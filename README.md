@@ -16,7 +16,7 @@
 
 **The self-hosted React framework.** Vercel developer experience. Go performance. Bun tooling.
 
-File-based React pages server-rendered by Bun, API routes written in Go. You get the DX — `bunx create-borgo my-app`, drop a file in `pages/`, drop a file in `api/`, one dev command — without the platform. Deployment is one Go binary and one Bun server on any box you control.
+File-based React pages server-rendered by Bun, API routes written in Go. You get the DX — `bunx create-borgo@latest my-app`, drop a file in `pages/`, drop a file in `api/`, one dev command — without the platform. Deployment is one Go binary and one Bun server on any box you control.
 
 Pages get nested layouts, per-page `<head>` management, streaming SSR through Suspense, client-side navigation with hover/viewport prefetching and scroll restoration, per-route code splitting, opt-out and deferred hydration plus islands, form actions that submit in place without losing your scroll (and still work with JavaScript off), live updates over server-sent events and first-class typed WebSocket topics, signed-cookie sessions, fast refresh in dev, opt-in Tailwind, the PWA mechanics (precache manifest, service worker serving, guarded registration), custom 404/500 pages, and static export for the pages that need no server — all through file conventions. Loaders and actions talk to the Go API through a client typed end to end by `borgogen`, which reads the Go handlers with `go/types` and generates the TypeScript route map, request bodies and WebSocket payloads included. Around the core: `/healthz` on both servers with opt-in Prometheus metrics, `borgo deploy init` for the blessed reverse-proxy/systemd/compose configs, and `borgo doctor` when something is off.
 
@@ -37,7 +37,7 @@ Not a feature list — the reasoning:
 Prerequisites: [Bun](https://bun.sh) >= 1.3, [Go](https://go.dev) >= 1.25.
 
 ```bash
-bunx create-borgo my-app
+bunx create-borgo@latest my-app
 cd my-app
 bun install
 go mod tidy   # fetches the borgo go module

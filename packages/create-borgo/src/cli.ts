@@ -60,7 +60,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--no-tailwind") tailwind = false;
   else if (arg === "--help" || arg === "-h") {
     console.log(`
-  usage: bunx create-borgo <name> [--template base|minimal|full] [--tailwind|--no-tailwind]
+  usage: bunx create-borgo@latest <name> [--template base|minimal|full] [--tailwind|--no-tailwind]
 
   templates
 ${TEMPLATES.map((t) => `    ${t.name.padEnd(8)} ${t.hint}`).join("\n")}

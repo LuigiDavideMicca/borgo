@@ -5,7 +5,7 @@ Build something small and complete: a page that reads data from a Go API, a form
 ## Scaffold
 
 ```bash
-bunx create-borgo notes
+bunx create-borgo@latest notes
 ```
 
 It asks which template you want — pick `minimal`, the one this guide builds on — and whether you want Tailwind (say no; [styling](dev-experience.md#styling) covers it later). Then:

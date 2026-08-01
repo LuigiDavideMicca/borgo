@@ -32,7 +32,7 @@ Tailwind v4 rides behind a CLI flag, never autodetection: your CSS pipeline shou
 New projects get it wired by the scaffolder:
 
 ```bash
-bunx create-borgo my-app --tailwind
+bunx create-borgo@latest my-app --tailwind
 ```
 
 For an existing app, three steps. Install it:

@@ -23,7 +23,7 @@ Any — the API is plain Go, so every Go driver works. The examples use SQLite w
 No — borgo is self-hosted by design: any VPS, container host or bare-metal box. That is the point: no platform lock-in. See [deploy](deploy.md).
 
 **Can I use Tailwind?**
-Yes, opt-in via the `--tailwind` CLI flag — never autodetected. New projects: `bunx create-borgo my-app --tailwind` scaffolds it wired. See [styling](dev-experience.md#styling).
+Yes, opt-in via the `--tailwind` CLI flag — never autodetected. New projects: `bunx create-borgo@latest my-app --tailwind` scaffolds it wired. See [styling](dev-experience.md#styling).
 
 **How do I add users and login?**
 `borgo.Auth[U]` gives you login/logout/register handlers, PBKDF2 hashing and signed-cookie sessions on the stdlib only; the front server adds CSRF for form actions. See [auth and sessions](auth-and-sessions.md).
