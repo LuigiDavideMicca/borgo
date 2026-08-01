@@ -133,6 +133,16 @@ func GetSession[T any](r *http.Request) (T, bool) {
 // their own without ever touching the signature. Junk duplicates are skipped
 // and a second cookie that also verifies is treated as ambiguous: no session.
 func sessionPayload(r *http.Request) (string, bool) {
+	// Without a secret there is nothing to verify against: hmac keyed on the
+	// empty string is a MAC anyone can compute, so every forged cookie would
+	// verify and Authed would admit an attacker-chosen principal. SetSession
+	// already refuses to issue in that state; refusing to accept is the half
+	// that matters, because the failure direction here is open, not closed.
+	// A deploy that loses SESSION_SECRET must log everyone out, not let
+	// everyone in as anybody.
+	if sessionSecret() == "" {
+		return "", false
+	}
 	var found string
 	var valid int
 	for _, cookie := range r.CookiesNamed(sessionCookie) {

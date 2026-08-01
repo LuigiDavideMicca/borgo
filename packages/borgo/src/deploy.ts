@@ -38,6 +38,14 @@ export function nginxConf({ name, port }: DeployContext): string {
     "        proxy_set_header Upgrade $http_upgrade;",
     '        proxy_set_header Connection "upgrade";',
     "        proxy_set_header Host $host;",
+    // nginx adds no forwarding header on its own, and borgo authorizes
+    // /__borgo/publish as "from loopback and not forwarded". Behind a proxy on
+    // the same box every request arrives from loopback, so without this line
+    // the second half of that test never fires and anyone on the internet can
+    // broadcast into every subscribed browser. Caddy sets it by default, which
+    // is why only this config had the hole.
+    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "        proxy_set_header X-Forwarded-Proto $scheme;",
     "        proxy_buffering off;",
     "        proxy_read_timeout 1h;",
     "    }",
