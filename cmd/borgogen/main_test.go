@@ -1,13 +1,31 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	embedapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/embed/api"
+	wireapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/wire/api"
 )
+
+// marshals asserts what encoding/json really writes for a fixture value, so
+// the generated TypeScript below is checked against the wire and not against
+// somebody's reading of the encoding/json documentation.
+func marshals(t *testing.T, v any, want string) {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal(%T): %v", v, err)
+	}
+	if string(b) != want {
+		t.Fatalf("json.Marshal(%T) = %s, want %s", v, b, want)
+	}
+}
 
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
@@ -66,17 +84,18 @@ func TestGenerateFixture(t *testing.T) {
 		`"PUT /api/widgets/{id}": { response: Widget; request: WidgetCreate };`,
 		`"GET /api/manual": { response: string };`,
 		`"GET /api/secret": { response: Deleted };`,
-		"created: string",
-		"tags?: Array<string>",
-		"price: string",
-		"notes: string | null",
-		"attrs: Record<string, number>",
-		"raw: unknown",
-		"counts: Record<string, string>",
-		"flags: unknown",
-		`"GET /api/categories": { response: Array<Category> };`,
-		"children?: Array<Category>",
-		"parent: Category | null",
+		"created: string;",
+		// a nil slice or map is "null" on the wire, whatever the key spells
+		"tags?: Array<string> | null;",
+		"price: string;",
+		"notes: string | null;",
+		"attrs: Record<string, number> | null;",
+		"raw: unknown;",
+		"counts: Record<string, string> | null;",
+		"flags: unknown;",
+		`"GET /api/categories": { response: Array<Category> | null };`,
+		"children?: Array<Category> | null;",
+		"parent: Category | null;",
 		`"GET /api/health/full": { response: FullHealth };`,
 		"uptime: number",
 		"interface WsEvents {",
@@ -142,6 +161,10 @@ func TestGenerateErrors(t *testing.T) {
 	cases := []struct{ name, dir, want string }{
 		{"duplicate pattern", "dup", "already registered"},
 		{"malformed type directive", "badtype", "malformed directive"},
+		// a directive that can never apply is a mistake, and used to be silent
+		{"type directive naming nothing", "badtypename", "not a type this api package can refer to"},
+		{"type directive with a typo in an imported name", "badtypepath", "not a type this api package can refer to"},
+		{"two type directives for one go type", "duptype", "maps to one TypeScript type"},
 		{"directive on non-handler", "badsig", "not a func(http.ResponseWriter"},
 		{"pattern without method", "nospace", `want "METHOD /path"`},
 		{"directive on method", "method", "package-level"},
@@ -240,8 +263,8 @@ func TestGenericInstantiationsStayDistinct(t *testing.T) {
 	for _, want := range []string{
 		"export interface PageWidget {",
 		"export interface PagePost {",
-		"items: Array<Widget>",
-		"items: Array<Post>",
+		"items: Array<Widget> | null;",
+		"items: Array<Post> | null;",
 		`"GET /api/widgets": { response: PageWidget };`,
 		`"GET /api/posts": { response: PagePost };`,
 	} {
@@ -299,8 +322,8 @@ func TestTypesNamedAfterTSGenericsAreRenamed(t *testing.T) {
 	}
 	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
 	for _, want := range []string{
-		"export interface ApiRecord {\n  m: Record<string, number>;\n}",
-		"export interface ApiArray {\n  l: Array<number>;\n}",
+		"export interface ApiRecord {\n  m: Record<string, number> | null;\n}",
+		"export interface ApiArray {\n  l: Array<number> | null;\n}",
 	} {
 		if !strings.Contains(types, want) {
 			t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
@@ -315,7 +338,7 @@ func TestTextMarshalersAreStrings(t *testing.T) {
 	}
 	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
 	want := "export interface Resp {\n  id: string;\n  lvl: string;\n  addr: string;\n" +
-		"  keyed: Record<string, number>;\n  plain: number;\n}"
+		"  keyed: Record<string, number> | null;\n  plain: number;\n}"
 	if !strings.Contains(types, want) {
 		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
 	}
@@ -332,8 +355,8 @@ func TestPointerReceiverTextMarshalerCoversBothShapes(t *testing.T) {
 	}
 	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
 	for _, want := range []string{
-		"export interface PtrText {\n  one: string | number;\n  many: Array<string | number>;\n" +
-			"  keyed: Record<string, number>;\n  deep: TierBox;\n}",
+		"export interface PtrText {\n  one: string | number;\n  many: Array<string | number> | null;\n" +
+			"  keyed: Record<string, number> | null;\n  deep: TierBox;\n}",
 		"export interface TierBox {\n  one: string | number;\n}",
 	} {
 		if !strings.Contains(types, want) {
@@ -349,9 +372,10 @@ func TestByteSlicesAreBase64Strings(t *testing.T) {
 	}
 	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
 	for _, want := range []string{
-		"export interface Blob {\n  raw: string;\n  alias: string;\n  defined: string;\n  arr: Array<number>;\n}",
+		// a nil []byte is "null", not "" - only the array is always there
+		"export interface Blob {\n  raw: string | null;\n  alias: string | null;\n  defined: string | null;\n  arr: Array<number>;\n}",
 		// a byte-kinded element that marshals itself leaves the base64 path
-		"export interface SelfBytes {\n  text: Array<string>;\n  ptext: Array<string | number>;\n  js: Array<unknown>;\n}",
+		"export interface SelfBytes {\n  text: Array<string> | null;\n  ptext: Array<string | number> | null;\n  js: Array<unknown> | null;\n}",
 	} {
 		if !strings.Contains(types, want) {
 			t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
@@ -422,30 +446,224 @@ func TestOptionalFieldsMatchEncodingJSON(t *testing.T) {
 	}
 	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
 	for _, want := range []string{
-		"zerost?: Inner",
-		"zeronum?: number",
-		"zerotime?: string",
+		"zerost?: Inner;",
+		"zeronum?: number;",
+		"zerotime?: string;",
 		// an option encoding/json does not recognize is not omitempty either
-		"typo: number",
+		"typo: number;",
 		// omitempty on a kind isEmptyValue never calls empty: the field is on
 		// the wire every time, so promising it may be missing is a lie too
-		"a2: Array<number>",
-		"st: Inner",
-		"t: string",
-		"m: Inner",
+		"a2: Array<number>;",
+		"st: Inner;",
+		"t: string;",
+		"m: Inner;",
 		// and the kinds it does drop stay optional
-		"bool?: boolean",
-		"num?: number",
-		"str?: string",
-		"slice?: Array<number>",
-		"map?: Record<string, number>",
-		"ptr?: number | null",
-		"iface?: unknown",
-		"a0?: Array<number>",
+		"bool?: boolean;",
+		"num?: number;",
+		"str?: string;",
+		"slice?: Array<number> | null;",
+		"map?: Record<string, number> | null;",
+		"ptr?: number | null;",
+		"iface?: unknown;",
+		"a0?: Array<number>;",
 	} {
 		if !strings.Contains(types, want) {
 			t.Errorf("api-types.d.ts missing %q\n%s", want, types)
 		}
+	}
+}
+
+// Every nil encoding/json can reach writes "null", never an empty container: a
+// handler that found nothing answers {"items":null,...} while the type promised
+// an array, and data.items.map() is a TypeError on the very first empty result.
+func TestNilSlicesMapsAndBytesAreNullable(t *testing.T) {
+	marshals(t, wireapi.Empty{},
+		`{"items":null,"m":null,"raw":null,"nest":null,"named":null,"arr":[0,0]}`)
+
+	root := filepath.Join("testdata", "wire")
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	want := "export interface Empty {\n  items: Array<number> | null;\n  m: Record<string, number> | null;\n" +
+		"  raw: string | null;\n  nest: Array<Array<string> | null> | null;\n  named: Array<string> | null;\n" +
+		// an array is not a slice: it is on the wire every time, elements and all
+		"  arr: Array<number>;\n}"
+	if !strings.Contains(types, want) {
+		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
+	}
+	if !strings.Contains(types, `"GET /api/empty": { response: Empty };`) {
+		t.Errorf("route missing:\n%s", types)
+	}
+}
+
+// An anonymous struct promotes the methods of what it embeds just like a named
+// one does, so a struct{ time.Time; ... } is a JSON string on the wire and
+// nothing at all like the object its fields describe.
+func TestAnonymousStructWithPromotedMarshalerIsNotAnObject(t *testing.T) {
+	marshals(t, wireapi.Stamped{}, `{"at":"0001-01-01T00:00:00Z","plain":{"n":0}}`)
+
+	root := filepath.Join("testdata", "wire")
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	// and one without a marshaler still expands to its fields
+	want := "export interface Stamped {\n  at: unknown;\n  plain: { n: number };\n}"
+	if !strings.Contains(types, want) {
+		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
+	}
+}
+
+// A promoted MarshalText reaches an anonymous struct the same way, and a
+// pointer receiver still only runs where encoding/json holds an addressable
+// value - so the same anonymous struct is a string in a slice and an object in
+// a plain field. Expanding it needs care: a struct is its own underlying type.
+func TestAnonymousStructWithPromotedTextMarshaler(t *testing.T) {
+	one := wireapi.Tagged{}
+	one.Many = append(one.Many, struct {
+		wireapi.PtrLabel
+		Extra int `json:"extra"`
+	}{})
+	marshals(t, one, `{"l":"label","p":{"N":0,"extra":0},"many":["ptr"]}`)
+
+	root := filepath.Join("testdata", "wire")
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	want := "export interface Tagged {\n  l: string;\n  p: string | { N: number; extra: number };\n" +
+		"  many: Array<string | { N: number; extra: number }> | null;\n}"
+	if !strings.Contains(types, want) {
+		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
+	}
+}
+
+// encoding/json names an object key from a string or an integer and refuses the
+// whole value for anything else - a float key included, which is numeric but not
+// a key. Typing it Record<string, number> promised a response that never comes.
+func TestFloatMapKeysAreUnknown(t *testing.T) {
+	if _, err := json.Marshal(wireapi.Keys{}); err == nil ||
+		!strings.Contains(err.Error(), "unsupported type: map[float64]int") {
+		t.Fatalf("want encoding/json to refuse a float map key, got %v", err)
+	}
+
+	root := filepath.Join("testdata", "wire")
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	want := "export interface Keys {\n  fees: unknown;\n  sizes: Record<string, number> | null;\n}"
+	if !strings.Contains(types, want) {
+		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
+	}
+}
+
+// encoding/json drops a whole promoted group when the pointer it hangs off is
+// nil, without a word about it, so none of those fields can be promised.
+func TestFieldsPromotedThroughANilPointerAreOptional(t *testing.T) {
+	marshals(t, embedapi.PtrOuter{B: 1}, `{"b":1}`)
+	marshals(t, embedapi.PtrOuter{PtrInner: &embedapi.PtrInner{A: 7}, B: 1}, `{"a":7,"b":1}`)
+	marshals(t, embedapi.Deep{D: 2}, `{"d":2}`)
+
+	root := filepath.Join("testdata", "embed")
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	for _, want := range []string{
+		"export interface PtrOuter {\n  a?: number;\n  b: number;\n}",
+		// two hops down, still behind the same nil pointer
+		"export interface Deep {\n  a?: number;\n  c?: number;\n  d: number;\n}",
+	} {
+		if !strings.Contains(types, want) {
+			t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
+		}
+	}
+}
+
+// A named type whose underlying is not a struct is inlined, so a recursive one
+// had no anchor and expanded until the stack blew up - a fatal error run()'s
+// recover never sees, so the dev loop died on save with no message at all.
+func TestRecursiveNamedNonStructTypesTerminate(t *testing.T) {
+	root := filepath.Join("testdata", "recursive")
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	for _, want := range []string{
+		"export type Tree = Record<string, Tree> | null;",
+		"export type Ring = Array<Hop> | null;",
+		"export interface Hop {\n  next: Ring;\n}",
+		`"GET /api/tree": { response: Tree };`,
+		`"GET /api/ring": { response: Ring };`,
+		// a named type that is not recursive is still inlined
+		"export interface Wallet {\n  balance: number;\n}",
+	} {
+		if !strings.Contains(types, want) {
+			t.Errorf("api-types.d.ts missing %q\n%s", want, types)
+		}
+	}
+	if strings.Contains(types, "export type Money") {
+		t.Errorf("a non-recursive named type needs no declaration of its own:\n%s", types)
+	}
+}
+
+// Publishing from a service package instead of from the http handler is
+// ordinary layering. Scanning only api/ dropped those events, and with them the
+// whole WsEvents block, so every subscriber in the app lost its types at once.
+func TestPushesInOtherPackagesAreCollected(t *testing.T) {
+	root := filepath.Join("testdata", "pushpkg")
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	for _, want := range []string{
+		"interface WsEvents {",
+		// one hop out, through a function taking no writer and no request
+		`"room/note": Note;`,
+		// and two hops out
+		`"room/audit": Audit;`,
+		"export interface Note {\n  text: string;\n}",
+		"export interface Audit {\n  at: string;\n}",
+	} {
+		if !strings.Contains(types, want) {
+			t.Errorf("api-types.d.ts missing %q\n%s", want, types)
+		}
+	}
+}
+
+// //borgo:type is consulted for named types, and an alias is a name of its own -
+// silently ignoring one left the directive looking applied and the wrong type in
+// every caller.
+func TestTypeOverrideAppliesToAnAlias(t *testing.T) {
+	root := filepath.Join("testdata", "aliastype")
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	want := "export interface Price {\n  amount: string;\n  ship: string;\n  raw: number;\n}"
+	if !strings.Contains(types, want) {
+		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
+	}
+}
+
+// A borgo.Handle whose pattern is computed still mounts and still serves; only
+// its key is unknown here. Dropped in silence, its callers just found the route
+// missing from ApiRoutes with nothing to explain it.
+func TestComputedHandlePatternWarns(t *testing.T) {
+	root := filepath.Join("testdata", "dynamichandle")
+	out := captureStderr(t, func() {
+		if err := run(root); err != nil {
+			t.Error(err)
+		}
+	})
+	if !strings.Contains(out, "dyn.go:26") || !strings.Contains(out, "computed pattern") {
+		t.Errorf("want a warning pointing at the call, got:\n%s", out)
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	if !strings.Contains(types, `"GET /api/fixed"`) {
+		t.Errorf("the constant route must still be typed:\n%s", types)
 	}
 }
 

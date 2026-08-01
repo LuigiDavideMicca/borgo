@@ -8,8 +8,8 @@ export interface Optional {
   bool?: boolean;
   num?: number;
   str?: string;
-  slice?: Array<number>;
-  map?: Record<string, number>;
+  slice?: Array<number> | null;
+  map?: Record<string, number> | null;
   ptr?: number | null;
   iface?: unknown;
   a0?: Array<number>;

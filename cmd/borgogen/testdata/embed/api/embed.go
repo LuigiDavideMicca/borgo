@@ -66,6 +66,29 @@ type Diamond struct {
 	BranchB
 }
 
+// encoding/json skips a whole promoted group when the pointer it hangs off is
+// nil, and says nothing about it: json.Marshal(PtrOuter{B: 1}) is {"b":1} and
+// json.Marshal(PtrOuter{&PtrInner{7}, 1}) is {"a":7,"b":1}. Deep's fields are
+// two hops down but still behind the same nil pointer.
+type PtrInner struct {
+	A int `json:"a"`
+}
+
+type PtrMid struct {
+	PtrInner
+	C int `json:"c"`
+}
+
+type PtrOuter struct {
+	*PtrInner
+	B int `json:"b"`
+}
+
+type Deep struct {
+	*PtrMid
+	D int `json:"d"`
+}
+
 //borgo:route GET /api/doc
 func GetDoc(w http.ResponseWriter, r *http.Request) {
 	borgo.JSON(w, http.StatusOK, Doc{})
@@ -84,4 +107,14 @@ func GetTie(w http.ResponseWriter, r *http.Request) {
 //borgo:route GET /api/diamond
 func GetDiamond(w http.ResponseWriter, r *http.Request) {
 	borgo.JSON(w, http.StatusOK, Diamond{})
+}
+
+//borgo:route GET /api/ptrouter
+func GetPtrOuter(w http.ResponseWriter, r *http.Request) {
+	borgo.JSON(w, http.StatusOK, PtrOuter{})
+}
+
+//borgo:route GET /api/deep
+func GetDeep(w http.ResponseWriter, r *http.Request) {
+	borgo.JSON(w, http.StatusOK, Deep{})
 }

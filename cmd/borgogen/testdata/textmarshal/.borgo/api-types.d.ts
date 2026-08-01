@@ -6,8 +6,8 @@ export interface TierBox {
 
 export interface PtrText {
   one: string | number;
-  many: Array<string | number>;
-  keyed: Record<string, number>;
+  many: Array<string | number> | null;
+  keyed: Record<string, number> | null;
   deep: TierBox;
 }
 
@@ -15,7 +15,7 @@ export interface Resp {
   id: string;
   lvl: string;
   addr: string;
-  keyed: Record<string, number>;
+  keyed: Record<string, number> | null;
   plain: number;
 }
 

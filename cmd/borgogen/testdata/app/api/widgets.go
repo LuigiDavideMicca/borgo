@@ -22,10 +22,10 @@ type Meta struct {
 
 type Widget struct {
 	Meta
-	ID     int            `json:"id"`
-	Name   string         `json:"name"`
-	Tags   []string       `json:"tags,omitempty"`
-	Price  Money          `json:"price"`
+	ID     int             `json:"id"`
+	Name   string          `json:"name"`
+	Tags   []string        `json:"tags,omitempty"`
+	Price  Money           `json:"price"`
 	Notes  *string         `json:"notes"`
 	Attrs  map[string]int  `json:"attrs"`
 	Raw    json.RawMessage `json:"raw"`

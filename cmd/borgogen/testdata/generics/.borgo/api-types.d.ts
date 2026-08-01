@@ -5,7 +5,7 @@ export interface Post {
 }
 
 export interface PagePost {
-  items: Array<Post>;
+  items: Array<Post> | null;
   total: number;
 }
 
@@ -14,7 +14,7 @@ export interface Widget {
 }
 
 export interface PageWidget {
-  items: Array<Widget>;
+  items: Array<Widget> | null;
   total: number;
 }
 

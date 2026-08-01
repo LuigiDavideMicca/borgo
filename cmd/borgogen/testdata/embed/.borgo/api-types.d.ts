@@ -5,6 +5,12 @@ export interface Child {
   id: number;
 }
 
+export interface Deep {
+  a?: number;
+  c?: number;
+  d: number;
+}
+
 export interface Diamond {
   a1: number;
   b1: number;
@@ -16,6 +22,11 @@ export interface Doc {
   title: string;
 }
 
+export interface PtrOuter {
+  a?: number;
+  b: number;
+}
+
 export interface Tie {
   y: number;
 }
@@ -23,8 +34,10 @@ export interface Tie {
 declare module "borgo-framework" {
   interface ApiRoutes {
     "GET /api/child": { response: Child };
+    "GET /api/deep": { response: Deep };
     "GET /api/diamond": { response: Diamond };
     "GET /api/doc": { response: Doc };
+    "GET /api/ptrouter": { response: PtrOuter };
     "GET /api/tie": { response: Tie };
   }
 }

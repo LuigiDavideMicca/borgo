@@ -2,7 +2,7 @@
 
 export interface Category {
   name: string;
-  children?: Array<Category>;
+  children?: Array<Category> | null;
   parent: Category | null;
 }
 
@@ -25,12 +25,12 @@ export interface Widget {
   created: string;
   id: number;
   name: string;
-  tags?: Array<string>;
+  tags?: Array<string> | null;
   price: string;
   notes: string | null;
-  attrs: Record<string, number>;
+  attrs: Record<string, number> | null;
   raw: unknown;
-  counts: Record<string, string>;
+  counts: Record<string, string> | null;
   flags: unknown;
 }
 
@@ -39,7 +39,7 @@ export interface Deleted {
 }
 
 export interface WidgetList {
-  widgets: Array<Widget>;
+  widgets: Array<Widget> | null;
 }
 
 export interface WidgetCreate {
@@ -48,7 +48,7 @@ export interface WidgetCreate {
 
 declare module "borgo-framework" {
   interface ApiRoutes {
-    "GET /api/categories": { response: Array<Category> };
+    "GET /api/categories": { response: Array<Category> | null };
     "GET /api/export": { response: Export };
     "GET /api/health": { response: Health };
     "GET /api/health/full": { response: FullHealth };
