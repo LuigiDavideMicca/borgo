@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +33,36 @@ func TestHealthz(t *testing.T) {
 	}
 	if body.Status != "ok" || body.Uptime == nil || *body.Uptime < 0 {
 		t.Errorf("body wrong: %s", rec.Body.String())
+	}
+}
+
+// Version is hand-written in the source and bumped by the release, so the one
+// failure mode is drifting from what was actually released. The release
+// manifest is the source of truth for both halves; if they ever disagree the
+// build says so rather than shipping a constant that lies.
+func TestVersionMatchesManifest(t *testing.T) {
+	raw, err := os.ReadFile(".release-please-manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]string
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	// the go module is the repository root and is tagged with the same tag as
+	// packages/borgo (include-component-in-tag: false), so that is its version
+	want, ok := manifest["packages/borgo"]
+	if !ok {
+		t.Fatalf("no packages/borgo entry in the release manifest: %v", manifest)
+	}
+	if Version != want {
+		t.Fatalf("borgo.Version = %q, release manifest says %q; bump the constant in borgo.go with the release", Version, want)
+	}
+}
+
+func TestVersionIsSemver(t *testing.T) {
+	if !regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(Version) {
+		t.Fatalf("Version = %q, want a bare semver like 0.21.0 (no leading v)", Version)
 	}
 }
 

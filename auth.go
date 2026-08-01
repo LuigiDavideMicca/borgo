@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -44,10 +45,16 @@ const (
 
 type pbkdf2Hasher struct{}
 
-// DefaultHasher is the PBKDF2-SHA256 hasher used when Auth.Hasher is nil.
+// DefaultHasher returns the PBKDF2-SHA256 hasher used when Auth.Hasher is nil.
 // Hashes embed their parameters ("pbkdf2$<iterations>$<salt>$<key>"), so
 // stored passwords keep verifying if the defaults change.
-var DefaultHasher PasswordHasher = pbkdf2Hasher{}
+//
+// It is a function and not a package variable on purpose: a variable of
+// interface type can be reassigned by any code in the process, silently
+// changing password hashing for every Auth that did not set its own Hasher.
+// The value is stateless, so each call returns an equivalent hasher. To use a
+// different algorithm, set Auth.Hasher on the Auth you own.
+func DefaultHasher() PasswordHasher { return pbkdf2Hasher{} }
 
 func (pbkdf2Hasher) Hash(password string) (string, error) {
 	salt := make([]byte, pbkdf2SaltLen)
@@ -117,7 +124,7 @@ type Auth[U any] struct {
 	// MaxAge is the session lifetime, default 7 days.
 	MaxAge time.Duration
 	// Hasher verifies (and, on register, creates) password hashes.
-	// Default: DefaultHasher.
+	// Default: DefaultHasher().
 	Hasher PasswordHasher
 
 	dummyOnce sync.Once
@@ -128,7 +135,7 @@ func (a *Auth[U]) hasher() PasswordHasher {
 	if a.Hasher != nil {
 		return a.Hasher
 	}
-	return DefaultHasher
+	return DefaultHasher()
 }
 
 func (a *Auth[U]) principal(u U) any {
@@ -160,7 +167,29 @@ func (a *Auth[U]) dummyHash() string {
 // unauthenticated login traffic is a cpu exhaustion vector: a handful of
 // parallel attempts is enough to starve every other route. Half the cores
 // keeps the rest of the api answering while logins queue.
-var hashSlots = make(chan struct{}, max(1, runtime.GOMAXPROCS(0)/2))
+var hashSlots = make(chan struct{}, hashSlotCount())
+
+// defaultHashSlots is the cap when BORGO_HASH_SLOTS is unset.
+func defaultHashSlots() int { return max(1, runtime.GOMAXPROCS(0)/2) }
+
+// hashSlotCount reads BORGO_HASH_SLOTS, the number of password hashes that may
+// run at once. It is read once, when the package is initialised, because the
+// semaphore it sizes is created there. A box tuned for login throughput raises
+// it; a box that must keep every other route responsive under a login flood
+// lowers it. Like the BORGO_*_TIMEOUT reads, a value that is not a positive
+// integer is a panic rather than a silent fallback: a typo here would quietly
+// reinstate the cpu exhaustion vector the cap exists to close.
+func hashSlotCount() int {
+	v := os.Getenv("BORGO_HASH_SLOTS")
+	if v == "" {
+		return defaultHashSlots()
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		panic(`borgo: BORGO_HASH_SLOTS: invalid value "` + v + `" (want a positive integer; unset uses max(1, GOMAXPROCS/2) = ` + strconv.Itoa(defaultHashSlots()) + `)`)
+	}
+	return n
+}
 
 // hashWait is how long a request queues for a slot before being shed; a var
 // so tests need not wait it out.

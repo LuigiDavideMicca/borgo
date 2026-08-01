@@ -25,6 +25,17 @@ import (
 	"time"
 )
 
+// Version is the version of the borgo module, matching the npm packages and
+// the git tag of the same release - the two halves ship together and are
+// always the same number. Report it in bug reports; borgo doctor prints the
+// TypeScript half's.
+//
+// It is kept in sync with .release-please-manifest.json, which release-please
+// rewrites when it cuts a release, and TestVersionMatchesManifest fails the
+// build if the two ever disagree. So this line is updated by the release, and
+// the check is what makes drifting from it impossible to do quietly.
+const Version = "0.20.1" // x-release-please-version
+
 var (
 	// generated init() functions register on one goroutine, but nothing stops
 	// an app from registering lazily: the lock keeps the map from tearing
@@ -269,8 +280,39 @@ func newServer(port string, handler http.Handler) *http.Server {
 }
 
 // Serve mounts every registered route and listens on API_PORT (default 3501).
-// It also answers GET /healthz, unless a registered route claims it.
+// It also answers GET /healthz, unless a registered route claims it. It blocks
+// until the process is signalled, then shuts down gracefully; a listener that
+// fails to start is fatal.
+//
+// Use ServeContext to get the error back instead of exiting - a test or a
+// program that embeds the api needs to be able to stop the server and carry on.
 func Serve() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// stop restores the default handlers the moment shutdown begins: a second
+	// ctrl-c then kills a shutdown that is taking too long
+	if err := serveContext(ctx, stop); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// ServeContext is Serve that returns instead of exiting. It mounts every
+// registered route, listens on API_PORT and blocks until ctx is cancelled or
+// the parent process named by BORGO_PARENT_PID exits, then shuts the server
+// down gracefully within BORGO_SHUTDOWN_TIMEOUT and returns nil. It returns
+// the listener's error - a port already in use, most often - if the server
+// cannot start or stops on its own.
+//
+// Cancelling ctx is the way to stop the server: when it returns, the port is
+// released and every event stream has ended.
+func ServeContext(ctx context.Context) error {
+	return serveContext(ctx, func() {})
+}
+
+// serveContext is the body of Serve and ServeContext. onShutdown runs once,
+// the moment shutdown begins, before waiting for in-flight requests: Serve
+// uses it to release its hold on the interrupt signal.
+func serveContext(ctx context.Context, onShutdown func()) error {
 	mux := http.NewServeMux()
 	routesMu.Lock()
 	patterns := make([]string, 0, len(routes))
@@ -302,29 +344,29 @@ func Serve() {
 	srv := newServer(port, recoverMiddleware(gzipMiddleware(mux)))
 	grace := envDuration("BORGO_SHUTDOWN_TIMEOUT", 10*time.Second)
 	srv.RegisterOnShutdown(signalShutdown)
+	// arm the stream-shutdown latch before anything can connect, so a second
+	// run in the same process does not inherit the first one's cancellation
+	armShutdown()
 	warnSessionSecret()
 	printStartup(patterns, port)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	select {
 	case err := <-errCh:
-		log.Fatal(err)
+		return err
 	case <-ctx.Done():
-		// stop restores the default handlers: a second ctrl-c kills a
-		// shutdown that is taking too long
-		stop()
+		onShutdown()
 		shutdown(srv, grace)
 	case <-watchParent():
 		// on windows a force-killed supervisor delivers no signal: without
 		// this the api outlives borgo dev/start, holding the port and the
 		// binary until someone finds it in the task manager
 		log.Print("borgo: parent process exited; shutting down")
-		stop()
+		onShutdown()
 		shutdown(srv, grace)
 	}
+	return nil
 }
 
 // watchParent returns a channel that closes when the process named by

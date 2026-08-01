@@ -351,16 +351,152 @@ func serveOn(t *testing.T, srv *http.Server) string {
 	return "http://" + ln.Addr().String()
 }
 
-// the shutdown signal is process-wide; swap in a fresh one so the rest of the
+// the shutdown signal is process-wide; re-arm it afterwards so the rest of the
 // package still sees live streams
 func isolateShutdownSignal(t *testing.T) {
 	t.Helper()
-	prevCtx, prevCancel := shuttingDown, signalShutdown
-	shuttingDown, signalShutdown = context.WithCancel(context.Background())
+	armShutdown()
+	t.Cleanup(armShutdown)
+}
+
+// freePort grabs a loopback port and lets it go, so the caller can bind it.
+func freePort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+// serveContext snapshots the route registry and latches `served`; a test that
+// runs it must hand the registry back, or every later Handle call panics.
+func restoreRegistry(t *testing.T) {
+	t.Helper()
+	routesMu.Lock()
+	prev := served
+	routesMu.Unlock()
 	t.Cleanup(func() {
-		signalShutdown()
-		shuttingDown, signalShutdown = prevCtx, prevCancel
+		routesMu.Lock()
+		served = prev
+		routesMu.Unlock()
 	})
+}
+
+// Serve calls log.Fatal and never returns, so nothing could start the api from
+// a test or embed it in a larger program. ServeContext has to actually come
+// back, and leave the port behind it.
+func TestServeContextReturnsAndReleasesPort(t *testing.T) {
+	isolateShutdownSignal(t)
+	restoreRegistry(t)
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	port := freePort(t)
+	t.Setenv("API_PORT", port)
+	t.Setenv("SESSION_SECRET", "") // the startup warning must still fire
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- ServeContext(ctx) }()
+
+	// the server is really listening: its own /healthz answers
+	base := "http://127.0.0.1:" + port
+	deadline := time.Now().Add(10 * time.Second)
+	var res *http.Response
+	for {
+		var err error
+		res, err = http.Get(base + "/healthz")
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ServeContext never came up on :%s (%v)", port, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ok"`) {
+		t.Fatalf("/healthz = %d %s", res.StatusCode, body)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("ServeContext returned %v, want nil on a cancelled context", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("ServeContext did not return after its context was cancelled")
+	}
+
+	// the port is free again: the whole point of returning. It must be the
+	// same wildcard address the server binds - windows grants a loopback bind
+	// next to a live wildcard one, which would make this assertion vacuous
+	ln, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		t.Fatalf("port %s still held after ServeContext returned: %v", port, err)
+	}
+	ln.Close()
+
+	// behaviour Serve had and ServeContext must keep
+	if !strings.Contains(logs.String(), "SESSION_SECRET") {
+		t.Errorf("the session-secret warning did not fire: %q", logs.String())
+	}
+}
+
+// a listener that cannot start was a log.Fatal; now it is a value the caller
+// can act on
+func TestServeContextReturnsListenerErrors(t *testing.T) {
+	isolateShutdownSignal(t)
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	// hold the port so ListenAndServe cannot have it. It has to be the same
+	// address the server asks for - windows happily grants a wildcard bind
+	// next to a loopback-specific one
+	port := freePort(t)
+	ln, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		t.Skipf("could not hold :%s to create the conflict: %v", port, err)
+	}
+	defer ln.Close()
+	t.Setenv("API_PORT", port)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // never leave a server behind if the listener did start
+	done := make(chan error, 1)
+	go func() { done <- ServeContext(ctx) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("ServeContext returned nil for a port already in use")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("ServeContext blocked on a listener that could not start")
+	}
+}
+
+// the timeout matrix is still read - and still read before the banner, so a
+// typo fails the boot rather than half-configuring the server
+func TestServeContextStillValidatesTimeouts(t *testing.T) {
+	restoreRegistry(t)
+	t.Setenv("BORGO_IDLE_TIMEOUT", "soon")
+	t.Setenv("API_PORT", freePort(t))
+	defer func() {
+		if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "BORGO_IDLE_TIMEOUT") {
+			t.Fatalf("want a panic naming the variable, got %v", r)
+		}
+	}()
+	ServeContext(context.Background())
 }
 
 func TestShutdownEndsEventStreams(t *testing.T) {

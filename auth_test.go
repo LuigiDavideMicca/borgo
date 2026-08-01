@@ -6,8 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -21,7 +27,7 @@ type testUser struct {
 func testAuth(t *testing.T) (*Auth[testUser], map[string]string) {
 	t.Helper()
 	t.Setenv("SESSION_SECRET", "test-secret")
-	hash, err := DefaultHasher.Hash("hunter22")
+	hash, err := DefaultHasher().Hash("hunter22")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,28 +59,164 @@ func postJSON(handler http.HandlerFunc, body string) *httptest.ResponseRecorder 
 }
 
 func TestHasherRoundTrip(t *testing.T) {
-	hash, err := DefaultHasher.Hash("s3cret")
+	hash, err := DefaultHasher().Hash("s3cret")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(hash, "pbkdf2$600000$") {
 		t.Errorf("hash format wrong: %s", hash)
 	}
-	if !DefaultHasher.Verify("s3cret", hash) {
+	if !DefaultHasher().Verify("s3cret", hash) {
 		t.Error("correct password rejected")
 	}
-	if DefaultHasher.Verify("wrong", hash) {
+	if DefaultHasher().Verify("wrong", hash) {
 		t.Error("wrong password accepted")
 	}
-	again, _ := DefaultHasher.Hash("s3cret")
+	again, _ := DefaultHasher().Hash("s3cret")
 	if again == hash {
 		t.Error("two hashes of the same password must differ (random salt)")
 	}
 }
 
+type swappedHasher struct{}
+
+func (swappedHasher) Hash(string) (string, error) { return "swapped$anything", nil }
+func (swappedHasher) Verify(string, string) bool  { return true }
+
+// DefaultHasher used to be a package-level var of interface type, so any code
+// in the process - a dependency, a test helper, an init() three modules away -
+// could reassign it and silently change password hashing for every Auth that
+// had not set its own Hasher. A caller can now only rebind its own copy.
+func TestDefaultHasherCannotBeSwappedAtADistance(t *testing.T) {
+	stolen := DefaultHasher()
+	// the whole of what a caller can do to the value it is handed
+	stolen = swappedHasher{}
+	if _, ok := stolen.(swappedHasher); !ok {
+		t.Fatal("the local really should have been rebound")
+	}
+
+	if _, ok := DefaultHasher().(pbkdf2Hasher); !ok {
+		t.Fatalf("DefaultHasher() = %T after a caller rebound its copy, want pbkdf2Hasher", DefaultHasher())
+	}
+	var auth Auth[testUser]
+	if _, ok := auth.hasher().(pbkdf2Hasher); !ok {
+		t.Fatalf("an Auth with no Hasher fell back to %T, want pbkdf2Hasher", auth.hasher())
+	}
+	// and the fallback still produces real pbkdf2 hashes, not swappedHasher's
+	hash, err := auth.hasher().Hash("hunter22")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(hash, "pbkdf2$") {
+		t.Fatalf("fallback hasher produced %q", hash)
+	}
+	if auth.hasher().Verify("wrong", hash) {
+		t.Fatal("the fallback hasher accepts any password: it was swapped")
+	}
+}
+
+// the property above is a compile-time one, so it is worth checking at the
+// source: nothing exported may hold a PasswordHasher in a package-level var,
+// and DefaultHasher must be a func.
+func TestNoExportedPasswordHasherVariable(t *testing.T) {
+	fset := token.NewFileSet()
+	pkg, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := pkg["borgo"]
+	if files == nil {
+		t.Fatal("package borgo not found in the working directory")
+	}
+
+	var defaultHasherIsFunc bool
+	for name, file := range files.Files {
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Recv == nil && d.Name.Name == "DefaultHasher" {
+					defaultHasherIsFunc = true
+				}
+			case *ast.GenDecl:
+				if d.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range d.Specs {
+					value, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					ident, isIdent := value.Type.(*ast.Ident)
+					if !isIdent || ident.Name != "PasswordHasher" {
+						continue
+					}
+					for _, n := range value.Names {
+						if n.IsExported() {
+							t.Errorf("%s: exported var %s PasswordHasher: any code in the process could reassign it and change hashing for every Auth; make it a func", name, n.Name)
+						}
+					}
+				}
+			}
+		}
+	}
+	if !defaultHasherIsFunc {
+		t.Error("DefaultHasher must be declared as a func, not a var")
+	}
+}
+
+func TestHashSlotsDefault(t *testing.T) {
+	t.Setenv("BORGO_HASH_SLOTS", "")
+	if got, want := hashSlotCount(), defaultHashSlots(); got != want {
+		t.Fatalf("unset BORGO_HASH_SLOTS gives %d slots, want the previous default %d", got, want)
+	}
+	if want := max(1, runtime.GOMAXPROCS(0)/2); defaultHashSlots() != want {
+		t.Fatalf("default = %d, want max(1, GOMAXPROCS/2) = %d", defaultHashSlots(), want)
+	}
+}
+
+func TestHashSlotsOverride(t *testing.T) {
+	for _, v := range []string{"1", "3", "64"} {
+		t.Setenv("BORGO_HASH_SLOTS", v)
+		want, _ := strconv.Atoi(v)
+		if got := hashSlotCount(); got != want {
+			t.Errorf("BORGO_HASH_SLOTS=%s gives %d slots, want %d", v, got, want)
+		}
+	}
+}
+
+// a typo that silently fell back to the default would quietly reinstate the
+// cpu exhaustion vector the cap exists to close, exactly like a malformed
+// BORGO_*_TIMEOUT
+func TestHashSlotsRejectsGarbage(t *testing.T) {
+	for _, v := range []string{"lots", "0", "-4", "2.5", "8 ", "1e3", "99999999999999999999"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("BORGO_HASH_SLOTS", v)
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("BORGO_HASH_SLOTS=%q was accepted", v)
+				}
+				if !strings.Contains(fmt.Sprint(r), "BORGO_HASH_SLOTS") {
+					t.Fatalf("panic does not name the variable: %v", r)
+				}
+			}()
+			hashSlotCount()
+		})
+	}
+}
+
+// the semaphore the package actually uses must be the configured size
+func TestHashSlotsSizeTheSemaphore(t *testing.T) {
+	if got, want := cap(hashSlots), hashSlotCount(); got != want {
+		t.Fatalf("hashSlots has %d slots, want %d", got, want)
+	}
+}
+
 func TestHasherRejectsMalformed(t *testing.T) {
 	for _, hash := range []string{"", "plain", "pbkdf2$abc$x$y", "pbkdf2$1000$!!$!!", "argon2$1$a$b"} {
-		if DefaultHasher.Verify("anything", hash) {
+		if DefaultHasher().Verify("anything", hash) {
 			t.Errorf("malformed hash %q verified", hash)
 		}
 	}
@@ -94,7 +236,7 @@ func TestHasherRejectsAbsurdParameters(t *testing.T) {
 	}
 	for name, hash := range crafted {
 		start := time.Now()
-		if DefaultHasher.Verify("anything", hash) {
+		if DefaultHasher().Verify("anything", hash) {
 			t.Errorf("%s: crafted hash verified", name)
 		}
 		// a real verify is ~100 ms; anything in this ballpark means the
@@ -104,11 +246,11 @@ func TestHasherRejectsAbsurdParameters(t *testing.T) {
 		}
 	}
 	// the parameters borgo itself writes keep verifying
-	hash, err := DefaultHasher.Hash("hunter22")
+	hash, err := DefaultHasher().Hash("hunter22")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !DefaultHasher.Verify("hunter22", hash) {
+	if !DefaultHasher().Verify("hunter22", hash) {
 		t.Error("a hash from the default hasher must still verify")
 	}
 }
@@ -172,7 +314,7 @@ func TestRegisterHandler(t *testing.T) {
 	if len(w.Result().Cookies()) != 1 {
 		t.Fatal("register must start a session")
 	}
-	if !DefaultHasher.Verify("pw123456", users["newby"]) {
+	if !DefaultHasher().Verify("pw123456", users["newby"]) {
 		t.Error("stored hash does not verify")
 	}
 

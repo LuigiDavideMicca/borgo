@@ -15,7 +15,7 @@ export default function Live() {
 
   useEffect(() => {
     const append = (text: string) => setLog((l) => [...l, { id: l.length, text }]);
-    // typed events: "note-created" comes from borgo.PushT in go via borgogen,
+    // typed events: "note-created" comes from borgo.Push in go via borgogen,
     // "message" from ws-events.d.ts - checking the event narrows the data
     const ch = subscribe("live", (event, data) => {
       if (event === "__count") setPresent(data);
@@ -39,7 +39,7 @@ export default function Live() {
       <p>
         A WebSocket channel on the front server. Open this page in two tabs: messages relay between
         browsers, and adding a note on the home page arrives here from Go via{" "}
-        <code>borgo.PushT</code>.
+        <code>borgo.Push</code>.
       </p>
       <p>
         {present} {present === 1 ? "tab" : "tabs"} connected

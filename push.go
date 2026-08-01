@@ -24,19 +24,19 @@ func pushTransport() *http.Transport {
 	return t
 }
 
-// PushT is Push with the payload type visible to static analysis. Call it
-// with literal topic and event strings and borgogen records the payload type
-// in the generated event map, typing the browser's subscribe callback for
-// that topic (mirroring how borgo.JSON[T] types a route's response).
-func PushT[T any](topic, event string, data T) error {
-	return Push(topic, event, data)
-}
-
 // Push publishes an event to every browser subscribed to a websocket topic
 // on the front server (see the subscribe helper in the borgo npm package).
 // The front server is assumed on localhost; set FRONT_URL when it is not,
 // and BORGO_PUSH_KEY on both sides when pushing across hosts.
-func Push(topic, event string, data any) error {
+//
+// The payload type is visible to static analysis, so the plain name is the
+// typed one - as with borgo.JSON[T] against WriteJSON. Called with literal
+// topic and event strings, borgogen records T in the generated event map and
+// the browser's subscribe callback for that topic is typed with it. Go infers
+// T from data, so no call site has to spell it out. A dynamic topic or event
+// name simply stays out of the map: the push still happens, the browser side
+// stays untyped.
+func Push[T any](topic, event string, data T) error {
 	payload, err := json.Marshal(map[string]any{"topic": topic, "event": event, "data": data})
 	if err != nil {
 		return err

@@ -8,7 +8,7 @@
 //     too); the request type comes from borgo.Bind[T] and borgo.BindMax[T]
 //     calls the same way. An inline json.NewEncoder(w).Encode(v) on the
 //     handler's http.ResponseWriter counts as a response too. A "//borgo:type Go TS"
-//     directive overrides the mapping for any named Go type. borgo.PushT
+//     directive overrides the mapping for any named Go type. borgo.Push
 //     calls additionally feed a "topic/event" -> payload map (WsEvents),
 //     typing the browser's subscribe callback per topic.
 //   - api/borgo.gen.go - mounting for handlers annotated with a
@@ -56,6 +56,12 @@ type genError struct{ msg string }
 
 func fail(format string, args ...any) {
 	panic(genError{fmt.Sprintf(format, args...)})
+}
+
+// warn reports something the generator chose not to type but will not fail
+// over: silence would leave the user wondering where their event went.
+func warn(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "borgogen: warning: %s\n", fmt.Sprintf(format, args...))
 }
 
 func main() {
@@ -497,10 +503,11 @@ func constString(pkg *packages.Package, expr ast.Expr) (string, bool) {
 	return constant.StringVal(tv.Value), true
 }
 
-// collectPushes gathers every borgo.PushT call into a "topic/event" -> payload
+// collectPushes gathers every borgo.Push call into a "topic/event" -> payload
 // type map; payloads pushed under the same key union like response types do.
-// Topic and event must be constant strings - dynamic ones belong to borgo.Push,
-// which stays out of the generated map.
+// Only calls with constant topic and event strings can be recorded: a computed
+// name is not a mistake, it is how you publish something decided at runtime, so
+// those calls generate nothing and their subscribers keep the untyped callback.
 func collectPushes(pkg *packages.Package, gen *tsGen) ([]string, map[string]string) {
 	unions := map[string]*union{}
 	var keys []string
@@ -511,17 +518,25 @@ func collectPushes(pkg *packages.Package, gen *tsGen) ([]string, map[string]stri
 				return true
 			}
 			name, sel := borgoFunc(pkg.TypesInfo, call)
-			if name != "PushT" || len(call.Args) != 3 {
+			if name != "Push" || len(call.Args) != 3 {
 				return true
 			}
 			pos := pkg.Fset.Position(call.Pos())
 			topic, topicOK := constString(pkg, call.Args[0])
 			event, eventOK := constString(pkg, call.Args[1])
+			// a computed topic or event is the documented way to publish
+			// something that cannot be typed: the push still happens, the
+			// event stays out of the map, and the browser keeps the untyped
+			// callback. Nothing to report - it is a choice, not a mistake
 			if !topicOK || !eventOK {
-				fail("%s: borgo.PushT needs constant topic and event strings; use borgo.Push for dynamic ones", pos)
+				return true
 			}
 			if strings.Contains(topic, "/") {
-				fail(`%s: borgo.PushT topic %q must not contain "/" - WsEvents keys are "topic/event", so the browser would subscribe to the wrong topic`, pos, topic)
+				// it compiles and it delivers, but "topic/event" keys make the
+				// split ambiguous, so the browser would subscribe to the part
+				// before the slash. Say so rather than drop it silently
+				warn(`%s: borgo.Push topic %q contains "/", so its events stay untyped - WsEvents keys are "topic/event"`, pos, topic)
+				return true
 			}
 			inst, ok := pkg.TypesInfo.Instances[sel]
 			if !ok || inst.TypeArgs.Len() != 1 {

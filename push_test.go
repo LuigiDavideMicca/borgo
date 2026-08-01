@@ -38,25 +38,69 @@ func TestPush(t *testing.T) {
 	}
 }
 
-func TestPushTDelegates(t *testing.T) {
+type pushPayload struct {
+	Title string `json:"title"`
+}
+
+// Push carries its payload type in its signature - this only compiles if Push
+// has exactly one type parameter, which is what borgogen reads to type the
+// browser's subscribe callback. The whole typed-events feature rests on it.
+var _ func(string, string, pushPayload) error = Push[pushPayload]
+
+// the typed path end to end: T inferred from the argument, payload on the wire
+func TestPushIsTypedAndInferred(t *testing.T) {
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-
 	t.Setenv("FRONT_URL", server.URL)
 
-	type payload struct {
-		Title string `json:"title"`
-	}
-	if err := PushT("live", "created", payload{Title: "t"}); err != nil {
+	// no type argument written anywhere: Go infers T = pushPayload
+	if err := Push("live", "created", pushPayload{Title: "t"}); err != nil {
 		t.Fatal(err)
 	}
 	data, ok := got["data"].(map[string]any)
 	if got["topic"] != "live" || got["event"] != "created" || !ok || data["title"] != "t" {
-		t.Errorf("payload wrong: %+v", got)
+		t.Fatalf("payload wrong: %+v", got)
+	}
+
+	// an explicit type argument is accepted too
+	got = nil
+	if err := Push[pushPayload]("live", "created", pushPayload{Title: "explicit"}); err != nil {
+		t.Fatal(err)
+	}
+	if data, ok := got["data"].(map[string]any); !ok || data["title"] != "explicit" {
+		t.Fatalf("explicit instantiation payload wrong: %+v", got)
+	}
+}
+
+// every pre-0.21 call shape that Go can still infer must compile and behave
+func TestPushAcceptsUntypedCallSites(t *testing.T) {
+	var seen int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	t.Setenv("FRONT_URL", server.URL)
+
+	var anyPayload any = map[string]int{"id": 1}
+	calls := []func() error{
+		func() error { return Push("live", "a", anyPayload) },             // T = any, as before
+		func() error { return Push("live", "b", map[string]int{"i": 1}) }, // T inferred
+		func() error { return Push("live", "c", "plain") },
+		func() error { return Push("live", "d", 7) },
+		func() error { return Push[any]("live", "e", nil) }, // the one shape that needs help
+	}
+	for i, call := range calls {
+		if err := call(); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if seen != len(calls) {
+		t.Fatalf("front server saw %d pushes, want %d", seen, len(calls))
 	}
 }
 
@@ -116,7 +160,8 @@ func TestPushRejected(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("FRONT_URL", server.URL)
-	if err := Push("live", "x", nil); err == nil {
+	// an untyped nil is the one payload Go cannot infer T from: spell it out
+	if err := Push[any]("live", "x", nil); err == nil {
 		t.Fatal("want error on non-204 response")
 	}
 }

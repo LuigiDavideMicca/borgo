@@ -5,7 +5,7 @@
 // slice, an unexported and a json:"-" field (both must be absent), a route
 // with a request body, a route whose handler answers with two different types
 // (which must become a union), a route reached only through a helper, and a
-// PushT topic (which must land in WsEvents, not in ApiRoutes).
+// Push topic (which must land in WsEvents, not in ApiRoutes).
 //
 // It lives under testdata/ so the go tool never builds or vets it as part of
 // the repo module; golden.test.ts copies it into a throwaway module that
@@ -62,7 +62,7 @@ func CreateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	note := Note{Title: body.Title}
-	borgo.PushT("notes", "created", note)
+	borgo.Push("notes", "created", note)
 	respondNote(w, http.StatusCreated, note)
 }
 
@@ -77,6 +77,6 @@ func GetNote(w http.ResponseWriter, r *http.Request) {
 
 //borgo:route DELETE /api/notes/{id}
 func DeleteNote(w http.ResponseWriter, r *http.Request) {
-	borgo.PushT("notes", "deleted", 1)
+	borgo.Push("notes", "deleted", 1)
 	borgo.WriteJSON(w, http.StatusOK, Deleted{OK: true})
 }

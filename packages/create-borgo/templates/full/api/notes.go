@@ -69,7 +69,7 @@ func CreateNote(w http.ResponseWriter, r *http.Request) {
 
 	// realtime fan-out: sse subscribers refresh, the ws topic gets a typed event
 	events.Publish("note-created", note)
-	go borgo.PushT("live", "note-created", note.Title)
+	go borgo.Push("live", "note-created", note.Title)
 	borgo.JSON(w, http.StatusCreated, NoteItem{Note: note})
 }
 

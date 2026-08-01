@@ -146,8 +146,6 @@ func TestGenerateErrors(t *testing.T) {
 		{"pattern without method", "nospace", `want "METHOD /path"`},
 		{"directive on method", "method", "package-level"},
 		{"directive on generic function", "genericfn", "type parameters"},
-		{"dynamic push topic", "badpush", "constant topic and event"},
-		{"slash in push topic", "slashpush", `must not contain "/"`},
 		{"missing api dir", "none", "no api/ directory"},
 	}
 	for _, c := range cases {
@@ -170,9 +168,9 @@ func TestInvalidDirectiveWritesNoMounting(t *testing.T) {
 	}
 }
 
-// A run that fails after the routes are collected - here on a PushT topic -
-// must leave both outputs exactly as they were, not a fresh mounting next to a
-// missing or stale .d.ts.
+// A run that fails after the routes are collected and typed - here on two
+// handlers claiming one pattern - must leave both outputs exactly as they were,
+// not a fresh mounting next to a missing or stale .d.ts.
 func TestFailedRunLeavesNoOutput(t *testing.T) {
 	root := filepath.Join("testdata", "partialfail")
 	genPath := filepath.Join(root, "api", "borgo.gen.go")
@@ -518,9 +516,43 @@ func TestLooseRouteCommentWarns(t *testing.T) {
 	}
 }
 
-func TestSlashPushErrorCarriesPosition(t *testing.T) {
-	err := run(filepath.Join("testdata", "slashpush"))
-	if err == nil || !strings.Contains(err.Error(), "bad.go:6") {
-		t.Fatalf("want file:line in the error, got %v", err)
+// A slashed topic still publishes and still reaches its subscribers, so
+// refusing to generate would break a working app over a typing detail. It
+// cannot be typed, though - "topic/event" keys make the split ambiguous - so
+// the event is dropped from the map and the reason is said out loud.
+func TestSlashPushWarnsAndStaysUntyped(t *testing.T) {
+	root := filepath.Join("testdata", "slashpush")
+	out := captureStderr(t, func() {
+		if err := run(root); err != nil {
+			t.Error(err)
+		}
+	})
+	if !strings.Contains(out, "bad.go:6") {
+		t.Errorf("want file:line in the warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "stay untyped") {
+		t.Errorf("want the warning to say the events stay untyped, got:\n%s", out)
+	}
+	if types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts")); strings.Contains(types, "live/chat") {
+		t.Errorf("a slashed topic must not enter WsEvents:\n%s", types)
+	}
+}
+
+// Push with a computed topic or event is the documented escape hatch: there is
+// nothing to record statically, so generation succeeds in silence and the
+// browser keeps the untyped callback. Failing here would leave no way at all to
+// publish a name decided at runtime.
+func TestDynamicPushGeneratesWithoutComplaint(t *testing.T) {
+	root := filepath.Join("testdata", "dynamicpush")
+	out := captureStderr(t, func() {
+		if err := run(root); err != nil {
+			t.Fatalf("a computed topic must not fail generation: %v", err)
+		}
+	})
+	if out != "" {
+		t.Errorf("a computed topic is a choice, not a mistake; got:\n%s", out)
+	}
+	if types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts")); strings.Contains(types, "WsEvents") {
+		t.Errorf("nothing was statically typed, so WsEvents must be absent:\n%s", types)
 	}
 }
