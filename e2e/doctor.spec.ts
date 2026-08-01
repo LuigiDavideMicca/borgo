@@ -36,7 +36,8 @@ test("borgo doctor reports a healthy example app", async () => {
   expect(out).toContain("api types");
   expect(out).toContain("node_modules");
   expect(out).toContain("borgo-framework");
-  expect(out).toContain("all 8 checks passed");
+  // the count grows as checks are added; what matters is that none failed
+  expect(out).toMatch(/all \d+ checks passed/);
   expect(result.status).toBe(0);
 });
 
@@ -54,7 +55,7 @@ test("borgo doctor fails with exit 1 when a port is taken", async () => {
     });
     expect(result.stdout).toContain(`port ${port} (front)`);
     expect(result.stdout).toContain("in use");
-    expect(result.stdout).toMatch(/1 of 8 checks failed/);
+    expect(result.stdout).toMatch(/1 of \d+ checks failed/);
     expect(result.status).toBe(1);
   } finally {
     await new Promise((resolve) => holder.close(resolve));
