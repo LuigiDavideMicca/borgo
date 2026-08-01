@@ -7,6 +7,8 @@ Every TypeScript and Go example on these pages is compiled by CI against the rea
 | Page | One line |
 | --- | --- |
 | [Getting started](getting-started.md) | build a small app end to end: a page, a Go route, a loader, a form action, an island |
+| [Why borgo works this way](why.md) | six design questions — Go, Bun, codegen, file routing, typed APIs, self-hosting — and what each choice costs |
+| [Architecture](architecture.md) | the two processes, what happens at boot, a request through both servers, what the build produces, code generation, the dev loop |
 | [Pages and routing](pages-and-routing.md) | pages and loaders, layouts, `<head>` management, streaming SSR, form actions, error pages |
 | [The typed bridge](typed-bridge.md) | Go API routes, borgogen, typed request bodies, type overrides, honest limits |
 | [Client navigation and hydration](client-navigation.md) | client-side transitions, prefetching, scroll restoration, code splitting, hydration modes, islands |
@@ -16,7 +18,10 @@ Every TypeScript and Go example on these pages is compiled by CI against the rea
 | [Dev experience](dev-experience.md) | fast refresh and its contract, styling and Tailwind, the error overlay, `borgo doctor` |
 | [PWA](pwa.md) | manifest, service worker, the precache list, guarded registration |
 | [Deploy](deploy.md) | Docker, compose, reverse proxy, systemd, static export, caching, health and metrics, environment reference |
+| [Performance](performance.md) | the mechanisms: work moved out of the request path, revalidation, compression, backpressure — and what borgo does not optimize |
 | [FAQ and troubleshooting](faq-and-troubleshooting.md) | the questions people ask, and symptoms with their one-line fixes |
+| [API reference](api-reference.md) | every public Go and TypeScript export, environment variable, CLI flag and file convention, each with a stability marker |
+| [API stability](api-stability.md) | what `1.x` will promise: one version across four artifacts, what counts as breaking, what is not covered, the deprecation policy |
 
 ## Where to start
 

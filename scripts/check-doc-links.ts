@@ -9,6 +9,11 @@ import { dirname, join, resolve } from "node:path";
 const repoBlob = "https://github.com/LuigiDavideMicca/borgo/blob/main/";
 const sources = [
   "README.md",
+  "VISION.md",
+  "CONTRIBUTING.md",
+  // every docs/*.md is picked up here, new pages included: listing one
+  // explicitly would check it twice and collide in the go scratch package,
+  // where the package directory is named after the source's first index
   ...readdirSync("docs")
     .filter((f) => f.endsWith(".md"))
     .map((f) => `docs/${f}`),
