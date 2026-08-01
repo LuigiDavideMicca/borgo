@@ -5,7 +5,14 @@ import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
 import { buildAssets, compileCss } from "./build";
 import { banner, c, fmtMs, g, statusColor } from "./colors";
-import { buildAssetIndex, jsonResponse, serveAsset, serveIndexed, type AssetInfo } from "./compress";
+import {
+  buildAssetIndex,
+  findAsset,
+  jsonResponse,
+  serveAsset,
+  serveIndexed,
+  type AssetInfo,
+} from "./compress";
 import { registerCsrf, registerIslands } from "./internal";
 import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
@@ -16,13 +23,13 @@ import {
   decodeChanged,
   envInt,
   headResponse,
-  idleTimeout,
-  isLongLivedStream,
   keysEqual,
   metricsEnabled,
   prepareShell,
   proxyRequest,
+  readTimeout,
   renderPage as renderDocument,
+  requestFullyRead,
   runAction,
   runPropsRequest,
   type ActionOptions,
@@ -175,6 +182,11 @@ export async function serve({ dev = false } = {}) {
         target: api + url.pathname + url.search,
         deadlineMs: apiTimeout,
         retries: apiRetries,
+        // the one hop borgo can vouch for, appended to X-Forwarded-For
+        clientIp: server.requestIP(req)?.address,
+        // a buffered body is entirely in hand by then, so the read deadline
+        // stops applying and the upstream gets as long as it needs
+        onBodyRead: () => server.timeout(req, 0),
       });
     }
 
@@ -192,7 +204,7 @@ export async function serve({ dev = false } = {}) {
         !assetPath.includes("\0") &&
         (process.platform !== "win32" || !/[:*?"<>|]/.test(assetPath))
       ) {
-        const indexed = assetIndex.get(assetPath);
+        const indexed = findAsset(assetIndex, assetPath);
         if (indexed) return serveIndexed(req, indexed);
         const path = "public" + assetPath;
         const asset = Bun.file(path);
@@ -306,12 +318,28 @@ export async function serve({ dev = false } = {}) {
   const server = await bindRetry(() => Bun.serve<SocketData, never>({
     port,
     maxRequestBodySize,
-    // a real read deadline: this same number bounds how long bun waits for an
-    // inbound request's headers and body, so disabling it to protect proxied
-    // event streams left every body-reading path with no timeout at all. The
-    // streams keep their exemption, granted per response below with
-    // server.timeout(req, 0). BORGO_IDLE_TIMEOUT is in seconds, 0 disables it.
-    idleTimeout: idleTimeout(process.env.BORGO_IDLE_TIMEOUT),
+    // the inbound read deadline, and nothing else - how long bun waits for a
+    // *request* to arrive. How long a *response* may live is a different clock
+    // with no honest bound, and it is expressed by lifting this one per
+    // request; readTimeout in util.ts owns both halves of that argument.
+    // BORGO_READ_TIMEOUT is in seconds, 0 disables it.
+    idleTimeout: readTimeout(process.env),
+    // bun's fallback error page embeds a base64 payload that decodes to the
+    // absolute path of the file on the server, and it appears whenever
+    // `development` is on - which it is by default, since `borgo start` in a
+    // plain shell leaves NODE_ENV unset. borgo renders its own 500 (and its own
+    // dev overlay) from the handler; this is the net under everything the
+    // handler never sees, a body that fails mid-stream above all.
+    development: false,
+    error(error) {
+      console.error(error);
+      return secure(
+        new Response("internal server error", {
+          status: 500,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+      );
+    },
     websocket: {
       // websockets have their own deadline and bun pings them itself, so the
       // read deadline above never applies to an upgraded socket
@@ -365,6 +393,16 @@ export async function serve({ dev = false } = {}) {
     async fetch(req) {
       const t0 = performance.now();
       const url = new URL(req.url);
+      // a request with no body is entirely in hand - bun calls fetch only once
+      // the request line and headers are in - so from here on nothing is left
+      // for a client to dribble at us and the read deadline has only harm to
+      // do: it would cut a stream idle between writes, or close the connection
+      // before an upstream slower than the deadline produced its first byte.
+      // Lifted before any handler runs, because the deadline can fire while a
+      // handler is still deciding what the response even is. It is scoped to
+      // this request: the next one on the same keep-alive connection gets the
+      // server default back (measured on bun 1.3.14).
+      if (requestFullyRead(req)) server.timeout(req, 0);
       // heads render for real (status and headers must be honest), only the
       // body is dropped - and cancelled, or the ssr/gzip pipeline keeps
       // rendering into a stream nobody reads
@@ -481,10 +519,6 @@ export async function serve({ dev = false } = {}) {
         }
       }
       response = dropBody(response);
-      // an event stream is idle between events by design; the read deadline
-      // that protects every other path would cut it. lifted only for the
-      // connection that actually carries one
-      if (isLongLivedStream(response)) server.timeout(req, 0);
       if (metrics && !url.pathname.startsWith("/assets/") && url.pathname !== "/favicon.ico") {
         metrics.observe(label.route, response.status, (performance.now() - t0) / 1000);
       }

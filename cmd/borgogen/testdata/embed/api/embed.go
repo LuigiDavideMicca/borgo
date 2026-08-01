@@ -89,6 +89,55 @@ type Deep struct {
 	D int `json:"d"`
 }
 
+// MA and MB both carry a MarshalJSON, so neither promotes to Amb: Amb has no
+// marshaler of its own and encoding/json's typeFields flattens both embedded
+// structs like any other. json.Marshal(Amb{}) is {"x":0,"y":0,"z":0} - the
+// marshalers never run.
+type MA struct {
+	X int `json:"x"`
+}
+
+func (MA) MarshalJSON() ([]byte, error) { return []byte(`"ma"`), nil }
+
+type MB struct {
+	Y int `json:"y"`
+}
+
+func (MB) MarshalJSON() ([]byte, error) { return []byte(`"mb"`), nil }
+
+type Amb struct {
+	MA
+	MB
+	Z int `json:"z"`
+}
+
+// PtrM's MarshalJSON is on the pointer receiver, so it promotes to *PtrEmbed
+// and not to PtrEmbed: an unaddressable PtrEmbed is flattened like any struct
+// and an addressable one goes through the marshaler.
+//
+//	json.Marshal(PtrEmbed{})   -> {"x":0,"z":0}
+//	json.Marshal([]PtrEmbed{{}}) -> ["pm"]
+type PtrM struct {
+	X int `json:"x"`
+}
+
+func (p *PtrM) MarshalJSON() ([]byte, error) { return []byte(`"pm"`), nil }
+
+type PtrEmbed struct {
+	PtrM
+	Z int `json:"z"`
+}
+
+//borgo:route GET /api/amb
+func GetAmb(w http.ResponseWriter, r *http.Request) {
+	borgo.JSON(w, http.StatusOK, Amb{})
+}
+
+//borgo:route GET /api/ptrembed
+func GetPtrEmbed(w http.ResponseWriter, r *http.Request) {
+	borgo.JSON(w, http.StatusOK, PtrEmbed{})
+}
+
 //borgo:route GET /api/doc
 func GetDoc(w http.ResponseWriter, r *http.Request) {
 	borgo.JSON(w, http.StatusOK, Doc{})

@@ -44,7 +44,7 @@ Breaking:
 - Changing the meaning of a return value — for example, making `GetSession` report `true` for an expired session.
 - Changing an HTTP status a documented handler produces: `LoginHandler` answering 400 instead of 401, `RegisterHandler` answering 200 instead of 201, `Authed` answering 403 instead of 401.
 - Changing a wire format both halves rely on: the session cookie envelope, the password hash string format, the SSE frame shape, the `/__borgo/publish` body.
-- Tightening a default such that previously working apps stop working — dropping `Bind`'s cap from 1 MB, say, or making `SESSION_SECRET` fatal at boot.
+- Tightening a default such that previously working apps stop working — dropping `Bind`'s cap from 1 MB, say, or making an *absent* `SESSION_SECRET` fatal at boot. (A `SESSION_SECRET` that is set but shorter than 32 bytes is already fatal at boot, and was made so deliberately: a searchable key is not a weaker secret, it is no secret. Unset still only warns, because an app with no sessions is legitimate.)
 
 Not breaking:
 
@@ -66,7 +66,7 @@ Breaking:
 Not breaking:
 
 - Adding an export, an optional property, or a new overload that accepts strictly more.
-- Changing anything reachable only through `borgo-framework/router`, `/runtime`, `/refresh-runtime` or `/package.json`, all of which are internal.
+- Changing anything reachable only through `borgo-framework/internal`, `/router`, `/runtime`, `/refresh-runtime` or `/package.json`, all of which are internal. `/internal` most of all: it exists because generated code has to import `registerCsrf`, `registerIslands` and `withCsrf` from somewhere, and its name is the whole disclaimer.
 - Making an inferred type *more* precise, where the extra precision only rejects code that was already wrong. (This one is a judgement call. If it turns real apps red, it is breaking regardless of who was right.)
 
 ### The CLI
@@ -115,7 +115,7 @@ Adding a new convention — a new special filename, a new optional page export �
 
 Deliberately outside the guarantee, in any release:
 
-- **Internal exports.** Everything marked internal in [the reference](api-reference.md), including all of `borgo-framework/router`, `/runtime` and `/refresh-runtime`, and every unexported Go symbol. These move without notice.
+- **Internal exports.** Everything marked internal in [the reference](api-reference.md), including all of `borgo-framework/internal`, `/router`, `/runtime` and `/refresh-runtime`, and every unexported Go symbol. These move without notice — `registerCsrf` and `registerIslands` already did once, from the root entry to `/internal` in 0.21.
 - **Exact generated formatting.** Whitespace, ordering, comments and the file header in generated files.
 - **Log lines.** Wording, colour, ordering and the presence of any particular startup, build or warning message. Do not parse them; `/healthz` and `/metrics` exist for machines.
 - **Console output shape.** The startup route table, the build asset table, `borgo doctor`'s report layout. The exit codes are covered; the text is not.

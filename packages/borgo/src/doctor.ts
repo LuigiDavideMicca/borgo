@@ -433,6 +433,17 @@ export function portHolder(d: DoctorEnv, port: number): { pid: string; name: str
   return pid && /^\d+$/.test(pid) ? { pid, name } : null;
 }
 
+// the processes `borgo dev` and `borgo start` are made of: the bun front
+// server, and the go api binary, which is `api` in dev (.borgo/api) and
+// dist/api in a build. lsof truncates long command names, so these are
+// compared as the short image names both platforms report.
+const OWN_IMAGES = new Set(["bun", "api", "borgo"]);
+
+export function isOwnProcess(image: string): boolean {
+  const base = image.replaceAll("\\", "/").split("/").pop() ?? image;
+  return OWN_IMAGES.has(base.toLowerCase().replace(/\.exe$/, ""));
+}
+
 export async function checkPort(d: DoctorEnv, port: number, label: string, envVar: string): Promise<Check> {
   const name = `port ${port} (${label})`;
   if (await d.isPortFree(port)) return { name, ok: true, detail: "free" };
@@ -441,6 +452,19 @@ export async function checkPort(d: DoctorEnv, port: number, label: string, envVa
     return { name, ok: false, detail: "in use", fix: `free it, or set ${envVar} to another port` };
   }
   const kill = d.platform === "win32" ? `taskkill /F /PID ${holder.pid}` : `kill ${holder.pid}`;
+  // doctor is what you run *while* something is off, which usually means with
+  // `borgo dev` up: a port held by borgo's own processes is the app running,
+  // not a broken machine, and failing red and exiting 1 over it made the one
+  // command meant to diagnose the problem report a problem of its own.
+  if (isOwnProcess(holder.name)) {
+    return {
+      name,
+      ok: false,
+      info: true,
+      detail: `in use by borgo itself ${g.dot} ${holder.name} (pid ${holder.pid})`,
+      fix: `nothing to fix if that is your own borgo ${g.dot} a leftover from a killed run: ${kill}`,
+    };
+  }
   return {
     name,
     ok: false,

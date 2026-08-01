@@ -4,15 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assetsBuildMode,
+  buildModeFor,
   compileCss,
+  cssSource,
   generateManifest,
-  isBuildOutput,
+  isSweepable,
   parseHydrate,
   precacheStamp,
+  readBuildInventory,
   refreshTransform,
   renameUnsafeChunks,
   reservedRoutes,
+  scanCode,
   sweepBuildOutput,
+  warnDeadRoutes,
+  writeBuildInventory,
 } from "../src/build";
 
 describe("parseHydrate", () => {
@@ -29,6 +35,120 @@ describe("parseHydrate", () => {
       expect(parseHydrate(source)).toBe(want);
     });
   }
+});
+
+// the export is read, never executed, so the text is all there is - and the
+// text lies. Commenting the line out is the most obvious way to re-enable
+// hydration, and it did the opposite: the page kept shipping no JS, kept
+// server-rendering, and nothing warned. PROVED against the real parser.
+describe("parseHydrate ignores what is not code", () => {
+  const page = (head: string) =>
+    `${head}\nexport default function P() { return null; }\n`;
+
+  const cases: Array<[string, string, ReturnType<typeof parseHydrate>]> = [
+    [
+      "a commented-out false above a real true",
+      "// export const hydrate = false;\nexport const hydrate = true;",
+      "true",
+    ],
+    [
+      "a commented-out false with no other export at all",
+      "// export const hydrate = false;",
+      "true",
+    ],
+    [
+      "a trailing comment on another line",
+      "const x = 1; // export const hydrate = false;\nexport const hydrate = 'visible';",
+      '"visible"',
+    ],
+    [
+      "a block comment",
+      "/* export const hydrate = false; */\nexport const hydrate = true;",
+      "true",
+    ],
+    [
+      "a doc comment",
+      "/**\n * export const hydrate = false;\n */\nexport const hydrate = true;",
+      "true",
+    ],
+    [
+      "a template string quoting the line",
+      "const snippet = `\nexport const hydrate = false;\n`;\nexport const hydrate = true;",
+      "true",
+    ],
+    [
+      "a plain string quoting the line",
+      'const snippet = "export const hydrate = false;";\nexport const hydrate = true;',
+      "true",
+    ],
+    // and the other direction: a real export must still be found through
+    // everything above it
+    [
+      "a real false under a comment that mentions it",
+      "// hydrate is off here: see docs\nexport const hydrate = false;",
+      "false",
+    ],
+    [
+      "a real false under a block comment holding a quote",
+      "/* it's off: \"why\" is in the docs */\nexport const hydrate = false;",
+      "false",
+    ],
+    [
+      "a real false under jsx text holding an apostrophe",
+      "const label = <p>don't panic</p>;\nexport const hydrate = false;",
+      "false",
+    ],
+    [
+      "a real false under a regex literal full of quotes and slashes",
+      "const re = /[\"'\\/]/g;\nexport const hydrate = false;",
+      "false",
+    ],
+  ];
+
+  for (const [name, head, want] of cases) {
+    test(name, () => {
+      expect(parseHydrate(page(head))).toBe(want);
+    });
+  }
+
+  test("scanCode blanks comments in place and keeps every offset", () => {
+    const source = "const a = 1; // gone\nconst b = 2;\n";
+    const { code } = scanCode(source);
+    expect(code.length).toBe(source.length);
+    expect(code).not.toContain("gone");
+    expect(code).toContain("const a = 1;");
+    expect(code.split("\n")[1]).toBe("const b = 2;");
+  });
+
+  test("scanCode reports the literals a match can hide inside", () => {
+    const source = 'const s = "hydrate";\n';
+    const { strings } = scanCode(source);
+    expect(strings).toHaveLength(1);
+    expect(source.slice(strings[0][0], strings[0][1])).toBe('"hydrate"');
+  });
+});
+
+// a page filtered out of the client manifest ships no js and never hydrates,
+// so what parseHydrate decides has to survive the whole generator
+describe("a commented-out hydrate export reaches the client manifest", () => {
+  test("the page is still a client route", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-hydrate-comment-"));
+    const cwd = process.cwd();
+    try {
+      mkdirSync(join(dir, "pages"), { recursive: true });
+      writeFileSync(
+        join(dir, "pages/index.tsx"),
+        "// export const hydrate = false;\nexport const hydrate = true;\nexport default function P() { return null; }\n",
+      );
+      process.chdir(dir);
+      await generateManifest();
+      const manifest = readFileSync(join(dir, ".borgo/client-routes.gen.ts"), "utf8");
+      expect(manifest).toContain('file: "index.tsx", hydrate: true');
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("refreshTransform", () => {
@@ -301,15 +421,20 @@ describe("a page named like a layout is a page", () => {
 // a page generated for one of them can never render - while the startup route
 // table prints it as though it works
 describe("reservedRoutes", () => {
+  const metricsOn = { BORGO_METRICS: "1" };
+
   test("names the paths the server takes first", () => {
-    const dead = reservedRoutes([
-      { pattern: "/api/users", file: "api/users.tsx" },
-      { pattern: "/api/:id", file: "api/[id].tsx" },
-      { pattern: "/ws", file: "ws.tsx" },
-      { pattern: "/healthz", file: "healthz.tsx" },
-      { pattern: "/metrics", file: "metrics.tsx" },
-      { pattern: "/__borgo/dev", file: "__borgo/dev.tsx" },
-    ]);
+    const dead = reservedRoutes(
+      [
+        { pattern: "/api/users", file: "api/users.tsx" },
+        { pattern: "/api/:id", file: "api/[id].tsx" },
+        { pattern: "/ws", file: "ws.tsx" },
+        { pattern: "/healthz", file: "healthz.tsx" },
+        { pattern: "/metrics", file: "metrics.tsx" },
+        { pattern: "/__borgo/dev", file: "__borgo/dev.tsx" },
+      ],
+      metricsOn,
+    );
     expect(dead.map((d) => d.pattern)).toEqual([
       "/api/users",
       "/api/:id",
@@ -320,6 +445,42 @@ describe("reservedRoutes", () => {
     ]);
     expect(dead[0].owner).toContain("go api");
     expect(dead[0].file).toBe("api/users.tsx");
+  });
+
+  // the server only claims /metrics with BORGO_METRICS=1 (server.ts asks
+  // metricsEnabled). Listing it unconditionally called a page that renders
+  // perfectly well "dead code" on every build of every app that never turned
+  // metrics on - a red line, on stderr, for nothing.
+  test("/metrics is only reserved when the server actually claims it", () => {
+    const pages = [{ pattern: "/metrics", file: "metrics.tsx" }];
+    expect(reservedRoutes(pages, {})).toEqual([]);
+    expect(reservedRoutes(pages, { BORGO_METRICS: "0" })).toEqual([]);
+    expect(reservedRoutes(pages, metricsOn).map((d) => d.pattern)).toEqual(["/metrics"]);
+    // the unconditional ones do not move
+    expect(reservedRoutes([{ pattern: "/healthz", file: "h.tsx" }], {}).map((d) => d.pattern)).toEqual([
+      "/healthz",
+    ]);
+  });
+
+  // the warning used to exist only inside generateManifest, which `borgo
+  // start` on a pre-built tree never runs: the startup route table printed the
+  // dead route like any other, with nothing to say it could never answer.
+  test("warnDeadRoutes says so out loud, and returns what it said", () => {
+    const said: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void said.push(args.join(" "));
+    try {
+      const dead = warnDeadRoutes([
+        { pattern: "/healthz", file: "healthz.tsx" },
+        { pattern: "/about", file: "about.tsx" },
+      ], {});
+      expect(dead.map((d) => d.pattern)).toEqual(["/healthz"]);
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain("pages/healthz.tsx");
+      expect(said[0]).toContain("/healthz");
+    } finally {
+      console.warn = original;
+    }
   });
 
   test("leaves reachable routes alone, prefixes included", () => {
@@ -341,14 +502,15 @@ describe("reservedRoutes", () => {
 // the pre-build sweep of public/assets. it used to take every .js in there,
 // which includes the analytics snippet or vendored widget an app dropped next
 // to the build output - deleted on the next build, with no warning.
-describe("isBuildOutput", () => {
-  test("claims what the build wrote", () => {
+describe("isSweepable", () => {
+  const owned = new Set(["client.js", "islands-client.js", "precache.json", "page-abc12345.js"]);
+
+  test("claims what the build recorded, and the stylesheet's siblings", () => {
     for (const f of [
       "client.js",
       "islands-client.js",
       "precache.json",
       "page-abc12345.js",
-      "chunk-0wj4r0a3.js",
       "client.js.gz",
       "client.js.br",
       "page-abc12345.js.gz",
@@ -357,7 +519,7 @@ describe("isBuildOutput", () => {
       "style.css.gz",
       "style.css.br",
     ]) {
-      expect(isBuildOutput(f)).toBe(true);
+      expect(isSweepable(f, owned)).toBe(true);
     }
   });
 
@@ -370,16 +532,60 @@ describe("isBuildOutput", () => {
       "logo.svg",
       "data.json",
       "analytics.js.gz",
-      // eight characters, but no dash before them
       "abcd1234.js",
     ]) {
-      expect(isBuildOutput(f)).toBe(false);
+      expect(isSweepable(f, owned)).toBe(false);
+    }
+  });
+
+  // the sweep used to match a SHAPE - `[^/\\]+-[a-z0-9]{8}\.js` - which is
+  // exactly the shape of a hashed analytics bundle. Proved: the comment
+  // promised `analytics.js` was safe, and `analytics-9f8e7d6c.js` was deleted
+  // on every build while `vendor.js` beside it survived.
+  test("a hashed app file is not a chunk just because it looks like one", () => {
+    for (const f of ["analytics-9f8e7d6c.js", "widget-0wj4r0a3.js", "sentry-1a2b3c4d.js"]) {
+      expect(isSweepable(f, owned)).toBe(false);
+      // and the same name IS swept once a build has recorded writing it
+      expect(isSweepable(f, new Set([...owned, f]))).toBe(true);
+    }
+  });
+
+  test("what this build just wrote is never swept, but its stale siblings are", () => {
+    const keep = new Set(["client.js"]);
+    expect(isSweepable("client.js", owned, keep)).toBe(false);
+    expect(isSweepable("client.js.gz", owned, keep)).toBe(true);
+  });
+});
+
+describe("build inventory", () => {
+  test("round-trips the names, sorted and deduplicated", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-inventory-"));
+    const path = join(dir, "build-output.json");
+    try {
+      expect(readBuildInventory(path)).toBeNull();
+      await writeBuildInventory(["b.js", "a.js", "b.js"], path);
+      expect(readBuildInventory(path)).toEqual(["a.js", "b.js"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("garbage on disk reads as no inventory, not as a crash", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-inventory-"));
+    const path = join(dir, "build-output.json");
+    try {
+      writeFileSync(path, "{not json");
+      expect(readBuildInventory(path)).toBeNull();
+      writeFileSync(path, JSON.stringify({ files: [1, 2] }));
+      expect(readBuildInventory(path)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
 
 describe("sweepBuildOutput", () => {
-  test("clears the last build and leaves the app's files where they were", () => {
+  test("clears the recorded build and leaves the app's files where they were", () => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-sweep-"));
     try {
       const mine = [
@@ -389,6 +595,8 @@ describe("sweepBuildOutput", () => {
         "logo.svg",
         "data.json",
         "style.css",
+        // the one the shape-matching sweep took with it
+        "analytics-9f8e7d6c.js",
       ];
       const theirs = [
         "client.js",
@@ -403,19 +611,35 @@ describe("sweepBuildOutput", () => {
       ];
       for (const f of [...mine, ...theirs]) writeFileSync(join(dir, f), "x");
 
-      const removed = sweepBuildOutput(dir);
+      const removed = sweepBuildOutput(dir, ["page-abc12345.js"]);
 
       expect(removed.sort()).toEqual([...theirs].sort());
       for (const f of theirs) expect(existsSync(join(dir, f))).toBe(false);
-      // the whole point: a file the app put here survives the next build
+      // the whole point: a file the app put here survives the next build,
+      // whatever its name happens to look like
       for (const f of mine) expect(existsSync(join(dir, f))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
+  test("no inventory sweeps only the names borgo always writes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-sweep-legacy-"));
+    try {
+      for (const f of ["client.js", "page-abc12345.js", "analytics-9f8e7d6c.js"]) {
+        writeFileSync(join(dir, f), "x");
+      }
+      expect(sweepBuildOutput(dir, null)).toEqual(["client.js"]);
+      // an unidentifiable chunk is dead weight; a deleted app file is not
+      // recoverable, and public/assets is gitignored by every template
+      expect(existsSync(join(dir, "analytics-9f8e7d6c.js"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a directory that does not exist yet is not an error", () => {
-    expect(sweepBuildOutput(join(tmpdir(), "borgo-no-such-dir-" + Date.now()))).toEqual([]);
+    expect(sweepBuildOutput(join(tmpdir(), "borgo-no-such-dir-" + Date.now()), [])).toEqual([]);
   });
 });
 
@@ -446,6 +670,53 @@ describe("compileCss", () => {
       expect(existsSync(join(dir, "public/assets/analytics.js"))).toBe(true);
     } finally {
       process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // `create-borgo --tailwind` deletes style.scss and makes style.css the
+  // entry, but only wired --tailwind into dev/build/start - so `borgo export`
+  // (and a bare `borgo build`) ran with BORGO_TAILWIND unset, found no
+  // style.scss, and deleted public/assets/style.css, its .gz and its .br. The
+  // exported pages still linked it, public/assets is gitignored by all three
+  // templates, and the app's only stylesheet was gone for good. Exit 0.
+  test("a tailwind app's stylesheet survives a build that forgot the flag", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-css-tailwind-"));
+    process.chdir(dir);
+    const hadFlag = process.env.BORGO_TAILWIND;
+    delete process.env.BORGO_TAILWIND;
+    try {
+      // exactly what the tailwind scaffold leaves behind: a style.css entry in
+      // the app root, no style.scss anywhere
+      writeFileSync(join(dir, "style.css"), '@import "tailwindcss";\n');
+      mkdirSync(join(dir, "public/assets"), { recursive: true });
+      for (const f of ["style.css", "style.css.gz", "style.css.br"]) {
+        writeFileSync(join(dir, "public/assets", f), "body{color:red}");
+      }
+
+      await compileCss(false);
+
+      for (const f of ["style.css", "style.css.gz", "style.css.br"]) {
+        expect(existsSync(join(dir, "public/assets", f))).toBe(true);
+      }
+      expect(readFileSync(join(dir, "public/assets/style.css"), "utf8")).toBe("body{color:red}");
+    } finally {
+      if (hadFlag === undefined) delete process.env.BORGO_TAILWIND;
+      else process.env.BORGO_TAILWIND = hadFlag;
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("cssSource names the entry the app actually has", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-css-source-"));
+    try {
+      expect(cssSource(dir)).toBeNull();
+      writeFileSync(join(dir, "style.css"), "");
+      expect(cssSource(dir)).toBe("css");
+      writeFileSync(join(dir, "style.scss"), "");
+      expect(cssSource(dir)).toBe("scss");
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

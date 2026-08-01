@@ -20,7 +20,10 @@ describe("templates", () => {
     const out = nginxConf(ctx);
     expect(out).toContain("proxy_pass http://localhost:3000;");
     expect(out).toContain("proxy_set_header Upgrade $http_upgrade;");
-    expect(out).toContain('proxy_set_header Connection "upgrade";');
+    // Connection is set from the map above, so a plain request keeps the
+    // upstream connection alive instead of being told to upgrade
+    expect(out).toContain("proxy_set_header Connection $connection_upgrade;");
+    expect(out).toContain("map $http_upgrade $connection_upgrade {");
     expect(out).toContain("proxy_buffering off;");
     expect(balanced(out)).toBe(true);
     // every directive inside a block ends with a semicolon
@@ -81,31 +84,32 @@ describe("templates", () => {
     expect(out).toContain("restart: unless-stopped");
   });
 
-  // docker creates the mounted volume root-owned, and the images borgo
-  // scaffolds run as `USER bun`. Uncommenting the DB_PATH line the file
-  // documents gives permission-denied at startup, with nothing in the compose
-  // file to suggest why - so the file says what the Dockerfile has to do.
-  test("compose says what /data needs before DB_PATH can be uncommented", () => {
+  // the scaffolded app persists nothing, so the compose file mounts nothing:
+  // a volume that exists because the generator always writes one is a volume
+  // whose permissions bite the first time somebody uses it. What it carries
+  // instead is the whole recipe, commented, next to the line it is about.
+  test("compose mounts no volume, and says exactly what adding one takes", () => {
     const out = composeYml(ctx);
-    expect(out).toContain("# DB_PATH: /data/app.db");
-    expect(out).toContain("chown bun:bun /data");
-    expect(out).toContain("USER bun");
-    // the advice has to sit with the line it is about, not at the top
-    const advice = out.indexOf("chown bun:bun /data");
-    const dbPath = out.indexOf("# DB_PATH: /data/app.db");
-    expect(advice).toBeLessThan(dbPath);
-    expect(dbPath - advice).toBeLessThan(200);
+    expect(out).toContain("DB_PATH: /data/app.db");
+    expect(out).toContain("- data:/data");
+    // every one of those lines is commented: the file as written must not
+    // hand an app a database path, or a volume, it never asked for
+    const persistence = /DB_PATH|data:\/data|^volumes:|^ {2}data:/;
+    for (const line of out.split(String.fromCharCode(10))) {
+      if (persistence.test(line)) expect(line.trimStart().startsWith("#")).toBe(true);
+    }
   });
 
   test("compose is still valid yaml with the advice in it", () => {
     const parsed = Bun.YAML.parse(composeYml(ctx)) as {
-      services: { app: { environment: Record<string, string>; volumes: string[] } };
-      volumes: Record<string, unknown>;
+      services: { app: { environment: Record<string, string>; volumes?: string[] } };
+      volumes?: Record<string, unknown>;
     };
-    expect(parsed.services.app.volumes).toContain("data:/data");
-    // still commented out: an app with no DB_PATH must not be handed one
+    expect(parsed.services.app.environment.BUN_CONFIG_MAX_HTTP_REQUESTS).toBe("16384");
+    // commented out means absent to a parser, which is the point
+    expect(parsed.services.app.volumes).toBeUndefined();
     expect(parsed.services.app.environment.DB_PATH).toBeUndefined();
-    expect(parsed.volumes).toHaveProperty("data");
+    expect(parsed.volumes).toBeUndefined();
   });
 });
 

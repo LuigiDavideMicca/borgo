@@ -49,7 +49,10 @@ var (
 type route struct {
 	pattern string
 	handler *types.Func
-	pos     token.Position
+	// decl carries the body to read bridge types from when the handler is not a
+	// declared function - an inline closure has no *types.Func to look up.
+	decl *ast.FuncDecl
+	pos  token.Position
 }
 
 type genError struct{ msg string }
@@ -160,7 +163,11 @@ func run(root string) (err error) {
 			continue
 		}
 		first[r.pattern] = r.pos
-		resp, req := gen.bridgeTypes(pkg, decls, decls[r.handler], loader)
+		body := r.decl
+		if body == nil {
+			body = decls[r.handler]
+		}
+		resp, req := gen.bridgeTypes(pkg, decls, body, loader)
 		entry := "{ response: " + resp
 		if req != "" {
 			entry += "; request: " + req
@@ -490,10 +497,18 @@ func collectRoutes(pkg *packages.Package) []route {
 					pkg.Fset.Position(call.Pos()))
 				return true
 			}
+			pos := pkg.Fset.Position(call.Pos())
+			fn, decl := handlerTarget(pkg.TypesInfo, call.Args[1])
+			if fn == nil && decl == nil {
+				// the route is mounted and serves; only the body behind it is
+				// out of reach. Left silent it just came out "response: unknown"
+				warn("%s: borgo.Handle with a handler expression that is not a function, a closure or a conversion of one; the route is registered but its request and response types stay unknown", pos)
+			}
 			routes = append(routes, route{
 				pattern: constant.StringVal(tv.Value),
-				handler: handlerFunc(pkg.TypesInfo, call.Args[1]),
-				pos:     pkg.Fset.Position(call.Pos()),
+				handler: fn,
+				decl:    decl,
+				pos:     pos,
 			})
 			return true
 		})
@@ -567,7 +582,7 @@ func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]s
 	sort.Strings(keys)
 	entries := make(map[string]string, len(keys))
 	for _, k := range keys {
-		entries[k] = unions[k].String()
+		entries[k] = tsUnion(unions[k].parts...)
 	}
 	return keys, entries
 }
@@ -581,22 +596,8 @@ func pushSources(pkg *packages.Package, loader *helperLoader) []*packages.Packag
 	seen := map[string]bool{pkg.PkgPath: true}
 	frontier := []*packages.Package{pkg}
 	for hop := 0; hop < maxCrossPkgDepth && len(frontier) > 0; hop++ {
-		var paths []string
-		for _, p := range frontier {
-			for path := range p.Imports {
-				// borgo declares Push, so a qualified borgo.Push cannot occur
-				// inside it; loading the framework would be pure cost for the
-				// one app that shares a module with it - this one's examples
-				if seen[path] || path == borgoPath || !loader.sameModule(path) {
-					continue
-				}
-				seen[path] = true
-				paths = append(paths, path)
-			}
-		}
-		sort.Strings(paths)
 		var next []*packages.Package
-		for _, path := range paths {
+		for _, path := range nextPushHop(frontier, seen, loader) {
 			if hp := loader.load(path, ""); hp != nil {
 				out = append(out, hp.pkg)
 				next = append(next, hp.pkg)
@@ -604,26 +605,69 @@ func pushSources(pkg *packages.Package, loader *helperLoader) []*packages.Packag
 		}
 		frontier = next
 	}
+	// the cap stopped the walk with same-module packages still ahead of it. A
+	// dropped push is worse than a plain omission: TopicEvents<T> closes a
+	// topic's union as soon as one of its events is declared, so a subscriber
+	// for the missing one fails tsc with nothing pointing back at here
+	if dropped := nextPushHop(frontier, seen, loader); len(dropped) > 0 {
+		warn("%s is more than %d package hops from api/, so it was not scanned; a borgo.Push there stays out of WsEvents and its subscriber will not typecheck",
+			strings.Join(dropped, ", "), maxCrossPkgDepth)
+	}
 	return out
 }
 
-func handlerFunc(info *types.Info, expr ast.Expr) *types.Func {
+// nextPushHop returns the same-module packages one hop past frontier, in sorted
+// order so a payload pushed under one key from two packages always unions the
+// same way, and marks them seen.
+func nextPushHop(frontier []*packages.Package, seen map[string]bool, loader *helperLoader) []string {
+	var paths []string
+	for _, p := range frontier {
+		for path := range p.Imports {
+			// borgo declares Push, so a qualified borgo.Push cannot occur
+			// inside it; loading the framework would be pure cost for the
+			// one app that shares a module with it - this one's examples
+			if seen[path] || path == borgoPath || !loader.sameModule(path) {
+				continue
+			}
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// handlerTarget resolves the handler argument of a borgo.Handle call to the
+// body its bridge types come from: a declared function, or the closure itself
+// when the handler is written inline. Both are nil when neither applies, which
+// is the caller's cue to say so rather than emit "response: unknown" in silence.
+func handlerTarget(info *types.Info, expr ast.Expr) (*types.Func, *ast.FuncDecl) {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		if fn, ok := info.Uses[e].(*types.Func); ok {
-			return fn
+			return fn, nil
 		}
 	case *ast.SelectorExpr:
 		if fn, ok := info.Uses[e.Sel].(*types.Func); ok {
-			return fn
+			return fn, nil
 		}
+	case *ast.ParenExpr:
+		return handlerTarget(info, e.X)
+	case *ast.FuncLit:
+		// borgo.Handle("GET /x", func(w, r) {...}): there is no *types.Func to
+		// look a declaration up by, but the body is right here
+		return nil, &ast.FuncDecl{Name: ast.NewIdent("handler"), Type: e.Type, Body: e.Body}
 	case *ast.CallExpr:
 		// borgo.Authed(h) is transparent: the route keeps h's types
 		if name, _ := borgoFunc(info, e); name == "Authed" && len(e.Args) == 1 {
-			return handlerFunc(info, e.Args[0])
+			return handlerTarget(info, e.Args[0])
+		}
+		// and so is a conversion - http.HandlerFunc(Named) above all
+		if len(e.Args) == 1 && info.Types[e.Fun].IsType() {
+			return handlerTarget(info, e.Args[0])
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func funcDecls(pkg *packages.Package) map[*types.Func]*ast.FuncDecl {
@@ -704,10 +748,10 @@ func collectTypeOverrides(pkg *packages.Package) map[string]string {
 func overrideTargetExists(pkg *packages.Package, goType string) bool {
 	i := strings.LastIndex(goType, ".")
 	if i < 0 {
-		if pkg.Types != nil {
-			if _, ok := pkg.Types.Scope().Lookup(goType).(*types.TypeName); ok {
-				return true
-			}
+		// function bodies included: tsGen.override matches any api type by bare
+		// name, and a `type resp struct{...}` inside a handler is one of them
+		if pkg.Types != nil && scopeDeclaresType(pkg.Types.Scope(), goType) {
+			return true
 		}
 		_, ok := types.Universe.Lookup(goType).(*types.TypeName)
 		return ok
@@ -724,6 +768,20 @@ func overrideTargetExists(pkg *packages.Package, goType string) bool {
 		return ok
 	}
 	return true
+}
+
+// scopeDeclaresType reports whether a scope or any scope nested in it declares
+// a type of that name.
+func scopeDeclaresType(s *types.Scope, name string) bool {
+	if _, ok := s.Lookup(name).(*types.TypeName); ok {
+		return true
+	}
+	for i := 0; i < s.NumChildren(); i++ {
+		if scopeDeclaresType(s.Child(i), name) {
+			return true
+		}
+	}
+	return false
 }
 
 type union struct {
@@ -747,13 +805,23 @@ func (u *union) String() string {
 
 // tsUnion joins TypeScript alternatives in the order given, flattening the
 // unions among them and dropping the repeats: "string" and "string | null"
-// compose to "string | null", not "string | string | null".
+// compose to "string | null", not "string | string | null". null goes last
+// whichever alternative carried it, so two nullable answers under one route
+// read "A | B | null" instead of "A | null | B".
 func tsUnion(parts ...string) string {
 	var u union
+	nullable := false
 	for _, p := range parts {
 		for _, alt := range strings.Split(p, " | ") {
+			if alt == "null" {
+				nullable = true
+				continue
+			}
 			u.add(alt)
 		}
+	}
+	if nullable {
+		u.add("null")
 	}
 	return u.String()
 }
@@ -956,10 +1024,12 @@ func (g *tsGen) bridgeTypes(pkg *packages.Package, decls map[*types.Func]*ast.Fu
 	}
 	walk(pkg, decls, decl, 0)
 
+	// tsUnion, not String: two responses that are each nullable dedup as whole
+	// strings but not as alternatives, so the union carried a second "| null"
 	if len(resp.parts) == 0 {
-		return "unknown", req.String()
+		return "unknown", tsUnion(req.parts...)
 	}
-	return resp.String(), req.String()
+	return tsUnion(resp.parts...), tsUnion(req.parts...)
 }
 
 // isErrorStatus reports whether the status argument is a constant >= 300.
@@ -976,11 +1046,17 @@ func isErrorStatus(info *types.Info, expr ast.Expr) bool {
 	return ok && v >= 300
 }
 
-// hasCustomMarshal reports whether t marshals through json.Marshaler in any
-// position. A marshaler declared on the pointer receiver only reaches some of
-// them (see textMarshalTS), but both answers are "unknown" here, so the
-// distinction does not change the emitted type.
+// hasCustomMarshal reports whether t can marshal through json.Marshaler in some
+// position - slice elements and pointed-to values included, which are the
+// addressable ones a pointer-receiver MarshalJSON reaches.
 func hasCustomMarshal(t types.Type) bool { return hasMarshalMethod(t, "MarshalJSON", true) }
+
+// marshalsEverywhere reports whether t marshals through json.Marshaler in every
+// position. A MarshalJSON on the pointer receiver does not: inside
+// json.Marshal(v any) the root is unaddressable, and so are a struct field of it
+// and a map value, so those reach the wire as the Go shape instead - the same
+// split textMarshalTS handles for MarshalText.
+func marshalsEverywhere(t types.Type) bool { return hasMarshalMethod(t, "MarshalJSON", false) }
 
 // textMarshalTS types a value that reaches the wire through
 // encoding.TextMarshaler - how uuid.UUID, netip.Addr and hand written enums
@@ -1019,7 +1095,10 @@ func hasMarshalMethod(t types.Type, name string, addressable bool) bool {
 	if !ok || sig.Params().Len() != 0 || sig.Results().Len() != 2 {
 		return false
 	}
-	return sig.Results().At(0).Type().String() == "[]byte" &&
+	// []byte and []uint8 are one type but not one string: go/types spells the
+	// predeclared alias "[]byte" and the plain kind "[]uint8", so comparing the
+	// rendering missed a MarshalJSON() ([]uint8, error) that json.Marshal calls
+	return types.Identical(sig.Results().At(0).Type(), types.NewSlice(types.Typ[types.Byte])) &&
 		sig.Results().At(1).Type().String() == "error"
 }
 
@@ -1033,16 +1112,31 @@ func (g *tsGen) tsType(t types.Type) string {
 		if obj.Pkg() != nil && obj.Pkg().Path() == "time" && obj.Name() == "Time" {
 			return "string"
 		}
-		if hasCustomMarshal(t) {
+		// json.Number is typed string and carries a bare number on the wire.
+		// Only this exact type: `type Amount json.Number` is a copy, not it, and
+		// encoding/json quotes a copy like any other string-kinded type
+		if obj.Pkg() != nil && obj.Pkg().Path() == "encoding/json" && obj.Name() == "Number" {
+			return "number"
+		}
+		if marshalsEverywhere(t) {
 			return "unknown"
+		}
+		shape := func() string {
+			if s, ok := t.Underlying().(*types.Struct); ok {
+				return g.interfaceFor(t, s)
+			}
+			return g.namedFor(t)
+		}
+		if hasCustomMarshal(t) {
+			// pointer receiver only, so one type reaches the wire both ways in
+			// a single response - through the marshaler where it is addressable
+			// and as its Go shape where it is not
+			return tsUnion("unknown", shape())
 		}
 		if ts, ok := g.textMarshalTS(t, func() string { return g.tsType(t.Underlying()) }); ok {
 			return ts
 		}
-		if s, ok := t.Underlying().(*types.Struct); ok {
-			return g.interfaceFor(t, s)
-		}
-		return g.namedFor(t)
+		return shape()
 	case *types.Alias:
 		// an alias is a name of its own, so a //borgo:type may target it
 		// instead of the type it stands for
@@ -1084,10 +1178,12 @@ func (g *tsGen) tsType(t types.Type) string {
 		if b, ok := t.Key().Underlying().(*types.Basic); ok && b.Info()&(types.IsString|types.IsInteger) != 0 {
 			return nullable("Record<string, " + g.tsType(t.Elem()) + ">")
 		}
-		if !hasCustomMarshal(t.Key()) && hasMarshalMethod(t.Key(), "MarshalText", false) {
-			// encoding/json keys the object by MarshalText output. A key is
-			// never addressable, so a MarshalText on the pointer receiver does
-			// not apply - encoding/json refuses to marshal the map at all
+		if hasMarshalMethod(t.Key(), "MarshalText", false) {
+			// encoding/json keys the object by MarshalText output, and only by
+			// it: resolveKeyName never consults MarshalJSON, so a key type
+			// carrying both is still a string key and not "unknown". A key is
+			// never addressable either, so a MarshalText on the pointer receiver
+			// does not apply - encoding/json refuses to marshal the map at all
 			return nullable("Record<string, " + g.tsType(t.Elem()) + ">")
 		}
 		return "unknown"
@@ -1095,10 +1191,13 @@ func (g *tsGen) tsType(t types.Type) string {
 		// an anonymous struct promotes its embedded methods too, so one
 		// embedding a time.Time reaches the wire as a JSON string and never as
 		// the object its fields describe
-		if hasCustomMarshal(t) {
+		if marshalsEverywhere(t) {
 			return "unknown"
 		}
 		object := func() string { return "{ " + strings.Join(g.fields(t), "; ") + " }" }
+		if hasCustomMarshal(t) {
+			return tsUnion("unknown", object())
+		}
 		if ts, ok := g.textMarshalTS(t, object); ok {
 			return ts
 		}
@@ -1169,13 +1268,58 @@ func (g *tsGen) reserveName(t *types.Named) string {
 	return name
 }
 
+// typeKey identifies a named type across the names, expanding and taken maps.
+// types.TypeString spells one out as "pkgpath.Name", which is not unique: the
+// idiomatic one-off `type resp struct{...}` declared inside a handler body has
+// the same string in every handler, so every route sharing the name collapsed
+// onto one TypeScript type built from whichever route sorted first - promising
+// the caller of one route the properties of another. The declaration position
+// separates the function-local ones; a package-level type keeps the plain
+// string, so two instantiations of a generic still key on their type arguments.
+func typeKey(t *types.Named) string {
+	key := types.TypeString(t, nil)
+	obj := t.Obj()
+	if scope := obj.Parent(); scope != nil && obj.Pkg() != nil && scope != obj.Pkg().Scope() {
+		key = fmt.Sprintf("%s#%d", key, obj.Pos())
+	}
+	return key
+}
+
+// pointerCycle reports whether expanding t re-enters t through pointers alone -
+// `type Loop *Loop`, or a pair of types pointing at each other. Every value of
+// such a type is a chain that has to end at a nil pointer, and encoding/json
+// writes a pointer as whatever it points at, so null is the only thing that can
+// reach the wire. Inlining the expansion instead emitted `export type Loop =
+// Loop | null;`, a type alias that refers to itself: TS2456.
+func pointerCycle(t types.Type) bool {
+	seen := map[*types.TypeName]bool{}
+	for {
+		named, ok := types.Unalias(t).(*types.Named)
+		if !ok {
+			return false
+		}
+		if seen[named.Obj()] {
+			return true
+		}
+		seen[named.Obj()] = true
+		ptr, ok := named.Underlying().(*types.Pointer)
+		if !ok {
+			return false
+		}
+		t = ptr.Elem()
+	}
+}
+
 // namedFor expands a named type whose underlying is not a struct. It inlines
 // the underlying, as it always did - `type Money int` is still just `number` -
 // unless the expansion re-enters this same type, which means the type is
 // recursive and has to be able to refer to itself. Then it gets a declaration
 // of its own and the inner reference resolves to that name.
 func (g *tsGen) namedFor(t *types.Named) string {
-	key := types.TypeString(t, nil)
+	if pointerCycle(t) {
+		return "null"
+	}
+	key := typeKey(t)
 	if name, ok := g.names[key]; ok {
 		return name
 	}
@@ -1197,7 +1341,7 @@ func (g *tsGen) namedFor(t *types.Named) string {
 }
 
 func (g *tsGen) interfaceFor(t *types.Named, s *types.Struct) string {
-	key := types.TypeString(t, nil)
+	key := typeKey(t)
 	if name, ok := g.names[key]; ok {
 		return name
 	}
@@ -1290,7 +1434,11 @@ func (g *tsGen) collectFields(s *types.Struct, depth int, viaPtr bool, expanded 
 		if skip {
 			continue
 		}
-		if f.Embedded() && name == "" && embeddedStruct != nil && !hasCustomMarshal(named) {
+		// no Marshaler check here, and none in encoding/json's typeFields
+		// either: an embedded struct is flattened whatever methods it carries,
+		// and the marshaler only decides anything once it is promoted to the
+		// outer type - in which case tsType answered before collectFields ran
+		if f.Embedded() && name == "" && embeddedStruct != nil {
 			if expanded[embeddedStruct] {
 				continue
 			}

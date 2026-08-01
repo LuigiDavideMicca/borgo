@@ -1,7 +1,6 @@
 package borgo
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,51 +17,66 @@ import (
 const sseWriteTimeout = 10 * time.Second
 
 // an event stream never ends on its own, so a graceful shutdown would sit out
-// its whole grace period waiting for one. ServeContext cancels this when it
-// starts shutting down and every stream's Done fires: browsers reconnect to
-// the next instance on their own.
+// its whole grace period waiting for one. The run that is shutting down trips
+// its latch, every stream that run is serving sees Done fire, and browsers
+// reconnect to the next instance on their own.
 //
-// It is re-armed at the top of every ServeContext rather than being a one-shot
-// package latch, so a program that runs a server, stops it and runs another -
-// which ServeContext exists to allow - does not start the second one with
-// every stream already cancelled. The mutex is only taken when a stream opens
-// or a server starts or stops, never per frame.
-var (
-	shutdownMu   sync.Mutex
-	shutdownCtx  context.Context
-	shutdownStop context.CancelFunc
-)
+// The latch belongs to the server, not to the package. One package global is
+// re-armed by whichever run started last, and runs overlap: arming happens
+// before the bind, so a second ServeContext that never got its port - the most
+// likely overlap there is - replaced the live server's latch. The live
+// server's own Shutdown then tripped a latch none of its streams were
+// watching, so it sat out the whole BORGO_SHUTDOWN_TIMEOUT on them; and when
+// the overlapping run stopped, its hook ended the streams of the server still
+// serving, which answered every later SSE call with an already-finished stream
+// while /healthz stayed green. Keyed by the server, no run can reach another
+// run's latch, whatever order they start and stop in. The map is touched when
+// a stream opens or a server starts or stops, never per frame.
+var streamLatches sync.Map // *http.Server -> *streamLatch
 
-func init() { armShutdown() }
-
-// armShutdown resets the stream-shutdown latch and returns the cancel that
-// ends the streams of the run it just armed - and of no other run.
-func armShutdown() context.CancelFunc {
-	shutdownMu.Lock()
-	defer shutdownMu.Unlock()
-	shutdownCtx, shutdownStop = context.WithCancel(context.Background())
-	return shutdownStop
+type streamLatch struct {
+	done chan struct{}
+	once sync.Once
 }
 
-// armStreamShutdown arms this run's stream-shutdown latch and registers the
-// hook that trips it on srv.
-//
-// The hook closes over the cancel this call created rather than reading the
-// package latch when it fires. net/http runs OnShutdown hooks as `go f()` and
-// Shutdown does not wait for them, so a hook left over from server N can still
-// be pending when server N+1 arms: a hook that read the live latch would then
-// cancel the new server's, and every SSE call it ever serves would return an
-// already-finished stream while the api looks healthy - browsers reconnect
-// forever.
-func armStreamShutdown(srv *http.Server) {
-	srv.RegisterOnShutdown(armShutdown())
+func (l *streamLatch) trip() { l.once.Do(func() { close(l.done) }) }
+
+// armStreamShutdown gives srv its own stream-shutdown latch and registers the
+// hook that trips it. The returned func trips the latch and forgets the
+// server; serveContext defers it, so a run that never reached Shutdown - a
+// listener that could not bind - leaves nothing behind either.
+func armStreamShutdown(srv *http.Server) func() {
+	latch := &streamLatch{done: make(chan struct{})}
+	streamLatches.Store(srv, latch)
+	disarm := func() {
+		latch.trip()
+		streamLatches.Delete(srv)
+	}
+	// net/http runs OnShutdown hooks as `go f()` and Shutdown does not wait for
+	// them, so this one can still be pending long after the run it belongs to
+	// is gone: it closes over its own latch and can only ever end its own
+	// server's streams
+	srv.RegisterOnShutdown(disarm)
+	return disarm
 }
 
-// shutdownSignal is the channel a stream watches for server shutdown.
-func shutdownSignal() <-chan struct{} {
-	shutdownMu.Lock()
-	defer shutdownMu.Unlock()
-	return shutdownCtx.Done()
+// shutdownSignal is the channel a stream watches for its own server's
+// shutdown. The server comes from the request, so a stream always watches the
+// run that is serving it. A request that arrives without one - a handler
+// called directly in a test, or mounted on something that is not net/http -
+// gets a nil channel, which never fires: there is no run to end it, and the
+// request's own context still does.
+func shutdownSignal(r *http.Request) <-chan struct{} {
+	srv, _ := r.Context().Value(http.ServerContextKey).(*http.Server)
+	if srv == nil {
+		return nil
+	}
+	latch, _ := streamLatches.Load(srv)
+	l, _ := latch.(*streamLatch)
+	if l == nil {
+		return nil
+	}
+	return l.done
 }
 
 // SSEStream is one open server-sent-events response.
@@ -103,14 +117,16 @@ func SSE(w http.ResponseWriter, r *http.Request) (*SSEStream, error) {
 	// the same favour; this asks it of everyone, by not being quiet.
 	io.WriteString(w, ":ok\n\n")
 	f.Flush()
-	return &SSEStream{w: w, f: f, r: r, rc: rc, done: streamDone(r.Context())}, nil
+	return &SSEStream{w: w, f: f, r: r, rc: rc, done: streamDone(r)}, nil
 }
 
-// streamDone closes on client disconnect or on shutdown, whichever comes
-// first; the watcher goroutine ends with the stream either way.
-func streamDone(ctx context.Context) <-chan struct{} {
+// streamDone closes on client disconnect or on the shutdown of the server
+// serving r, whichever comes first; the watcher goroutine ends with the stream
+// either way.
+func streamDone(r *http.Request) <-chan struct{} {
 	done := make(chan struct{})
-	stopping := shutdownSignal()
+	ctx := r.Context()
+	stopping := shutdownSignal(r)
 	go func() {
 		defer close(done)
 		select {

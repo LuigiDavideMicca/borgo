@@ -11,17 +11,19 @@ import {
   forwardableHeaders,
   headHtml,
   headResponse,
-  idleTimeout,
-  IDLE_TIMEOUT_MAX,
-  IDLE_TIMEOUT_SECONDS,
-  isLongLivedStream,
   metricsEnabled,
   PROXY_RETRY_MAX_BODY,
+  readTimeout,
+  READ_TIMEOUT_MAX,
+  READ_TIMEOUT_SECONDS,
+  requestFullyRead,
   scriptJson,
   shouldBufferBody,
   UNKNOWN_CHANGE,
   sessionSecure,
 } from "../src/util";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 describe("freshCookieHeader", () => {
   const SESSION = "borgo_session";
@@ -523,74 +525,126 @@ describe("metricsEnabled", () => {
   });
 });
 
-// borgo used to run the front server with idleTimeout: 0, on the strength of a
-// comment about proxied SSE responses. But bun's idleTimeout is not a
-// response-side setting: the same number bounds how long the server waits for
-// an inbound request's headers and body. Disabling it left the internet-facing
-// server with no read deadline at all, while README and docs/security.md
-// advertised "a slowloris-resistant timeout matrix" that belongs to the GO
-// server. The deadline is back, and the exemption is per response.
-describe("the read deadline", () => {
+// TWO CLOCKS, NOT ONE.
+//
+// borgo first ran the front server with idleTimeout: 0, on the strength of a
+// comment about proxied SSE responses, which left the internet-facing server
+// with no read deadline at all. The fix for that fused the two clocks instead
+// of separating them: it turned the deadline back on and exempted responses
+// whose Content-Type matched an allowlist of text/event-stream and
+// multipart/x-mixed-replace, after the handler had already resolved. Measured
+// with idleTimeout=3 and a stream idle 8s mid-body, that truncated every
+// long-lived response that is not SSE - application/x-ndjson was cancelled
+// server-side at ~3s and the connection closed at 4.0s, and the client saw a
+// TRUNCATED 200, not an error - and it granted the exemption too late for an
+// upstream slower than the deadline, which closed at 4.0s having delivered
+// nothing.
+//
+// The deadline bounds the REQUEST. The response has no bound. bun has one knob
+// for both, so the knob is the request clock and the response clock is that
+// knob lifted, at the one moment the request can no longer be dribbled at us.
+describe("the read deadline: how long a REQUEST may take to arrive", () => {
   test("defaults to a real number of seconds, not to none", () => {
-    expect(idleTimeout(undefined)).toBe(IDLE_TIMEOUT_SECONDS);
-    expect(idleTimeout("")).toBe(IDLE_TIMEOUT_SECONDS);
-    expect(IDLE_TIMEOUT_SECONDS).toBeGreaterThan(0);
+    expect(readTimeout({})).toBe(READ_TIMEOUT_SECONDS);
+    expect(readTimeout({ BORGO_READ_TIMEOUT: "" })).toBe(READ_TIMEOUT_SECONDS);
+    expect(READ_TIMEOUT_SECONDS).toBeGreaterThan(0);
     // garbage must not silently disable it
-    expect(idleTimeout("soon")).toBe(IDLE_TIMEOUT_SECONDS);
-    expect(idleTimeout("-5")).toBe(IDLE_TIMEOUT_SECONDS);
+    expect(readTimeout({ BORGO_READ_TIMEOUT: "soon" })).toBe(READ_TIMEOUT_SECONDS);
+    expect(readTimeout({ BORGO_READ_TIMEOUT: "-5" })).toBe(READ_TIMEOUT_SECONDS);
   });
 
-  test("BORGO_IDLE_TIMEOUT overrides it, and bun's ceiling is respected", () => {
-    expect(idleTimeout("5")).toBe(5);
+  test("BORGO_READ_TIMEOUT overrides it, and bun's ceiling is respected", () => {
+    expect(readTimeout({ BORGO_READ_TIMEOUT: "5" })).toBe(5);
     // an explicit 0 is a deliberate opt-out and stays honoured
-    expect(idleTimeout("0")).toBe(0);
+    expect(readTimeout({ BORGO_READ_TIMEOUT: "0" })).toBe(0);
     // bun rejects anything above 255 outright, which would take the server down
-    expect(idleTimeout("3600")).toBe(IDLE_TIMEOUT_MAX);
-    expect(IDLE_TIMEOUT_MAX).toBe(255);
+    expect(readTimeout({ BORGO_READ_TIMEOUT: "3600" })).toBe(READ_TIMEOUT_MAX);
+    expect(READ_TIMEOUT_MAX).toBe(255);
   });
 
-  test("a stream that lives on purpose is recognised by its content type", () => {
-    const res = (type?: string) => new Response(null, type ? { headers: { "Content-Type": type } } : {});
-    expect(isLongLivedStream(res("text/event-stream"))).toBe(true);
-    expect(isLongLivedStream(res("text/event-stream; charset=utf-8"))).toBe(true);
-    expect(isLongLivedStream(res("Text/Event-Stream"))).toBe(true);
-    expect(isLongLivedStream(res("multipart/x-mixed-replace; boundary=x"))).toBe(true);
-    // and everything else is bounded work that the deadline should apply to
-    expect(isLongLivedStream(res("text/html; charset=utf-8"))).toBe(false);
-    expect(isLongLivedStream(res("application/json"))).toBe(false);
-    expect(isLongLivedStream(res("text/event-streamish"))).toBe(false);
-    expect(isLongLivedStream(res())).toBe(false);
+  // BORGO_IDLE_TIMEOUT is the go api's: go parses it with time.ParseDuration
+  // and PANICS on anything else. The systemd unit and the compose file put both
+  // processes in one environment block, so one name meant two things at once -
+  // the documented BORGO_IDLE_TIMEOUT=2m gave go two minutes and gave this side
+  // a silent 30 seconds, and BORGO_IDLE_TIMEOUT=120 panicked the go api at
+  // boot. Same collision class as the METRICS and SESSION_SECURE renames, and
+  // like those the old name is not honoured as an alias, because an alias keeps
+  // the collision alive.
+  test("the go api's BORGO_IDLE_TIMEOUT is not this side's variable", () => {
+    // go's own grammar: neither of these is a number of seconds
+    expect(readTimeout({ BORGO_IDLE_TIMEOUT: "2m" })).toBe(READ_TIMEOUT_SECONDS);
+    expect(readTimeout({ BORGO_IDLE_TIMEOUT: "120" })).toBe(READ_TIMEOUT_SECONDS);
+    expect(readTimeout({ BORGO_IDLE_TIMEOUT: "0" })).toBe(READ_TIMEOUT_SECONDS);
+    // and one env block carrying both gives each side what it asked for
+    expect(readTimeout({ BORGO_IDLE_TIMEOUT: "2m", BORGO_READ_TIMEOUT: "45" })).toBe(45);
   });
 
-  // the two halves against a real bun server: the deadline has to actually cut
-  // a dribbling body, and the exemption has to actually save a silent stream
-  test("bun enforces it on an inbound body, and server.timeout(req, 0) lifts it", async () => {
-    // measured against bun 1.3.14: an unexempted response-side stream is cut
-    // at ~4s no matter how small idleTimeout is (1, 2 and 3 all cut at ~4.0s),
-    // so the silence has to clear that floor for the exemption to be the thing
-    // under test rather than the clock
+  test("the front server reads the name it owns, and no other", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    expect(src).toContain("readTimeout(process.env)");
+    expect(src).not.toContain("BORGO_IDLE_TIMEOUT");
+  });
+});
+
+// The exemption is granted on the request, not on the response: by the time a
+// response exists the deadline may already have fired. The question a request
+// can answer is "is there anything left for a client to dribble at me", and
+// bun answers it by handing a body-less request a null body.
+describe("the response clock: when the deadline stops applying", () => {
+  test("a request with no body is entirely in hand", () => {
+    expect(requestFullyRead(new Request("http://app.test/"))).toBe(true);
+    expect(requestFullyRead(new Request("http://app.test/", { method: "HEAD" }))).toBe(true);
+    // a POST without one is too: nothing is coming
+    expect(requestFullyRead(new Request("http://app.test/", { method: "POST" }))).toBe(true);
+  });
+
+  test("a request still carrying a body is not, and keeps the deadline", () => {
+    const post = new Request("http://app.test/", { method: "POST", body: "x=1" });
+    expect(requestFullyRead(post)).toBe(false);
+  });
+
+  // Against a real bun server, all four halves at once: the deadline still cuts
+  // a dribbling body, the lift saves a stream that is not SSE, the lift saves a
+  // handler slower than the deadline, and the lift does not leak to the next
+  // request on the same keep-alive connection.
+  test("bun cuts a dribbling body, and the lift saves a non-SSE stream and a slow handler", async () => {
+    // measured on bun 1.3.14: an unexempted response-side stream is cut at ~4s
+    // no matter how small idleTimeout is (1, 2 and 3 all cut at ~4.0s), so the
+    // silence has to clear that floor for the lift to be what is under test
+    // rather than the clock
     const SILENCE_MS = 6_000;
+    const enc = new TextEncoder();
     const server = Bun.serve({
       port: 0,
-      idleTimeout: idleTimeout("1"),
+      idleTimeout: readTimeout({ BORGO_READ_TIMEOUT: "1" }),
       async fetch(req, srv) {
-        if (new URL(req.url).pathname === "/sse") {
-          if (isLongLivedStream(SSE_HEADERS)) srv.timeout(req, 0);
+        // exactly what serve() does, and with the real predicate: a body-less
+        // request is lifted before the handler decides anything at all
+        if (requestFullyRead(req)) srv.timeout(req, 0);
+        const path = new URL(req.url).pathname;
+        if (path === "/ndjson") {
+          // NOT text/event-stream: the Content-Type allowlist that used to grant
+          // the exemption would truncate this one at the deadline
           return new Response(
             new ReadableStream<Uint8Array>({
               start(controller) {
-                controller.enqueue(new TextEncoder().encode("data: hi\n\n"));
-                // then sit silent well past the deadline, like a real feed
+                controller.enqueue(enc.encode('{"n":1}\n'));
                 setTimeout(() => {
                   try {
-                    controller.enqueue(new TextEncoder().encode("data: late\n\n"));
+                    controller.enqueue(enc.encode('{"n":2}\n'));
                     controller.close();
                   } catch {}
                 }, SILENCE_MS);
               },
             }),
-            { headers: { "Content-Type": "text/event-stream" } },
+            { headers: { "Content-Type": "application/x-ndjson" } },
           );
+        }
+        if (path === "/slow-headers") {
+          // an upstream that takes longer than the deadline to produce headers:
+          // an exemption granted after the handler resolves is already too late
+          await Bun.sleep(SILENCE_MS);
+          return new Response("upstream answered", { headers: { "Content-Type": "text/plain" } });
         }
         return new Response(`got ${(await req.text()).length}`);
       },
@@ -601,12 +655,14 @@ describe("the read deadline", () => {
     // a POST that promises 1000 bytes, sends one, and then says nothing
     const slowloris = new Promise<string>((resolve) => {
       const t0 = Date.now();
+      let socket: { end: () => void } | undefined;
       void Bun.connect({
         hostname: "127.0.0.1",
         port,
         socket: {
-          open(socket) {
-            socket.write(
+          open(s) {
+            socket = s;
+            s.write(
               "POST /slow HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1000\r\n" +
                 "Content-Type: text/plain\r\n\r\nx",
             );
@@ -616,13 +672,18 @@ describe("the read deadline", () => {
           data() {},
         },
       }).catch(() => resolve("dropped"));
-      setTimeout(() => resolve(`held for ${Date.now() - t0}ms`), SILENCE_MS);
+      // resolve before closing, so the verdict is the timer's and not the
+      // close event the timer itself provokes
+      setTimeout(() => {
+        resolve(`held for ${Date.now() - t0}ms`);
+        try {
+          socket?.end();
+        } catch {}
+      }, SILENCE_MS);
     });
 
-    // and, on the same server, an event stream that survives the same silence
-    const stream = (async () => {
-      const res = await fetch(`http://127.0.0.1:${port}/sse`);
-      expect(res.headers.get("Content-Type")).toBe("text/event-stream");
+    const drain = async (path: string) => {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`);
       let body = "";
       const reader = res.body!.getReader();
       for (;;) {
@@ -631,22 +692,21 @@ describe("the read deadline", () => {
         if (value) body += new TextDecoder().decode(value);
       }
       return body;
-    })();
+    };
+
+    const ndjson = drain("/ndjson");
+    const slowHeaders = drain("/slow-headers");
 
     try {
       expect(await slowloris).toBe("dropped");
-      const body = await stream;
-      expect(body).toContain("data: hi");
-      expect(body).toContain("data: late");
+      // the whole feed, both records - a truncated 200 would carry only the first
+      expect(await ndjson).toBe('{"n":1}\n{"n":2}\n');
+      expect(await slowHeaders).toBe("upstream answered");
     } finally {
       server.stop(true);
     }
   }, 30_000);
 });
-
-// the response the handler is about to return decides the exemption, so the
-// check runs against a real Response and not against a path or a guess
-const SSE_HEADERS = new Response(null, { headers: { "Content-Type": "text/event-stream" } });
 
 // two saves inside one 100 ms debounce window are one rebuild, and the browser
 // has to be told about both files: it ignores an update naming a page other

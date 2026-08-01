@@ -11,6 +11,12 @@ export interface RunConfig {
   memoryConnections: number;
   scenarios: ScenarioId[];
   apps: string[];
+  /** sweeps over the app list, each the reverse of the last */
+  passes: number;
+  /** the exact order each pass ran in, printed in the report */
+  passOrders: string[][];
+  skipBuild: boolean;
+  skipInstall: boolean;
   loadArgvTemplate: string;
 }
 
@@ -51,11 +57,38 @@ export function reportMarkdown(report: Report): string {
   lines.push(`| warmup (discarded) | ${config.warmupSeconds}s |`);
   lines.push(`| runs per scenario | ${config.runs} (**median reported**, not best) |`);
   lines.push(`| connections held for the memory probe | ${config.memoryConnections} |`);
+  lines.push(`| sweeps over the app list | ${config.passes}, each the reverse of the last |`);
+  lines.push(`| build | ${config.skipBuild ? "**skipped** (--skip-build: measured whatever was already on disk)" : "rebuilt from source"} |`);
+  lines.push(`| dependency install | ${config.skipInstall ? "**skipped**" : "run before each build"} |`);
   lines.push(`| load invocation | \`${config.loadArgvTemplate}\` |`);
   lines.push("");
 
+  lines.push("### Run order");
+  lines.push("");
+  lines.push(
+    "This machine drifts thermally under sustained load, and an app measured 45 minutes into a " +
+      "saturated campaign is not being compared with one measured at minute two. The list is " +
+      "therefore swept more than once, in opposite directions, and every sweep's order is printed " +
+      "here so a reader can check any surprising result against where it sat in the queue.",
+  );
+  lines.push("");
+  for (const [i, order] of config.passOrders.entries()) {
+    lines.push(`${i + 1}. pass ${i + 1}: ${order.join(" -> ")}`);
+  }
+  lines.push("");
+  if (config.passes < 2) {
+    lines.push(
+      "> Only one sweep was run (`--passes 1`). Nothing here separates a framework difference " +
+        "from the machine getting hotter as the campaign went on. Do not publish these numbers " +
+        "as a comparison.",
+    );
+    lines.push("");
+  }
+
   const implemented = results.filter((r) => r.status !== "stub");
   const stubs = results.filter((r) => r.status === "stub");
+  const label = (app: AppResult) =>
+    config.passes > 1 && app.pass !== undefined ? `${app.app} (pass ${app.pass}, #${app.orderIndex})` : app.app;
 
   lines.push("## Startup");
   lines.push("");
@@ -63,14 +96,31 @@ export function reportMarkdown(report: Report): string {
   lines.push("| --- | ---: | ---: |");
   for (const app of implemented) {
     if (!app.startup) {
-      lines.push(`| ${app.app} | did not start | - |`);
+      lines.push(`| ${label(app)} | did not start | - |`);
       continue;
     }
     lines.push(
-      `| ${app.app} | ${fmt(app.startup.timeToFirstResponseMs)} ms | ${mib(app.startup.bootRssBytes)} MiB |`,
+      `| ${label(app)} | ${fmt(app.startup.timeToFirstResponseMs)} ms | ${mib(app.startup.bootRssBytes)} MiB |`,
     );
   }
   lines.push("");
+
+  const versioned = implemented.filter((r) => r.frameworkVersion);
+  if (versioned.length > 0) {
+    const seen = new Map<string, string>();
+    for (const app of versioned) seen.set(app.app, app.frameworkVersion!);
+    lines.push("## Versions measured");
+    lines.push("");
+    lines.push(
+      "Read out of each implementation's own installed tree by its manifest's `versionCommand`, " +
+        "at the time of the run. Not transcribed from a README.",
+    );
+    lines.push("");
+    lines.push("| app | version |");
+    lines.push("| --- | --- |");
+    for (const [name, version] of seen) lines.push(`| ${name} | ${version} |`);
+    lines.push("");
+  }
 
   for (const scenario of SCENARIOS.filter((s) => config.scenarios.includes(s.id))) {
     const rows = implemented

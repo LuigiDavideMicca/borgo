@@ -312,7 +312,12 @@ if (template === "full") {
 if (tailwind) {
   rmSync(join(target, "style.scss"));
   renameSync(join(target, "tailwind.css"), join(target, "style.css"));
-  for (const script of ["dev", "build", "start"]) {
+  // every borgo command that compiles css, not just the three that were
+  // obvious. `borgo export` compiles it too, and without the flag it looked
+  // for the style.scss this branch had just deleted, found none, and removed
+  // public/assets/style.css - the app's only stylesheet, in a gitignored
+  // directory, while the pages it exported still linked it.
+  for (const script of ["dev", "build", "start", "export"]) {
     if (pkg.scripts?.[script]) pkg.scripts[script] += " --tailwind";
   }
   addDevDeps({
@@ -495,6 +500,15 @@ const linterLine: Record<LinterName, string> = {
 
 const included = [
   git ? gitLine[gitResult] : `${dim(dot)} git         ${dim("skipped")}`,
+  // the only place a key that exists in exactly one gitignored file gets
+  // named. its other mention lives in the README's Deploy section, which
+  // --no-docker strips - so an app scaffolded without docker documented its
+  // own signing key nowhere at all.
+  ...(template === "full"
+    ? [
+        `${sage(ok)} .env        ${dim("SESSION_SECRET " + dot + " random, unique, gitignored " + dot + " copy it to the server or sessions break")}`,
+      ]
+    : []),
   docker
     ? `${sage(ok)} docker      ${dim("Dockerfile " + dot + " docker-compose.yml " + dot + " .dockerignore")}`
     : `${dim(dot)} docker      ${dim("no docker files")}`,

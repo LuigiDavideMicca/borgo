@@ -115,13 +115,16 @@ This defends against **cookie tossing**. A cookie on a sibling subdomain (`blog.
 | JSON body decoded by `borgo.Bind` | 1 MB | `borgo.BindMax[T](r, bytes)` per route |
 | Body buffered by the front server | 32 MB | `BORGO_MAX_BODY` (bytes) |
 | Waiting for the Go API's response headers | 30 s | `BORGO_API_TIMEOUT` (ms, `0` disables) |
-| Reading a client's request headers | 5 s | `BORGO_READ_HEADER_TIMEOUT` |
-| Idle keep-alive connection | 2 m | `BORGO_IDLE_TIMEOUT` |
+| Reading a client's request headers (Go) | 5 s | `BORGO_READ_HEADER_TIMEOUT` |
+| Idle keep-alive connection (Go) | 2 m | `BORGO_IDLE_TIMEOUT` (duration; malformed panics at boot) |
+| Reading a client's request headers and body (front server) | 30 s | `BORGO_IDLE_TIMEOUT` (seconds, max 255, `0` disables; malformed is silently ignored) |
 | Whole-request read/write deadline | none | `BORGO_READ_TIMEOUT`, `BORGO_WRITE_TIMEOUT` |
 
 Over the `Bind` cap the client gets a `413`; a missing or non-JSON `Content-Type` gets a `415`. Both come from `borgo.BindError`.
 
 The whole-request deadlines are deliberately unset. They are wall-clock limits on an entire exchange, so any value would eventually kill a legitimate server-sent-events stream or a slow upload. Header timeouts stop slowloris without that cost, `Bind` bounds the body, and if you set the deadlines anyway, `borgo.SSE` clears them on its own connection so streams survive.
+
+The front server's own read deadline is the internet-facing one, and it is the reason the table lists `BORGO_IDLE_TIMEOUT` twice. Bun's `idleTimeout` bounds the wait for an inbound request's headers *and* body, so switching it off — which borgo used to do, to protect proxied event streams — left every body-reading path with no deadline at all: a POST declaring a `Content-Length` and then dribbling a byte at a time was held open indefinitely. The deadline is on, and the exemption for streams is granted per response instead, on the connections whose `Content-Type` says they are meant to sit idle. **The two halves read that one variable name with different grammars** — Go a duration, the front server whole seconds — and the failure modes differ too: Go panics at boot on a value it cannot parse, the front server silently keeps 30 s. Setting it in an environment both halves share means one of them is not getting what you wrote. See the [environment reference](deploy.md#environment-reference).
 
 A hung Go handler cannot take the front server with it: past `BORGO_API_TIMEOUT` the request answers `504` and the upstream body is cancelled.
 

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, type Dirent } from "node:fs";
+import { readdirSync, statSync, type Dirent } from "node:fs";
 import { join } from "node:path";
 import { brotliCompressSync, constants, createGzip, gzipSync } from "node:zlib";
 
@@ -90,7 +90,10 @@ export type AssetInfo = {
 // rebuilds assets in place under stable names, where a cached etag would pin
 // the browser to yesterday's bundle. anything written after boot is simply not
 // in here and falls back to a live lookup.
-export function buildAssetIndex(dir: string): Map<string, AssetInfo> {
+export function buildAssetIndex(
+  dir: string,
+  caseInsensitive: boolean = CASE_INSENSITIVE_FS,
+): Map<string, AssetInfo> {
   const files = new Map<string, { size: number; mtimeMs: number }>();
   let entries: Dirent[];
   try {
@@ -134,7 +137,7 @@ export function buildAssetIndex(dir: string): Map<string, AssetInfo> {
         }
       }
     }
-    index.set(url, {
+    const info: AssetInfo = {
       identity: { path, etag: tag(path, ""), size: file.size },
       variants,
       cacheControl: assetCacheControl(path),
@@ -142,7 +145,14 @@ export function buildAssetIndex(dir: string): Map<string, AssetInfo> {
       mtimeMs: file.mtimeMs,
       lastModified: new Date(file.mtimeMs).toUTCString(),
       type: Bun.file(path).type,
-    });
+    };
+    index.set(url, info);
+    // the folded alias findAsset falls back to, where the filesystem folds
+    // too. never over a real url: an exact match is always the right answer.
+    if (caseInsensitive) {
+      const folded = url.toLowerCase();
+      if (folded !== url && !index.has(folded)) index.set(folded, info);
+    }
   }
   return index;
 }
@@ -198,7 +208,36 @@ export function isRangeStale(req: Request, etag: string): boolean {
   return ifRange.trim() !== etag;
 }
 
-// the indexed path: no stat, and an etag the browser can revalidate against
+const statOf = (path: string) => {
+  try {
+    return statSync(path);
+  } catch {
+    return null;
+  }
+};
+
+// windows resolves paths case-insensitively and so does macos by default; the
+// index is an exact-match Map, and the two disagree. /OK.TXT missed the index
+// and fell through to the live serveAsset, which opened the very same file off
+// the very same filesystem - past the precomputed .br/.gz variants, past the
+// etag, past the cache policy the index holds for it. The aliases are built
+// where the filesystem is case-insensitive and nowhere else: on a
+// case-sensitive one /OK.TXT and /ok.txt are two different files, and folding
+// them would serve the wrong one.
+export const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
+
+export function findAsset(
+  index: Map<string, AssetInfo>,
+  url: string,
+  caseInsensitive: boolean = CASE_INSENSITIVE_FS,
+): AssetInfo | undefined {
+  const exact = index.get(url);
+  if (exact || !caseInsensitive) return exact;
+  return index.get(url.toLowerCase());
+}
+
+// the indexed path: an etag the browser can revalidate against, the variants
+// already chosen, and one stat to confirm the snapshot still describes a file
 export function serveIndexed(req: Request, info: AssetInfo): Response {
   let variant = info.identity;
   if (info.variants.length) {
@@ -212,11 +251,30 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
     const encoding = pickEncoding(req.headers.get("accept-encoding"), available);
     if (encoding) variant = info.variants.find((v) => v.encoding === encoding) ?? variant;
   }
-  // the index was taken at boot: a precompressed sibling deleted since then
-  // (a `borgo dev` writing over the same public/assets, a deploy swapping
-  // files in place) must degrade to the identity file, not answer a 500 for
-  // an asset that is still sitting on disk
-  if (variant.encoding && !existsSync(variant.path)) variant = info.identity;
+  // the index was taken at boot, and the disk moved on: a `borgo dev` writing
+  // over the same public/assets, a deploy swapping files in place. one stat
+  // settles all three consequences at once, which is why it is a stat and not
+  // the existsSync that used to be here:
+  //   - a precompressed sibling that is gone degrades to the identity file
+  //     rather than 500ing for an asset still sitting on disk;
+  //   - an identity that is gone too is a 404. `new Response(Bun.file(missing))`
+  //     is answered by bun's own fallback page instead: 67,016 bytes of html
+  //     whose base64 payload decodes to the absolute path of the file on the
+  //     server, under the ambient NODE_ENV that `borgo start` in a plain shell
+  //     leaves unset. serve() also runs with development:false and an error
+  //     handler so no other route can leak it either, but the index is the one
+  //     that *knows* the file may be gone;
+  //   - the length below is the file's, not the snapshot's. bun recomputes
+  //     Content-Length from the file on a GET and ignores what we set, so a
+  //     stale index made HEAD and GET disagree about the same url (measured
+  //     1400 against 5600) - a HEAD wrong by any factor, which is what a HEAD
+  //     is asked for in the first place.
+  let live = statOf(variant.path);
+  if (!live && variant.encoding) {
+    variant = info.identity;
+    live = statOf(variant.path);
+  }
+  if (!live) return new Response("not found", { status: 404 });
   const headers = new Headers();
   if (info.cacheControl) headers.set("Cache-Control", info.cacheControl);
   if (info.compressible) headers.set("Vary", "Accept-Encoding");
@@ -231,10 +289,9 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
   }
   // a HEAD is answered from the headers alone, and dropping the body drops
   // the length bun would have computed from the file: without this every
-  // HEAD claims Content-Length: 0 for a file a GET returns in full. bun
-  // recomputes it from the file on a GET (and on a range), so a stale index
-  // can only misreport the head, never mis-frame a body
-  headers.set("Content-Length", String(variant.size));
+  // HEAD claims Content-Length: 0 for a file a GET returns in full. the live
+  // size, so the two answers agree even when the index does not.
+  headers.set("Content-Length", String(live.size));
   // bun turns a Range into a 206 off a Bun.file body, and never consults
   // If-Range while doing it. a stream body is how the refusal is spelled:
   // bun ranges files, not streams, so a validator that no longer matches
@@ -243,7 +300,17 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
   if (isRangeStale(req, variant.etag)) {
     // a stream body also loses the content type bun derives from a file, and
     // under the global nosniff a typeless stylesheet is a refused stylesheet;
-    // for an encoded variant this re-sets the same value as above
+    // for an encoded variant this re-sets the same value as above.
+    //
+    // it loses the Content-Length too, whatever we set: measured on bun
+    // 1.3.14, an explicit Content-Length on a stream body is dropped and the
+    // response goes out chunked, so this 200 is chunked while the 206 beside
+    // it is length-framed. Both are legal framings of a complete body and the
+    // client gets every byte either way; the only lever that suppresses bun's
+    // range handling on a *file* body is a Content-Range header, which rfc
+    // 9110 §14.4 gives meaning to on 206 and 416 alone. Trading a legal
+    // framing difference for a header that has no meaning in a 200 - or for
+    // reading the whole asset through memory - is the worse deal.
     headers.set("Content-Type", info.type);
     return new Response(Bun.file(variant.path).stream(), { headers });
   }

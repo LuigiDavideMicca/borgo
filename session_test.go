@@ -3,8 +3,11 @@ package borgo
 import (
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -150,8 +153,8 @@ func TestSessionSecureAcceptsTheUsualSpellings(t *testing.T) {
 		if cookie := setAndExtract(t, testSession{User: "luigi"}, time.Hour); !cookie.Secure {
 			t.Errorf("SESSION_SECURE=%q issued a cookie without Secure", v)
 		}
-		if !sessionSecure() {
-			t.Errorf("sessionSecure() = false for SESSION_SECURE=%q", v)
+		if secure, err := sessionSecure(); !secure || err != nil {
+			t.Errorf("sessionSecure() = %v, %v for SESSION_SECURE=%q", secure, err, v)
 		}
 	}
 	for _, v := range []string{"", "0", "f", "F", "false", "FALSE", "False"} {
@@ -168,30 +171,93 @@ func TestSessionSecureRejectsGarbage(t *testing.T) {
 	for _, v := range []string{"yes", "on", "secure", "2", "-1", " 1", "true ", "https"} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv("SESSION_SECURE", v)
-			defer func() {
-				r := recover()
-				if r == nil {
-					t.Fatalf("SESSION_SECURE=%q was accepted; an unrecognised value must not quietly drop Secure", v)
-				}
-				if !strings.Contains(fmt.Sprint(r), "SESSION_SECURE") {
-					t.Fatalf("panic does not name the variable: %v", r)
-				}
-			}()
-			sessionSecure()
+			secure, err := sessionSecure()
+			if err == nil {
+				t.Fatalf("SESSION_SECURE=%q was accepted; an unrecognised value must not quietly drop Secure", v)
+			}
+			if !strings.Contains(err.Error(), "SESSION_SECURE") {
+				t.Fatalf("error does not name the variable: %v", err)
+			}
+			if secure {
+				t.Fatalf("SESSION_SECURE=%q reported as secure alongside its error", v)
+			}
 		})
 	}
 }
 
-// and the boot reads it, so a typo is a startup failure rather than a panic
-// inside the first handler that writes a cookie
+// and the boot reads it, so a typo is a startup failure rather than something
+// the first handler that writes a cookie finds out about
 func TestStartupValidatesSessionSecure(t *testing.T) {
 	t.Setenv("SESSION_SECURE", "yes")
-	defer func() {
-		if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "SESSION_SECURE") {
-			t.Fatalf("want a boot panic naming the variable, got %v", r)
+	err := CheckEnv()
+	if err == nil || !strings.Contains(err.Error(), "SESSION_SECURE") {
+		t.Fatalf("CheckEnv() = %v, want a refusal naming the variable", err)
+	}
+}
+
+// CheckEnv is what an embedder that never calls Serve runs at startup, so it
+// has to cover both variables and pass a healthy environment
+func TestCheckEnv(t *testing.T) {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	t.Run("a short secret is refused", func(t *testing.T) {
+		t.Setenv("SESSION_SECRET", "too-short")
+		err := CheckEnv()
+		if err == nil || !strings.Contains(err.Error(), "SESSION_SECRET") {
+			t.Fatalf("CheckEnv() = %v, want a refusal naming SESSION_SECRET", err)
 		}
-	}()
-	warnSessionSecret()
+	})
+	t.Run("an unset secret only warns", func(t *testing.T) {
+		t.Setenv("SESSION_SECRET", "")
+		if err := CheckEnv(); err != nil {
+			t.Fatalf("CheckEnv() = %v, want nil: an app with no sessions is legitimate", err)
+		}
+	})
+	t.Run("a usable environment passes", func(t *testing.T) {
+		t.Setenv("SESSION_SECRET", "a-secret-that-is-at-least-32-bytes")
+		t.Setenv("SESSION_SECURE", "true")
+		if err := CheckEnv(); err != nil {
+			t.Fatalf("CheckEnv() = %v, want nil", err)
+		}
+	})
+}
+
+// An embedder mounting these handlers on its own mux never passes through
+// CheckEnv - the case sessionSecret's own comment calls out - and a misspelt
+// SESSION_SECURE reached it as a panic inside the first request that wrote a
+// cookie. It comes back as an error now, with no cookie issued: refusing to
+// start a session is the closed direction, panicking in a handler is not.
+func TestInvalidSessionSecureIsAnErrorNotAPanic(t *testing.T) {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	t.Setenv("SESSION_SECRET", "a-secret-that-is-at-least-32-bytes")
+	t.Setenv("SESSION_SECURE", "yes")
+
+	t.Run("SetSession refuses", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		err := SetSession(w, testSession{User: "luigi"}, time.Hour)
+		if err == nil || !strings.Contains(err.Error(), "SESSION_SECURE") {
+			t.Fatalf("SetSession = %v, want a refusal naming SESSION_SECURE", err)
+		}
+		if len(w.Result().Cookies()) != 0 {
+			t.Fatal("no session may be issued while SESSION_SECURE is unreadable")
+		}
+	})
+
+	// logging out is the one thing that must still work: a clear without
+	// Secure still deletes the cookie, a panicking handler leaves it live
+	t.Run("ClearSession still clears", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		ClearSession(w)
+		cookies := w.Result().Cookies()
+		if len(cookies) != 1 || cookies[0].MaxAge != -1 || cookies[0].Value != "" {
+			t.Fatalf("clear cookie wrong: %+v", cookies)
+		}
+		if cookies[0].Secure {
+			t.Error("the deletion must not carry a Secure this process cannot vouch for")
+		}
+	})
 }
 
 func TestClearSession(t *testing.T) {
@@ -200,6 +266,53 @@ func TestClearSession(t *testing.T) {
 	cookies := w.Result().Cookies()
 	if len(cookies) != 1 || cookies[0].MaxAge != -1 || cookies[0].Value != "" {
 		t.Fatalf("clear cookie wrong: %+v", cookies)
+	}
+}
+
+// "A maxAge of zero or less writes an already-expired session" was true only
+// for the negative half: net/http omits Max-Age entirely for 0, which is a
+// browser-session cookie rather than a deletion, and the envelope's Exp read
+// exactly now against an exclusive check, so the session stayed valid for the
+// rest of the current second. A logout that leaves the principal usable is a
+// silent open failure.
+func TestSetSessionZeroMaxAgeIsAlreadyExpired(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "a-secret-that-is-at-least-32-bytes")
+
+	for _, maxAge := range []time.Duration{0, -time.Second, -time.Hour} {
+		t.Run(maxAge.String(), func(t *testing.T) {
+			w := httptest.NewRecorder()
+			if err := SetSession(w, testSession{User: "luigi"}, maxAge); err != nil {
+				t.Fatal(err)
+			}
+			// on the wire: Max-Age=0, which is the deletion. The attribute
+			// missing altogether would keep the cookie for the window's life
+			header := w.Result().Header.Get("Set-Cookie")
+			if !strings.Contains(header, "Max-Age=0") {
+				t.Errorf("Set-Cookie = %q, want Max-Age=0", header)
+			}
+			cookie := w.Result().Cookies()[0]
+			if cookie.MaxAge >= 0 {
+				t.Errorf("MaxAge = %d, want the already-expired -1", cookie.MaxAge)
+			}
+			// and server-side, in case a copy of the value is replayed
+			if got, ok := GetSession[testSession](sessionRequest(cookie)); ok {
+				t.Errorf("the session still verifies: %+v", got)
+			}
+		})
+	}
+}
+
+// the shortest session that is not a logout still is one
+func TestSetSessionKeepsShortLivedSessions(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "a-secret-that-is-at-least-32-bytes")
+	for _, maxAge := range []time.Duration{time.Millisecond, time.Second, time.Minute} {
+		cookie := setAndExtract(t, testSession{User: "luigi"}, maxAge)
+		if cookie.MaxAge < 1 {
+			t.Errorf("maxAge %v: cookie MaxAge = %d, want at least 1", maxAge, cookie.MaxAge)
+		}
+		if _, ok := GetSession[testSession](sessionRequest(cookie)); !ok {
+			t.Errorf("maxAge %v: a live session must verify", maxAge)
+		}
 	}
 }
 

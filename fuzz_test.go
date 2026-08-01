@@ -81,17 +81,20 @@ func FuzzSSEFrame(f *testing.F) {
 }
 
 // FuzzAcceptsGzip throws arbitrary Accept-Encoding headers at the negotiator.
-// Three properties, all of them RFC 9110 12.5.3 rather than restatements of
-// the implementation: the optional whitespace a client may put around the list
-// separators is not semantic, and where the header does not name gzip at all,
-// appending an explicit entry for it settles the answer either way - which is
-// what makes "*" unable to override a refusal.
+// Four properties, all of them RFC 9110 rather than restatements of the
+// implementation: the optional whitespace a client may put around the list
+// separators is not semantic, neither is the case of a header made of
+// case-insensitive coding names (12.5.3) and parameter names (5.6.6), and
+// where the header does not name gzip at all, appending an explicit entry for
+// it settles the answer either way - which is what makes "*" unable to
+// override a refusal.
 func FuzzAcceptsGzip(f *testing.F) {
 	for _, seed := range []string{
 		"", "gzip", "GZIP", "*", "*;q=0", "gzip;q=0",
 		"gzip;q=0, *", "*, gzip;q=0", "identity, *;q=0", "*;q=0, gzip",
 		"deflate, gzip;q=0.5", "br;q=1, *;q=0", "gzip;q=", "gzip;q=abc",
 		"gzip ; q = 0", ",,,", "*;q=0.0001", "x-gzip",
+		"gzip;Q=0", "*;Q=0", "GZIP;Q=0.0", "gzip;Q=0, *;Q=1",
 	} {
 		f.Add(seed)
 	}
@@ -101,6 +104,12 @@ func FuzzAcceptsGzip(f *testing.F) {
 		spaced := strings.ReplaceAll(header, ",", " , ")
 		if other := acceptsGzip(spaced); other != got {
 			t.Fatalf("whitespace changed the decision: %q=%v but %q=%v", header, got, spaced, other)
+		}
+
+		// nothing in this header is case-sensitive: not the coding names, not
+		// the quality parameter beside them
+		if cased := swapASCIICase(header); acceptsGzip(cased) != got {
+			t.Fatalf("case changed the decision: %q=%v but %q=%v", header, got, cased, !got)
 		}
 
 		if namesGzip(header) {
@@ -113,6 +122,23 @@ func FuzzAcceptsGzip(f *testing.F) {
 			t.Fatalf("an explicit gzip;q=0 must be refused: %q", header+", gzip;q=0")
 		}
 	})
+}
+
+// swapASCIICase flips the case of the ascii letters and nothing else. The
+// case-insensitivity being asserted is ascii; folding arbitrary unicode would
+// rewrite tokens into different ones - strings.ToUpper turns the dotless-i
+// "gzıp", which is not a coding borgo speaks, into "GZIP", which is.
+func swapASCIICase(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		switch {
+		case c >= 'a' && c <= 'z':
+			b[i] = c - ('a' - 'A')
+		case c >= 'A' && c <= 'Z':
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
 
 // namesGzip reports whether the header already carries a gzip entry, whose

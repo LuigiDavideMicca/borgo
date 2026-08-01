@@ -13,6 +13,18 @@ export interface Scenario {
     contentType?: string;
     /** every string must appear in the body */
     contains?: string[];
+    /**
+     * every pattern must match the body at least `min` times (default 1). This
+     * is what makes a structural requirement enforceable: "five nav links" and
+     * "twenty rows" are counts, and a substring check cannot express a count.
+     */
+    matches?: { pattern: string; flags?: string; min?: number; label: string }[];
+    /**
+     * a floor on the response body, in bytes. Not a performance figure - a
+     * tripwire. An implementation that quietly serves a shorter body than the
+     * contract describes would otherwise post a very good req/s number.
+     */
+    minBytes?: number;
   };
   description: string;
 }
@@ -51,19 +63,63 @@ export interface Manifest {
   todo?: string;
 }
 
+export interface Latencies {
+  p50: number;
+  p90: number;
+  p95: number;
+  p99: number;
+  /**
+   * p99.99, not the maximum. oha reports both and this is the one we take;
+   * the field used to be called `max`, which made a tail percentile look like
+   * a worst case in every artifact that carried it. wrk does not report it and
+   * leaves it 0.
+   */
+  p9999: number;
+}
+
 export interface LoadStats {
   requestsPerSec: number;
+  /**
+   * the load tool's own transport-level success rate: did the exchange
+   * complete. A 500 that arrives intact counts as a success here, which is why
+   * it is not the only thing the runner gates on - see `non2xxRate`.
+   */
   successRate: number;
+  /** share of responses whose status was not 2xx. Derived, not reported by oha. */
+  non2xxRate: number;
   totalRequests: number;
-  latencyMs: { p50: number; p90: number; p95: number; p99: number; max: number };
+  latencyMs: Latencies;
   statusCodes: Record<string, number>;
   errors: Record<string, number>;
+}
+
+/**
+ * The per-field median across runs. Counting fields are deliberately absent:
+ * summing a distribution over three runs and storing it in an object called
+ * "median" is how a 3-run total ends up printed beside a 1-run median. Counts
+ * live in `totals`, labelled as totals.
+ */
+export interface LoadMedian {
+  requestsPerSec: number;
+  successRate: number;
+  non2xxRate: number;
+  totalRequests: number;
+  latencyMs: Latencies;
 }
 
 export interface LoadRunResult {
   runs: LoadStats[];
   /** median across runs, per field - the reported number */
-  median: LoadStats;
+  median: LoadMedian;
+  /** summed over every run, and named for it */
+  totals: {
+    runs: number;
+    requests: number;
+    statusCodes: Record<string, number>;
+    errors: Record<string, number>;
+  };
+  /** the single worst run, which is what the gates use: a median of three hides one catastrophe */
+  worst: { successRate: number; non2xxRate: number };
 }
 
 export interface MemoryResult {
@@ -90,10 +146,24 @@ export interface StartupResult {
   bootRssBytes: number;
 }
 
+/**
+ * The one response the correctness check read, recorded so that a req/s table
+ * can be read against what each implementation actually put on the wire. Two
+ * frameworks answering the same path with a 3 kB and a 40 kB body are not
+ * doing the same amount of work, and nothing else in this harness would say so.
+ */
+export interface ResponseSample {
+  status: number;
+  contentType: string;
+  bytes: number;
+}
+
 export interface ScenarioResult {
   scenario: ScenarioId;
   status: "ok" | "skipped" | "failed";
   reason?: string;
+  /** what the pre-load correctness check received */
+  sample?: ResponseSample;
   load?: LoadRunResult;
   memory?: MemoryResult;
   /** on failure: was the server still running when the scenario gave up? */
@@ -107,6 +177,15 @@ export interface AppResult {
   manifest: Manifest;
   status: "ok" | "stub" | "failed";
   reason?: string;
+  /**
+   * which sweep produced this result, and where in that sweep's queue the app
+   * sat. Two sweeps are run in opposite order precisely so that "measured
+   * first" and "measured last" are both represented for every app.
+   */
+  pass?: number;
+  orderIndex?: number;
+  /** whatever `versionCommand` printed, so a competitor's version is recorded and not asserted */
+  frameworkVersion?: string;
   startup?: StartupResult;
   scenarios: ScenarioResult[];
 }

@@ -14,6 +14,28 @@ export interface Keys {
   sizes: Record<string, number> | null;
 }
 
+export interface MapBoth {
+  m: Record<string, number> | null;
+}
+
+export interface Nums {
+  n: number;
+  np: number | null;
+  ns: Array<number> | null;
+  amt: string;
+}
+
+export interface PM {
+  x: number;
+}
+
+export interface PMHolder {
+  one: unknown | PM;
+  many: Array<unknown | PM> | null;
+  ptr: unknown | PM | null;
+  keyed: Record<string, unknown | PM> | null;
+}
+
 export interface Stamped {
   at: unknown;
   plain: { n: number };
@@ -25,12 +47,21 @@ export interface Tagged {
   many: Array<string | { N: number; extra: number }> | null;
 }
 
+export interface Uint8Marshal {
+  u: unknown;
+}
+
 declare module "borgo-framework" {
   interface ApiRoutes {
+    "GET /api/either": { response: Array<string> | Array<number> | null };
     "GET /api/empty": { response: Empty };
     "GET /api/keys": { response: Keys };
+    "GET /api/mapboth": { response: MapBoth };
+    "GET /api/nums": { response: Nums };
+    "GET /api/pm": { response: PMHolder };
     "GET /api/stamped": { response: Stamped };
     "GET /api/tagged": { response: Tagged };
+    "GET /api/uint8": { response: Uint8Marshal };
   }
 }
 

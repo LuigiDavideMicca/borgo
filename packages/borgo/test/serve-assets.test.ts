@@ -294,9 +294,10 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
     expect(await res.text()).toBe("");
   });
 
-  test("index staleness: a file rewritten after boot misreports only the head", async () => {
-    // the index remembers boot-time sizes; the get streams the real file and
-    // bun reframes the length from disk, so the body is never cut or padded
+  test("a file rewritten after boot is framed from disk, head included", async () => {
+    // the index remembers boot-time sizes, and a HEAD used to be answered from
+    // it - so a client sizing a download from HEAD was told a number the GET
+    // then contradicted, by any factor. Both are framed from the file now.
     const grown = RAW_PNG + " and then it grew past the indexed size";
     writeFileSync(join(dir, "public", "logo.png"), grown);
     try {
@@ -304,8 +305,8 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
       expect(await get.text()).toBe(grown);
       expect(get.headers.get("Content-Length")).toBe(String(grown.length));
       const head = await fetch(`${base}/logo.png`, { method: "HEAD" });
-      // the head is answered from the stale index: documented, honest-ish lie
-      expect(head.headers.get("Content-Length")).toBe(String(RAW_PNG.length));
+      expect(head.headers.get("Content-Length")).toBe(String(grown.length));
+      expect(head.headers.get("Content-Length")).toBe(get.headers.get("Content-Length"));
     } finally {
       writeFileSync(join(dir, "public", "logo.png"), RAW_PNG);
     }

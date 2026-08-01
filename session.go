@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -24,36 +25,48 @@ const (
 	sessionCookieMaxLen = 4096
 )
 
-func newSessionCookie() *http.Cookie {
+// newSessionCookie builds the cookie SetSession and ClearSession write. The
+// error is SESSION_SECURE's, and it comes back as a value rather than a panic
+// because this runs inside a request: an embedder that mounts these handlers
+// on its own server never passes through CheckEnv, and a typo used to reach it
+// as a panicking handler on the first login.
+//
+// The cookie returned alongside an error carries no Secure attribute and is
+// only fit for deletion - SetSession refuses it, ClearSession uses it.
+func newSessionCookie() (*http.Cookie, error) {
+	secure, err := sessionSecure()
 	return &http.Cookie{
 		Name:     sessionCookie,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   sessionSecure(),
-	}
+		Secure:   secure,
+	}, err
 }
 
 // sessionSecure reads SESSION_SECURE, which adds the Secure attribute to the
 // session cookie. Like BORGO_HASH_SLOTS and the BORGO_*_TIMEOUT family, a
-// value that is not understood is a panic rather than a silent fallback: this
-// was an == "1" test, so SESSION_SECURE=true - the spelling every other
+// value that is not understood is a refusal rather than a silent fallback:
+// this was an == "1" test, so SESSION_SECURE=true - the spelling every other
 // boolean env in the ecosystem takes - read as "not 1" and quietly issued a
 // session cookie the browser would send back over plain http. The failure
 // direction of a misread here is open, so it must not be silent.
 //
-// serveContext reads it at startup, so a typo fails the boot rather than the
-// first request that writes a cookie.
-func sessionSecure() bool {
+// CheckEnv reads it at startup, so a typo fails the boot rather than the first
+// request that writes a cookie. Serve and ServeContext call CheckEnv; an
+// embedder mounting these handlers on its own mux has to call it itself, and
+// until it does the refusal still arrives - as SetSession's error, with no
+// cookie issued.
+func sessionSecure() (bool, error) {
 	v := os.Getenv("SESSION_SECURE")
 	if v == "" {
-		return false
+		return false, nil
 	}
 	secure, err := strconv.ParseBool(v)
 	if err != nil {
-		panic(`borgo: SESSION_SECURE: invalid value "` + v + `" (want "1"/"true" or "0"/"false"; unset means not secure)`)
+		return false, fmt.Errorf(`borgo: SESSION_SECURE: invalid value %q (want "1"/"true" or "0"/"false"; unset means not secure)`, v)
 	}
-	return secure
+	return secure, nil
 }
 
 type sessionEnvelope struct {
@@ -127,27 +140,46 @@ func sessionSign(payload, secret string) string {
 // SetSession stores v, JSON-encoded and HMAC-signed with SESSION_SECRET, in
 // an http-only cookie. The expiry is signed too, so a client cannot extend
 // it. Set SESSION_SECURE=1 (or "true") to add the Secure attribute behind
-// https. A maxAge of zero or less writes an already-expired session.
+// https. A maxAge of zero or less writes an already-expired session: the
+// browser deletes the cookie on arrival, and the envelope it carries is
+// already past, so a copy of it kept elsewhere does not verify either.
 func SetSession(w http.ResponseWriter, v any, maxAge time.Duration) error {
 	secret := sessionSecret()
 	if secret == "" {
 		return ErrNoSessionSecret
 	}
+	cookie, err := newSessionCookie()
+	if err != nil {
+		return err
+	}
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	envelope, err := json.Marshal(sessionEnvelope{Exp: time.Now().Add(maxAge).Unix(), Data: data})
+	// zero is "expired", not "expires now": Unix() truncates to the second and
+	// GetSession's check is exclusive, so an Exp of exactly now would keep the
+	// session valid for the rest of the current second - a logout that leaves
+	// the principal usable
+	exp := time.Now().Add(maxAge)
+	if maxAge <= 0 {
+		exp = time.Now().Add(-time.Second)
+	}
+	envelope, err := json.Marshal(sessionEnvelope{Exp: exp.Unix(), Data: data})
 	if err != nil {
 		return err
 	}
 	payload := base64.RawURLEncoding.EncodeToString(envelope)
-	cookie := newSessionCookie()
 	cookie.Value = payload + "." + sessionSign(payload, secret)
-	// int(maxAge.Seconds()) would overflow a 32-bit int for a >68-year age,
-	// and a negative MaxAge serializes as Max-Age=0: the browser would delete
-	// the session the moment it was issued
-	cookie.MaxAge = int(min(int64(maxAge/time.Second), math.MaxInt32))
+	// -1 is what net/http serializes as Max-Age=0, the deletion. A cookie
+	// MaxAge of 0 is the attribute being omitted altogether, which is a
+	// browser-session cookie that outlives nothing but the window - the
+	// opposite of the expiry this documents - so no non-positive age may reach
+	// it. Above, int(maxAge.Seconds()) would overflow a 32-bit int for a
+	// >68-year age, and a sub-second age would truncate to that same 0
+	cookie.MaxAge = -1
+	if maxAge > 0 {
+		cookie.MaxAge = int(max(1, min(int64(maxAge/time.Second), math.MaxInt32)))
+	}
 	if n := len(cookie.String()); n > sessionCookieMaxLen {
 		return fmt.Errorf("borgo: session cookie is %d bytes, over the %d-byte browser limit; store a smaller principal (see Auth.Principal)", n, sessionCookieMaxLen)
 	}
@@ -223,7 +255,14 @@ func sessionPayload(r *http.Request) (string, bool) {
 
 // ClearSession deletes the session cookie.
 func ClearSession(w http.ResponseWriter) {
-	cookie := newSessionCookie()
+	cookie, err := newSessionCookie()
+	if err != nil {
+		// deleting beats refusing. The Secure attribute does not gate this
+		// overwrite from an https origin, so a clear without it still logs the
+		// user out, while a logout handler that failed on a misspelt
+		// SESSION_SECURE would leave the session live
+		log.Printf("borgo: %v; clearing the session cookie without Secure", err)
+	}
 	cookie.MaxAge = -1
 	http.SetCookie(w, cookie)
 }

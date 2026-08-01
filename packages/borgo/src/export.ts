@@ -8,7 +8,7 @@ import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
-import { buildAssets } from "./build";
+import { buildAssets, BundleFailed } from "./build";
 import { banner, c, fmtMs, g } from "./colors";
 import type { Route } from "./router";
 import { goBinName, runBorgogen } from "./util";
@@ -171,7 +171,15 @@ export async function exportSite(): Promise<number> {
 
   if (!(await runBorgogen())) return 1;
   markStaticExport();
-  await buildAssets(false);
+  try {
+    await buildAssets(false);
+  } catch (error) {
+    if (!(error instanceof BundleFailed)) throw error;
+    console.error(`\n  ${c.red(g.err)} the client bundle failed to build`);
+    for (const detail of error.details) console.error(`    ${detail}`);
+    console.error("");
+    return 1;
+  }
 
   const manifest = pathToFileURL(join(process.cwd(), ".borgo/routes.gen.tsx")).href;
   const { routes, notFound } = (await import(manifest)) as {
@@ -310,7 +318,13 @@ export async function exportSite(): Promise<number> {
     );
     if (failures) console.log(`  ${c.red(g.err)} ${failures} page(s) failed to export`);
     console.log(
-      `  ${c.dim(`${g.dot} a static export serves pages only: actions, sse and websocket topics need borgo start`)}\n`,
+      `  ${c.dim(`${g.dot} a static export serves pages only: actions, sse and websocket topics need borgo start`)}`,
+    );
+    // the export rebuilt public/assets with the props endpoint compiled out of
+    // the bundle. `.borgo/build-mode` now says so, and `borgo start` rebuilds
+    // rather than serving a bundle that reloads the document on every link.
+    console.log(
+      `  ${c.dim(`${g.dot} public/assets now holds the export build ${g.dot} borgo start rebuilds it for production`)}\n`,
     );
   } finally {
     apiProc?.kill();

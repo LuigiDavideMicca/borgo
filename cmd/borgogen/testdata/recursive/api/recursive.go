@@ -27,6 +27,22 @@ type Wallet struct {
 	Balance Money `json:"balance"`
 }
 
+// A cycle that runs through pointers alone has no shape to declare: every Loop
+// is a chain that has to end at a nil pointer, and encoding/json writes a
+// pointer as whatever it points at, so json.Marshal(LoopHolder{}) is {"l":null}
+// and so is a LoopHolder holding a chain. Inlining the expansion produced
+// `export type Loop = Loop | null;`, an alias that refers to itself (TS2456).
+type Loop *Loop
+
+type LoopHolder struct {
+	L Loop `json:"l"`
+}
+
+//borgo:route GET /api/loop
+func GetLoop(w http.ResponseWriter, r *http.Request) {
+	borgo.JSON(w, http.StatusOK, LoopHolder{})
+}
+
 //borgo:route GET /api/tree
 func GetTree(w http.ResponseWriter, r *http.Request) {
 	borgo.JSON(w, http.StatusOK, Tree{})

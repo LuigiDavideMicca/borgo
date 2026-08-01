@@ -4,7 +4,7 @@ import { c, g } from "./colors";
 import { documentStream, gzipStream, pickEncoding } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD, csrfCookieValue } from "./index";
 import { withCsrf } from "./internal";
-import { resolveHead, type ActionContext, type Head, type Route } from "./router";
+import { resolveHead, safeHeadAttrs, type ActionContext, type Head, type Route } from "./router";
 
 // constant-time on the value, honest about the length: a comparison that
 // leaks how many prefix bytes matched is a comparison an attacker can walk
@@ -18,18 +18,15 @@ export const keysEqual = (given: string, expected: string) => {
 export const escapeHtml = (s: string) =>
   s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 
-// a head export may be computed from loader data, so attribute names are as
-// untrusted as their values: anything but a plain name - and never an event
-// handler - would break out of the tag it is written into
-const safeAttrName = (name: string) => /^[a-z][a-z0-9:._-]*$/i.test(name) && !/^on/i.test(name);
-
+// safeHeadAttrs lives in router.ts because the browser runtime applies the
+// very same head and has to refuse the very same names
 export function headHtml(head: Head): string {
   let html = "";
   if (head.title) html += `<title>${escapeHtml(String(head.title))}</title>`;
   for (const meta of head.meta ?? []) {
     let attrs = "";
-    for (const [name, value] of Object.entries(meta)) {
-      if (safeAttrName(name)) attrs += ` ${name}="${escapeHtml(String(value))}"`;
+    for (const [name, value] of safeHeadAttrs(meta)) {
+      attrs += ` ${name}="${escapeHtml(value)}"`;
     }
     html += `<meta${attrs} data-borgo-head>`;
   }
@@ -240,36 +237,80 @@ export const decodeChanged = (value: string | undefined): string[] =>
   value ? value.split("\n").filter(Boolean) : [];
 
 /**
- * The socket read deadline, in seconds.
+ * The inbound read deadline, in seconds - and only that.
  *
- * bun's `idleTimeout` is not a response-side setting: the same number bounds
- * how long the server waits for an inbound request's headers and body. Borgo
- * used to disable it outright so that proxied event streams - which are idle
- * by nature between events - were not cut, and the cost was that the
- * internet-facing server had no read deadline at all: a POST declaring a
- * Content-Length and then dribbling one byte was held indefinitely, and every
- * path that reads a body parks on it. The deadline is back on, and the
- * exemption is granted per response instead, through `server.timeout(req, 0)`
- * once the response is known to be a stream that lives on purpose.
+ * There are two clocks here and they are not the same clock:
+ *
+ *   1. how long the server waits for a *request* to arrive. This is a
+ *      slowloris control and it has to be a real number: a POST that declares
+ *      a Content-Length and then dribbles one byte held the front server
+ *      indefinitely, and every path that reads a body parks on it.
+ *   2. how long a *response* may live. This one has no honest bound. An event
+ *      stream is idle between events; so is an `application/x-ndjson` feed, a
+ *      long poll answering `application/json`, a chunked report, a gRPC-web
+ *      call, a stalled `/api` download, a streamed document whose suspense
+ *      boundary is waiting on a query, and an upstream that needs six seconds
+ *      to produce its headers. None of those is a client holding a socket
+ *      open. They are the server working.
+ *
+ * bun has one knob for both: `idleTimeout` is per connection and covers the
+ * request read and the response write alike. So the knob is clock 1, and clock
+ * 2 is expressed by lifting the deadline - `server.timeout(req, 0)` - at the
+ * moment the request body can no longer be dribbled at us. That moment is
+ * knowable in exactly two places, and borgo lifts in both:
+ *
+ *   - at the top of `fetch()` when the request carries no body at all, which
+ *     is every GET and HEAD. bun calls `fetch` only once the request line and
+ *     headers are in, so slowloris on the headers is still clock 1's;
+ *   - in the proxy, the instant a buffered request body has been read in full.
+ *
+ * What the design costs, measured on bun 1.3.14: a request whose body borgo
+ * never finished reading keeps the deadline for its whole life. So a form
+ * action whose render idles past it is still cut, and so is a proxied upload
+ * too large to buffer. The obvious alternative - lift once the handler has
+ * returned a response - is not available: a POST to a path with no action is
+ * answered 405 without the body ever being read, which would hand a slowloris
+ * exactly the free hold this deadline exists to deny (verified: an unguarded
+ * lift at `fetch` entry held a dribbling POST for the full 9s budget under
+ * `idleTimeout: 3`).
+ *
+ * Content-Type was tried as the discriminator and was wrong in kind. An
+ * allowlist of `text/event-stream` and `multipart/x-mixed-replace` truncates
+ * every other long-lived response at the deadline - measured with
+ * `idleTimeout: 3` and a stream idle 8s mid-body, `application/x-ndjson` was
+ * cancelled server-side at ~3s and the connection closed at 4.0s, and the
+ * client saw a *truncated 200*, not an error. And the exemption was granted
+ * only after the handler resolved, which is already too late for anything
+ * slower than the deadline: an upstream taking 6s to produce headers had the
+ * connection closed at 4.0s with zero bytes delivered, which also defeated the
+ * documented `BORGO_API_TIMEOUT=0`.
  *
  * bun caps idleTimeout at 255 seconds and rejects anything larger.
  */
-export const IDLE_TIMEOUT_SECONDS = 30;
-export const IDLE_TIMEOUT_MAX = 255;
+export const READ_TIMEOUT_SECONDS = 30;
+export const READ_TIMEOUT_MAX = 255;
 
-export function idleTimeout(value: string | undefined): number {
-  return Math.min(envInt(value, IDLE_TIMEOUT_SECONDS), IDLE_TIMEOUT_MAX);
+/**
+ * BORGO_READ_TIMEOUT: this side's own name, in seconds.
+ *
+ * It used to read BORGO_IDLE_TIMEOUT, which is the go api's - go parses that
+ * one with `time.ParseDuration` and panics on anything it cannot read. The
+ * systemd unit and the compose file put both processes in one environment
+ * block, so the documented `BORGO_IDLE_TIMEOUT=2m` gave go two minutes and
+ * gave the front server a silent 30 seconds, while `BORGO_IDLE_TIMEOUT=120`
+ * panicked the go api at boot. One name, two grammars, two meanings. Same
+ * collision class as the METRICS and SESSION_SECURE renames: the old name is
+ * not honoured here at all, because an alias kept for compatibility is an
+ * alias that keeps the collision alive.
+ */
+export function readTimeout(env: Record<string, string | undefined>): number {
+  return Math.min(envInt(env.BORGO_READ_TIMEOUT, READ_TIMEOUT_SECONDS), READ_TIMEOUT_MAX);
 }
 
-// responses whose whole point is to sit idle between writes, and which the
-// read deadline above would otherwise kill mid-stream. Content-Type is the
-// only honest signal here: the proxy learns nothing about the shape of an
-// upstream response beyond its headers.
-const LONG_LIVED_TYPES = /^(text\/event-stream|multipart\/x-mixed-replace)\b/;
-
-export function isLongLivedStream(res: Response): boolean {
-  return LONG_LIVED_TYPES.test((res.headers.get("content-type") ?? "").trim().toLowerCase());
-}
+// nothing is left for a client to dribble at us: the request is entirely in
+// hand, so whatever the response does from here is not the read deadline's
+// business. bun reports a body-less request as a null body.
+export const requestFullyRead = (req: Request): boolean => req.body === null;
 
 /**
  * Whether /metrics is exposed.
@@ -796,8 +837,17 @@ export async function runAction(
       // with the session cookie dropped on the floor: the login ran, the
       // browser never heard about it, and the user is told nothing happened.
       // The error page is rendered here instead, with the cookies attached.
-      // A client that has already hung up is still the server's 499 to make.
-      if (!wantsJson && (!apiCookies.length || req.signal.aborted)) throw error;
+      //
+      // A client that has already hung up is still the server's 499 to make,
+      // and it is the same 499 whichever way the form was posted. The abort
+      // check used to sit inside the native branch, so an enhanced submit
+      // (X-Borgo-Action: 1) from a client that was already gone still bought a
+      // full _500 ssr render and its go round trip, writing it to a socket
+      // nobody was reading - the very waste the 499 in serve() says it closed,
+      // and reachable with no credentials at all, since csrfRejects returns
+      // false immediately for a cookie-less client.
+      if (req.signal.aborted) throw error;
+      if (!wantsJson && !apiCookies.length) throw error;
       onError(error);
       if (!wantsJson) {
         if (dev) {
@@ -889,6 +939,14 @@ export type ProxyOptions = {
   // connection-refused retries (the api restarting), 0 to never retry
   retries: number;
   retryDelayMs?: number;
+  // the address borgo actually read this request from, appended to the
+  // X-Forwarded-For chain. undefined means "no peer to vouch for", and then no
+  // chain travels at all
+  clientIp?: string;
+  // called once the request body is entirely in hand, so the caller can lift
+  // the read deadline: from here on the connection is the server's to hold,
+  // not the client's. see readTimeout above for why that is a second clock.
+  onBodyRead?: () => void;
   // injectable for tests; production passes none of these
   fetchImpl?: ProxyFetch;
   sleep?: (ms: number) => Promise<void>;
@@ -910,6 +968,8 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
     deadlineMs,
     retries,
     retryDelayMs = 250,
+    clientIp,
+    onBodyRead,
     fetchImpl = fetch,
     sleep = Bun.sleep,
     onError = console.error,
@@ -920,6 +980,11 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
   // may throw when the client hangs up mid-upload; the caller owns that (it
   // is the one holding the request that would answer 499)
   const body = hasBody ? (buffered ? await req.arrayBuffer() : req.body) : undefined;
+  // the whole body is here, so the read deadline has nothing left to protect
+  // and everything left to break: an upstream slower than it would otherwise
+  // close the connection before a single byte of the answer shipped. an
+  // unbuffered body is still arriving and keeps the deadline.
+  if (buffered) onBodyRead?.();
   // hop-by-hop headers belong to the browser -> borgo connection, not to
   // this one; built once, outside the retry loop
   const headers = forwardableHeaders(req.headers);
@@ -937,13 +1002,33 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
   // absolute Location, a password-reset link, anything built from "the site's
   // own name". dropping it lets bun write the target's authority, so r.Host
   // is the api borgo actually dialled and nothing else. the browser's value
-  // is not lost, it is moved to the header that declares itself untrusted -
-  // and only when no front proxy already set one, because a proxy that
-  // rewrote Host (nginx's default proxy_set_header Host $proxy_host) knows
-  // the public name better than the Host reaching us does.
+  // is not lost, it is moved to the header that declares itself untrusted.
   const inboundHost = headers.get("host");
   headers.delete("host");
-  if (inboundHost && !headers.has("x-forwarded-host")) headers.set("x-forwarded-host", inboundHost);
+  // and it is *set*, never merely defaulted. X-Forwarded-* describe the hop
+  // the client made, so the client does not get to write them: leaving a
+  // client-supplied X-Forwarded-Host in place moves the primitive Host was
+  // just dropped to prevent exactly one header over, into the field app code
+  // reaches for when it builds an absolute url or keys a rate limit. The old
+  // rule ("a front proxy already set it") was not true of the deployment borgo
+  // ships: its own generated nginx sets Host, X-Forwarded-For and
+  // X-Forwarded-Proto, and no X-Forwarded-Host at all - so the only sender
+  // that value ever had in practice was the browser. Behind a proxy the
+  // inbound Host *is* the public name ($host), which is what belongs here.
+  if (inboundHost) headers.set("x-forwarded-host", inboundHost);
+  else headers.delete("x-forwarded-host");
+  // the chain gets the real peer appended, the way nginx's
+  // $proxy_add_x_forwarded_for does. what came in may be a trusted proxy's
+  // chain or a client's invention and borgo cannot tell the two apart, but the
+  // last entry is now always the address it read the request from - the one
+  // hop it can vouch for. with no peer to append (the connection is already
+  // gone) nothing travels: a chain borgo cannot sign is not evidence.
+  if (clientIp) {
+    const chain = headers.get("x-forwarded-for");
+    headers.set("x-forwarded-for", chain ? `${chain}, ${clientIp}` : clientIp);
+  } else {
+    headers.delete("x-forwarded-for");
+  }
   // resendable unless a real body streamed through unbuffered - a
   // body-less delete/post (body null) is as safe to retry as a get
   const retriable = !hasBody || buffered || body == null;

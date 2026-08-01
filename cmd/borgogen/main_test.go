@@ -9,9 +9,34 @@ import (
 	"testing"
 	"time"
 
+	closureapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/closurehandle/api"
+	deeph3 "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/deeppush/h3"
+	deeph4 "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/deeppush/h4"
 	embedapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/embed/api"
+	recursiveapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/recursive/api"
 	wireapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/wire/api"
 )
+
+// wants asserts every want is present in the generated file, whole - each of
+// these spells out a complete declaration or ApiRoutes entry, braces included,
+// so a substring match cannot be satisfied by a different body.
+func wants(t *testing.T, types string, want ...string) {
+	t.Helper()
+	for _, w := range want {
+		if !strings.Contains(types, w) {
+			t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", w, types)
+		}
+	}
+}
+
+func generate(t *testing.T, dir string) string {
+	t.Helper()
+	root := filepath.Join("testdata", dir)
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	return read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+}
 
 // marshals asserts what encoding/json really writes for a fixture value, so
 // the generated TypeScript below is checked against the wire and not against
@@ -773,4 +798,196 @@ func TestDynamicPushGeneratesWithoutComplaint(t *testing.T) {
 	if types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts")); strings.Contains(types, "WsEvents") {
 		t.Errorf("nothing was statically typed, so WsEvents must be absent:\n%s", types)
 	}
+}
+
+// A one-off `type resp struct{...}` declared inside the handler that answers
+// with it is mainstream Go. types.TypeString spells every one of them
+// "pkgpath.resp", so two handlers collapsed onto a single interface built from
+// whichever route sorted first: the other route promised properties it never
+// sends and hid the ones it does.
+func TestFunctionLocalNamedTypesDoNotCollide(t *testing.T) {
+	// the three shapes testdata/localtypes/api answers with, on the wire
+	func() {
+		type resp struct {
+			A int `json:"a"`
+		}
+		marshals(t, resp{A: 1}, `{"a":1}`)
+	}()
+	func() {
+		type resp struct {
+			B string `json:"b"`
+			C bool   `json:"c"`
+		}
+		marshals(t, resp{B: "x", C: true}, `{"b":"x","c":true}`)
+	}()
+	func() {
+		type node []int
+		marshals(t, node{1, 2}, `[1,2]`)
+	}()
+
+	types := generate(t, "localtypes")
+	wants(t, types,
+		"export interface resp {\n  a: number;\n}",
+		"export interface Apiresp {\n  b: string;\n  c: boolean;\n}",
+		`"GET /api/alpha": { response: resp };`,
+		`"GET /api/beta": { response: Apiresp };`,
+		// a non-struct local collides the same way: the recursive one needs a
+		// declaration and claims the name, and the plain slice next to it used
+		// to resolve to that declaration instead of to its own shape
+		"export type node = Record<string, node> | null;",
+		`"GET /api/cyc": { response: node };`,
+		`"GET /api/list": { response: Array<number> | null };`,
+	)
+}
+
+// encoding/json.Number is typed string in Go and carries a bare number on the
+// wire. A named copy of it is not it, and is quoted like any other string.
+func TestJSONNumberIsANumberOnTheWire(t *testing.T) {
+	n := json.Number("12.5")
+	marshals(t, wireapi.Nums{N: "1", NP: &n, NS: []json.Number{"2", "3"}, Amt: "3"},
+		`{"n":1,"np":12.5,"ns":[2,3],"amt":"3"}`)
+
+	wants(t, generate(t, "wire"),
+		"export interface Nums {\n  n: number;\n  np: number | null;\n"+
+			"  ns: Array<number> | null;\n  amt: string;\n}")
+}
+
+// encoding/json's typeFields flattens an embedded struct whatever methods it
+// carries; the marshaler only decides anything once it is promoted to the outer
+// type, and then tsType has already answered. Refusing to flatten invented two
+// properties and hid the real ones.
+func TestEmbeddedMarshalersAreStillFlattened(t *testing.T) {
+	// MA and MB are both marshalers at the same depth, so neither promotes and
+	// Amb is a plain struct to encoding/json
+	marshals(t, embedapi.Amb{}, `{"x":0,"y":0,"z":0}`)
+	// PtrM's marshaler promotes to *PtrEmbed only, so an unaddressable
+	// PtrEmbed is flattened and an addressable one goes through the marshaler
+	marshals(t, embedapi.PtrEmbed{}, `{"x":0,"z":0}`)
+	marshals(t, []embedapi.PtrEmbed{{}}, `["pm"]`)
+
+	wants(t, generate(t, "embed"),
+		"export interface Amb {\n  x: number;\n  y: number;\n  z: number;\n}",
+		`"GET /api/amb": { response: Amb };`,
+		"export interface PtrEmbed {\n  x: number;\n  z: number;\n}",
+		`"GET /api/ptrembed": { response: unknown | PtrEmbed };`,
+	)
+}
+
+// A MarshalJSON on the pointer receiver runs only where encoding/json holds an
+// addressable value, so one named type reaches the wire as its Go shape in a
+// plain field and as the marshaler's output in a slice - the same split
+// textMarshalTS already covers for MarshalText.
+func TestPointerReceiverJSONMarshalerKeepsTheGoShape(t *testing.T) {
+	marshals(t, wireapi.PMHolder{Many: []wireapi.PM{{}}, Ptr: &wireapi.PM{}, Keyed: map[string]wireapi.PM{"k": {}}},
+		`{"one":{"x":0},"many":["pm"],"ptr":"pm","keyed":{"k":{"x":0}}}`)
+
+	wants(t, generate(t, "wire"),
+		"export interface PM {\n  x: number;\n}",
+		"export interface PMHolder {\n  one: unknown | PM;\n  many: Array<unknown | PM> | null;\n"+
+			"  ptr: unknown | PM | null;\n  keyed: Record<string, unknown | PM> | null;\n}",
+	)
+}
+
+// encoding/json's resolveKeyName never consults MarshalJSON for a map key, only
+// the kind and then TextMarshaler, so a key type carrying both is still a
+// string key and the map is an ordinary object.
+func TestMapKeyWithBothMarshalersIsStillAnObject(t *testing.T) {
+	marshals(t, wireapi.MapBoth{M: map[wireapi.KeyBoth]int{{N: 5}: 5}}, `{"m":{"kt":5}}`)
+
+	wants(t, generate(t, "wire"), "export interface MapBoth {\n  m: Record<string, number> | null;\n}")
+}
+
+// go/types spells the predeclared alias "[]byte" and the plain kind "[]uint8",
+// so matching the result type by its rendering missed a MarshalJSON that
+// json.Marshal calls all the same.
+func TestUint8MarshalJSONIsRecognized(t *testing.T) {
+	marshals(t, wireapi.Uint8Marshal{}, `{"u":"u8"}`)
+
+	wants(t, generate(t, "wire"), "export interface Uint8Marshal {\n  u: unknown;\n}")
+}
+
+// union.add dedups whole strings while tsUnion flattens alternatives, so two
+// nullable answers under one route used to carry a "| null" each.
+func TestNullableResponsesShareOneNull(t *testing.T) {
+	marshals(t, wireapi.Tags(nil), `null`)
+	marshals(t, []int(nil), `null`)
+
+	types := generate(t, "wire")
+	wants(t, types, `"GET /api/either": { response: Array<string> | Array<number> | null };`)
+	entry := types[strings.Index(types, `"GET /api/either"`):]
+	entry = entry[:strings.IndexByte(entry, '\n')]
+	if n := strings.Count(entry, "null"); n != 1 {
+		t.Errorf("want one null alternative, got %d in %s", n, entry)
+	}
+}
+
+// `type Loop *Loop` is a cycle that runs through pointers alone: every value is
+// a chain that has to end at a nil pointer, and encoding/json writes a pointer
+// as whatever it points at. Inlining it emitted "export type Loop = Loop |
+// null;", a type alias referring to itself - TS2456, which skipLibCheck hides.
+func TestPointerCycleTypeIsNull(t *testing.T) {
+	marshals(t, recursiveapi.LoopHolder{}, `{"l":null}`)
+	var end recursiveapi.Loop
+	marshals(t, recursiveapi.LoopHolder{L: &end}, `{"l":null}`)
+
+	types := generate(t, "recursive")
+	wants(t, types, "export interface LoopHolder {\n  l: null;\n}")
+	if strings.Contains(types, "export type Loop") {
+		t.Errorf("a pointer cycle has no declaration to make, and a self-referential alias is TS2456:\n%s", types)
+	}
+}
+
+// An inline closure and an http.HandlerFunc(Named) conversion are both ordinary
+// ways to register a handler, and both used to yield "response: unknown" with
+// nothing said. Anything still unresolvable has to warn, the way a computed
+// borgo.Handle pattern already does.
+func TestClosureAndConvertedHandlersAreTyped(t *testing.T) {
+	marshals(t, closureapi.Inline{A: 1}, `{"a":1}`)
+	marshals(t, closureapi.Wrapped{B: "b"}, `{"b":"b"}`)
+
+	var types string
+	out := captureStderr(t, func() { types = generate(t, "closurehandle") })
+	wants(t, types,
+		"export interface Inline {\n  a: number;\n}",
+		"export interface Wrapped {\n  b: string;\n}",
+		`"GET /api/inline": { response: Inline };`,
+		`"GET /api/wrapped": { response: Wrapped };`,
+		`"GET /api/authedinline": { response: Wrapped };`,
+		// a handler decided at runtime has no body to read, which is the one
+		// case that stays unknown - and says so
+		`"GET /api/opaque": { response: unknown };`,
+	)
+	if !strings.Contains(out, "handle.go:35") || !strings.Contains(out, "stay unknown") {
+		t.Errorf("want a warning pointing at the unresolvable registration, got:\n%s", out)
+	}
+}
+
+// A push further from api than the walk goes is worse than a plain omission:
+// TopicEvents<T> closes a topic's union as soon as one of its events is
+// declared, so the subscriber for the dropped one fails tsc with nothing
+// pointing back at the generator.
+func TestPushBeyondTheHopCapWarns(t *testing.T) {
+	marshals(t, deeph3.PThree{}, `{"n":0}`)
+	marshals(t, deeph4.PFour{}, `{"n":0}`)
+
+	var types string
+	out := captureStderr(t, func() { types = generate(t, "deeppush") })
+	wants(t, types,
+		`"chain/one": POne;`,
+		`"chain/two": PTwo;`,
+		`"chain/three": PThree;`,
+	)
+	if strings.Contains(types, "chain/four") {
+		t.Errorf("h4 is past the cap, so its event cannot be typed:\n%s", types)
+	}
+	if !strings.Contains(out, "deeppush/h4") || !strings.Contains(out, "package hops from api/") {
+		t.Errorf("want a warning naming the package that was not scanned, got:\n%s", out)
+	}
+}
+
+// tsGen.override matches an api type by bare name whatever scope declares it,
+// so a //borgo:type naming a function-local one does apply. Rejecting it failed
+// the whole run over a directive that was perfectly good.
+func TestTypeOverrideOnAFunctionLocalType(t *testing.T) {
+	wants(t, generate(t, "localoverride"), "export interface resp {\n  at: string;\n}")
 }

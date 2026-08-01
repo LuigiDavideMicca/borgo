@@ -52,7 +52,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `SetSession(w, v any, maxAge time.Duration) error` | Stores `v` JSON-encoded and HMAC-signed in the `borgo_session` cookie. The expiry is signed too. Errors if the cookie would exceed 4 KB. | stable |
 | `GetSession[T any](r) (T, bool)` | Verifies signature and expiry and decodes into `T`. False for missing, tampered, expired — or ambiguous (two valid cookies). | stable |
 | `ClearSession(w)` | Deletes the session cookie. | stable |
-| `ErrNoSessionSecret` | Returned by `SetSession` when `SESSION_SECRET` is unset. | stable |
+| `ErrNoSessionSecret` | Returned by `SetSession` when there is no usable `SESSION_SECRET` — unset, **or set to fewer than 32 bytes**, which `sessionSecret()` reports as absent deliberately so that every guard covering the missing case covers the weak key too. In practice only the unset case reaches a running handler: `Serve` refuses to boot on a short secret. | stable |
 
 ### Auth
 
@@ -221,6 +221,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `API_URL` (`http://localhost:$API_PORT`) | Where the front server reaches the api, for split deployments. | stable |
 | `BORGO_API_TIMEOUT` (`30000`) | Milliseconds to wait for api response headers before answering 504; `0` disables. | stable |
 | `BORGO_MAX_BODY` (`33554432`) | Largest request body the front server accepts and buffers, in bytes. | stable |
+| `BORGO_IDLE_TIMEOUT` (`30`) | Socket read deadline in **seconds** — how long bun waits for an inbound request's headers and body. `0` disables it; bun caps it at `255` and borgo clamps to that. Event streams are exempted per response, so raising this is not what keeps SSE alive. **Read by the Go server too, under the same name and a different grammar** — see the note below. | stable |
 | `BORGO_CSRF` | `0` disables CSRF checks on form actions, `1` forces them in dev. | stable |
 | `BORGO_SECURITY_HEADERS` | `0` drops the security headers and the CSP. | stable |
 | `BORGO_CSP` | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request. | stable |
@@ -229,7 +230,7 @@ Read at runtime unless noted. Defaults in parentheses.
 
 `BORGO_METRICS` was `METRICS` before 0.21. The old name is not honoured, and not honouring it is the point: a bare `METRICS` is the most collidable variable borgo ever read, and an alias kept for compatibility would keep the collision alive.
 
-`BUN_CONFIG_MAX_HTTP_REQUESTS` is bun's, not borgo's, but borgo is why you would set it — see [realtime](realtime.md#honest-limits). A process cannot raise it for itself once bun has booted, so `borgo start` re-execs itself with `16384` when nothing set it, and `borgo dev` and every deploy config borgo writes set it too. Setting it yourself is still honoured: `start` sees a value and runs in one process rather than two.
+`BUN_CONFIG_MAX_HTTP_REQUESTS` is bun's, not borgo's, but borgo is why you would set it — see [realtime](realtime.md#honest-limits). A process cannot raise it for itself once bun has booted, so `borgo start` re-execs itself with `16384` when nothing set it, and `borgo dev` sets it, as do the two `borgo deploy init` targets that launch the app — the systemd unit and the compose file. The `caddy` and `nginx` targets are reverse-proxy configs and set no environment. Setting it yourself is still honoured: `start` sees a value and runs in one process rather than two.
 
 ### Go server only
 
@@ -237,13 +238,15 @@ Read at runtime unless noted. Defaults in parentheses.
 | --- | --- | --- |
 | `FRONT_URL` (`http://localhost:$PORT`) | Where `Push` reaches the front server. | stable |
 | `BORGO_READ_HEADER_TIMEOUT` (`5s`) | Cap on reading request headers. | stable |
-| `BORGO_IDLE_TIMEOUT` (`2m`) | Idle keep-alive reclaim. | stable |
+| `BORGO_IDLE_TIMEOUT` (`2m`) | Idle keep-alive reclaim. **Also read by the front server**, as seconds — see the note below. | stable |
 | `BORGO_READ_TIMEOUT` (`0`, off) | Whole-request read deadline. | stable |
 | `BORGO_WRITE_TIMEOUT` (`0`, off) | Whole-response write deadline; `SSE` exempts its own connection. | stable |
 | `BORGO_SHUTDOWN_TIMEOUT` (`10s`) | Grace period for in-flight requests; `0` waits indefinitely. | stable |
 | `BORGO_HASH_SLOTS` (`max(1, GOMAXPROCS/2)`) | Password hashes that may run at once. A value that is not a positive integer is refused at startup. | stable |
 
 The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` is a positive integer and `FRONT_URL` a URL. A malformed duration or a non-positive slot count panics at boot, before the startup banner.
+
+> **`BORGO_IDLE_TIMEOUT` is one name read by both halves, and they do not agree on it.** The Go server parses it as a duration (`time.ParseDuration`) and **panics at boot** on anything it cannot read. The front server parses it as an integer number of **seconds** and, on anything it cannot read, **silently falls back to 30**. So `BORGO_IDLE_TIMEOUT=2m` gives Go two minutes and leaves the front server on its default; `BORGO_IDLE_TIMEOUT=120` gives the front server two minutes and stops the Go binary from booting. `borgo start` exports one environment to both children, so there is no value that means the same thing to both. Until the two are separated, set it only if you are running the halves as separate processes with separate environments, and check which half you are actually configuring.
 
 ### Build, dev loop and internal
 
@@ -253,7 +256,8 @@ The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` i
 | `BORGO_PARENT_PID` | How the CLI tells a child process whose death to exit with. | internal |
 | `BORGO_SUPERVISOR_PID` | Set by `borgo start` on the copy of itself it re-execs to raise `BUN_CONFIG_MAX_HTTP_REQUESTS`; the child polls it and exits when the supervisor does. | internal |
 | `BORGO_RELOAD` | Marks a restart so the banner prints the short form. | internal |
-| `BORGO_CHANGED` | Carries the changed file into the dev fallback server. | internal |
+| `BORGO_CHANGED` | Carries the changed file **set** into the dev fallback server — newline-separated, because a path may contain a comma or a space but not a newline. Two saves inside one debounce window announce both; carrying only the first meant the browser, which ignores an update naming a page other than the one on screen, could apply nothing at all. | internal |
+| `BORGO_STATIC` | Set to `1` by `borgo export` for the build it drives, and substituted into the client bundle as a `define` rather than read at runtime — it is what compiles the `?__borgo=props` navigation path out of an exported site, where there is no server to ask for props. Not something to set by hand. | internal |
 | `BORGO_DEV` | Set by the dev loop for `serve-entry.ts`. | internal |
 | `BORGO_FORCE_PROMPT` | Test hook: forces `create-borgo`'s interactive path. | internal |
 | `NODE_ENV` | Not read at runtime — it is a build-time `define` substituted into client bundles. | internal |

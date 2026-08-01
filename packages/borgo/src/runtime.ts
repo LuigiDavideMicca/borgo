@@ -4,7 +4,14 @@ import type { createElement as CreateElement } from "react";
 import type { hydrateRoot as HydrateRoot, Root } from "react-dom/client";
 import { CSRF_FIELD, csrfCookieValue } from "./index";
 import { withCsrf } from "./internal";
-import { matchRoute, resolveHead, type Head, type LayoutModule, type PageModule } from "./router";
+import {
+  matchRoute,
+  resolveHead,
+  safeHeadAttrs,
+  type Head,
+  type LayoutModule,
+  type PageModule,
+} from "./router";
 
 // the double-submit cookie was set by the response that carried this page,
 // so the token hydrates to the same value the server rendered
@@ -210,7 +217,10 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
     for (const el of document.querySelectorAll("[data-borgo-head]")) el.remove();
     for (const meta of head.meta ?? []) {
       const el = document.createElement("meta");
-      for (const [key, value] of Object.entries(meta)) el.setAttribute(key, value);
+      // the same filter the server renders through: a name it refuses must not
+      // arrive by client navigation instead, and setAttribute throws on names
+      // the server merely dropped
+      for (const [key, value] of safeHeadAttrs(meta)) el.setAttribute(key, value);
       el.setAttribute("data-borgo-head", "");
       document.head.appendChild(el);
     }

@@ -106,7 +106,7 @@ export interface Note {
 }
 
 export interface NoteList {
-  notes: Array<Note>;
+  notes: Array<Note> | null;
 }
 
 declare module "borgo-framework" {
@@ -130,7 +130,8 @@ export const head = { title: "Notes" };
 
 export async function loader({ api }: LoaderContext) {
   const { notes } = await api("GET /api/notes");
-  return { notes };
+  // a nil Go slice is null on the wire, so notes is Array<Note> | null
+  return { notes: notes ?? [] };
 }
 
 export default function Home({ notes }: { notes: Note[] }) {
@@ -149,6 +150,8 @@ export default function Home({ notes }: { notes: Note[] }) {
 ```
 
 Reload. The note is there — and it was in the HTML before any JavaScript ran: view source and you will find `<li>Buy oranges</li>` in the document. The `loader` runs on the server before rendering, and whatever it returns becomes the component's props.
+
+The `?? []` is not defensive padding. A nil Go slice marshals to `null`, not `[]`, so `NoteList.notes` is generated as `Array<Note> | null` and TypeScript makes you say what an empty list looks like before you map over it — see [the nil slice trap](typed-bridge.md#the-nil-slice-trap). Normalizing in the loader is the tidiest place: the component below never has to think about it.
 
 Now try to break it on purpose. Change the route string to `"GET /api/note"`:
 
@@ -191,7 +194,8 @@ export const head = { title: "Notes" };
 
 export async function loader({ api }: LoaderContext) {
   const { notes } = await api("GET /api/notes");
-  return { notes };
+  // a nil Go slice is null on the wire, so notes is Array<Note> | null
+  return { notes: notes ?? [] };
 }
 
 export async function action({ request, api }: ActionContext) {

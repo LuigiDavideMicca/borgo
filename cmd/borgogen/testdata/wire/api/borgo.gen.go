@@ -4,8 +4,13 @@ package api
 import "github.com/LuigiDavideMicca/borgo"
 
 func init() {
+	borgo.Handle("GET /api/either", GetEither)
 	borgo.Handle("GET /api/empty", GetEmpty)
 	borgo.Handle("GET /api/keys", GetKeys)
+	borgo.Handle("GET /api/mapboth", GetMapBoth)
+	borgo.Handle("GET /api/nums", GetNums)
+	borgo.Handle("GET /api/pm", GetPM)
 	borgo.Handle("GET /api/stamped", GetStamped)
 	borgo.Handle("GET /api/tagged", GetTagged)
+	borgo.Handle("GET /api/uint8", GetUint8)
 }

@@ -1,6 +1,7 @@
 // borgo deploy init <target>: writes the deploy guide's blessed config for
 // caddy, nginx, systemd or compose into the project, templated with the
 // app's name and ports. never overwrites without --force.
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { banner, c, g } from "./colors";
@@ -9,7 +10,77 @@ export type DeployContext = {
   name: string;
   port: string;
   apiPort: string;
+  /**
+   * The signing key the app already has, read from its `.env` - `null` when it
+   * has none. Not a value to copy around: what the generated configs need to
+   * know is whether the app signs sessions at all, and whether a key is
+   * already being supplied from somewhere they must not override.
+   */
+  secret?: string | null;
 };
+
+// session.go refuses a SESSION_SECRET shorter than this, so anything under it
+// is not a placeholder to fill in later - it is an app whose every auth route
+// answers 500
+export const SESSION_SECRET_MIN = 32;
+
+// 48 base64url characters out of the CSPRNG: over the floor, and safe to put
+// on a systemd `Environment=` line unquoted (no spaces, no `%`, no newline)
+export function randomSecret(): string {
+  return randomBytes(36).toString("base64url");
+}
+
+// what the app is already signing with. a real environment variable beats
+// `.env` in bun, so a config that sets SESSION_SECRET to anything else - a
+// placeholder, or a fresh random key - silently overrides the one
+// `create-borgo` generated and invalidates every session the app ever issued.
+export function envSecret(dir = "."): string | null {
+  let raw: string;
+  try {
+    raw = readFileSync(join(dir, ".env"), "utf8");
+  } catch {
+    return null;
+  }
+  const value = raw
+    .match(/^\s*(?:export\s+)?SESSION_SECRET\s*=\s*(.*)$/m)?.[1]
+    ?.trim()
+    .replace(/^(["'])(.*)\1$/, "$2");
+  return value && value.length >= SESSION_SECRET_MIN ? value : null;
+}
+
+/**
+ * `borgo <deploy|pwa> init [target] [--force]`, and nothing else.
+ *
+ * The old parser was `argv.filter(a => !a.startsWith("--"))`, which drops a
+ * flag and keeps its value: `deploy init nginx --port 8080` read `8080` as a
+ * second positional and silently wrote the default-port config, and
+ * `deploy init --port 8080 nginx` took `8080` as the target. Unknown options
+ * and surplus arguments are refused by name instead.
+ */
+export type InitArgv = { ok: true; target?: string; force: boolean } | { ok: false; reason: string };
+
+export function parseInitArgv(argv: string[], maxPositionals: number): InitArgv {
+  const positionals: string[] = [];
+  let force = false;
+  for (const arg of argv) {
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
+    // parsed globally by the cli itself, and legal after any command
+    if (arg === "--tailwind") continue;
+    if (arg.startsWith("-")) return { ok: false, reason: `unknown option "${arg}"` };
+    positionals.push(arg);
+  }
+  const [sub, ...rest] = positionals;
+  if (sub !== "init") {
+    return { ok: false, reason: sub ? `unknown subcommand "${sub}"` : "missing subcommand" };
+  }
+  if (rest.length > maxPositionals) {
+    return { ok: false, reason: `unexpected argument "${rest[maxPositionals]}"` };
+  }
+  return { ok: true, target: rest[0], force };
+}
 
 export function caddyfile({ name, port }: DeployContext): string {
   return [
@@ -30,6 +101,18 @@ export function nginxConf({ name, port }: DeployContext): string {
     "# so those two lines are the one edit between this file and a running nginx.",
     "# upgrade headers keep websockets alive, proxy_buffering off keeps sse streaming,",
     "# and borgo compresses responses itself (gzip off is nginx's default).",
+    "",
+    "# `Connection: upgrade` belongs on a request that asked to upgrade, and on",
+    "# no other: a fixed value sends it on every proxied request, which stops",
+    "# nginx from keeping the upstream connection alive and hands borgo a",
+    "# hop-by-hop header it has to strip. this map answers `upgrade` only when",
+    "# the client sent an Upgrade header, and `close` otherwise. it sits at http",
+    "# level, which is where sites-enabled is included from.",
+    "map $http_upgrade $connection_upgrade {",
+    "    default upgrade;",
+    "    ''      close;",
+    "}",
+    "",
     "server {",
     "    listen 443 ssl;",
     "    server_name example.com;",
@@ -49,7 +132,7 @@ export function nginxConf({ name, port }: DeployContext): string {
     `        proxy_pass http://localhost:${port};`,
     "        proxy_http_version 1.1;",
     "        proxy_set_header Upgrade $http_upgrade;",
-    '        proxy_set_header Connection "upgrade";',
+    "        proxy_set_header Connection $connection_upgrade;",
     "        proxy_set_header Host $host;",
     // nginx adds no forwarding header on its own, and borgo authorizes
     // /__borgo/publish as "from loopback and not forwarded". Behind a proxy on
@@ -67,7 +150,29 @@ export function nginxConf({ name, port }: DeployContext): string {
   ].join("\n");
 }
 
-export function systemdUnit({ name, port, apiPort }: DeployContext): string {
+export function systemdUnit({ name, port, apiPort, secret }: DeployContext): string {
+  // `Environment=SESSION_SECRET=change-me` was nine bytes, under session.go's
+  // 32-character floor, so every auth route answered 500 - and because a real
+  // environment variable beats `.env` in bun, the unit borgo wrote also
+  // overrode the random key create-borgo had generated. An app that worked
+  // locally, broken by its own deploy config. So: when the app already has a
+  // key, the unit deliberately sets nothing and says why; when it does not,
+  // the key written here is a real one.
+  const session = secret
+    ? [
+        "# SESSION_SECRET is deliberately not set here: bun loads .env from the",
+        `# working directory, so /srv/${name}/.env is the single source of the`,
+        "# key. An Environment= line would win over it and invalidate every",
+        "# session the app has already issued - copy .env to the server instead.",
+      ]
+    : [
+        "# generated by borgo deploy init, unique to this file. borgo refuses a",
+        "# SESSION_SECRET under 32 characters, so a placeholder here would be an",
+        "# app whose every login answers 500. shipping a .env instead? delete",
+        "# this line: bun reads .env from the working directory, and a real",
+        "# environment variable would override it.",
+        `Environment=SESSION_SECRET=${randomSecret()}`,
+      ];
   return [
     "[Unit]",
     `Description=${name} (borgo app)`,
@@ -75,11 +180,17 @@ export function systemdUnit({ name, port, apiPort }: DeployContext): string {
     "",
     "[Service]",
     `WorkingDirectory=/srv/${name}`,
+    // systemd requires an absolute path, so this cannot be a bare `bun`. it is
+    // where a system-wide install puts it; the official installer script puts
+    // it in the installing user's ~/.bun/bin instead
+    "# absolute path is systemd's rule, not borgo's: check yours with `command -v bun`.",
+    "# the official installer writes ~/.bun/bin/bun, which is not readable by User=",
+    "# below - copy or symlink it somewhere system-wide, or point this line at it.",
     "ExecStart=/usr/local/bin/bun run start",
     "Environment=NODE_ENV=production",
     `Environment=PORT=${port}`,
     `Environment=API_PORT=${apiPort}`,
-    "Environment=SESSION_SECRET=change-me",
+    ...session,
     "# bun's outbound fetch pool defaults to 256, which ceilings concurrent",
     "# proxied requests - event streams above all - see docs/realtime.md",
     "Environment=BUN_CONFIG_MAX_HTTP_REQUESTS=16384",
@@ -92,7 +203,27 @@ export function systemdUnit({ name, port, apiPort }: DeployContext): string {
   ].join("\n");
 }
 
-export function composeYml({ port }: DeployContext): string {
+export function composeYml({ port, secret }: DeployContext): string {
+  // an app that signs sessions gets the same required declaration the `full`
+  // template ships: docker compose interpolates it from the .env beside this
+  // file (which the image never sees - .dockerignore excludes it), and `:?`
+  // stops the deploy with a message rather than producing an app whose every
+  // login answers 500. an app with no key gets no line to override: this file
+  // used to replace a correct one with a comment.
+  const session = secret
+    ? [
+        "      # read from the .env beside this file, which docker compose",
+        "      # interpolates and the image never receives (.dockerignore",
+        "      # excludes it). required on purpose: a missing key must stop the",
+        "      # deploy, not turn up later as a 500 on every login.",
+        '      SESSION_SECRET: "${SESSION_SECRET:?missing - create-borgo writes one into .env, or generate one with openssl rand -base64 48}"',
+      ]
+    : [
+        "      # this app signs no sessions yet. adding borgo.SetSession later?",
+        "      # it needs SESSION_SECRET (32+ random characters) or every session",
+        "      # route answers 500 - put it in the .env beside this file and",
+        '      # declare it here as: SESSION_SECRET: "${SESSION_SECRET:?missing}"',
+      ];
   return [
     "services:",
     "  app:",
@@ -100,24 +231,26 @@ export function composeYml({ port }: DeployContext): string {
     "    ports:",
     `      - "${port}:${port}"`,
     "    environment:",
-    "      # SESSION_SECRET: use-a-long-random-string",
-    // the volume below is created root-owned by docker, and the images borgo
-    // scaffolds drop to `USER bun`: uncommenting DB_PATH without preparing the
-    // directory in the Dockerfile is a permission-denied at startup, every time
-    "      # DB_PATH needs /data writable by the image's user. In the Dockerfile,",
-    "      # before `USER bun`: RUN mkdir -p /data && chown bun:bun /data",
-    "      # DB_PATH: /data/app.db",
     "      NODE_ENV: production",
     `      PORT: "${port}"`,
+    ...session,
     "      # bun's outbound fetch pool defaults to 256, which ceilings",
     "      # concurrent event streams - see docs/realtime.md",
     '      BUN_CONFIG_MAX_HTTP_REQUESTS: "16384"',
-    "    volumes:",
-    "      - data:/data",
     "    restart: unless-stopped",
-    "",
-    "volumes:",
-    "  data:",
+    // no volume: the templates deliberately ship none, because nothing in them
+    // persists anything yet, and a mount docker creates root-owned is a
+    // permission error waiting for the first app that uses it. the scaffolded
+    // Dockerfiles already prepare /data, so adding one is two blocks here.
+    "# nothing here persists yet, so there is no volume. swapping the in-memory",
+    "# stores for a real database? the scaffolded Dockerfile already creates",
+    "# /data owned by the image's user, so this is the whole change:",
+    "#   environment:",
+    "#     DB_PATH: /data/app.db",
+    "#   volumes:",
+    "#     - data:/data",
+    "# volumes:",
+    "#   data:",
     "",
   ].join("\n");
 }
@@ -156,6 +289,7 @@ export function projectContext(dir = "."): DeployContext {
     name,
     port: process.env.PORT || "3000",
     apiPort: process.env.API_PORT || "3501",
+    secret: envSecret(dir),
   };
 }
 

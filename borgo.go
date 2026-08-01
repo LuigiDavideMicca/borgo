@@ -231,6 +231,19 @@ func recoverMiddleware(next http.Handler) http.Handler {
 // recoverWriter records whether the response was committed. It forwards Flush
 // and Unwrap so streaming handlers and http.ResponseController still reach the
 // real writer.
+//
+// Hijack is deliberately not forwarded, here or on gzipResponseWriter, so a
+// `w.(http.Hijacker)` assertion inside a borgo handler fails - gorilla/
+// websocket and anything else that takes the connection over cannot upgrade.
+// It is not an oversight: borgo's own streaming is server-sent events, which
+// needs no hijack, and websockets in a borgo app terminate on the front server
+// (the ws relay), not in the go api. A wrapper that handed the connection out
+// would also hand out one this one has already staged headers for and, past
+// gzipMinBytes, written a gzip stream into. http.ResponseController - the
+// supported route to the deadlines and the flusher - works through both
+// wrappers via Unwrap. If the api ever has to upgrade in-process, the honest
+// change is a Hijack that first refuses on any writer that has buffered or
+// committed bytes, not a blind forward.
 type recoverWriter struct {
 	http.ResponseWriter
 	wrote bool
@@ -307,7 +320,7 @@ func newServer(port string, handler http.Handler) *http.Server {
 // Serve mounts every registered route and listens on API_PORT (default 3501).
 // It also answers GET /healthz, unless a registered route claims it. It blocks
 // until the process is signalled, then shuts down gracefully; a listener that
-// fails to start is fatal.
+// fails to start, or an environment CheckEnv refuses, is fatal.
 //
 // Use ServeContext to get the error back instead of exiting - a test or a
 // program that embeds the api needs to be able to stop the server and carry on.
@@ -326,10 +339,13 @@ func Serve() {
 // the parent process named by BORGO_PARENT_PID exits, then shuts the server
 // down gracefully within BORGO_SHUTDOWN_TIMEOUT and returns nil. It returns
 // the listener's error - a port already in use, most often - if the server
-// cannot start or stops on its own.
+// cannot start or stops on its own, and CheckEnv's if the session environment
+// is unusable. It never exits the process: every refusal comes back as a
+// value, so an embedder's own cleanup, and any other server it is running,
+// survive a borgo that will not start.
 //
 // Cancelling ctx is the way to stop the server: when it returns, the port is
-// released and every event stream has ended.
+// released and every event stream this run was serving has ended.
 func ServeContext(ctx context.Context) error {
 	return serveContext(ctx, func() {})
 }
@@ -368,12 +384,21 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 	// before "api on :port" is printed
 	srv := newServer(port, recoverMiddleware(gzipMiddleware(mux)))
 	grace := envDuration("BORGO_SHUTDOWN_TIMEOUT", 10*time.Second)
-	// arm the stream-shutdown latch before anything can connect, so a second
-	// run in the same process neither inherits the first one's cancellation
-	// nor has its own tripped by the first one's still-pending hook
-	armStreamShutdown(srv)
-	warnSessionSecret()
+	// arm this server's stream-shutdown latch before anything can connect, and
+	// drop it on the way out however this run ends: a run that never binds
+	// must leave no latch behind it
+	defer armStreamShutdown(srv)()
+	// settle the session environment before binding: a refusal here is the
+	// caller's to act on, and Serve turns it into the log.Fatal it always was.
+	// Exiting from in here would take an embedder's process with it, deferred
+	// cleanup unrun, which is the one thing ServeContext exists not to do
+	if err := CheckEnv(); err != nil {
+		return err
+	}
 	printStartup(patterns, port)
+
+	parentExited, stopWatchingParent := watchParent()
+	defer stopWatchingParent()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
@@ -383,7 +408,7 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 	case <-ctx.Done():
 		onShutdown()
 		shutdown(srv, grace)
-	case <-watchParent():
+	case <-parentExited:
 		// on windows a force-killed supervisor delivers no signal: without
 		// this the api outlives borgo dev/start, holding the port and the
 		// binary until someone finds it in the task manager
@@ -395,22 +420,33 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 }
 
 // watchParent returns a channel that closes when the process named by
-// BORGO_PARENT_PID exits; without the env it returns nil (blocks forever).
-func watchParent() <-chan struct{} {
+// BORGO_PARENT_PID exits, and the func that ends the watch. Without the env
+// the channel is nil (blocks forever) and the stop is a no-op.
+//
+// The stop is not optional. The watcher blocks in a wait nothing else ends -
+// on windows inside WaitForSingleObject, holding a kernel handle on the parent
+// - so without it every ServeContext run left a goroutine parked for the life
+// of the process, and ServeContext exists to be called more than once. Each
+// run ends its own watcher on the way out.
+func watchParent() (<-chan struct{}, func()) {
 	v := os.Getenv("BORGO_PARENT_PID")
 	if v == "" {
-		return nil
+		return nil, func() {}
 	}
 	pid, err := strconv.Atoi(v)
 	if err != nil || pid <= 0 {
-		return nil
+		return nil, func() {}
 	}
+	stop := make(chan struct{})
 	ch := make(chan struct{})
 	go func() {
-		waitParentExit(pid)
-		close(ch)
+		// a cancelled watch observed nothing about the parent: closing ch
+		// there would report an exit that never happened
+		if waitParentExit(pid, stop) {
+			close(ch)
+		}
 	}()
-	return ch
+	return ch, sync.OnceFunc(func() { close(stop) })
 }
 
 // shutdown stops accepting and lets in-flight requests finish. Event streams
@@ -430,11 +466,20 @@ func shutdown(srv *http.Server, grace time.Duration) {
 	}
 }
 
-// warnSessionSecret settles SESSION_SECRET at startup, while there is still
-// somebody watching the terminal who can fix it.
+// CheckEnv settles the session environment - SESSION_SECURE and
+// SESSION_SECRET - while there is still somebody watching the terminal who can
+// fix it. Serve and ServeContext call it before they bind; call it yourself at
+// startup if you mount borgo's handlers on your own server, or the first
+// request that writes a cookie is where you find out. It logs the warnings and
+// returns the refusals.
 //
-// Unset only warns: an app with no sessions is legitimate, and borgo already
-// refuses to issue or verify one, so the failure direction is closed.
+// SESSION_SECURE is refused when it is not a boolean: it was an == "1" test
+// once, so SESSION_SECURE=true read as false and quietly issued a cookie the
+// browser would send back over plain http.
+//
+// An unset SESSION_SECRET only warns: an app with no sessions is legitimate,
+// and borgo already refuses to issue or verify one, so the failure direction
+// is closed.
 //
 // Set but too short is refused outright. A short key is not a weaker secret,
 // it is a searchable one - the whole security of a session cookie is that
@@ -444,23 +489,28 @@ func shutdown(srv *http.Server, grace time.Duration) {
 // nobody reads, which is the same silent-downgrade shape as SESSION_SECURE=true
 // issuing a non-Secure cookie. Refusing costs a restart with a real secret;
 // accepting costs every session in the app.
-func warnSessionSecret() {
-	// read now so a malformed SESSION_SECURE fails the boot, the way a
-	// malformed BORGO_*_TIMEOUT does, rather than panicking inside the first
-	// handler that writes a cookie
-	_ = sessionSecure()
+//
+// The refusal is an error and not a log.Fatal because the caller may be a test
+// binary or a program that embeds the api: exiting from inside ServeContext
+// killed the process mid-run, skipped its deferred cleanup and took any
+// sibling server with it. Serve, which owns its process, still exits.
+func CheckEnv() error {
+	if _, err := sessionSecure(); err != nil {
+		return err
+	}
 	secret := os.Getenv("SESSION_SECRET")
 	switch {
 	case secret == "":
 		log.Print("borgo: SESSION_SECRET not set: session and auth routes will fail until it is")
 	case len(secret) < sessionSecretMinLen:
-		log.Fatalf(
+		return fmt.Errorf(
 			"borgo: SESSION_SECRET is %d bytes; it must be at least %d (openssl rand -base64 48). "+
 				"A key this short can be searched offline from one captured cookie, so borgo refuses "+
 				"to start rather than sign with it",
 			len(secret), sessionSecretMinLen,
 		)
 	}
+	return nil
 }
 
 func colorEnabled() bool {

@@ -499,27 +499,35 @@ describe("proxyRequest: the outbound request", () => {
     expect(headers!.get("cookie")).toBe("borgo_session=abc");
   });
 
-  test("a front proxy's own X-Forwarded-Host is not overwritten", async () => {
-    // nginx's default rewrites Host to the upstream, so its X-Forwarded-Host
-    // is the only record of the public name; ours would be strictly worse
+  // Dropping Host and then passing the client's own X-Forwarded-Host through
+  // moves the primitive one header over: app code building an absolute url, or
+  // keying a rate limit, reaches for exactly that field. The old rule was "a
+  // front proxy already set it", which was never true of the deployment borgo
+  // ships - its generated nginx sets Host, X-Forwarded-For and
+  // X-Forwarded-Proto, and no X-Forwarded-Host at all - so in practice the only
+  // sender was the browser, and it reached go verbatim (confirmed on the wire).
+  test("a client-supplied X-Forwarded-Host does not survive", async () => {
     let headers: Headers | undefined;
     await proxyRequest(
-      req("GET", { headers: { host: "localhost:3000", "x-forwarded-host": "app.example.com" } }),
+      req("GET", { headers: { host: "localhost:3000", "x-forwarded-host": "attacker.example" } }),
       opts({
+        clientIp: "203.0.113.7",
         fetchImpl: async (_t, init) => {
           headers = new Headers(init.headers);
           return new Response("ok");
         },
       }),
     );
-    expect(headers!.get("x-forwarded-host")).toBe("app.example.com");
+    // behind a proxy the inbound Host IS the public name (nginx's $host), so
+    // this is both the honest value and the only one borgo saw for itself
+    expect(headers!.get("x-forwarded-host")).toBe("localhost:3000");
     expect(headers!.has("host")).toBe(false);
   });
 
-  test("a request with no Host of its own gains no X-Forwarded-Host", async () => {
+  test("a request with no Host of its own gains no X-Forwarded-Host, invented or inherited", async () => {
     let headers: Headers | undefined;
     await proxyRequest(
-      req("GET"),
+      req("GET", { headers: { "x-forwarded-host": "attacker.example" } }),
       opts({
         fetchImpl: async (_t, init) => {
           headers = new Headers(init.headers);
@@ -528,6 +536,109 @@ describe("proxyRequest: the outbound request", () => {
       }),
     );
     expect(headers!.has("x-forwarded-host")).toBe(false);
+  });
+
+  describe("X-Forwarded-For", () => {
+    const forwardedFor = async (over: Partial<ProxyOptions>, headers: Record<string, string> = {}) => {
+      let seen: Headers | undefined;
+      await proxyRequest(
+        req("GET", { headers }),
+        opts({
+          ...over,
+          fetchImpl: async (_t, init) => {
+            seen = new Headers(init.headers);
+            return new Response("ok");
+          },
+        }),
+      );
+      return seen!.get("x-forwarded-for");
+    };
+
+    test("the real peer is appended, the way $proxy_add_x_forwarded_for does", async () => {
+      // a trusted front proxy's chain is kept and extended: borgo cannot tell a
+      // real chain from an invented one, but it can always name the hop it read
+      // the request from, and that is now the last entry
+      expect(await forwardedFor({ clientIp: "127.0.0.1" }, { "x-forwarded-for": "198.51.100.9" })).toBe(
+        "198.51.100.9, 127.0.0.1",
+      );
+    });
+
+    test("a client's invention never travels alone", async () => {
+      // forwarded verbatim it is a rate-limit key and an audit log the client
+      // writes for itself
+      expect(await forwardedFor({ clientIp: "203.0.113.7" }, { "x-forwarded-for": "1.2.3.4" })).toBe(
+        "1.2.3.4, 203.0.113.7",
+      );
+      expect(await forwardedFor({ clientIp: "203.0.113.7" })).toBe("203.0.113.7");
+    });
+
+    test("with no peer to vouch for, nothing travels at all", async () => {
+      // the connection is already gone: a chain borgo cannot sign is not evidence
+      expect(await forwardedFor({}, { "x-forwarded-for": "1.2.3.4" })).toBeNull();
+    });
+  });
+
+  // The read deadline bounds the request, not the response - but bun has one
+  // knob for both, so the caller lifts it the instant the request body is
+  // entirely in hand. Granting that only after the handler resolves is too
+  // late: an upstream taking 6s to produce headers had the connection closed at
+  // 4.0s with zero bytes delivered, which also defeated BORGO_API_TIMEOUT=0.
+  describe("onBodyRead: when the read deadline stops applying", () => {
+    const lifts = async (method: string, init: { headers?: Record<string, string>; body?: BodyInit } = {}) => {
+      const order: string[] = [];
+      await proxyRequest(
+        req(method, init),
+        opts({
+          onBodyRead: () => order.push("lifted"),
+          fetchImpl: async () => {
+            order.push("upstream");
+            return new Response("ok");
+          },
+        }),
+      );
+      return order;
+    };
+
+    test("a buffered body is lifted before the upstream is even dialled", async () => {
+      expect(await lifts("POST", { headers: { "content-length": "3" }, body: "abc" })).toEqual([
+        "lifted",
+        "upstream",
+      ]);
+    });
+
+    test("a body still arriving keeps the deadline", async () => {
+      // no content-length means an unbuffered passthrough: the client is still
+      // writing, so this is still a read and still the deadline's business
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode("x"));
+          c.close();
+        },
+      });
+      const order: string[] = [];
+      await proxyRequest(
+        new Request("http://app.test/api/x", {
+          method: "POST",
+          body: stream,
+          // @ts-expect-error bun accepts a stream body with duplex: "half"
+          duplex: "half",
+        }),
+        opts({
+          onBodyRead: () => order.push("lifted"),
+          fetchImpl: async () => {
+            order.push("upstream");
+            return new Response("ok");
+          },
+        }),
+      );
+      expect(order).toEqual(["upstream"]);
+    });
+
+    test("a GET has nothing to wait for and is lifted by the caller, not here", async () => {
+      // serve() lifts a body-less request at the top of fetch(), before this
+      // function is ever reached; there is nothing left for the proxy to signal
+      expect(await lifts("GET")).toEqual(["upstream"]);
+    });
   });
 
   test("a head carries no body, and is not turned into a get", async () => {

@@ -67,10 +67,16 @@ func acceptsGzip(acceptEncoding string) bool {
 
 // refusesCoding reports whether a coding's parameters carry a zero quality;
 // any spelling of it (q=0, q=0.0, q=0.00) is a refusal.
+//
+// The parameter name is matched case-insensitively, like the coding name
+// beside it: RFC 9110 5.6.6 makes parameter names case-insensitive, and
+// "gzip;Q=0" is a client refusing gzip in a spelling no less valid than
+// "gzip;q=0". Matching only the lowercase one compressed a response for a
+// client that had just said it cannot decode it.
 func refusesCoding(params []string) bool {
 	for _, param := range params {
-		value, ok := strings.CutPrefix(strings.TrimSpace(param), "q=")
-		if !ok {
+		name, value, ok := strings.Cut(param, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "q") {
 			continue
 		}
 		q, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
@@ -104,7 +110,10 @@ type gzipResponseWriter struct {
 
 func (g *gzipResponseWriter) Header() http.Header { return g.rw.Header() }
 
-// Unwrap lets http.ResponseController reach the underlying writer.
+// Unwrap lets http.ResponseController reach the underlying writer. Hijack is
+// not forwarded - see recoverWriter for why - so a handler cannot take over a
+// connection whose headers are staged and whose body may already be a gzip
+// stream; http.ResponseController is the supported way through.
 func (g *gzipResponseWriter) Unwrap() http.ResponseWriter { return g.rw }
 
 func (g *gzipResponseWriter) WriteHeader(status int) {

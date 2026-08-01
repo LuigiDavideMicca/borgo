@@ -29,6 +29,16 @@ func TestAcceptsGzip(t *testing.T) {
 		{"GZIP", true},
 		{"Gzip;q=0", false},
 		{"*;q=0", false},
+		// and so are parameter names (RFC 9110 5.6.6): a client that spells
+		// its refusal "Q=0" refused, and compressing it ships bytes it just
+		// said it cannot decode
+		{"gzip;Q=0", false},
+		{"gzip; Q=0.00", false},
+		{"GZIP;Q=0", false},
+		{"*;Q=0", false},
+		{"gzip;Q=0, *", false},
+		{"deflate, gzip;Q=0.5", true},
+		{"*;Q=0, gzip", true},
 		{"br", false},
 		{"*", true},
 		{"identity", false},

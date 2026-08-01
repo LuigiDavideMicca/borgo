@@ -19,10 +19,20 @@ import { loadArgv, resolveLoadTool, runLoad, summarise, type LoadTool } from "./
 import { listApps, resolveArgv, resolveEnv, type App } from "./lib/manifest";
 import { measureMemory, settledRss, sseHandshake } from "./lib/memory";
 import { resultsDir } from "./lib/paths";
-import { cleanupStale, installCleanupHooks, killAll, portInUse, run, spawnServer, waitPortFree, type Spawned } from "./lib/proc";
+import { capture, cleanupStale, installCleanupHooks, killAll, portInUse, run, spawnServer, waitPortFree, type Spawned } from "./lib/proc";
 import { reportMarkdown, type Report, type RunConfig } from "./lib/report";
 import { ALL_SCENARIO_IDS, SCENARIOS, scenarioById } from "./lib/scenarios";
-import type { AppResult, ScenarioId, ScenarioResult } from "./lib/types";
+import type { AppResult, ResponseSample, ScenarioId, ScenarioResult } from "./lib/types";
+
+/**
+ * How many non-2xx responses a scenario may contain before its throughput is
+ * refused. oha's own successRate is transport-level - a 500 that arrives
+ * intact is a "success" to it - so a server that sheds work under load used to
+ * be reported as a server that is fast. Applied to the WORST run, not the
+ * median: with three runs a median discards one catastrophe entirely.
+ */
+const MAX_NON_2XX_RATE = 0.001;
+const MIN_TRANSPORT_SUCCESS_RATE = 0.99;
 
 // ---------------------------------------------------------------- arguments
 
@@ -35,12 +45,40 @@ interface Options {
   runs: number;
   memoryConnections: number;
   apiPort: number;
+  /**
+   * Sweeps over the whole app list. Pass 1 runs the list forwards, pass 2
+   * backwards, and so on. See the comment on `sweepOrder`.
+   */
+  passes: number;
   note: string;
   out: string;
   label: string;
   skipBuild: boolean;
+  skipInstall: boolean;
   loadToolPath?: string;
   noDownload: boolean;
+}
+
+/**
+ * The order the apps are measured in, for one sweep.
+ *
+ * This used to be alphabetical, once, for everything - which on a laptop that
+ * drifts thermally is not an ordering, it is a handicap. borgo ran second and
+ * Next.js ran last, roughly 45 minutes into a saturated machine, and the
+ * committed proof run shows -24% across three consecutive 30 s runs of a
+ * single scenario (19,355 -> 15,422 -> 14,665 req/s, RSD 15.3%). A queue
+ * position worth 24% swamps every framework difference this harness exists to
+ * find.
+ *
+ * The fix is not a cleverer sort. Two sweeps are run in opposite directions,
+ * so every app is measured once early and once late, and both results are
+ * reported. If the two disagree by more than the run-to-run noise, the machine
+ * drifted and the campaign says so instead of publishing the drift as a
+ * finding. Alphabetical remains the pass-1 order only because it is stable and
+ * printable; nothing depends on it any more.
+ */
+function sweepOrder<T>(apps: T[], pass: number): T[] {
+  return pass % 2 === 1 ? [...apps] : [...apps].reverse();
 }
 
 function parseArgs(argv: string[]): Options | "help" | "list" | "cleanup" {
@@ -74,10 +112,16 @@ function parseArgs(argv: string[]): Options | "help" | "list" | "cleanup" {
     runs: Number(value("--runs", "3")),
     memoryConnections: Number(value("--conn-mem", "1000")),
     apiPort: Number(value("--api-port", "43501")),
+    passes: Number(value("--passes", "2")),
     note: value("--note", ""),
     out: value("--out", resultsDir()),
     label: value("--label", ""),
     skipBuild: argv.includes("--skip-build"),
+    // --skip-build used to run every manifest's `install` step anyway, so the
+    // flag documented as "reuse whatever is already built" could pull new
+    // dependency versions and change what a second campaign was measuring.
+    // Skipping the build now skips the install with it; --install forces it.
+    skipInstall: argv.includes("--skip-build") && !argv.includes("--install"),
     loadToolPath: value("--load-tool", "") || undefined,
     noDownload: argv.includes("--no-download"),
   };
@@ -98,11 +142,19 @@ Options
   --runs N              measured runs per scenario; the MEDIAN is reported (default 3)
   --conn-mem N          open SSE connections for the memory probe (default 1000)
   --api-port N          port handed to implementations that need a second one (default 43501)
+  --passes N            sweeps over the app list, each in the opposite order to the
+                        last (default 2). Every app is therefore measured once early
+                        and once late in the campaign, and both are reported: on a
+                        machine that drifts thermally, queue position is worth more
+                        than most framework differences. --passes 1 is faster and
+                        gives you no way to tell drift from a result.
   --note "..."          free text recorded in the environment block: say whether the
                         machine was idle, on mains, thermally throttled, ...
   --label name          suffix for the output filenames
   --out DIR             where to write results (default bench/results)
-  --skip-build          reuse whatever is already built (faster, less honest)
+  --skip-build          reuse whatever is already built, and do not reinstall
+                        dependencies either (faster, less honest)
+  --install             run the manifest install steps even under --skip-build
   --load-tool PATH      use this oha/wrk binary
   --no-download         never fetch a pinned oha; fail instead
   --list                list implementations and scenarios, run nothing
@@ -116,6 +168,10 @@ interface Ports {
   port: number;
   apiPort: number;
 }
+
+/** does this implementation get handed a second port it actually listens on? */
+const usesApiPort = (app: App): boolean =>
+  JSON.stringify([app.manifest.env ?? {}, app.manifest.start, app.manifest.build ?? []]).includes("API_PORT");
 
 const log = (msg: string) => console.log(msg);
 const step = (msg: string) => console.log(`  ${msg}`);
@@ -148,8 +204,18 @@ async function waitReady(url: string, timeoutMs: number, proc: Spawned): Promise
  * A fast wrong answer is not a result. Every scenario is checked against the
  * contract before it is loaded, and a failed check fails the scenario loudly
  * rather than producing a very impressive number for a 404.
+ *
+ * The check counts as well as searches. Substring checks alone could only
+ * express "this string appears somewhere", so an implementation that shipped
+ * two of CONTRACT.md's seven requirements for `/page` - and skipped the twenty
+ * rows, the nav and the hydrating component - passed and posted a number that
+ * looked like a win. `expect.matches` carries the counts; `expect.minBytes` is
+ * a floor under the response so a suspiciously short body fails rather than
+ * scores.
+ *
+ * Returns what it saw, so the report can print response size beside req/s.
  */
-async function verify(base: string, id: ScenarioId): Promise<void> {
+async function verify(base: string, id: ScenarioId): Promise<ResponseSample | undefined> {
   const scenario = scenarioById(id);
 
   if (scenario.kind === "memory") {
@@ -162,7 +228,8 @@ async function verify(base: string, id: ScenarioId): Promise<void> {
     if (scenario.expect.contentType && !streamType.includes(scenario.expect.contentType)) {
       throw new Error(`GET ${scenario.path} content-type "${streamType}" does not include "${scenario.expect.contentType}"`);
     }
-    return;
+    // a stream has no body length to record: it is still open
+    return undefined;
   }
 
   const res = await fetch(base + scenario.path, { signal: AbortSignal.timeout(15_000) });
@@ -174,17 +241,41 @@ async function verify(base: string, id: ScenarioId): Promise<void> {
     throw new Error(`GET ${scenario.path} content-type "${contentType}" does not include "${scenario.expect.contentType}"`);
   }
   const body = await res.text();
+  // bytes, not characters: the load tool moves bytes and so does the network
+  const bytes = Buffer.byteLength(body, "utf8");
+
   for (const needle of scenario.expect.contains ?? []) {
     if (!body.includes(needle)) {
       throw new Error(`GET ${scenario.path} body does not contain ${JSON.stringify(needle)} - the contract is not met`);
     }
   }
+  for (const rule of scenario.expect.matches ?? []) {
+    const min = rule.min ?? 1;
+    const flags = rule.flags ?? "";
+    const found = min === 1 && !flags.includes("g")
+      ? (new RegExp(rule.pattern, flags).test(body) ? 1 : 0)
+      : [...body.matchAll(new RegExp(rule.pattern, flags.includes("g") ? flags : flags + "g"))].length;
+    if (found < min) {
+      throw new Error(
+        `GET ${scenario.path}: the contract requires ${rule.label} (/${rule.pattern}/ at least ${min}x); ` +
+          `the response has ${found}`,
+      );
+    }
+  }
+  if (scenario.expect.minBytes !== undefined && bytes < scenario.expect.minBytes) {
+    throw new Error(
+      `GET ${scenario.path} returned ${bytes} bytes; the contract's floor is ${scenario.expect.minBytes}. ` +
+        "A short body is not a fast body - refusing to time this.",
+    );
+  }
+
+  return { status: res.status, contentType, bytes };
 }
 
-async function buildApp(app: App, env: Record<string, string>, skip: boolean, ports: Ports): Promise<void> {
+async function buildApp(app: App, env: Record<string, string>, opts: Options, ports: Ports): Promise<void> {
   const steps: string[][] = [];
-  if (app.manifest.install) steps.push(app.manifest.install);
-  if (!skip) steps.push(...(app.manifest.build ?? []));
+  if (app.manifest.install && !opts.skipInstall) steps.push(app.manifest.install);
+  if (!opts.skipBuild) steps.push(...(app.manifest.build ?? []));
   for (const raw of steps) {
     const argv = resolveArgv(raw, ports);
     step(`build: ${argv.join(" ")}`);
@@ -208,14 +299,32 @@ async function benchmarkApp(app: App, opts: Options, tool: LoadTool): Promise<Ap
   const ports: Ports = { port: app.manifest.port, apiPort: opts.apiPort };
   const env = resolveEnv(app.manifest, ports);
 
-  if (await portInUse(app.manifest.port)) {
-    return { ...result, status: "failed", reason: `port ${app.manifest.port} is already in use - refusing to measure someone else's server` };
+  // Both ports, not just the public one. An implementation with a second half
+  // (borgo's Go API) is proxied to on API_PORT, so a stale binary left on it by
+  // a crashed run would be quietly measured instead of the one just started -
+  // and the public port would look perfectly free while it happened.
+  for (const port of [app.manifest.port, ...(usesApiPort(app) ? [opts.apiPort] : [])]) {
+    if (await portInUse(port)) {
+      return {
+        ...result,
+        status: "failed",
+        reason: `port ${port} is already in use - refusing to measure someone else's server`,
+      };
+    }
   }
 
   try {
-    await buildApp(app, env, opts.skipBuild, ports);
+    await buildApp(app, env, opts, ports);
   } catch (error) {
     return { ...result, status: "failed", reason: `build failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+
+  // the competitor's own version, recorded rather than asserted from a
+  // hand-typed string in a README. `versionCommand` had been declared and set
+  // by seven manifests and read by nothing at all.
+  if (app.manifest.versionCommand) {
+    const printed = await capture(resolveArgv(app.manifest.versionCommand, ports), app.dir);
+    result.frameworkVersion = printed.split("\n")[0]?.trim() || "unknown";
   }
 
   let server: Spawned | null = null;
@@ -281,8 +390,9 @@ async function runScenario(
   rootPid: number,
 ): Promise<ScenarioResult> {
   const scenario = scenarioById(id);
+  let sample: ResponseSample | undefined;
   try {
-    await verify(base, id);
+    sample = await verify(base, id);
   } catch (error) {
     return { scenario: id, status: "failed", reason: error instanceof Error ? error.message : String(error) };
   }
@@ -310,19 +420,45 @@ async function runScenario(
       await Bun.sleep(1_000);
     }
     const summary = summarise(runs);
-    if (summary.median.successRate < 0.99) {
+    // the worst run, not the median: three runs and a median means one run can
+    // fail completely without the campaign noticing
+    if (summary.worst.successRate < MIN_TRANSPORT_SUCCESS_RATE) {
       return {
         scenario: id,
         status: "failed",
-        reason: `success rate ${(summary.median.successRate * 100).toFixed(1)}% - too many failed requests to report a throughput`,
+        reason:
+          `worst-run transport success rate ${(summary.worst.successRate * 100).toFixed(1)}% ` +
+          `- too many failed requests to report a throughput`,
+        sample,
         load: summary,
       };
     }
-    return { scenario: id, status: "ok", load: summary };
+    // and the answers themselves, which oha's successRate says nothing about:
+    // a 500 delivered intact is a completed exchange to a load tool, and a
+    // server that sheds work under sustained concurrency sheds it fast.
+    // verify() only ever saw one response, before the load started.
+    if (summary.worst.non2xxRate > MAX_NON_2XX_RATE) {
+      const seen = Object.entries(summary.totals.statusCodes)
+        .map(([code, count]) => `${code}:${count}`)
+        .join(" ");
+      return {
+        scenario: id,
+        status: "failed",
+        reason:
+          `${(summary.worst.non2xxRate * 100).toFixed(2)}% of responses in the worst run were not 2xx ` +
+          `(over ${pct(MAX_NON_2XX_RATE)}) - the server degraded under load, so this is not a throughput. ` +
+          `Totals over ${summary.totals.runs} run(s): ${seen}`,
+        sample,
+        load: summary,
+      };
+    }
+    return { scenario: id, status: "ok", sample, load: summary };
   } catch (error) {
     return { scenario: id, status: "failed", reason: error instanceof Error ? error.message : String(error) };
   }
 }
+
+const pct = (rate: number) => `${(rate * 100).toFixed(2)}%`;
 
 async function main() {
   const parsed = parseArgs(process.argv.slice(2));
@@ -370,14 +506,29 @@ async function main() {
 
   const environment = await captureEnvironment(tool, opts.note);
   const results: AppResult[] = [];
-  for (const app of selected) {
-    log(`\n  === ${app.manifest.name} (${app.manifest.framework}) ===`);
-    if (app.manifest.status === "stub") {
-      step(`stub, not run: ${app.manifest.todo}`);
-      results.push({ app: app.manifest.name, manifest: app.manifest, status: "stub", reason: app.manifest.todo, scenarios: [] });
-      continue;
+  const passOrders: string[][] = [];
+
+  for (let pass = 1; pass <= opts.passes; pass++) {
+    const order = sweepOrder(selected, pass);
+    passOrders.push(order.map((a) => a.manifest.name));
+    log(`\n  ==== pass ${pass} of ${opts.passes}: ${order.map((a) => a.manifest.name).join(" -> ")} ====`);
+    for (const [index, app] of order.entries()) {
+      const position = { pass, orderIndex: index + 1 };
+      log(`\n  === ${app.manifest.name} (${app.manifest.framework}) - pass ${pass}, #${index + 1} of ${order.length} ===`);
+      if (app.manifest.status === "stub") {
+        step(`stub, not run: ${app.manifest.todo}`);
+        results.push({
+          app: app.manifest.name,
+          manifest: app.manifest,
+          status: "stub",
+          reason: app.manifest.todo,
+          scenarios: [],
+          ...position,
+        });
+        continue;
+      }
+      results.push({ ...(await benchmarkApp(app, opts, tool)), ...position });
     }
-    results.push(await benchmarkApp(app, opts, tool));
   }
 
   const config: RunConfig = {
@@ -388,6 +539,10 @@ async function main() {
     memoryConnections: opts.memoryConnections,
     scenarios: opts.scenarios,
     apps: selected.map((a) => a.manifest.name),
+    passes: opts.passes,
+    passOrders,
+    skipBuild: opts.skipBuild,
+    skipInstall: opts.skipInstall,
     loadArgvTemplate: loadArgv(tool, { url: "<url>", connections: opts.connections, durationSeconds: opts.durationSeconds })
       .slice(1)
       .join(" "),

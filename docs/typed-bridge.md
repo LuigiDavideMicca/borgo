@@ -110,9 +110,10 @@ Fields follow `encoding/json` semantics, because that is what will actually be o
 | --- | --- | --- |
 | `string`, `int`, `float64`, `bool` | `string`, `number`, `boolean` | |
 | `*T` | `T \| null` | |
-| `[]T`, `[N]T` | `Array<T>` | |
-| `[]byte` | `string` | Go marshals it as base64 |
-| `map[string]T` | `Record<string, T>` | numeric keys too — Go writes them as strings |
+| `[]T` | `Array<T> \| null` | a **nil** slice marshals to `null`, never `[]` — see below |
+| `[N]T` | `Array<T>` | a fixed-size array is always there, so it is never null |
+| `[]byte` | `string \| null` | Go marshals it as base64; nil is `null` |
+| `map[string]T` | `Record<string, T> \| null` | numeric keys too — Go writes them as strings; a nil map is `null` |
 | `time.Time` | `string` | RFC 3339 |
 | `json.RawMessage` | `unknown` | |
 | a type with `MarshalText` | `string` | see the addressability note below |
@@ -136,7 +137,7 @@ A type borgogen cannot see through — anything with a custom `MarshalJSON` — 
 
 ## The nil slice trap
 
-One place where Go's own JSON semantics can surprise you, and the bridge deliberately does not paper over it:
+One place where Go's own JSON semantics can surprise you, and where the generated types now say so out loud:
 
 ```go no-check
 var tasks []Task            // nil, not empty
@@ -144,15 +145,23 @@ db.Find(&tasks)             // still nil if there are no rows
 borgo.JSON(w, 200, TaskList{Tasks: tasks})
 ```
 
-A **nil** slice or map marshals to `null`, not `[]` — so the client receives `{"tasks": null}` while the generated type says `Array<Task>`, and `tasks.map(...)` throws. The bridge types the *intent*, because `Array<Task> | null` on every collection would push a null check into every consumer for a case your handler controls.
+A **nil** slice, map or `[]byte` marshals to `null`, not `[]` — and there is no tag, no receiver and no analysis that tells the generator which of your handlers has arranged for it not to be nil. So the bridge types the wire: `Array<Task> | null`. The alternative is a type that is right about intent and wrong about bytes, which fails at `tasks.map(...)` in the browser, at runtime, in production — the one place TypeScript was supposed to help. A fixed-size array (`[N]T`) is exempt: it is always there.
 
-The fix belongs in Go, and it is one line:
+You have two ways to deal with the null, and they are both fine.
+
+**Handle it on the client**, which is what the type is asking for:
+
+```tsx no-check
+const tasks = data.tasks ?? [];
+```
+
+**Or make it impossible in Go**, which is one line and worth the habit in any handler returning a collection:
 
 ```go no-check
 tasks := []Task{}           // empty, marshals to []
 ```
 
-Make it a habit in any handler that returns a collection.
+Note that the second one does not change the generated type — borgogen reads the struct, not the handler — so the `?? []` stays. What it buys you is that the null never reaches a client you did not write.
 
 ## The generated client
 

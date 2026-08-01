@@ -4,10 +4,12 @@ package api
 import "github.com/LuigiDavideMicca/borgo"
 
 func init() {
+	borgo.Handle("GET /api/amb", GetAmb)
 	borgo.Handle("GET /api/child", GetChild)
 	borgo.Handle("GET /api/deep", GetDeep)
 	borgo.Handle("GET /api/diamond", GetDiamond)
 	borgo.Handle("GET /api/doc", GetDoc)
+	borgo.Handle("GET /api/ptrembed", GetPtrEmbed)
 	borgo.Handle("GET /api/ptrouter", GetPtrOuter)
 	borgo.Handle("GET /api/tie", GetTie)
 }

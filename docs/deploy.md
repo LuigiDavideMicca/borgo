@@ -4,7 +4,7 @@ Everything between `borgo build` and traffic: container and bare-metal layouts, 
 
 A borgo app in production is two servers: the Go API binary and the Bun front server. `borgo start` is the one thing your supervisor — Docker, systemd, compose — starts and stops; it holds the pair together and exits if either dies.
 
-One wrinkle worth knowing before you read a `ps` listing: bun sizes its outbound fetch pool when the process boots and cannot raise it afterwards, so when `BUN_CONFIG_MAX_HTTP_REQUESTS` is unset `borgo start` re-execs itself once with it set. You then see three processes — the supervisor `borgo start`, the child that actually runs the front server, and the Go binary the child spawned. The supervisor is the pid a service manager signals; it forwards `SIGINT`/`SIGTERM` to the child and exits with the child's code, and the child exits if the supervisor disappears. Set `BUN_CONFIG_MAX_HTTP_REQUESTS` yourself — every deploy config below does — and there is no re-exec and no third process.
+One wrinkle worth knowing before you read a `ps` listing: bun sizes its outbound fetch pool when the process boots and cannot raise it afterwards, so when `BUN_CONFIG_MAX_HTTP_REQUESTS` is unset `borgo start` re-execs itself once with it set. You then see three processes — the supervisor `borgo start`, the child that actually runs the front server, and the Go binary the child spawned. The supervisor is the pid a service manager signals; it forwards `SIGINT`/`SIGTERM` to the child and exits with the child's code, and the child exits if the supervisor disappears. Set `BUN_CONFIG_MAX_HTTP_REQUESTS` yourself and there is no re-exec and no third process. Every config on this page that *starts* the app does exactly that — the template `Dockerfile`, the compose file and the systemd unit. The Caddyfile and the nginx `site.conf` do not: they are reverse proxies, they launch nothing, and they set no environment at all. Behind one of those the variable belongs in whatever actually starts the app — a unit file, a container, your shell — or you leave it unset and let `borgo start` re-exec.
 
 ## borgo deploy init
 
@@ -118,8 +118,12 @@ Behind https, set `SESSION_SECURE=1` so session cookies carry the `Secure` attri
 import type { PrerenderContext } from "borgo-framework";
 
 export const prerender = true;
-export const prerenderPaths = async ({ api }: PrerenderContext) =>
-  (await api("GET /api/tasks")).tasks.map((task) => ({ id: task.ID }));
+export const prerenderPaths = async ({ api }: PrerenderContext) => {
+  const { tasks } = await api("GET /api/tasks");
+  // a nil Go slice is null on the wire, so the generated type is
+  // Array<Task> | null - see the typed bridge
+  return (tasks ?? []).map((task) => ({ id: task.ID }));
+};
 ```
 
 Pages with `hydrate = false` export with zero JavaScript; hydrated pages carry their chunks and hydrate against the exported props (client-side navigation falls back to plain page loads — there is no server to ask for props). A `pages/_404.tsx` exports as `dist/site/404.html` — the filename most static hosts pick up as their error page automatically. Everything else is skipped, with the reason printed.
@@ -200,18 +204,20 @@ Route labels are the matched route *pattern*, not each concrete URL — and the 
 | `BORGO_CSP` | unset | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request |
 | `BORGO_MAX_BODY` | `33554432` (32 MB) | front server: largest request body it will accept and buffer, in bytes |
 | `BORGO_API_TIMEOUT` | `30000` (30 s) | front server: milliseconds to wait for the api's response headers before answering `504`; `0` disables |
-| `BUN_CONFIG_MAX_HTTP_REQUESTS` | `16384` under `borgo dev` and `borgo start`; `256` (bun's default) otherwise | front server: how many proxied requests may be in flight at once. Each event stream holds one for its whole life, so bun's default ceilings concurrent SSE subscribers at ~255. `borgo dev` sets it, every config borgo generates sets it, and `borgo start` re-execs itself to set it when nothing else did. Read at process start — exporting it afterwards has no effect, which is why the re-exec exists |
+| `BUN_CONFIG_MAX_HTTP_REQUESTS` | `16384` under `borgo dev` and `borgo start`; `256` (bun's default) otherwise | front server: how many proxied requests may be in flight at once. Each event stream holds one for its whole life, so bun's default ceilings concurrent SSE subscribers at ~255. `borgo dev` sets it, every config borgo generates that *launches* the app sets it (Dockerfile, compose, systemd — not the caddy/nginx proxy configs, which set no environment), and `borgo start` re-execs itself to set it when nothing else did. Read at process start — exporting it afterwards has no effect, which is why the re-exec exists |
 | `BORGO_READ_HEADER_TIMEOUT` | `5s` | go server: cap on reading request headers (slow-header clients) |
-| `BORGO_IDLE_TIMEOUT` | `2m` | go server: idle keep-alive connections are reclaimed after this |
+| `BORGO_IDLE_TIMEOUT` | go `2m`, front server `30` | **one name, both halves, two grammars** — go reads a duration and panics on anything else; the front server reads whole seconds (its socket read deadline, capped at 255, `0` disables) and silently keeps its default on anything else. See the warning under this table |
 | `BORGO_READ_TIMEOUT` | `0` (off) | go server: whole-request read deadline — leave off unless you have no streams |
 | `BORGO_WRITE_TIMEOUT` | `0` (off) | go server: whole-response write deadline — `borgo.SSE` streams exempt themselves |
 | `BORGO_SHUTDOWN_TIMEOUT` | `10s` | go server: grace period for in-flight requests on shutdown; `0` waits indefinitely |
 | `BORGO_HASH_SLOTS` | `max(1, GOMAXPROCS/2)` | go server: password hashes that may run at once. One costs ~140 ms of cpu, so the cap is what keeps a login flood from starving every other route. A value that is not a positive integer is refused at startup rather than ignored |
 | `NO_COLOR` | unset | disable ANSI colors in logs |
 
-The Go timeouts are duration strings (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot rather than silently defaulting; the front server's two are plain numbers. `DB_PATH` in the samples above is the app's own variable, not the framework's.
+The Go timeouts are duration strings (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot rather than silently defaulting; the front server's three — `BORGO_MAX_BODY` in bytes, `BORGO_API_TIMEOUT` in milliseconds, `BORGO_IDLE_TIMEOUT` in seconds — are plain numbers, and a malformed one is silently replaced by the default. `DB_PATH` in the samples above is the app's own variable, not the framework's.
 
-Two more exist for the build, not the runtime: `BORGO_TAILWIND=1` is what `borgo build --tailwind` sets for its child processes (use the flag, not the variable — see [styling](dev-experience.md#styling)), and `BORGO_PARENT_PID` is how the CLI tells its children whose death to exit with. `BORGO_RELOAD` and `BORGO_CHANGED` are internal to the dev loop.
+> **Careful with `BORGO_IDLE_TIMEOUT`.** Both halves read that one name and neither knows the other does. `2m` is two minutes to Go and unparseable to the front server, which keeps 30 s without saying so; `120` is two minutes to the front server and a boot panic for the Go binary. `borgo start` hands both children the same environment, so there is no setting that means one thing. Leave it unset unless you run the two halves as separate processes with separate environments — and note that raising it is *not* how you keep event streams alive on the front server: streams are exempted from the deadline per response, automatically.
+
+Three more exist for the build, not the runtime: `BORGO_TAILWIND=1` is what `borgo build --tailwind` sets for its child processes (use the flag, not the variable — see [styling](dev-experience.md#styling)); `BORGO_STATIC=1` is what `borgo export` sets for the build it drives, and it is substituted into the client bundle rather than read at runtime, which is what compiles the props-fetching navigation path out of an exported site; and `BORGO_PARENT_PID` is how the CLI tells its children whose death to exit with. `BORGO_RELOAD` and `BORGO_CHANGED` are internal to the dev loop — the latter carries the whole set of changed files, newline-separated.
 
 ## Shutdown and zero-downtime redeploys
 

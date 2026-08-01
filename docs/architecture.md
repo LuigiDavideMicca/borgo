@@ -55,7 +55,7 @@ In dev there are three processes: the `borgo dev` watcher, the Go binary it buil
 
 **6. Index the static files.** In production one walk of `public/` records every file's size, mtime, content type, cache-control, whether it has `.br`/`.gz` siblings and an ETag for each variant. A static request then answers from a `Map` lookup with no `stat` call. Dev skips this: it rewrites assets in place under stable names, where a cached ETag would pin the browser to yesterday's bundle.
 
-**7. Bind.** `Bun.serve` with `idleTimeout: 0`, so proxied event streams are not cut at ten seconds, and a WebSocket handler for both the app topic relay and the dev channel.
+**7. Bind.** `Bun.serve` with a 30-second socket read deadline (`idleTimeout`, overridable with `BORGO_IDLE_TIMEOUT` in seconds; `0` disables it), and a WebSocket handler for both the app topic relay and the dev channel. That deadline is not a response-side setting — the same number bounds how long bun waits for an inbound request's headers and body — so it is lifted **per response**, with `server.timeout(req, 0)`, on exactly the responses that are idle by design: `text/event-stream` and `multipart/x-mixed-replace`. Streams survive; a POST that declares a `Content-Length` and then dribbles one byte does not.
 
 The route table is then printed and the server is live. Nothing about the table can change afterwards: adding a page means a restart, which in dev is what the watcher does for you.
 
@@ -211,7 +211,7 @@ export interface Task {
 }
 
 export interface TaskList {
-  tasks: Array<Task>;
+  tasks: Array<Task> | null;
 }
 
 declare module "borgo-framework" {

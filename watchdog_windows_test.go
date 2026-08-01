@@ -56,13 +56,14 @@ func deadPID(t *testing.T) int {
 func TestWaitParentExitPollsWhenOpenProcessIsDenied(t *testing.T) {
 	pid := deniedPID(t)
 
-	// the wait never ends for a process that never exits, so this goroutine
-	// stays parked for the rest of the binary's life; the short poll keeps it
-	// cheap
+	// the wait never ends for a process that never exits, so end it with the
+	// test rather than leaving it parked for the rest of the binary's life
+	stop := make(chan struct{})
+	defer close(stop)
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		waitProcessExit(pid, 50*time.Millisecond)
+		waitProcessExit(pid, 50*time.Millisecond, stop)
 	}()
 
 	select {
@@ -72,20 +73,42 @@ func TestWaitParentExitPollsWhenOpenProcessIsDenied(t *testing.T) {
 	}
 }
 
+// the poll is the degraded path, so its cancellation matters as much as the
+// blocking one's: a run that ends must not leave a watcher probing a pid it no
+// longer cares about
+func TestWaitProcessExitStopsPolling(t *testing.T) {
+	pid := deniedPID(t)
+
+	stop := make(chan struct{})
+	returned := make(chan bool, 1)
+	go func() { returned <- waitProcessExit(pid, 50*time.Millisecond, stop) }()
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+
+	select {
+	case exited := <-returned:
+		if exited {
+			t.Fatal("a cancelled poll reported the process as exited")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitProcessExit ignored its stop while polling")
+	}
+}
+
 // the other half: a pid no live process owns answers ERROR_INVALID_PARAMETER,
 // and that really does mean gone - the poll must not swallow the one case the
 // watchdog exists for
 func TestWaitParentExitReturnsWhenTheProcessIsGone(t *testing.T) {
 	pid := deadPID(t)
 
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		waitProcessExit(pid, 50*time.Millisecond)
-	}()
+	reported := make(chan bool, 1)
+	go func() { reported <- waitProcessExit(pid, 50*time.Millisecond, nil) }()
 
 	select {
-	case <-exited:
+	case exited := <-reported:
+		if !exited {
+			t.Fatalf("waitProcessExit(%d) returned without reporting the exit it observed", pid)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("waitProcessExit(%d) never returned for a pid no process owns", pid)
 	}
@@ -100,14 +123,42 @@ func TestWaitParentExitWaitsForAnOpenableProcess(t *testing.T) {
 	}
 	syscall.CloseHandle(h)
 
+	stop := make(chan struct{})
+	defer close(stop)
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		waitProcessExit(self, 50*time.Millisecond)
+		waitProcessExit(self, 50*time.Millisecond, stop)
 	}()
 	select {
 	case <-exited:
 		t.Fatal("waitProcessExit returned for a process that is still running")
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// the blocking wait holds a kernel handle on the parent, so it has to release
+// it when the run that opened it ends - not when the process does
+func TestWaitProcessExitReleasesTheHandleWhenStopped(t *testing.T) {
+	self := syscall.Getpid()
+	h, err := syscall.OpenProcess(syscall.SYNCHRONIZE, false, uint32(self))
+	if err != nil {
+		t.Skipf("cannot open this process: %v", err)
+	}
+	syscall.CloseHandle(h)
+
+	stop := make(chan struct{})
+	returned := make(chan bool, 1)
+	go func() { returned <- waitProcessExit(self, 50*time.Millisecond, stop) }()
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+
+	select {
+	case exited := <-returned:
+		if exited {
+			t.Fatal("a cancelled wait reported the process as exited")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("waitProcessExit stayed in its wait: the goroutine and the process handle it holds are pinned for the life of the process")
 	}
 }

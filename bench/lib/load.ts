@@ -111,22 +111,48 @@ interface OhaJson {
   errorDistribution?: Record<string, number>;
 }
 
+/**
+ * Share of counted responses whose status was not 2xx.
+ *
+ * oha's own `successRate` is transport-level: it says the exchange completed,
+ * not that the server agreed to do the work. A server that 500s under load
+ * answers faster than one that does not, so this is the figure the runner
+ * actually gates on.
+ *
+ * wrk's parser emits the synthetic keys "2xx" and "non-2xx"; both are handled
+ * here so the two tools mean the same thing.
+ */
+export function non2xxRate(statusCodes: Record<string, number>): number {
+  let total = 0;
+  let bad = 0;
+  for (const [code, count] of Object.entries(statusCodes)) {
+    total += count;
+    if (code !== "2xx" && !code.startsWith("2")) bad += count;
+  }
+  return total === 0 ? 0 : bad / total;
+}
+
 export function parseOha(stdout: string): LoadStats {
   const json = JSON.parse(stdout) as OhaJson;
   const sec = (v: number | undefined) => (v ?? 0) * 1000;
-  const total = Object.values(json.statusCodeDistribution ?? {}).reduce((a, b) => a + b, 0);
+  const statusCodes = json.statusCodeDistribution ?? {};
+  const total = Object.values(statusCodes).reduce((a, b) => a + b, 0);
   return {
     requestsPerSec: json.summary.requestsPerSec,
     successRate: json.summary.successRate,
+    non2xxRate: non2xxRate(statusCodes),
     totalRequests: total,
     latencyMs: {
       p50: sec(json.latencyPercentiles["p50"]),
       p90: sec(json.latencyPercentiles["p90"]),
       p95: sec(json.latencyPercentiles["p95"]),
       p99: sec(json.latencyPercentiles["p99"]),
-      max: sec(json.latencyPercentiles["p99.99"]),
+      // oha reports a true max as well; this is p99.99 and the field name now
+      // says so. It was called `max` and was written into every artifact
+      // under that name while holding a tail percentile.
+      p9999: sec(json.latencyPercentiles["p99.99"]),
     },
-    statusCodes: json.statusCodeDistribution ?? {},
+    statusCodes,
     errors: json.errorDistribution ?? {},
   };
 }
@@ -152,8 +178,10 @@ export function parseWrk(stdout: string): LoadStats {
   return {
     requestsPerSec: num(/Requests\/sec:\s+([\d.]+)/),
     successRate: requests > 0 ? (requests - nonSuccess) / requests : 0,
+    non2xxRate: requests > 0 ? nonSuccess / requests : 0,
     totalRequests: requests,
-    latencyMs: { p50: pct("50%"), p90: pct("90%"), p95: pct("95%"), p99: pct("99%"), max: 0 },
+    // wrk reports no p99.99, and 0 is the honest answer rather than a number
+    latencyMs: { p50: pct("50%"), p90: pct("90%"), p95: pct("95%"), p99: pct("99%"), p9999: 0 },
     statusCodes: nonSuccess > 0 ? { "2xx": requests - nonSuccess, "non-2xx": nonSuccess } : { "2xx": requests },
     errors: socketErrors
       ? {
@@ -166,32 +194,54 @@ export function parseWrk(stdout: string): LoadStats {
   };
 }
 
-/** median per field across runs - never the best run */
+/**
+ * Median per field across runs - never the best run.
+ *
+ * Two things this deliberately does NOT do any more. It does not put summed
+ * counters inside the object called `median`: `statusCodes` and `errors` are
+ * totals over every run, and printing a 3-run total in the same row as a 1-run
+ * median made the non-2xx column silently three times too large relative to
+ * `totalRequests`. And it does not let the median hide a catastrophe: with
+ * three runs the median success rate discards the worst one entirely, so the
+ * worst run is carried separately and is what the runner gates on.
+ *
+ * The `median` object is still a synthetic composite - each field is picked
+ * independently, so it corresponds to no single run. That is intended for
+ * latency percentiles and throughput; it is why counts are not in it.
+ */
 export function summarise(runs: LoadStats[]): LoadRunResult {
   const pick = (fn: (s: LoadStats) => number) => median(runs.map(fn));
-  const merged: Record<string, number> = {};
-  for (const runStats of runs) {
-    for (const [code, count] of Object.entries(runStats.statusCodes)) merged[code] = (merged[code] ?? 0) + count;
-  }
-  const errors: Record<string, number> = {};
-  for (const runStats of runs) {
-    for (const [kind, count] of Object.entries(runStats.errors)) errors[kind] = (errors[kind] ?? 0) + count;
-  }
+  const sum = (get: (s: LoadStats) => Record<string, number>) => {
+    const out: Record<string, number> = {};
+    for (const runStats of runs) {
+      for (const [key, count] of Object.entries(get(runStats))) out[key] = (out[key] ?? 0) + count;
+    }
+    return out;
+  };
   return {
     runs,
     median: {
       requestsPerSec: pick((s) => s.requestsPerSec),
       successRate: pick((s) => s.successRate),
+      non2xxRate: pick((s) => s.non2xxRate),
       totalRequests: pick((s) => s.totalRequests),
       latencyMs: {
         p50: pick((s) => s.latencyMs.p50),
         p90: pick((s) => s.latencyMs.p90),
         p95: pick((s) => s.latencyMs.p95),
         p99: pick((s) => s.latencyMs.p99),
-        max: pick((s) => s.latencyMs.max),
+        p9999: pick((s) => s.latencyMs.p9999),
       },
-      statusCodes: merged,
-      errors,
+    },
+    totals: {
+      runs: runs.length,
+      requests: runs.reduce((acc, r) => acc + r.totalRequests, 0),
+      statusCodes: sum((s) => s.statusCodes),
+      errors: sum((s) => s.errors),
+    },
+    worst: {
+      successRate: runs.length === 0 ? 0 : Math.min(...runs.map((r) => r.successRate)),
+      non2xxRate: runs.length === 0 ? 0 : Math.max(...runs.map((r) => r.non2xxRate)),
     },
   };
 }

@@ -14,6 +14,7 @@ import (
 	"net/http/httptrace"
 	"net/textproto"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -352,14 +353,69 @@ func serveOn(t *testing.T, srv *http.Server) string {
 	return "http://" + ln.Addr().String()
 }
 
-// the shutdown signal is process-wide; re-arm it afterwards so the rest of the
-// package still sees live streams. The returned cancel belongs to the run it
-// arms - it is what a server's OnShutdown hook has to close over.
-func isolateShutdownSignal(t *testing.T) context.CancelFunc {
+// latchOf returns the stream-shutdown latch armed for srv. A stream finds it
+// through its own request; a test holding only the server looks it up here.
+func latchOf(t *testing.T, srv *http.Server) <-chan struct{} {
 	t.Helper()
-	stop := armShutdown()
-	t.Cleanup(func() { armShutdown() })
-	return stop
+	v, ok := streamLatches.Load(srv)
+	if !ok {
+		t.Fatal("no stream latch is armed for this server")
+	}
+	return v.(*streamLatch).done
+}
+
+// pingStream keeps an event stream open until the run serving it shuts down.
+func pingStream(w http.ResponseWriter, r *http.Request) {
+	stream, err := SSE(w, r)
+	if err != nil {
+		return
+	}
+	for {
+		select {
+		case <-stream.Done():
+			return
+		case <-time.After(20 * time.Millisecond):
+			if stream.Ping() != nil {
+				return
+			}
+		}
+	}
+}
+
+// readingStream opens a stream against base and returns a channel that closes
+// when the stream ends.
+func readingStream(t *testing.T, base string) <-chan struct{} {
+	t.Helper()
+	res, err := http.Get(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { res.Body.Close() })
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		io.Copy(io.Discard, res.Body)
+	}()
+	return ended
+}
+
+// waitListening blocks until something accepts connections on port. It dials
+// rather than asking /healthz on purpose: an http client of its own would
+// leave idle connections, and their goroutines, behind a test that counts them.
+func waitListening(t *testing.T, port string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 200*time.Millisecond)
+		if err == nil {
+			c.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing came up on :%s (%v)", port, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // freePort grabs a loopback port and lets it go, so the caller can bind it.
@@ -395,7 +451,6 @@ func restoreRegistry(t *testing.T) {
 // a test or embed it in a larger program. ServeContext has to actually come
 // back, and leave the port behind it.
 func TestServeContextReturnsAndReleasesPort(t *testing.T) {
-	isolateShutdownSignal(t)
 	restoreRegistry(t)
 	var logs strings.Builder
 	log.SetOutput(&logs)
@@ -458,7 +513,6 @@ func TestServeContextReturnsAndReleasesPort(t *testing.T) {
 // a listener that cannot start was a log.Fatal; now it is a value the caller
 // can act on
 func TestServeContextReturnsListenerErrors(t *testing.T) {
-	isolateShutdownSignal(t)
 	restoreRegistry(t)
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
@@ -503,27 +557,12 @@ func TestServeContextStillValidatesTimeouts(t *testing.T) {
 }
 
 func TestShutdownEndsEventStreams(t *testing.T) {
-	stop := isolateShutdownSignal(t)
-
 	handlerReturned := make(chan struct{})
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer close(handlerReturned)
-		stream, err := SSE(w, r)
-		if err != nil {
-			return
-		}
-		for {
-			select {
-			case <-stream.Done():
-				return
-			case <-time.After(20 * time.Millisecond):
-				if stream.Ping() != nil {
-					return
-				}
-			}
-		}
+		pingStream(w, r)
 	})}
-	srv.RegisterOnShutdown(stop)
+	armStreamShutdown(srv)
 
 	res, err := http.Get(serveOn(t, srv))
 	if err != nil {
@@ -553,15 +592,13 @@ func TestShutdownEndsEventStreams(t *testing.T) {
 // every SSE request with an already-finished stream, for its whole life, while
 // /healthz stays green and the browser reconnects forever.
 func TestShutdownHookCancelsOnlyItsOwnRun(t *testing.T) {
-	isolateShutdownSignal(t)
-
 	prev := &http.Server{}
 	armStreamShutdown(prev)
-	prevStreams := shutdownSignal()
+	prevStreams := latchOf(t, prev)
 
 	next := &http.Server{}
 	armStreamShutdown(next)
-	nextStreams := shutdownSignal()
+	nextStreams := latchOf(t, next)
 
 	if prevStreams == nextStreams {
 		t.Fatal("the second run reused the first run's latch")
@@ -595,9 +632,225 @@ func TestShutdownHookCancelsOnlyItsOwnRun(t *testing.T) {
 	}
 }
 
-func TestShutdownCutsRequestsPastTheGrace(t *testing.T) {
-	isolateShutdownSignal(t)
+// The sequential case above is only half of it: runs overlap, and one package
+// global cannot hold two of them. Arming happens before the bind, so a second
+// ServeContext that never got its port - the likeliest overlap of all, a
+// restart racing the process it is replacing - still replaced the live
+// server's latch. Every stream that server opened afterwards then watched a
+// latch its own Shutdown does not trip, and the shutdown sat out the whole
+// BORGO_SHUTDOWN_TIMEOUT waiting for streams that would never end.
+func TestAFailedRunDoesNotTakeOverTheLiveRunsStreams(t *testing.T) {
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
 
+	live := &http.Server{Handler: http.HandlerFunc(pingStream)}
+	armStreamShutdown(live)
+	base := serveOn(t, live)
+	defer live.Close()
+
+	// the overlapping run: hold its port so it cannot bind, exactly as a
+	// restart racing the instance it replaces
+	busy := freePort(t)
+	ln, err := net.Listen("tcp", ":"+busy)
+	if err != nil {
+		t.Skipf("could not hold :%s to create the conflict: %v", busy, err)
+	}
+	defer ln.Close()
+	t.Setenv("API_PORT", busy)
+	t.Setenv("SESSION_SECRET", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	failed := make(chan error, 1)
+	go func() { failed <- ServeContext(ctx) }()
+	select {
+	case err := <-failed:
+		if err == nil {
+			t.Fatal("the second run bound a port that was already taken")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the overlapping run never returned")
+	}
+
+	// a stream the live server opens after that failed run
+	ended := readingStream(t, base)
+
+	start := time.Now()
+	shutdown(live, 10*time.Second)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("the live server's shutdown waited %v on its own event stream: a run that never bound had taken its stream latch", elapsed)
+	}
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the live server's shutdown never ended the stream it was serving")
+	}
+}
+
+// The other side of the overlap: when the second run stops, its hook must not
+// end the streams of the server still serving. It did - the hook tripped the
+// latch that run had armed, which by then was the one the live server's
+// streams were watching - and that server went on answering every SSE request
+// with an already-finished stream while /healthz stayed green and browsers
+// reconnected forever. Verbatim the failure armStreamShutdown's comment says
+// it fixed, reached by overlap instead of by sequence.
+func TestAnOverlappingRunsShutdownLeavesTheLiveRunsStreamsAlone(t *testing.T) {
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	live := &http.Server{Handler: http.HandlerFunc(pingStream)}
+	armStreamShutdown(live)
+	base := serveOn(t, live)
+	defer live.Close()
+
+	// a second run, on its own port, while the first is serving
+	port := freePort(t)
+	t.Setenv("API_PORT", port)
+	t.Setenv("SESSION_SECRET", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	second := make(chan error, 1)
+	go func() { second <- ServeContext(ctx) }()
+	waitListening(t, port)
+
+	// a stream opened on the live server while both runs are up
+	ended := readingStream(t, base)
+
+	cancel()
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatalf("the second run returned %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the second run never returned")
+	}
+
+	select {
+	case <-ended:
+		t.Fatal("the overlapping run's shutdown ended a stream the live server was serving: that server would answer every later stream already-finished, with the api healthy")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// and the live server can still end it, so nothing was disarmed either
+	shutdown(live, 10*time.Second)
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the live server's own shutdown did not end its stream")
+	}
+}
+
+// warnSessionSecret called log.Fatalf from inside serveContext, so a short
+// SESSION_SECRET took the process down: deferred cleanup unrun, sibling
+// servers dead, a test binary killed mid-run. The refusal stands - it is an
+// error now, and Serve is the one that turns it into an exit. If this
+// regresses the whole test binary exits 1 here rather than reporting a
+// failure, which is the point.
+func TestServeContextRefusesAShortSecretWithoutExiting(t *testing.T) {
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	port := freePort(t)
+	t.Setenv("API_PORT", port)
+	t.Setenv("SESSION_SECRET", "too-short-to-sign-with")
+
+	err := ServeContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "SESSION_SECRET") {
+		t.Fatalf("ServeContext returned %v, want a refusal naming SESSION_SECRET", err)
+	}
+	// and it refused before binding, so the caller can fix the env and retry
+	ln, lnErr := net.Listen("tcp", ":"+port)
+	if lnErr != nil {
+		t.Fatalf("port %s left bound by a run that refused to start: %v", port, lnErr)
+	}
+	ln.Close()
+}
+
+// waitParentExit has no timeout of its own: on windows it blocks inside
+// WaitForSingleObject holding a kernel handle on the parent, on unix in a
+// poll. Without a way to end it the goroutine stays parked for the life of the
+// process, and ServeContext exists to be called repeatedly.
+func TestWaitParentExitIsCancellable(t *testing.T) {
+	stop := make(chan struct{})
+	returned := make(chan bool, 1)
+	// this process is a parent that will not exit while the test runs
+	go func() { returned <- waitParentExit(os.Getpid(), stop) }()
+
+	select {
+	case exited := <-returned:
+		t.Fatalf("waitParentExit returned %v for a process that is still running", exited)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	close(stop)
+	select {
+	case exited := <-returned:
+		// serveContext reads that as "parent process exited" and shuts down
+		if exited {
+			t.Fatal("a cancelled watch reported the parent as exited")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("waitParentExit ignored its stop: the watcher stays parked for the life of the process, on windows pinning a handle on the parent")
+	}
+}
+
+// and serveContext really ends the watcher it started: five runs used to leave
+// five blocked goroutines, one process handle each on windows
+func TestServeContextLeavesNoParentWatcherBehind(t *testing.T) {
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	// a parent that never exits, so a watcher only ends if its run ends it
+	t.Setenv("BORGO_PARENT_PID", strconv.Itoa(os.Getpid()))
+	t.Setenv("SESSION_SECRET", "")
+
+	before := settledGoroutines()
+	const runs = 5
+	for range runs {
+		port := freePort(t)
+		t.Setenv("API_PORT", port)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- ServeContext(ctx) }()
+		waitListening(t, port)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("run returned %v", err)
+		}
+	}
+
+	// the watchers are cancelled, not joined, so give them a moment to unwind
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if leaked := runtime.NumGoroutine() - before; leaked <= 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines parked after %d ServeContext runs (%d before, %d now): each run leaves its parent watcher blocked forever",
+				runtime.NumGoroutine()-before, runs, before, runtime.NumGoroutine())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// settledGoroutines is the goroutine count once whatever ran before this test
+// has finished unwinding.
+func settledGoroutines() int {
+	lowest := runtime.NumGoroutine()
+	for range 20 {
+		time.Sleep(50 * time.Millisecond)
+		if n := runtime.NumGoroutine(); n < lowest {
+			lowest = n
+		}
+	}
+	return lowest
+}
+
+func TestShutdownCutsRequestsPastTheGrace(t *testing.T) {
 	stuck := make(chan struct{})
 	defer close(stuck)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

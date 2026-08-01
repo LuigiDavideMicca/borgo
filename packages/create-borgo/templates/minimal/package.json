@@ -6,6 +6,7 @@
     "dev": "borgo dev",
     "build": "borgo build",
     "start": "borgo start",
+    "export": "borgo export",
     "doctor": "borgo doctor"
   },
   "dependencies": {

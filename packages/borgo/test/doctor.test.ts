@@ -475,7 +475,9 @@ describe("ports", () => {
     expect(r.detail).toContain("api.exe");
     expect(r.detail).toContain("4321");
     expect(r.fix).toContain("taskkill /F /PID 4321");
-    expect(r.fix).toContain("PORT");
+    // the holder is borgo's own api binary, so the advice is not "move your
+    // port" - it is "that is probably you, left over from a killed run"
+    expect(r.fix).toContain("your own borgo");
   });
 
   test("busy port without a known holder still suggests the env var", async () => {

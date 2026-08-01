@@ -88,6 +88,27 @@ export function resolveHead(module: PageModule, props: Record<string, unknown>):
   return head ?? {};
 }
 
+// a head export may be computed from loader data, so attribute names are as
+// untrusted as their values: anything but a plain name - and never an event
+// handler - would break out of the tag it is written into.
+const safeAttrName = (name: string) => /^[a-z][a-z0-9:._-]*$/i.test(name) && !/^on/i.test(name);
+
+// the one filter both halves use, because one head() export must not produce
+// one head on the server and a different one on client navigation. the server
+// refused these names already; the client's setAttribute filtered nothing, so
+// the same meta that rendered as an escaped attribute during ssr either
+// installed a live handler (a name starting with `on`) or threw
+// InvalidCharacterError on a non-token name - inside navigate(), after
+// root.render(), which leaves the page swapped in, the head half-applied and
+// the rejection unhandled.
+export function safeHeadAttrs(meta: Record<string, unknown>): Array<[string, string]> {
+  const attrs: Array<[string, string]> = [];
+  for (const [name, value] of Object.entries(meta)) {
+    if (safeAttrName(name)) attrs.push([name, String(value)]);
+  }
+  return attrs;
+}
+
 // segments are compared without collapsing empty ones: "//foo" and "/a//b"
 // are distinct urls, not aliases of "/foo" - collapsing them would give every
 // page a second address (and a "//host" path is a protocol-relative url the

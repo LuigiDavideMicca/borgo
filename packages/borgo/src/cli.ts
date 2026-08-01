@@ -1,7 +1,10 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
-import { assetsBuildMode, buildAssets } from "./build";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { assetsBuildMode, buildAssets, BundleFailed, warnDeadRoutes, type BuildResult } from "./build";
 import { banner, c, fmtMs, g } from "./colors";
+import { parseInitArgv } from "./deploy";
 import { goBinName, runBorgogen } from "./util";
 
 const command = process.argv[2];
@@ -11,6 +14,20 @@ const command = process.argv[2];
 if (process.argv.includes("--tailwind")) process.env.BORGO_TAILWIND = "1";
 
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} kB`;
+
+// a failed bundle is a first-class cli failure, not an escaped stack trace:
+// one red line per bundler message, with the file and position bun reported
+async function build(dev = false): Promise<BuildResult> {
+  try {
+    return await buildAssets(dev);
+  } catch (error) {
+    if (!(error instanceof BundleFailed)) throw error;
+    console.error(`\n  ${c.red(g.err)} the client bundle failed to build`);
+    for (const detail of error.details) console.error(`    ${detail}`);
+    console.error(`  ${c.dim(`${g.dot} public/assets still holds the last build that worked`)}\n`);
+    process.exit(1);
+  }
+}
 
 async function assetLine(path: string, note = "") {
   const file = Bun.file(path);
@@ -35,7 +52,7 @@ switch (command) {
     console.log(`\n  ${banner("build")}\n`);
 
     if (!(await runBorgogen())) process.exit(1);
-    const { assets } = await buildAssets();
+    const { assets } = await build();
     const rel = (p: string) => p.replaceAll("\\", "/").replace(/^.*?(public\/assets\/)/, "$1");
     for (const asset of assets.sort((a, b) => (a.kind === b.kind ? b.size - a.size : a.kind === "entry-point" ? -1 : 1))) {
       await assetLine(rel(asset.path), asset.kind === "entry-point" ? "entry (runtime + react)" : "");
@@ -140,10 +157,26 @@ switch (command) {
     }
 
     // a tree last built by `borgo dev` holds dev assets (dev react, no
-    // precompression): rebuild for production instead of serving them silently
-    if (assetsBuildMode() === "dev") {
-      console.log(`  ${c.terracotta(g.change)} public/assets holds a dev build ${c.dim("- rebuilding for production")}`);
-      await buildAssets();
+    // precompression), and one last built by `borgo export` holds a bundle
+    // with the props endpoint compiled out - every client navigation would
+    // degrade to a full document reload. Either way: rebuild for production
+    // instead of serving them silently.
+    const mode = assetsBuildMode();
+    if (mode === "dev" || mode === "export") {
+      const held = mode === "dev" ? "a dev build" : "a static export build";
+      console.log(`  ${c.terracotta(g.change)} public/assets holds ${held} ${c.dim("- rebuilding for production")}`);
+      await build();
+    }
+
+    // the manifest's own warnings were printed by whoever ran `borgo build`,
+    // on a machine this operator may never have seen. Without this, the route
+    // table below lists a route the server answers itself as though it worked.
+    try {
+      const manifest = pathToFileURL(join(process.cwd(), ".borgo/routes.gen.tsx")).href;
+      const { routes } = (await import(manifest)) as { routes: Array<{ pattern: string; file: string }> };
+      warnDeadRoutes(routes.map(({ pattern, file }) => ({ pattern, file })));
+    } catch {
+      // no manifest yet, or one that will not import: serve() reports that
     }
 
     const { serve } = await import("./server");
@@ -163,22 +196,26 @@ switch (command) {
 
   case "pwa": {
     const { pwaInit } = await import("./pwa");
-    const [sub] = process.argv.slice(3).filter((a) => !a.startsWith("--"));
-    if (sub !== "init") {
-      console.log(`\n  ${banner("pwa")}\n\n  usage: borgo pwa init [--force]\n`);
+    const parsed = parseInitArgv(process.argv.slice(3), 0);
+    if (!parsed.ok) {
+      console.log(`\n  ${banner("pwa")}\n`);
+      console.log(`  ${c.red(g.err)} ${parsed.reason}`);
+      console.log(`  usage: borgo pwa init [--force]\n`);
       process.exit(1);
     }
-    process.exit(pwaInit(process.argv.includes("--force")));
+    process.exit(pwaInit(parsed.force));
   }
 
   case "deploy": {
     const { deployInit } = await import("./deploy");
-    const [sub, target] = process.argv.slice(3).filter((a) => !a.startsWith("--"));
-    if (sub !== "init") {
-      console.log(`\n  ${banner("deploy")}\n\n  usage: borgo deploy init <caddy|nginx|systemd|compose> [--force]\n`);
+    const parsed = parseInitArgv(process.argv.slice(3), 1);
+    if (!parsed.ok) {
+      console.log(`\n  ${banner("deploy")}\n`);
+      console.log(`  ${c.red(g.err)} ${parsed.reason}`);
+      console.log(`  usage: borgo deploy init <caddy|nginx|systemd|compose> [--force]\n`);
       process.exit(1);
     }
-    process.exit(deployInit(target, process.argv.includes("--force")));
+    process.exit(deployInit(parsed.target, parsed.force));
   }
 
   default: {
