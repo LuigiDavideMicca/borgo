@@ -234,15 +234,40 @@ export async function precacheStamp(dir: string, files: string[]): Promise<strin
   return String(Bun.hash(payload));
 }
 
-export async function compileCss(dev = false) {
-  if (process.env.BORGO_TAILWIND === "1") {
-    if (!existsSync("style.css")) {
-      throw new Error(
-        '--tailwind expects a style.css entry in the app root (start with `@import "tailwindcss";`)',
-      );
-    }
+// tailwind runs as a postcss plugin, not the cli: @tailwindcss/cli pulls in
+// @parcel/watcher, whose postinstall compiles a native watcher from source -
+// a `Blocked 1 postinstall` warning on the very first install, for a watcher
+// borgo never uses (it does its own watching and asks for one-shot compiles).
+// the plugin api has no such dependency, and staying in-process takes a
+// rebuild from ~300ms to ~15ms. loaded from the app, not from borgo's own
+// tree, so the app's tailwind version is the one that runs.
+type Processor = { process: (css: string, opts: { from: string; to: string }) => Promise<{ css: string }> };
+let tailwindPostcss: { dev: boolean; processor: Processor } | null = null;
+
+function resolveFromApp(specifier: string): string | null {
+  try {
+    return Bun.resolveSync(specifier, process.cwd());
+  } catch {
+    return null;
+  }
+}
+
+async function compileTailwind(dev: boolean) {
+  if (!existsSync("style.css")) {
+    throw new Error(
+      '--tailwind expects a style.css entry in the app root (start with `@import "tailwindcss";`)',
+    );
+  }
+
+  const pluginPath = resolveFromApp("@tailwindcss/postcss");
+  const postcssPath = resolveFromApp("postcss");
+  // apps scaffolded before 0.21 only have the cli: keep compiling those
+  // rather than breaking every existing tailwind app on upgrade
+  if (!pluginPath || !postcssPath) {
     if (!existsSync("node_modules/@tailwindcss/cli")) {
-      throw new Error("--tailwind needs the tailwind cli in the app: bun add tailwindcss @tailwindcss/cli");
+      throw new Error(
+        "--tailwind needs tailwind in the app: bun add -d tailwindcss @tailwindcss/postcss postcss",
+      );
     }
     const args = ["x", "@tailwindcss/cli", "-i", "style.css", "-o", `${outDir}/style.css`];
     if (!dev) args.push("--minify");
@@ -250,11 +275,29 @@ export async function compileCss(dev = false) {
     // code decides
     const proc = Bun.spawn(["bun", ...args], { stdout: "ignore", stderr: "pipe" });
     const stderr = await new Response(proc.stderr).text();
-    if ((await proc.exited) !== 0) {
-      throw new Error(`tailwind failed:\n${stderr.trim()}`);
-    }
+    if ((await proc.exited) !== 0) throw new Error(`tailwind failed:\n${stderr.trim()}`);
     return;
   }
+
+  // the plugin scans for class candidates from `base`, which defaults to cwd -
+  // the app root borgo already runs from. the processor is kept across
+  // rebuilds (that is where the speedup lives) but rebuilt if the mode flips,
+  // since `optimize` is fixed when the plugin is constructed
+  if (tailwindPostcss?.dev !== dev) {
+    const plugin = (await import(pluginPath)).default as (opts: { optimize: boolean }) => unknown;
+    const postcss = (await import(postcssPath)).default as (plugins: unknown[]) => Processor;
+    tailwindPostcss = { dev, processor: postcss([plugin({ optimize: !dev })]) };
+  }
+  const source = await Bun.file("style.css").text();
+  const result = await tailwindPostcss.processor.process(source, {
+    from: "style.css",
+    to: `${outDir}/style.css`,
+  });
+  await Bun.write(`${outDir}/style.css`, result.css);
+}
+
+export async function compileCss(dev = false) {
+  if (process.env.BORGO_TAILWIND === "1") return compileTailwind(dev);
   if (!existsSync("style.scss")) return;
   const sass = await import("sass-embedded");
   const css = await sass.compileAsync("style.scss", { style: dev ? "expanded" : "compressed" });
