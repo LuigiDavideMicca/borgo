@@ -16,13 +16,35 @@ Three templates:
 - `minimal` — bare bones: one page, one Go route.
 - `full` — a working app skeleton: notes CRUD, register/login/logout with sessions and CSRF, a protected page, SSE refresh and a typed WebSocket channel (in-memory stores, ready to swap for a real database).
 
-Pick one with `--template` (`-t`); in an interactive terminal `create-borgo` asks, anywhere else (CI, piped stdin) it defaults to `base`. It also asks about Tailwind — or take `--tailwind` (`--no-tailwind` to skip the question): the scaffold arrives wired, with the deps, a `style.css` and the `--tailwind` flag already in every script.
+Pick one with `--template` (`-t`); in an interactive terminal `create-borgo` asks, anywhere else (CI, piped stdin) it takes the defaults below without blocking.
+
+## Options
+
+Every question has a flag and a `--no-` twin, so nothing has to be answered interactively.
+
+| Question | Flags | Interactive default | Non-interactive |
+| --- | --- | --- | --- |
+| template | `-t`, `--template <base\|minimal\|full>` | `base` | `base` |
+| tailwind | `--tailwind` / `--no-tailwind` | no | no |
+| linter | `--linter <biome\|eslint\|none>` / `--no-linter` | `none` | `none` |
+| git | `--git` / `--no-git` | yes | yes |
+| docker | `--docker` / `--no-docker` | yes | yes |
+| vscode | `--vscode` / `--no-vscode` | yes | yes |
+
+`--yes` (`-y`) takes every default without asking a thing.
+
+- **tailwind** — the scaffold arrives wired for Tailwind v4: the deps, a `style.css`, and the `--tailwind` flag already in every script.
+- **linter** — `biome` writes `biome.json`; `eslint` writes a flat `eslint.config.js` plus `.prettierrc`. Either way you get the same two scripts, `bun run lint` and `bun run format`, and a fresh scaffold passes its own lint.
+- **git** — `git init` plus an initial commit, so the scaffold is undoable from the first second. Skipped when the target is already inside a repository.
+- **docker** — keeps the multi-stage `Dockerfile`, `docker-compose.yml` and `.dockerignore`.
+- **vscode** — `.vscode/extensions.json` recommends the Go extension plus the ones matching your Tailwind and linter choices, and `settings.json` sets format-on-save with the formatter those extensions provide.
 
 ```bash
-bunx create-borgo@latest my-app --template full --tailwind
+bunx create-borgo@latest my-app --template full --tailwind --linter biome
+bunx create-borgo@latest ci-app --yes --no-git --no-docker
 ```
 
-Requires Bun >= 1.3 and Go >= 1.25. Every scaffold ships pages, a Go `api/` package with `//borgo:route` handlers, pregenerated api types (so the typed client works before the first dev run), a multi-stage Dockerfile and a compose file — see the [repository README](https://github.com/LuigiDavideMicca/borgo) for the full picture.
+Requires Bun >= 1.3 and Go >= 1.25. Every scaffold ships pages, a Go `api/` package with `//borgo:route` handlers and pregenerated api types (so the typed client works before the first dev run) — see the [repository README](https://github.com/LuigiDavideMicca/borgo) for the full picture.
 
 ---
 
