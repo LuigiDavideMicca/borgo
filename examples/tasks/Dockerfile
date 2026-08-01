@@ -23,6 +23,10 @@ RUN mkdir /out \
 FROM oven/bun:1.3-slim
 WORKDIR /app
 ENV NODE_ENV=production DB_PATH=/data/tasks.db
+# bun's outbound fetch pool defaults to 256 requests, and the front server
+# holds one for the life of every proxied request - an event stream included.
+# it must be set in the environment: bun reads it when the process starts
+ENV BUN_CONFIG_MAX_HTTP_REQUESTS=16384
 RUN mkdir /data && chown bun:bun /data
 USER bun
 COPY --from=build --chown=bun:bun /out /app

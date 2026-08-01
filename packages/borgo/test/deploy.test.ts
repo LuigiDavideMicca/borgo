@@ -102,3 +102,44 @@ describe("deployInit", () => {
     }
   });
 });
+
+describe("the outbound request cap", () => {
+  // bun reads BUN_CONFIG_MAX_HTTP_REQUESTS once, at process start, so it can
+  // only be set by whatever launches the server. Every launch surface borgo
+  // writes therefore has to carry it, and dropping it from one of them is a
+  // silent ceiling on concurrent event streams - the kind of regression that
+  // shows up as "sse stops working past a few hundred users", months later.
+  const carriesCap = (s: string) => /BUN_CONFIG_MAX_HTTP_REQUESTS[=:]\s*"?\d+/.test(s);
+
+  test("the configs deploy init writes set it", () => {
+    expect(carriesCap(systemdUnit(ctx))).toBe(true);
+    expect(carriesCap(composeYml(ctx))).toBe(true);
+    // caddy and nginx are reverse proxies in front of borgo, not launchers:
+    // they have no process environment to set, and adding one would be noise
+    expect(carriesCap(caddyfile(ctx))).toBe(false);
+    expect(carriesCap(nginxConf(ctx))).toBe(false);
+  });
+
+  test("compose still parses, with the cap among the app's environment", () => {
+    const parsed = Bun.YAML.parse(composeYml(ctx)) as {
+      services: { app: { environment: Record<string, string> } };
+    };
+    expect(parsed.services.app.environment.BUN_CONFIG_MAX_HTTP_REQUESTS).toBe("16384");
+  });
+
+  test("every shipped Dockerfile sets it before the start command", () => {
+    const dockerfiles = [
+      "examples/tasks/Dockerfile",
+      "packages/create-borgo/templates/base/Dockerfile",
+      "packages/create-borgo/templates/full/Dockerfile",
+      "packages/create-borgo/templates/minimal/Dockerfile",
+    ];
+    for (const path of dockerfiles) {
+      const text = readFileSync(join(import.meta.dir, "../../..", path), "utf8");
+      expect(carriesCap(text)).toBe(true);
+      // an ENV after CMD would be dead weight: docker runs CMD with the
+      // environment as it stood, so placement is part of the assertion
+      expect(text.indexOf("BUN_CONFIG_MAX_HTTP_REQUESTS")).toBeLessThan(text.indexOf("CMD"));
+    }
+  });
+});

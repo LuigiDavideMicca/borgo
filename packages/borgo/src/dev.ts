@@ -148,6 +148,14 @@ export async function dev() {
       stdout: "inherit",
       stderr: "inherit",
       env: {
+        // bun caps concurrent outbound fetches at 256, and every proxied /api
+        // request - an event stream included - holds one for its whole life.
+        // For a client that is a sensible default; for a proxy it is a ceiling
+        // on how many streams the app can serve at once, hit silently. It has
+        // to be in the environment at spawn: bun reads it when the process
+        // starts, so assigning process.env later changes nothing. Kept
+        // overridable, because the app may want a real limit.
+        BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
         ...process.env,
         DEV: "1",
         ...(reload ? { BORGO_RELOAD: "1" } : {}),
