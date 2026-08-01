@@ -218,7 +218,7 @@ Everything here is a deliberate choice, with the reason attached:
 - **No plugin system.** The framework is small enough that the extension mechanism is reading the source and changing it.
 - **Loader data is not streamed on client navigations** — one JSON payload, fetched in parallel with the route chunk (and usually prefetched on hover). Streaming applies to initial SSR, where it matters most.
 - **Auth is mechanics, not policy.** Signed cookie, hashing, login/logout/register handlers and CSRF for actions are provided; the user store, its schema, OAuth and everything beyond username/password stay in your hands.
-- **The typed bridge is static analysis, no runtime reflection.** Helpers inside `api/` are followed and `//borgo:type` covers custom marshalers; a response written through `json.NewEncoder` or a helper in another package types as `unknown` — the escape hatch is visible, not silent.
+- **The typed bridge is static analysis, no runtime reflection.** Helpers are followed across the packages of your module, inline `json.NewEncoder(w).Encode(v)` is read, and `//borgo:type` covers custom marshalers; what stays invisible is a helper *outside* your module, an encoder stored in a variable, and a dynamically chosen type — those routes type as `unknown`, so the escape hatch is visible, not silent.
 - **WebSocket topics are a relay, not RPC.** The front server forwards `{event, data}` between subscribers and Go; per-message business logic belongs in Go routes. `borgo.PushT` types the payloads end to end — the relay itself stays dumb.
 
 Development happens in [issues](https://github.com/LuigiDavideMicca/borgo/issues).
