@@ -1,16 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import {
+  bunMinimum,
   checkApiBinary,
   checkApiTypes,
   checkBun,
+  checkBunShim,
   checkDeps,
+  checkDisk,
+  checkDocker,
   checkGo,
+  checkNode,
   checkNodeModules,
+  checkPlaywright,
   checkPort,
+  checkWritable,
+  isFailure,
   parseNetstatPid,
   parseVersion,
   portHolder,
   realEnv,
+  runChecks,
   versionAtLeast,
   type DoctorEnv,
 } from "../src/doctor";
@@ -27,6 +36,8 @@ function fakeEnv(overrides: Partial<DoctorEnv> = {}): DoctorEnv {
     readFile: () => null,
     resolve: () => null,
     openForWrite: () => "ok",
+    probeWrite: () => "ok",
+    diskFree: () => 40 * 1024 ** 3,
     isPortFree: async () => true,
     ...overrides,
   };
@@ -84,6 +95,288 @@ describe("checkBun", () => {
     const r = checkBun(fakeEnv({ exec: () => ({ code: 0, out: "1.2.0\n" }) }));
     expect(r.ok).toBe(false);
     expect(r.fix).toBe("bun upgrade");
+  });
+
+  test("an npm-installed shim under node_modules is refused on any platform", () => {
+    const r = checkBun(fakeEnv({ which: () => "/app/node_modules/.bin/bun" }));
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain("shadows the real bun");
+    expect(r.fix).toContain("bun.sh/install");
+  });
+
+  describe("minimum version", () => {
+    const withEngines = (engines: unknown) =>
+      fakeEnv({
+        exists: (p) => p === "package.json",
+        readFile: (p) => (p === "package.json" ? JSON.stringify({ engines }) : null),
+      });
+
+    test("the app's engines.bun raises the floor", () => {
+      expect(bunMinimum(withEngines({ bun: ">=1.4.2" }))).toEqual({
+        min: "1.4.2",
+        source: "package.json engines.bun",
+      });
+    });
+
+    test("no engines field falls back to borgo's own floor", () => {
+      expect(bunMinimum(fakeEnv()).source).toBe("borgo");
+      expect(bunMinimum(withEngines({ node: ">=20" })).source).toBe("borgo");
+    });
+
+    test("an unparseable engines range is ignored rather than trusted", () => {
+      expect(bunMinimum(withEngines({ bun: "latest" })).source).toBe("borgo");
+    });
+
+    test("a bun that satisfies borgo but not the app is flagged as too old", () => {
+      const d = withEngines({ bun: ">=1.4.2" });
+      const r = checkBun({ ...d, exec: () => ({ code: 0, out: "1.3.14\n" }) });
+      expect(r.ok).toBe(false);
+      expect(r.detail).toContain("older than the required 1.4.2");
+      expect(r.detail).toContain("package.json engines.bun");
+    });
+
+    test("and the same bun passes once the app asks for less", () => {
+      const d = withEngines({ bun: ">=1.3.0" });
+      expect(checkBun({ ...d, exec: () => ({ code: 0, out: "1.3.14\n" }) }).ok).toBe(true);
+    });
+  });
+});
+
+describe("checkBunShim", () => {
+  // the real shape this was written for: nvm-for-windows puts a bun.cmd next
+  // to node.exe, and it wins over the official install on PATH
+  const shimmed = (over: Partial<DoctorEnv> = {}) =>
+    fakeEnv({
+      platform: "win32",
+      which: (cmd) =>
+        cmd === "bun" ? "C:\\nvm4w\\nodejs\\bun.cmd" : "C:\\Users\\x\\.bun\\bin\\bun.exe",
+      ...over,
+    });
+
+  test("a .cmd shim shadowing a real bun.exe is a note, not a failure", () => {
+    const r = checkBunShim(shimmed());
+    expect(r!.ok).toBe(false);
+    expect(r!.info).toBe(true);
+    expect(isFailure(r!)).toBe(false);
+    expect(r!.detail).toBe("C:\\nvm4w\\nodejs\\bun.cmd shadows C:\\Users\\x\\.bun\\bin\\bun.exe");
+    expect(r!.fix).toContain("ahead of it on PATH");
+  });
+
+  test("and the version check still runs through the shim", () => {
+    const r = checkBun(shimmed({ exec: () => ({ code: 0, out: "1.3.14\n" }) }));
+    expect(r.ok).toBe(true);
+    expect(r.detail).toContain("1.3.14");
+  });
+
+  test("a real bun.exe on PATH says nothing", () => {
+    expect(checkBunShim(fakeEnv({ which: () => "C:\\Users\\x\\.bun\\bin\\bun.exe" }))).toBeNull();
+  });
+
+  test("no shim, no bun, nothing to say", () => {
+    expect(checkBunShim(fakeEnv({ which: () => null }))).toBeNull();
+  });
+
+  test("a shim with no real bun behind it is checkBun's failure, not a note", () => {
+    const d = fakeEnv({
+      platform: "win32",
+      which: (cmd) => (cmd === "bun" ? "C:\\nodejs\\bun.CMD" : null),
+    });
+    expect(checkBunShim(d)).toBeNull();
+    expect(isFailure(checkBun(d))).toBe(true);
+  });
+});
+
+describe("checkNode", () => {
+  test("present: reports the version, informational", () => {
+    const r = checkNode(fakeEnv({ exec: () => ({ code: 0, out: "v22.11.0\n" }) }));
+    expect(r.ok).toBe(true);
+    expect(r.info).toBe(true);
+    expect(r.detail).toContain("22.11.0");
+  });
+
+  test("absent: a note, never a failure", () => {
+    const r = checkNode(fakeEnv({ which: () => null }));
+    expect(r.ok).toBe(false);
+    expect(r.info).toBe(true);
+    expect(isFailure(r)).toBe(false);
+    expect(r.fix).toContain("borgo does not");
+  });
+
+  test("present but mute about its version still passes", () => {
+    const r = checkNode(fakeEnv({ exec: () => ({ code: 1, out: "" }) }));
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("checkDocker", () => {
+  test("not installed is a note with the install link", () => {
+    const r = checkDocker(fakeEnv({ which: () => null }));
+    expect(r.ok).toBe(false);
+    expect(r.info).toBe(true);
+    expect(isFailure(r)).toBe(false);
+    expect(r.fix).toContain("docs.docker.com");
+  });
+
+  test("installed with a reachable daemon reports the server version", () => {
+    const r = checkDocker(fakeEnv({ exec: () => ({ code: 0, out: "27.3.1\n" }) }));
+    expect(r.ok).toBe(true);
+    expect(r.detail).toContain("server 27.3.1");
+  });
+
+  test("installed but the daemon is down: a note, and how to start it", () => {
+    const r = checkDocker(fakeEnv({ exec: () => ({ code: 1, out: "" }) }));
+    expect(r.ok).toBe(false);
+    expect(r.info).toBe(true);
+    expect(r.detail).toContain("daemon is not reachable");
+    expect(r.fix).toBe("sudo systemctl start docker");
+  });
+
+  test("a daemon that answers empty counts as unreachable, not as version ''", () => {
+    const r = checkDocker(fakeEnv({ exec: () => ({ code: 0, out: "\n" }) }));
+    expect(r.ok).toBe(false);
+  });
+
+  test("the fix names docker desktop off linux", () => {
+    const r = checkDocker(fakeEnv({ platform: "win32", exec: () => ({ code: 1, out: "" }) }));
+    expect(r.fix).toBe("start docker desktop");
+  });
+});
+
+describe("checkWritable", () => {
+  const inApp = (over: Partial<DoctorEnv> = {}) =>
+    fakeEnv({ exists: (p) => p === "package.json", ...over });
+
+  test("skipped outside an app", () => {
+    expect(checkWritable(fakeEnv())).toBeNull();
+  });
+
+  test("all writable passes and names what was probed", () => {
+    const r = checkWritable(inApp());
+    expect(r!.ok).toBe(true);
+    expect(r!.detail).toContain(".borgo");
+    expect(r!.detail).toContain("public/assets");
+    expect(r!.detail).toContain("dist");
+  });
+
+  test("a read-only assets dir fails naming it, with a fix for the platform", () => {
+    const r = checkWritable(inApp({ probeWrite: (dir) => (dir === "public/assets" ? "denied" : "ok") }));
+    expect(r!.ok).toBe(false);
+    expect(isFailure(r!)).toBe(true);
+    expect(r!.detail).toContain("public/assets");
+    expect(r!.detail).not.toContain(".borgo");
+    expect(r!.fix).toContain("chmod u+w public/assets");
+  });
+
+  test("a read-only checkout names every denied directory", () => {
+    const r = checkWritable(inApp({ platform: "win32", probeWrite: () => "denied" }));
+    expect(r!.detail).toContain(".borgo, public/assets, dist");
+    expect(r!.fix).toContain("icacls");
+  });
+});
+
+describe("checkDisk", () => {
+  test("plenty of room passes with a human size", () => {
+    const r = checkDisk(fakeEnv({ diskFree: () => 12 * 1024 ** 3 }));
+    expect(r!.ok).toBe(true);
+    expect(r!.detail).toBe("12.0 GB free");
+  });
+
+  test("below the threshold fails and says what wants the space", () => {
+    const r = checkDisk(fakeEnv({ diskFree: () => 100 * 1024 ** 2 }));
+    expect(r!.ok).toBe(false);
+    expect(r!.detail).toContain("100 MB free");
+    expect(r!.detail).toContain("512 MB");
+    expect(r!.fix).toContain("free up space");
+  });
+
+  test("an fs that cannot answer is not reported at all", () => {
+    expect(checkDisk(fakeEnv({ diskFree: () => null }))).toBeNull();
+  });
+
+  test("the real statfs answers a number for the cwd", () => {
+    const free = realEnv().diskFree(".");
+    expect(typeof free).toBe("number");
+    expect(free!).toBeGreaterThan(0);
+  });
+});
+
+describe("checkPlaywright", () => {
+  const app = (pkg: unknown, over: Partial<DoctorEnv> = {}) =>
+    fakeEnv({
+      exists: (p) => p === "package.json",
+      readFile: (p) => (p === "package.json" ? JSON.stringify(pkg) : null),
+      ...over,
+    });
+
+  test("an app without playwright is not nagged", () => {
+    expect(checkPlaywright(app({ devDependencies: { typescript: "^5" } }))).toBeNull();
+    expect(checkPlaywright(fakeEnv())).toBeNull();
+  });
+
+  test("a dependency with no browsers installed fails with the install command", () => {
+    const r = checkPlaywright(
+      app({ devDependencies: { "@playwright/test": "^1.50.0" } }, { env: { HOME: "/home/x" } }),
+    );
+    expect(r!.ok).toBe(false);
+    expect(r!.detail).toContain("@playwright/test");
+    expect(r!.detail).toContain("/home/x/.cache/ms-playwright");
+    expect(r!.fix).toBe("bunx playwright install");
+  });
+
+  test("installed browsers pass, counted", () => {
+    const r = checkPlaywright(
+      app(
+        { dependencies: { playwright: "^1.50.0" } },
+        { env: { HOME: "/home/x" }, listDir: () => ["chromium-1148", "firefox-1471", ".links"] },
+      ),
+    );
+    expect(r!.ok).toBe(true);
+    expect(r!.detail).toContain("2 browsers");
+  });
+
+  test("PLAYWRIGHT_BROWSERS_PATH is honoured, including the documented 0", () => {
+    const seen: string[] = [];
+    const spy = (dir: string) => (seen.push(dir), [] as string[]);
+    checkPlaywright(app({ devDependencies: { playwright: "1" } }, { env: { PLAYWRIGHT_BROWSERS_PATH: "/opt/pw" }, listDir: spy }));
+    checkPlaywright(app({ devDependencies: { playwright: "1" } }, { env: { PLAYWRIGHT_BROWSERS_PATH: "0" }, listDir: spy }));
+    expect(seen[0]).toBe("/opt/pw");
+    expect(seen[1]).toBe("node_modules/playwright-core/.local-browsers");
+  });
+
+  test("windows looks under LOCALAPPDATA", () => {
+    const seen: string[] = [];
+    checkPlaywright(
+      app(
+        { devDependencies: { playwright: "1" } },
+        { platform: "win32", env: { LOCALAPPDATA: "C:/Users/x/AppData/Local" }, listDir: (d) => (seen.push(d), []) },
+      ),
+    );
+    expect(seen[0]).toBe("C:/Users/x/AppData/Local/ms-playwright");
+  });
+});
+
+describe("the exit code contract", () => {
+  test("notes never turn the exit code red", async () => {
+    // an environment with no node, no docker and nothing else wrong
+    const results = await runChecks(
+      fakeEnv({
+        which: (cmd) => (cmd === "node" || cmd === "docker" ? null : "/usr/bin/tool"),
+        exec: (cmd) => ({ code: 0, out: cmd[0] === "go" ? "go version go1.26.4 linux/amd64" : "1.3.14" }),
+      }),
+    );
+    const notes = results.filter((r) => !r.ok && r.info);
+    expect(notes.map((r) => r.name).sort()).toEqual(["docker", "node"]);
+    expect(results.filter(isFailure)).toEqual([]);
+  });
+
+  test("a real failure alongside the notes still fails", async () => {
+    const results = await runChecks(
+      fakeEnv({
+        which: (cmd) => (cmd === "docker" ? null : cmd === "bun" ? null : "/usr/bin/tool"),
+        exec: () => ({ code: 0, out: "go version go1.26.4 linux/amd64" }),
+      }),
+    );
+    expect(results.filter(isFailure).map((r) => r.name)).toEqual(["bun"]);
   });
 });
 
