@@ -44,14 +44,15 @@ GET /assets/style-{{HASH}}.css
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
-### hashed stylesheet, br negotiated but only a gzip sibling exists
+### hashed stylesheet, br accepted but only a gzip sibling exists: gzip wins
 GET /assets/style-{{HASH}}.css
   accept-encoding: br, gzip
 --> 200
   cache-control: public, max-age=31536000, immutable
-  content-length: 25
+  content-encoding: gzip
+  content-length: 24
   content-type: text/css;charset=utf-8
-  etag: "p-{{MTIME}}"
+  etag: "o-{{MTIME}}-gzip"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 

@@ -187,7 +187,14 @@ export function isRangeStale(req: Request, etag: string, lastModified: string): 
 export function serveIndexed(req: Request, info: AssetInfo): Response {
   let variant = info.identity;
   if (info.variants.length) {
-    const encoding = pickEncoding(req.headers.get("accept-encoding"), ["br", "gzip"]);
+    // negotiate against the encodings this asset actually has, not against
+    // every encoding borgo knows: offering br for a file that only has a .gz
+    // makes "accept-encoding: br, gzip" resolve to br, miss, and fall through
+    // to identity - shipping the raw bytes past a compressed sibling that is
+    // sitting right there. Server preference still decides between the ones
+    // that do exist, which is why the order here is fixed and not the index's.
+    const available = ["br", "gzip"].filter((e) => info.variants.some((v) => v.encoding === e));
+    const encoding = pickEncoding(req.headers.get("accept-encoding"), available);
     if (encoding) variant = info.variants.find((v) => v.encoding === encoding) ?? variant;
   }
   // the index was taken at boot: a precompressed sibling deleted since then

@@ -366,7 +366,7 @@ describe("golden: asset headers", () => {
       }),
       // no .br sibling exists: br is negotiated and misses, and the miss is
       // answered with identity rather than with the gzip that does exist
-      shot("hashed stylesheet, br negotiated but only a gzip sibling exists", "/assets/style-9f3a1c07.css", {
+      shot("hashed stylesheet, br accepted but only a gzip sibling exists: gzip wins", "/assets/style-9f3a1c07.css", {
         "accept-encoding": "br, gzip",
       }),
       shot("unhashed stylesheet, no siblings", "/site.css", { "accept-encoding": "gzip, br" }),

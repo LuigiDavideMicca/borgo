@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { brotliCompressSync, gzipSync } from "node:zlib";
+import { brotliCompressSync, gunzipSync, gzipSync } from "node:zlib";
 import { buildAssetIndex, serveAsset, serveIndexed, type AssetInfo } from "../src/compress";
 
 // a real public/ tree: a hashed bundle with both siblings, a css with only a
@@ -75,17 +75,45 @@ describe("serveIndexed: variant selection", () => {
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array(gzipSync(RAW_JS)));
   });
 
-  test("a negotiated encoding without a sibling falls back to identity", async () => {
-    // style.css has no .br: a client accepting both still negotiates br,
-    // and the miss serves identity rather than lying about the encoding
+  test("an asset is only offered the encodings it actually has", async () => {
+    // style.css has a .gz and no .br. Negotiating against every encoding
+    // borgo knows would resolve "br, gzip" to br, miss, and serve identity -
+    // shipping raw bytes past a compressed file sitting on disk
     const i = info("/style.css");
     const res = serveIndexed(
       new Request("http://app.test/style.css", { headers: { "accept-encoding": "br, gzip" } }),
       i,
     );
+    expect(res.headers.get("Content-Encoding")).toBe("gzip");
+    expect(res.headers.get("ETag")).toBe(i.variants.find((v) => v.encoding === "gzip")!.etag);
+    expect(new TextDecoder().decode(gunzipSync(await res.arrayBuffer()))).toBe(RAW_CSS);
+  });
+
+  test("a client that accepts only what the asset lacks gets identity", async () => {
+    // br alone against a gzip-only file: there is nothing to negotiate to, and
+    // identity is the honest answer rather than a body labelled with an
+    // encoding it was never compressed with
+    const i = info("/style.css");
+    const res = serveIndexed(
+      new Request("http://app.test/style.css", { headers: { "accept-encoding": "br" } }),
+      i,
+    );
     expect(res.headers.get("Content-Encoding")).toBeNull();
     expect(await res.text()).toBe(RAW_CSS);
     expect(res.headers.get("ETag")).toBe(i.identity.etag);
+  });
+
+  test("server preference still decides when the asset has both", async () => {
+    const i = info("/assets/client-abcd1234.js");
+    const res = serveIndexed(
+      new Request("http://app.test/assets/client-abcd1234.js", {
+        headers: { "accept-encoding": "gzip, br" },
+      }),
+      i,
+    );
+    // the client listed gzip first; the order it sends carries no preference
+    // without q-values, so borgo's own order picks the better codec
+    expect(res.headers.get("Content-Encoding")).toBe("br");
   });
 
   test("a non-compressible file has no variants and no vary", async () => {
@@ -168,8 +196,13 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
 
   afterAll(() => server.stop(true));
 
+  // ranges are taken over the *selected* representation, so these ask for
+  // identity explicitly: with a gzip sibling on disk and no accept-encoding of
+  // their own, they would be slicing compressed bytes and asserting plaintext
   test("a range off a file body is a 206 of exactly those bytes", async () => {
-    const res = await fetch(`${base}/style.css`, { headers: { range: "bytes=0-3" } });
+    const res = await fetch(`${base}/style.css`, {
+      headers: { range: "bytes=0-3", "accept-encoding": "identity" },
+    });
     expect(res.status).toBe(206);
     expect(await res.text()).toBe(RAW_CSS.slice(0, 4));
     expect(res.headers.get("Content-Range")).toBe(`bytes 0-3/${RAW_CSS.length}`);
@@ -178,7 +211,7 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
   test("if-range with the current validator keeps the 206", async () => {
     const i = info("/style.css");
     const res = await fetch(`${base}/style.css`, {
-      headers: { range: "bytes=5-9", "if-range": i.identity.etag },
+      headers: { range: "bytes=5-9", "if-range": i.identity.etag, "accept-encoding": "identity" },
     });
     expect(res.status).toBe(206);
     expect(await res.text()).toBe(RAW_CSS.slice(5, 10));
@@ -186,7 +219,7 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
 
   test("if-range with a stale validator gets the whole representation as 200", async () => {
     const res = await fetch(`${base}/style.css`, {
-      headers: { range: "bytes=5-9", "if-range": '"an-old-etag"' },
+      headers: { range: "bytes=5-9", "if-range": '"an-old-etag"', "accept-encoding": "identity" },
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toBe(RAW_CSS);
@@ -199,11 +232,11 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
   test("if-range accepts the last-modified date as a validator too", async () => {
     const i = info("/style.css");
     const fresh = await fetch(`${base}/style.css`, {
-      headers: { range: "bytes=0-3", "if-range": i.lastModified },
+      headers: { range: "bytes=0-3", "if-range": i.lastModified, "accept-encoding": "identity" },
     });
     expect(fresh.status).toBe(206);
     const stale = await fetch(`${base}/style.css`, {
-      headers: { range: "bytes=0-3", "if-range": new Date(0).toUTCString() },
+      headers: { range: "bytes=0-3", "if-range": new Date(0).toUTCString(), "accept-encoding": "identity" },
     });
     expect(stale.status).toBe(200);
   });
