@@ -1,4 +1,4 @@
-// hand-rolled prometheus text exposition, enabled with METRICS=1: request
+// hand-rolled prometheus text exposition, enabled with BORGO_METRICS=1: request
 // count by route pattern + status, one duration histogram per route pattern,
 // process uptime. patterns keep the cardinality bounded by the page table.
 export const BUCKETS = [0.005, 0.025, 0.1, 0.5, 1, 5] as const;

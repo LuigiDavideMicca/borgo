@@ -14,9 +14,9 @@ if (parentPid > 1) {
 }
 
 try {
-  await serve({ dev: !!process.env.DEV });
+  await serve({ dev: !!process.env.BORGO_DEV });
 } catch (error) {
-  if (!process.env.DEV) throw error;
+  if (!process.env.BORGO_DEV) throw error;
   // a broken build must not take the port down: serve the error instead, keep
   // the dev channel alive, and the next successful rebuild reloads the browser
   console.error(error);

@@ -47,7 +47,7 @@ export default defineConfig({
       PORT: "3400",
       API_PORT: "3901",
       DB_PATH: "e2e-prod.db",
-      METRICS: "1",
+      BORGO_METRICS: "1",
     },
   },
 });

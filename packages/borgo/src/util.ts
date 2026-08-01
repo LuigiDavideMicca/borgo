@@ -225,20 +225,14 @@ export function envInt(value: string | undefined, fallback: number): number {
 /**
  * Whether /metrics is exposed.
  *
- * BORGO_METRICS is the real name. METRICS was the original one and stays a
- * supported alias for all of 1.x - a bare `METRICS` in a shared environment is
- * the single most collidable variable borgo ever read, but silently ignoring
- * it would turn somebody's dashboard off on an upgrade.
- *
- * BORGO_METRICS wins whenever it is set, including when it is set to something
- * other than "1": that is how you turn metrics *off* for borgo alone in an
- * environment where a neighbouring process wants METRICS=1. An unset (or
- * empty) BORGO_METRICS falls through to the alias.
+ * The name is prefixed for a reason: a bare `METRICS` is the single most
+ * collidable variable borgo ever read, and a neighbouring process in the same
+ * environment has every right to its own. It was `METRICS` before 0.21 and the
+ * old name is not honoured - an alias kept for compatibility is an alias that
+ * keeps the collision alive.
  */
 export function metricsEnabled(env: Record<string, string | undefined>): boolean {
-  // empty counts as unset, as it does for envInt: `BORGO_METRICS=` is how a
-  // shell unsets a variable it cannot delete, not a request to shadow METRICS
-  return (env.BORGO_METRICS || env.METRICS) === "1";
+  return env.BORGO_METRICS === "1";
 }
 
 export const goBinName = () => "api" + (process.platform === "win32" ? ".exe" : "");

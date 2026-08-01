@@ -226,9 +226,8 @@ export async function serve({ dev = false } = {}) {
   }
 
   // observability: /healthz always answers (and probes the go api with a
-  // short timeout), /metrics appears with BORGO_METRICS=1 (or the legacy
-  // METRICS=1 alias). both stay out of the request log, the metrics themselves
-  // and any compression.
+  // short timeout), /metrics appears with BORGO_METRICS=1. both stay out of
+  // the request log, the metrics themselves and any compression.
   const bootTime = Date.now();
   const metrics = metricsEnabled(process.env) ? createMetrics(bootTime) : null;
 

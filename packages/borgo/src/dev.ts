@@ -157,7 +157,7 @@ export async function dev() {
         // overridable, because the app may want a real limit.
         BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
         ...process.env,
-        DEV: "1",
+        BORGO_DEV: "1",
         ...(reload ? { BORGO_RELOAD: "1" } : {}),
         ...(changed ? { BORGO_CHANGED: changed } : {}),
         BORGO_PARENT_PID: String(process.pid),
