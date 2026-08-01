@@ -35,20 +35,27 @@ var (
 
 func init() { armShutdown() }
 
-// armShutdown resets the stream-shutdown latch.
-func armShutdown() {
+// armShutdown resets the stream-shutdown latch and returns the cancel that
+// ends the streams of the run it just armed - and of no other run.
+func armShutdown() context.CancelFunc {
 	shutdownMu.Lock()
 	defer shutdownMu.Unlock()
 	shutdownCtx, shutdownStop = context.WithCancel(context.Background())
+	return shutdownStop
 }
 
-// signalShutdown ends every open stream. Registered as the server's
-// OnShutdown hook.
-func signalShutdown() {
-	shutdownMu.Lock()
-	stop := shutdownStop
-	shutdownMu.Unlock()
-	stop()
+// armStreamShutdown arms this run's stream-shutdown latch and registers the
+// hook that trips it on srv.
+//
+// The hook closes over the cancel this call created rather than reading the
+// package latch when it fires. net/http runs OnShutdown hooks as `go f()` and
+// Shutdown does not wait for them, so a hook left over from server N can still
+// be pending when server N+1 arms: a hook that read the live latch would then
+// cancel the new server's, and every SSE call it ever serves would return an
+// already-finished stream while the api looks healthy - browsers reconnect
+// forever.
+func armStreamShutdown(srv *http.Server) {
+	srv.RegisterOnShutdown(armShutdown())
 }
 
 // shutdownSignal is the channel a stream watches for server shutdown.
@@ -226,7 +233,8 @@ func (h *SSEHub) Publish(event string, data any) {
 //	}
 //
 // It is a sample, not a lock: a client can connect or drop the instant after
-// it returns.
+// it returns. On a closed hub it is not a sample but a guarantee - it reads 0
+// from the moment Close returns, however many requests arrive afterwards.
 func (h *SSEHub) Subscribers() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -266,9 +274,15 @@ func (h *SSEHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	// read the latch under the same lock that registers the subscription: a
 	// Close racing this call either sees the subscription and clears it, or
-	// trips the latch first and this stream ends on its first select
+	// trips the latch first and this stream ends on its first select. In that
+	// second case the subscription is not taken at all, so Subscribers really
+	// does read 0 for the whole life of a closed hub, as it documents - a
+	// request arriving after Close used to register itself for the microsecond
+	// before the select unwound it, and a presence counter could sample it
 	closed := h.closedChan()
-	h.subs[ch] = struct{}{}
+	if !h.shut {
+		h.subs[ch] = struct{}{}
+	}
 	h.mu.Unlock()
 	defer func() {
 		h.mu.Lock()

@@ -128,6 +128,10 @@ const bindLimit = 1 << 20
 // visible to static analysis: borgogen reads T to type the route's request
 // body for the TypeScript api client. On error, respond with BindError to
 // get the right status (413 for an oversized body).
+//
+// The request must declare Content-Type: application/json. Anything else -
+// including no Content-Type at all, which a cross-site fetch can send without
+// earning a preflight - is refused as 415.
 func Bind[T any](r *http.Request) (T, error) {
 	return BindMax[T](r, bindLimit)
 }
@@ -138,13 +142,19 @@ var errContentType = errors.New("Content-Type must be application/json")
 // disables the cap.
 func BindMax[T any](r *http.Request, limit int64) (T, error) {
 	var v T
-	// a browser form cannot send application/json - nor omit the header
-	// entirely - so rejecting other declared types blocks cross-site form
-	// posts while a bare curl or test request still binds
-	if raw := r.Header.Get("Content-Type"); raw != "" {
-		if ct, _, _ := mime.ParseMediaType(raw); ct != "application/json" {
-			return v, errContentType
-		}
+	// the header is required, not merely checked when present. A form post
+	// cannot declare application/json, and neither can a cross-site fetch
+	// without earning a CORS preflight - but a cross-site fetch can send a
+	// body with *no* Content-Type at all (a Blob with an empty type is a
+	// CORS-safelisted request and is not preflighted), so accepting the empty
+	// header would leave the door this check exists to shut wide open.
+	// Requiring it means every request that reaches a handler either came
+	// same-origin or passed a preflight. Clients must say what they are
+	// sending: `curl -d` declares application/x-www-form-urlencoded and is
+	// rejected, `curl -H 'Content-Type: application/json' -d ...` binds.
+	ct, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || ct != "application/json" {
+		return v, errContentType
 	}
 	body := r.Body
 	if limit > 0 {
@@ -158,6 +168,15 @@ func BindMax[T any](r *http.Request, limit int64) (T, error) {
 		return v, err
 	}
 	if _, err := dec.Token(); err != io.EOF {
+		// a body whose JSON value happens to complete inside the limit still
+		// overflows it on the trailing bytes, and the decoder reports that
+		// here rather than from Decode. Substituting a plain error would lose
+		// the *http.MaxBytesError BindError matches on, answering 400 for a
+		// body that is simply too large
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return v, err
+		}
 		return v, errors.New("unexpected data after JSON body")
 	}
 	return v, nil
@@ -349,10 +368,10 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 	// before "api on :port" is printed
 	srv := newServer(port, recoverMiddleware(gzipMiddleware(mux)))
 	grace := envDuration("BORGO_SHUTDOWN_TIMEOUT", 10*time.Second)
-	srv.RegisterOnShutdown(signalShutdown)
 	// arm the stream-shutdown latch before anything can connect, so a second
-	// run in the same process does not inherit the first one's cancellation
-	armShutdown()
+	// run in the same process neither inherits the first one's cancellation
+	// nor has its own tripped by the first one's still-pending hook
+	armStreamShutdown(srv)
 	warnSessionSecret()
 	printStartup(patterns, port)
 
@@ -411,16 +430,36 @@ func shutdown(srv *http.Server, grace time.Duration) {
 	}
 }
 
-// warnSessionSecret surfaces a missing or weak SESSION_SECRET at startup:
-// without this, session routes panic per request while /healthz stays green.
-// Not fatal - apps without sessions are legitimate.
+// warnSessionSecret settles SESSION_SECRET at startup, while there is still
+// somebody watching the terminal who can fix it.
+//
+// Unset only warns: an app with no sessions is legitimate, and borgo already
+// refuses to issue or verify one, so the failure direction is closed.
+//
+// Set but too short is refused outright. A short key is not a weaker secret,
+// it is a searchable one - the whole security of a session cookie is that
+// nobody can produce its HMAC, and a handful of bytes can be exhausted offline
+// from a single cookie the attacker holds. Warning was worse than either
+// alternative: it let a searchable key run in production while printing a line
+// nobody reads, which is the same silent-downgrade shape as SESSION_SECURE=true
+// issuing a non-Secure cookie. Refusing costs a restart with a real secret;
+// accepting costs every session in the app.
 func warnSessionSecret() {
+	// read now so a malformed SESSION_SECURE fails the boot, the way a
+	// malformed BORGO_*_TIMEOUT does, rather than panicking inside the first
+	// handler that writes a cookie
+	_ = sessionSecure()
 	secret := os.Getenv("SESSION_SECRET")
 	switch {
 	case secret == "":
 		log.Print("borgo: SESSION_SECRET not set: session and auth routes will fail until it is")
-	case len(secret) < 32:
-		log.Printf("borgo: SESSION_SECRET is %d bytes; use at least 32 random bytes", len(secret))
+	case len(secret) < sessionSecretMinLen:
+		log.Fatalf(
+			"borgo: SESSION_SECRET is %d bytes; it must be at least %d (openssl rand -base64 48). "+
+				"A key this short can be searched offline from one captured cookie, so borgo refuses "+
+				"to start rather than sign with it",
+			len(secret), sessionSecretMinLen,
+		)
 	}
 }
 

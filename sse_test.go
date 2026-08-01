@@ -299,6 +299,50 @@ func TestHubCloseEndsEveryStream(t *testing.T) {
 	}
 }
 
+// Subscribers documents that a closed hub reads 0 from the moment Close
+// returns, but a ServeHTTP arriving afterwards used to register itself anyway
+// and unwind a microsecond later on its first select - so a presence counter
+// on a retired hub could sample a subscriber that was never really there. The
+// count on a closed hub is a guarantee, not a sample: nothing may register.
+func TestClosedHubNeverReportsASubscriber(t *testing.T) {
+	hub := NewSSEHub()
+	hub.Close()
+
+	stop := make(chan struct{})
+	peak := make(chan int, 1)
+	go func() {
+		highest := 0
+		for {
+			if n := hub.Subscribers(); n > highest {
+				highest = n
+			}
+			select {
+			case <-stop:
+				peak <- highest
+				return
+			default:
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 250 {
+				hub.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/events", nil))
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+
+	if n := <-peak; n != 0 {
+		t.Fatalf("Subscribers() read %d on a closed hub; a request that arrives after Close must not register at all", n)
+	}
+}
+
 // the hub's discipline is a single mutex around a non-blocking publish and a
 // deferred unsubscribe; the count and the close have to live inside it. Run
 // under -race, every combination at once.

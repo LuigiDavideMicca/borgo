@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,8 +30,30 @@ func newSessionCookie() *http.Cookie {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   os.Getenv("SESSION_SECURE") == "1",
+		Secure:   sessionSecure(),
 	}
+}
+
+// sessionSecure reads SESSION_SECURE, which adds the Secure attribute to the
+// session cookie. Like BORGO_HASH_SLOTS and the BORGO_*_TIMEOUT family, a
+// value that is not understood is a panic rather than a silent fallback: this
+// was an == "1" test, so SESSION_SECURE=true - the spelling every other
+// boolean env in the ecosystem takes - read as "not 1" and quietly issued a
+// session cookie the browser would send back over plain http. The failure
+// direction of a misread here is open, so it must not be silent.
+//
+// serveContext reads it at startup, so a typo fails the boot rather than the
+// first request that writes a cookie.
+func sessionSecure() bool {
+	v := os.Getenv("SESSION_SECURE")
+	if v == "" {
+		return false
+	}
+	secure, err := strconv.ParseBool(v)
+	if err != nil {
+		panic(`borgo: SESSION_SECURE: invalid value "` + v + `" (want "1"/"true" or "0"/"false"; unset means not secure)`)
+	}
+	return secure
 }
 
 type sessionEnvelope struct {
@@ -38,12 +61,33 @@ type sessionEnvelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// ErrNoSessionSecret is returned by SetSession when SESSION_SECRET is unset.
+// ErrNoSessionSecret is returned by SetSession when SESSION_SECRET is unset,
+// or set to something too short to be a key (see sessionSecretMinLen).
 // It is an error rather than a panic because the app is already serving: a
 // login that answers 500 is recoverable, a panicking handler is not.
-var ErrNoSessionSecret = errors.New("borgo: SESSION_SECRET must be set to use sessions (any long random string)")
+var ErrNoSessionSecret = errors.New("borgo: SESSION_SECRET must be set to at least 32 bytes to use sessions (openssl rand -base64 48)")
 
-func sessionSecret() string { return os.Getenv("SESSION_SECRET") }
+// sessionSecretMinLen is the shortest SESSION_SECRET borgo will sign with, and
+// it is the output size of the hash it keys. Below it the cookie's security
+// stops being "nobody can produce this HMAC" and becomes "nobody has bothered
+// to search for the key yet" - one captured cookie is an offline oracle, and a
+// handful of bytes falls in seconds.
+const sessionSecretMinLen = 32
+
+// sessionSecret returns the signing key, or "" when there is nothing usable.
+// A secret too short is reported as absent rather than as its own case on
+// purpose: every guard in this package already refuses to issue or verify
+// without a secret, so one definition of "usable" makes all of them cover the
+// weak key too. Serve refuses to start on a short one, loudly, which is where
+// a deploy should learn about it; this is what keeps an embedder that never
+// calls Serve from signing with it anyway.
+func sessionSecret() string {
+	secret := os.Getenv("SESSION_SECRET")
+	if len(secret) < sessionSecretMinLen {
+		return ""
+	}
+	return secret
+}
 
 // building an hmac is most of the cost of verifying a session, and every
 // guarded request verifies one. Pooled macs are rebuilt only when the secret
@@ -57,8 +101,20 @@ type sessionSigner struct {
 
 var sessionSigners sync.Pool
 
+// The empty signature is what an unset SESSION_SECRET produces, and nothing
+// ever equals it: hmac.Equal against "" is false for any real signature, and a
+// cookie carrying an empty one cannot be built because SetSession refuses
+// first. Callers already guard, but the guard is positional - it sits at the
+// top of one function - and the hole this closes was exactly a verify path
+// that reached the signer without one. Refusing here makes it structural, so a
+// future caller cannot reintroduce it by forgetting.
+const noSignature = ""
+
 func sessionSign(payload string) string {
 	secret := sessionSecret()
+	if secret == "" {
+		return noSignature
+	}
 	s, _ := sessionSigners.Get().(*sessionSigner)
 	if s == nil || s.secret != secret {
 		s = &sessionSigner{secret: secret, mac: hmac.New(sha256.New, []byte(secret))}
@@ -74,8 +130,8 @@ func sessionSign(payload string) string {
 
 // SetSession stores v, JSON-encoded and HMAC-signed with SESSION_SECRET, in
 // an http-only cookie. The expiry is signed too, so a client cannot extend
-// it. Set SESSION_SECURE=1 to add the Secure attribute behind https. A
-// maxAge of zero or less writes an already-expired session.
+// it. Set SESSION_SECURE=1 (or "true") to add the Secure attribute behind
+// https. A maxAge of zero or less writes an already-expired session.
 func SetSession(w http.ResponseWriter, v any, maxAge time.Duration) error {
 	if sessionSecret() == "" {
 		return ErrNoSessionSecret

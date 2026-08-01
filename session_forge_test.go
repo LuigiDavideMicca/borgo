@@ -5,9 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -113,4 +114,48 @@ func TestSessionsDoNotSurviveASecretRotation(t *testing.T) {
 	}
 }
 
-var _ = fmt.Sprint
+// The guard closing the forgery hole sits at the top of sessionPayload, which
+// is a position, not a rule: a future caller reaching the signer another way
+// would reopen it. So the signer refuses too, and this pins that - remove the
+// check in sessionPayload and the forgery test above still has to fail.
+func TestSignerRefusesWithoutASecret(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "")
+	if sig := sessionSign("any-payload-at-all"); sig != "" {
+		t.Errorf("sessionSign produced %q without a secret; anything non-empty is a mac anyone can recompute", sig)
+	}
+	t.Setenv("SESSION_SECRET", "a-real-secret-of-respectable-length")
+	if sessionSign("any-payload-at-all") == "" {
+		t.Error("sessionSign refused a real secret")
+	}
+}
+
+// A short SESSION_SECRET is not a weaker secret, it is a searchable one: the
+// whole security of the cookie is that nobody can produce its HMAC, and a
+// handful of bytes falls offline from a single captured cookie. Warning about
+// it - which is what borgo did - left a searchable key signing production
+// sessions while printing a line nobody reads. Treated as absent everywhere,
+// so every guard that already refuses without a secret covers this too.
+func TestAShortSecretIsNoSecret(t *testing.T) {
+	for _, secret := range []string{"x", "short", strings.Repeat("a", sessionSecretMinLen-1)} {
+		t.Setenv("SESSION_SECRET", secret)
+
+		if err := SetSession(httptest.NewRecorder(), map[string]string{"u": "a"}, time.Hour); !errors.Is(err, ErrNoSessionSecret) {
+			t.Errorf("SetSession(%d bytes) = %v, want ErrNoSessionSecret", len(secret), err)
+		}
+		if sig := sessionSign("payload"); sig != "" {
+			t.Errorf("sessionSign signed with a %d-byte key", len(secret))
+		}
+		// and it cannot be used to forge either, which is the direction that matters
+		req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: forgeSession(t, map[string]string{"user": "root"}, secret)})
+		if _, ok := GetSession[map[string]string](req); ok {
+			t.Errorf("a session forged against the %d-byte key was accepted", len(secret))
+		}
+	}
+
+	// exactly at the floor is usable: the boundary belongs to the good side
+	t.Setenv("SESSION_SECRET", strings.Repeat("a", sessionSecretMinLen))
+	if sessionSign("payload") == "" {
+		t.Errorf("a %d-byte secret was refused; the minimum must be inclusive", sessionSecretMinLen)
+	}
+}

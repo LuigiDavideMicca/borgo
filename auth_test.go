@@ -26,7 +26,7 @@ type testUser struct {
 
 func testAuth(t *testing.T) (*Auth[testUser], map[string]string) {
 	t.Helper()
-	t.Setenv("SESSION_SECRET", "test-secret")
+	t.Setenv("SESSION_SECRET", "test-secret-long-enough-to-be-a-key")
 	hash, err := DefaultHasher().Hash("hunter22")
 	if err != nil {
 		t.Fatal(err)
@@ -53,6 +53,7 @@ func testAuth(t *testing.T) (*Auth[testUser], map[string]string) {
 
 func postJSON(handler http.HandlerFunc, body string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, r)
 	return w
@@ -408,6 +409,7 @@ func TestLoginReplacesAnExistingSession(t *testing.T) {
 
 	planted := setAndExtract(t, testUser{Name: "attacker"}, time.Hour)
 	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"username":"luigi","password":"hunter22"}`))
+	r.Header.Set("Content-Type", "application/json")
 	r.AddCookie(planted)
 	w := httptest.NewRecorder()
 	auth.LoginHandler(w, r)
@@ -426,7 +428,7 @@ func TestLoginReplacesAnExistingSession(t *testing.T) {
 }
 
 func TestAuthed(t *testing.T) {
-	t.Setenv("SESSION_SECRET", "test-secret")
+	t.Setenv("SESSION_SECRET", "test-secret-long-enough-to-be-a-key")
 	handler := Authed(func(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})

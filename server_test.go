@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -352,11 +353,13 @@ func serveOn(t *testing.T, srv *http.Server) string {
 }
 
 // the shutdown signal is process-wide; re-arm it afterwards so the rest of the
-// package still sees live streams
-func isolateShutdownSignal(t *testing.T) {
+// package still sees live streams. The returned cancel belongs to the run it
+// arms - it is what a server's OnShutdown hook has to close over.
+func isolateShutdownSignal(t *testing.T) context.CancelFunc {
 	t.Helper()
-	armShutdown()
-	t.Cleanup(armShutdown)
+	stop := armShutdown()
+	t.Cleanup(func() { armShutdown() })
+	return stop
 }
 
 // freePort grabs a loopback port and lets it go, so the caller can bind it.
@@ -500,7 +503,7 @@ func TestServeContextStillValidatesTimeouts(t *testing.T) {
 }
 
 func TestShutdownEndsEventStreams(t *testing.T) {
-	isolateShutdownSignal(t)
+	stop := isolateShutdownSignal(t)
 
 	handlerReturned := make(chan struct{})
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -520,7 +523,7 @@ func TestShutdownEndsEventStreams(t *testing.T) {
 			}
 		}
 	})}
-	srv.RegisterOnShutdown(signalShutdown)
+	srv.RegisterOnShutdown(stop)
 
 	res, err := http.Get(serveOn(t, srv))
 	if err != nil {
@@ -539,6 +542,56 @@ func TestShutdownEndsEventStreams(t *testing.T) {
 	case <-handlerReturned:
 	case <-time.After(3 * time.Second):
 		t.Fatal("stream handler never returned")
+	}
+}
+
+// net/http runs OnShutdown hooks as `go f()` and Shutdown does not wait for
+// them, so a hook registered by one server can still be pending when the next
+// one starts. It must end the streams of the run that registered it and no
+// other: a hook that reads the package latch when it fires cancels whichever
+// run is live at that moment, and the server that just started then answers
+// every SSE request with an already-finished stream, for its whole life, while
+// /healthz stays green and the browser reconnects forever.
+func TestShutdownHookCancelsOnlyItsOwnRun(t *testing.T) {
+	isolateShutdownSignal(t)
+
+	prev := &http.Server{}
+	armStreamShutdown(prev)
+	prevStreams := shutdownSignal()
+
+	next := &http.Server{}
+	armStreamShutdown(next)
+	nextStreams := shutdownSignal()
+
+	if prevStreams == nextStreams {
+		t.Fatal("the second run reused the first run's latch")
+	}
+
+	// the previous run's hook fires late, after the next run armed its latch
+	if err := prev.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-prevStreams:
+	case <-nextStreams:
+		t.Fatal("a pending hook from the previous server cancelled the new server's stream latch: every stream that server serves would end at once")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the shutdown hook never ended the streams of the run that registered it")
+	}
+	select {
+	case <-nextStreams:
+		t.Fatal("a pending hook from the previous server cancelled the new server's stream latch: every stream that server serves would end at once")
+	default:
+	}
+
+	// and the live run's own hook still works
+	if err := next.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-nextStreams:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the current run's own shutdown hook did not end its streams")
 	}
 }
 
@@ -581,6 +634,13 @@ func TestShutdownGraceIsConfigurable(t *testing.T) {
 	}
 }
 
+// jsonRequest is what a client that says what it is sending posts.
+func jsonRequest(body string) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	return r
+}
+
 func TestBindCapsBodies(t *testing.T) {
 	type payload struct {
 		Data string `json:"data"`
@@ -589,7 +649,7 @@ func TestBindCapsBodies(t *testing.T) {
 	small := `{"data":"ok"}`
 
 	t.Run("oversized body is a 413", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(big))
+		r := jsonRequest(big)
 		_, err := Bind[payload](r)
 		if err == nil {
 			t.Fatal("want error for oversized body")
@@ -602,16 +662,14 @@ func TestBindCapsBodies(t *testing.T) {
 	})
 
 	t.Run("small body decodes", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(small))
-		v, err := Bind[payload](r)
+		v, err := Bind[payload](jsonRequest(small))
 		if err != nil || v.Data != "ok" {
 			t.Fatalf("bind failed: %v %+v", err, v)
 		}
 	})
 
 	t.Run("malformed body is a 400", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("not json"))
-		_, err := Bind[payload](r)
+		_, err := Bind[payload](jsonRequest("not json"))
 		w := httptest.NewRecorder()
 		BindError(w, err)
 		if w.Code != http.StatusBadRequest {
@@ -620,17 +678,109 @@ func TestBindCapsBodies(t *testing.T) {
 	})
 
 	t.Run("BindMax overrides the cap", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(big))
-		if _, err := BindMax[payload](r, int64(len(big))+1); err != nil {
+		if _, err := BindMax[payload](jsonRequest(big), int64(len(big))+1); err != nil {
 			t.Fatalf("raised cap must decode: %v", err)
 		}
-		r = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(small))
-		if _, err := BindMax[payload](r, 4); err == nil {
+		if _, err := BindMax[payload](jsonRequest(small), 4); err == nil {
 			t.Fatal("tiny cap must reject")
 		}
-		r = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(big))
-		if _, err := BindMax[payload](r, 0); err != nil {
+		if _, err := BindMax[payload](jsonRequest(big), 0); err != nil {
 			t.Fatalf("0 disables the cap: %v", err)
 		}
 	})
+
+	// the padding pushes the body past the limit, but the JSON value itself
+	// completed inside it, so the decoder reports the overflow from Token()
+	// rather than from Decode(). Discarding that error - it used to be
+	// replaced by a plain "unexpected data after JSON body" - lost the
+	// *http.MaxBytesError BindError matches on, and an oversized body was
+	// answered 400 "unexpected data" instead of the documented 413.
+	t.Run("a body that overflows after a complete value is still a 413", func(t *testing.T) {
+		for _, pad := range []string{strings.Repeat(" ", 4<<10), strings.Repeat("\n", 4<<10)} {
+			r := jsonRequest(`{"username":"a","password":"b"}` + pad)
+			_, err := BindMax[Credentials](r, 64)
+			if err == nil {
+				t.Fatal("want an error for a body past the limit")
+			}
+			var tooLarge *http.MaxBytesError
+			if !errors.As(err, &tooLarge) {
+				t.Errorf("err = %v (%T), want it to carry *http.MaxBytesError", err, err)
+			}
+			w := httptest.NewRecorder()
+			BindError(w, err)
+			if w.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("want 413, got %d: %s", w.Code, w.Body)
+			}
+		}
+	})
+
+	// trailing junk that fits inside the limit is still a plain 400
+	t.Run("trailing data inside the limit is a 400", func(t *testing.T) {
+		_, err := BindMax[payload](jsonRequest(small+` {"data":"again"}`), 1<<20)
+		if err == nil {
+			t.Fatal("want an error for two values in one body")
+		}
+		w := httptest.NewRecorder()
+		BindError(w, err)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("want 400, got %d", w.Code)
+		}
+	})
+}
+
+// The Content-Type check is the only barrier Bind puts between a handler and a
+// cross-site POST, and it was not one: a request with no Content-Type at all
+// was accepted. `fetch(url, {method:"POST", body: new Blob([json], {type:""})})`
+// sends exactly that from any origin and is not preflighted, so the header has
+// to be required rather than merely validated when present.
+func TestBindRequiresAJSONContentType(t *testing.T) {
+	type payload struct {
+		Data string `json:"data"`
+	}
+	const body = `{"data":"ok"}`
+
+	t.Run("no Content-Type is a 415", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		_, err := Bind[payload](r)
+		if !errors.Is(err, errContentType) {
+			t.Fatalf("a request with no Content-Type bound: %v", err)
+		}
+		w := httptest.NewRecorder()
+		BindError(w, err)
+		if w.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("want 415, got %d", w.Code)
+		}
+	})
+
+	for _, ct := range []string{
+		"application/x-www-form-urlencoded", // what `curl -d` actually sends
+		"multipart/form-data; boundary=x",
+		"text/plain",
+		"application/jsonx",
+		"", // an empty but present header
+		"application/json; charset",
+	} {
+		t.Run("rejected: "+ct, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+			r.Header["Content-Type"] = []string{ct}
+			if _, err := Bind[payload](r); !errors.Is(err, errContentType) {
+				t.Fatalf("Content-Type %q bound: %v", ct, err)
+			}
+		})
+	}
+
+	for _, ct := range []string{
+		"application/json",
+		"application/json; charset=utf-8",
+		"Application/JSON",
+	} {
+		t.Run("accepted: "+ct, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+			r.Header.Set("Content-Type", ct)
+			v, err := Bind[payload](r)
+			if err != nil || v.Data != "ok" {
+				t.Fatalf("Content-Type %q rejected: %v %+v", ct, err, v)
+			}
+		})
+	}
 }

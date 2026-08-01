@@ -38,7 +38,7 @@ func setAndExtract(t *testing.T, v any, maxAge time.Duration) *http.Cookie {
 }
 
 func TestSessionRoundTrip(t *testing.T) {
-	t.Setenv("SESSION_SECRET", "test-secret")
+	t.Setenv("SESSION_SECRET", "test-secret-long-enough-to-be-a-key")
 	cookie := setAndExtract(t, testSession{User: "luigi", Role: "admin"}, time.Hour)
 
 	if !cookie.HttpOnly || cookie.Path != "/" || cookie.SameSite != http.SameSiteLaxMode {
@@ -51,7 +51,7 @@ func TestSessionRoundTrip(t *testing.T) {
 }
 
 func TestSessionRejects(t *testing.T) {
-	t.Setenv("SESSION_SECRET", "test-secret")
+	t.Setenv("SESSION_SECRET", "test-secret-long-enough-to-be-a-key")
 	valid := setAndExtract(t, testSession{User: "luigi"}, time.Hour)
 
 	tamperedValue := valid.Value
@@ -71,7 +71,7 @@ func TestSessionRejects(t *testing.T) {
 		{"no signature separator", &http.Cookie{Name: "borgo_session", Value: "nodothere"}, nil},
 		{"expired", setAndExtract(t, testSession{User: "luigi"}, -time.Second), nil},
 		{"oversized value", &http.Cookie{Name: "borgo_session", Value: strings.Repeat("a", sessionCookieMaxLen+1) + ".sig"}, nil},
-		{"wrong secret", valid, func(t *testing.T) { t.Setenv("SESSION_SECRET", "other-secret") }},
+		{"wrong secret", valid, func(t *testing.T) { t.Setenv("SESSION_SECRET", "other-secret-long-enough-to-be-key!") }},
 	}
 
 	for _, c := range cases {
@@ -128,7 +128,7 @@ func TestSessionDuplicateCookies(t *testing.T) {
 
 // a >68-year maxAge must not wrap a 32-bit cookie MaxAge into a deletion
 func TestSessionMaxAgeClamps(t *testing.T) {
-	t.Setenv("SESSION_SECRET", "test-secret")
+	t.Setenv("SESSION_SECRET", "test-secret-long-enough-to-be-a-key")
 	cookie := setAndExtract(t, testSession{User: "luigi"}, 100*365*24*time.Hour)
 	if cookie.MaxAge <= 0 {
 		t.Fatalf("MaxAge = %d, want a positive clamped value", cookie.MaxAge)
@@ -136,6 +136,62 @@ func TestSessionMaxAgeClamps(t *testing.T) {
 	if _, ok := GetSession[testSession](sessionRequest(cookie)); !ok {
 		t.Fatal("long-lived session must round trip")
 	}
+}
+
+// SESSION_SECURE was an == "1" test, so SESSION_SECURE=true - the spelling
+// every other boolean env in the ecosystem takes - read as false and issued a
+// session cookie without Secure, which the browser then sends back over plain
+// http. A downgrade must never be the silent reading of a value.
+func TestSessionSecureAcceptsTheUsualSpellings(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "a-secret-that-is-at-least-32-bytes")
+
+	for _, v := range []string{"1", "t", "T", "true", "TRUE", "True"} {
+		t.Setenv("SESSION_SECURE", v)
+		if cookie := setAndExtract(t, testSession{User: "luigi"}, time.Hour); !cookie.Secure {
+			t.Errorf("SESSION_SECURE=%q issued a cookie without Secure", v)
+		}
+		if !sessionSecure() {
+			t.Errorf("sessionSecure() = false for SESSION_SECURE=%q", v)
+		}
+	}
+	for _, v := range []string{"", "0", "f", "F", "false", "FALSE", "False"} {
+		t.Setenv("SESSION_SECURE", v)
+		if cookie := setAndExtract(t, testSession{User: "luigi"}, time.Hour); cookie.Secure {
+			t.Errorf("SESSION_SECURE=%q issued a Secure cookie", v)
+		}
+	}
+}
+
+// like BORGO_HASH_SLOTS and the BORGO_*_TIMEOUT family: a value the package
+// does not understand is a refusal, not a fallback to the insecure default
+func TestSessionSecureRejectsGarbage(t *testing.T) {
+	for _, v := range []string{"yes", "on", "secure", "2", "-1", " 1", "true ", "https"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("SESSION_SECURE", v)
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("SESSION_SECURE=%q was accepted; an unrecognised value must not quietly drop Secure", v)
+				}
+				if !strings.Contains(fmt.Sprint(r), "SESSION_SECURE") {
+					t.Fatalf("panic does not name the variable: %v", r)
+				}
+			}()
+			sessionSecure()
+		})
+	}
+}
+
+// and the boot reads it, so a typo is a startup failure rather than a panic
+// inside the first handler that writes a cookie
+func TestStartupValidatesSessionSecure(t *testing.T) {
+	t.Setenv("SESSION_SECURE", "yes")
+	defer func() {
+		if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "SESSION_SECURE") {
+			t.Fatalf("want a boot panic naming the variable, got %v", r)
+		}
+	}()
+	warnSessionSecret()
 }
 
 func TestClearSession(t *testing.T) {
@@ -149,11 +205,11 @@ func TestClearSession(t *testing.T) {
 
 // pooled macs must not outlive the secret they were built for
 func TestSessionSignFollowsTheSecret(t *testing.T) {
-	t.Setenv("SESSION_SECRET", "first-secret-first-secret-first")
+	t.Setenv("SESSION_SECRET", "first-secret-first-secret-first-x")
 	first := sessionSign("a-payload")
 	t.Setenv("SESSION_SECRET", "second-secret-second-secret-second")
 	second := sessionSign("a-payload")
-	t.Setenv("SESSION_SECRET", "first-secret-first-secret-first")
+	t.Setenv("SESSION_SECRET", "first-secret-first-secret-first-x")
 	again := sessionSign("a-payload")
 
 	if first == second {
