@@ -131,6 +131,16 @@ test.afterAll(async () => {
   for (const f of [staticPage, dataPage]) rmSync(f, { force: true });
   rmSync(dynDir, { recursive: true, force: true });
   rmSync(join(appDir, "e2e-export.db"), { force: true });
+  // the generated route manifest still imports the pages just deleted, and it
+  // is real input to the next build, not a scratch file. Left stale, the
+  // example stops typechecking and `borgo start` dies on a module resolution
+  // error, in a working tree nobody touched. Regenerating it is what a save
+  // under `borgo dev` would have done. Through the CLI, not by importing
+  // build.ts: this spec runs on node, and build.ts imports `bun`.
+  const regen = spawnSync("bun", [cli, "build"], { cwd: appDir, encoding: "utf8", shell: true });
+  if (regen.status !== 0) {
+    throw new Error(`could not regenerate the route manifest:\n${regen.stdout}\n${regen.stderr}`);
+  }
 });
 
 test("export writes the exportable pages and explains the skips", () => {

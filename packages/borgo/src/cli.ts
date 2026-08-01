@@ -58,6 +58,52 @@ switch (command) {
   }
 
   case "start": {
+    // bun sizes its outbound fetch pool when the process starts, and the front
+    // server holds one slot for the whole life of every proxied request - for
+    // an event stream, hours. At the default of 256 that ceilings concurrent
+    // subscribers at ~255, silently. This process cannot raise it for itself:
+    // assigning process.env after boot changes nothing, it has to be in the
+    // environment bun booted with. So when nobody set it, run ourselves once
+    // more with it set. Every deployment borgo writes - the Dockerfiles, the
+    // systemd unit, the compose file - sets it, and pays nothing here; the
+    // hand-launched server is the one that was quietly capped.
+    if (!process.env.BUN_CONFIG_MAX_HTTP_REQUESTS) {
+      // process.execPath and the module path, not the bin shim: a PATH lookup
+      // can resolve to a shim whose kill leaves the real server on the port
+      const child = Bun.spawn([process.execPath, import.meta.path, ...process.argv.slice(2)], {
+        stdout: "inherit",
+        stderr: "inherit",
+        stdin: "inherit",
+        env: {
+          ...process.env,
+          BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
+          // the child is the one holding the api, so it has to die with us -
+          // a hard kill of this process delivers no signal on windows, and
+          // the api's own watchdog only watches the child
+          BORGO_SUPERVISOR_PID: String(process.pid),
+        },
+      });
+      // the supervisor is the pid a service manager signals; pass it on and
+      // exit with the child's own code so a restart policy sees the truth
+      for (const signal of ["SIGINT", "SIGTERM"] as const) {
+        process.on(signal, () => child.kill(signal));
+      }
+      process.exit(await child.exited);
+    }
+    // the re-exec'd half: exit when the supervisor does, whatever killed it.
+    // Deliberately not process.ppid - a server started with nohup from a shell
+    // that then exits must keep serving, so only a borgo parent counts.
+    const supervisor = Number(process.env.BORGO_SUPERVISOR_PID);
+    if (supervisor > 0) {
+      setInterval(() => {
+        try {
+          process.kill(supervisor, 0);
+        } catch {
+          process.exit(0);
+        }
+      }, 2_000).unref();
+    }
+
     // --front-only skips the go binary, for a split deployment where the
     // api runs elsewhere (point API_URL at it)
     if (!process.argv.includes("--front-only")) {
