@@ -30,11 +30,17 @@ import (
 // always the same number. Report it in bug reports; borgo doctor prints the
 // TypeScript half's.
 //
-// It is kept in sync with .release-please-manifest.json, which release-please
-// rewrites when it cuts a release, and TestVersionMatchesManifest fails the
-// build if the two ever disagree. So this line is updated by the release, and
-// the check is what makes drifting from it impossible to do quietly.
-const Version = "0.20.1" // x-release-please-version
+// This line is bumped by hand, in the release PR, and it is the one version
+// number in the repository that is. release-please resolves extra-files
+// relative to a package's own path, so packages/borgo cannot reach a file at
+// the repository root, and giving the root a package entry of its own would
+// have it claim the same vX.Y.Z tag that packages/borgo already owns
+// (include-component-in-tag: false) - a real risk taken for a one-line edit.
+//
+// Forgetting it is not quiet: TestVersionMatchesManifest reads
+// .release-please-manifest.json and fails the build when the two disagree,
+// naming the value it wanted.
+const Version = "0.20.1"
 
 var (
 	// generated init() functions register on one goroutine, but nothing stops

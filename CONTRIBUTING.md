@@ -111,6 +111,8 @@ Two hard rules on commits:
 
 Merging the release PR tags `vX.Y.Z` and publishes both npm packages with linked versions; the Go module resolves the same tag because it lives at the repository root. One version number, four artifacts — do not bump versions by hand.
 
+The one exception is `Version` in `borgo.go`, which release-please cannot reach: it resolves `extra-files` relative to a package's own path, and giving the repository root a package entry would have it claim the same tag `packages/borgo` already owns. So the release PR needs one extra commit setting that constant to the version the PR is cutting. You cannot forget silently — `TestVersionMatchesManifest` reads `.release-please-manifest.json` and fails the build when they disagree, naming the value it expected.
+
 ## What a mergeable change looks like
 
 **A bug fix arrives with the test that would have caught it.** Not a test that exercises the area — the specific test that fails on the parent commit and passes on yours. If you cannot write one, say so in the pull request and explain why; sometimes the honest answer is that the bug is only reachable end to end, and an `e2e/` spec is the right home.
