@@ -9,6 +9,7 @@ import {
   forwardableHeaders,
   headHtml,
   headResponse,
+  metricsEnabled,
   PROXY_RETRY_MAX_BODY,
   scriptJson,
   shouldBufferBody,
@@ -487,5 +488,44 @@ describe("headResponse", () => {
       const res = new Response(null, { status, headers: { ETag: '"x"' } });
       expect(headResponse("HEAD", res)).toBe(res);
     }
+  });
+});
+
+// BORGO_METRICS is the real name from 0.21 on. METRICS was the original and
+// stays a supported alias for all of 1.x: a bare, entirely generic variable is
+// the one most likely to collide in a shared environment, but dropping it
+// would switch somebody's dashboard off during a patch upgrade.
+describe("metricsEnabled", () => {
+  test("the new name enables it", () => {
+    expect(metricsEnabled({ BORGO_METRICS: "1" })).toBe(true);
+  });
+
+  test("the legacy METRICS alias still enables it", () => {
+    expect(metricsEnabled({ METRICS: "1" })).toBe(true);
+  });
+
+  test("neither set means off", () => {
+    expect(metricsEnabled({})).toBe(false);
+  });
+
+  test("only 1 counts, under either name", () => {
+    for (const value of ["0", "true", "yes", "", " 1"]) {
+      expect(metricsEnabled({ BORGO_METRICS: value })).toBe(false);
+      expect(metricsEnabled({ METRICS: value })).toBe(false);
+    }
+  });
+
+  // precedence: the prefixed name is the one that decides. this is how you
+  // turn borgo's /metrics off in an environment where a neighbouring process
+  // needs METRICS=1 for its own reasons - the case the rename exists for.
+  test("BORGO_METRICS overrides METRICS in both directions", () => {
+    expect(metricsEnabled({ BORGO_METRICS: "0", METRICS: "1" })).toBe(false);
+    expect(metricsEnabled({ BORGO_METRICS: "1", METRICS: "0" })).toBe(true);
+  });
+
+  test("an empty BORGO_METRICS is unset, not a veto: the alias still decides", () => {
+    // `BORGO_METRICS=` is how a shell clears a variable it cannot delete, and
+    // envInt reads empty the same way
+    expect(metricsEnabled({ BORGO_METRICS: "", METRICS: "1" })).toBe(true);
   });
 });

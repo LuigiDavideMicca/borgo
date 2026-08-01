@@ -1,6 +1,17 @@
-// everything exported here is browser-safe: pages import from "borgo-framework" and
-// end up in the client bundle. server-only entry points live in borgo/server.
-export { filePathToPattern, matchRoute, resolveHead } from "./router";
+// THE ROOT ENTRY IS THE APPLICATION-FACING API.
+//
+// One rule governs what belongs here: an app writes it by hand. If the only
+// caller is generated code, or another borgo module reaching across a file
+// boundary, it does not belong on "borgo-framework" - it belongs on a subpath
+// whose name says it is not for you ("borgo-framework/internal", ./runtime,
+// ./router). Adding a symbol here is a stability promise; adding one there is
+// not. That is the whole reason the split exists, so resist the convenience of
+// re-exporting an internal from this file because an import path got long.
+//
+// Everything exported here is also browser-safe: pages import from
+// "borgo-framework" and end up in the client bundle. The SSR front server
+// (src/server.ts) is not published at all - the cli boots it by relative
+// import - so nothing server-only can leak in through this file.
 export type {
   ActionContext,
   Head,
@@ -32,7 +43,7 @@ export type Channel<T extends string = string> = {
   close(): void;
 };
 
-// "topic/event" -> payload type. borgogen fills this in from borgo.PushT
+// "topic/event" -> payload type. borgogen fills this in from borgo.Push
 // calls through the generated .borgo/api-types.d.ts; browser-published
 // events are declared the same way in any app .d.ts file.
 export interface WsEvents {}
@@ -125,10 +136,10 @@ export function subscribe(
 }
 
 // islands: components in islands/*.tsx that hydrate independently, so a
-// hydrate=false page can still have interactive parts. react is injected at
-// registration time so this package never bundles its own copy.
-import type { ComponentType, Context } from "react";
-import type { createContext as CreateContext, createElement as CreateElement, useContext as UseContext } from "react";
+// hydrate=false page can still have interactive parts. the registries the two
+// components below read live on borgo-framework/internal, because the only
+// things that *fill* them are generated code and the ssr server.
+import { csrfRuntime, islandRegistry } from "./internal";
 
 // csrf double-submit: the front server issues a borgo_csrf cookie and, in
 // production, requires form actions of session-carrying requests to echo it
@@ -137,18 +148,35 @@ import type { createContext as CreateContext, createElement as CreateElement, us
 export const CSRF_COOKIE = "borgo_csrf";
 export const CSRF_FIELD = "__borgo_csrf";
 
-export function cookieValue(header: string | null, name: string): string {
-  for (const part of (header ?? "").split(";")) {
-    const eq = part.indexOf("=");
-    if (eq !== -1 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
-  }
-  return "";
-}
-
-// duplicate borgo_csrf cookies (a stale Domain= copy shadowing the host-only
-// one) are ambiguous, and the browser cannot verify tokens to break the tie.
-// the go side treats ambiguous duplicates as no session; the csrf read agrees:
-// differing values mean no token, identical duplicates are still one token
+/**
+ * Reads borgo's CSRF token out of a cookie header (or `document.cookie`).
+ *
+ * An app needs this when it posts with a hand-rolled `fetch` instead of a
+ * `<form>`: `<CsrfField />` covers real forms, and nothing else does. Send the
+ * value back in the `__borgo_csrf` field of a form-encoded body, or in a
+ * `__borgo_csrf` entry of a `FormData`, and the front server's double-submit
+ * check passes exactly as it does for a native form post.
+ *
+ * ```ts
+ * await fetch("/tasks", {
+ *   method: "POST",
+ *   headers: { "content-type": "application/x-www-form-urlencoded" },
+ *   body: new URLSearchParams({ [CSRF_FIELD]: csrfCookieValue(document.cookie), title }),
+ * });
+ * ```
+ *
+ * Conflicting duplicates read as **absent**, deliberately. Two `borgo_csrf`
+ * cookies with different values - a stale `Domain=` copy shadowing the
+ * host-only one - are ambiguous, and the browser cannot verify a token to
+ * break the tie. Guessing would sometimes echo the cookie the server is not
+ * comparing against, which fails the post anyway, and sometimes echo a token
+ * an attacker planted. This mirrors the Go side, which treats two valid
+ * session cookies as no session for the same reason. Identical duplicates are
+ * not a conflict: they are one token seen twice, and read normally.
+ *
+ * Returns `""` for missing, empty and ambiguous alike - the caller has nothing
+ * useful to do with the distinction.
+ */
 export function csrfCookieValue(header: string | null): string {
   let value: string | null = null;
   for (const part of (header ?? "").split(";")) {
@@ -161,34 +189,14 @@ export function csrfCookieValue(header: string | null): string {
   return value ?? "";
 }
 
-type CsrfReact = {
-  createElement: typeof CreateElement;
-  createContext: typeof CreateContext;
-  useContext: typeof UseContext;
-};
-
-let csrfRuntime: { react: CsrfReact; context: Context<string> } | null = null;
-
-// react is injected (like islands) so this package never bundles its own copy
-// null clears the registration: the server registers on every boot, so the
-// only caller that needs to unregister is a test asserting the bare path
-export function registerCsrf(react: CsrfReact | null) {
-  csrfRuntime = react ? { react, context: react.createContext("") } : null;
-}
-
-export function withCsrf(element: import("react").ReactNode, token: string) {
-  if (!csrfRuntime) return element;
-  const { react, context } = csrfRuntime;
-  return react.createElement(context.Provider, { value: token }, element);
-}
-
 // <CsrfField /> inside any <form method="post"> - server-rendered with the
 // same token the cookie carries, so classic no-js posts pass validation too
 export function CsrfField() {
-  if (!csrfRuntime) {
+  const runtime = csrfRuntime();
+  if (!runtime) {
     throw new Error("csrf runtime not registered - is the app on a current borgo build?");
   }
-  const { react, context } = csrfRuntime;
+  const { react, context } = runtime;
   const token = react.useContext(context);
   return react.createElement("input", { type: "hidden", name: CSRF_FIELD, value: token });
 }
@@ -199,27 +207,16 @@ export type IslandProps = {
   client?: "load" | "visible";
 };
 
-let islandRegistry: {
-  components: Record<string, ComponentType<any>>;
-  createElement: typeof CreateElement;
-} | null = null;
-
-export function registerIslands(
-  components: Record<string, ComponentType<any>>,
-  createElement: typeof CreateElement,
-) {
-  islandRegistry = { components, createElement };
-}
-
 export function Island({ name, props = {}, client = "load" }: IslandProps) {
-  if (!islandRegistry) {
+  const registry = islandRegistry();
+  if (!registry) {
     throw new Error("no islands registered - <Island> needs a component in islands/");
   }
-  const component = islandRegistry.components[name];
+  const component = registry.components[name];
   if (!component) {
     throw new Error(`unknown island "${name}" - expected islands/${name}.tsx`);
   }
-  const h = islandRegistry.createElement;
+  const h = registry.createElement;
   return h(
     "div",
     {

@@ -1,33 +1,28 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { makeApiClient } from "../src/api";
-import { CSRF_COOKIE, cookieValue, csrfCookieValue, registerCsrf, withCsrf } from "../src/index";
+import { csrfCookieValue } from "../src/index";
+import { registerCsrf, withCsrf } from "../src/internal";
 
-describe("cookieValue", () => {
-  test("finds a cookie among several", () => {
-    expect(cookieValue("a=1; borgo_csrf=tok3n; b=2", CSRF_COOKIE)).toBe("tok3n");
+describe("csrfCookieValue", () => {
+  // the plain-reader cases the removed generic `cookieValue` used to cover:
+  // csrfCookieValue is now the only cookie reader on the public surface, so
+  // the ordinary paths are asserted here rather than through a second parser
+  test("finds the token among several cookies", () => {
+    expect(csrfCookieValue("a=1; borgo_csrf=tok3n; b=2")).toBe("tok3n");
   });
 
   test("exact name match only", () => {
-    expect(cookieValue("xborgo_csrf=nope", CSRF_COOKIE)).toBe("");
-    expect(cookieValue("borgo_csrf_extra=nope", CSRF_COOKIE)).toBe("");
+    expect(csrfCookieValue("xborgo_csrf=nope")).toBe("");
+    expect(csrfCookieValue("borgo_csrf_extra=nope")).toBe("");
   });
 
   test("empty and null headers", () => {
-    expect(cookieValue("", CSRF_COOKIE)).toBe("");
-    expect(cookieValue(null, CSRF_COOKIE)).toBe("");
-  });
-
-  test("value may contain =", () => {
-    expect(cookieValue("s=a=b=c", "s")).toBe("a=b=c");
-  });
-});
-
-describe("csrfCookieValue", () => {
-  test("single cookie reads like cookieValue", () => {
-    expect(csrfCookieValue("a=1; borgo_csrf=tok3n; b=2")).toBe("tok3n");
     expect(csrfCookieValue("")).toBe("");
     expect(csrfCookieValue(null)).toBe("");
-    expect(csrfCookieValue("xborgo_csrf=nope")).toBe("");
+  });
+
+  test("a value may contain =", () => {
+    expect(csrfCookieValue("borgo_csrf=a=b=c")).toBe("a=b=c");
   });
 
   test("two same-name cookies with different values are ambiguous: no token", () => {

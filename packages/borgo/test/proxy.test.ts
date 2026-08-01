@@ -696,3 +696,72 @@ describe("proxyRequest: over a real socket", () => {
     up.stop();
   });
 });
+
+describe("proxyRequest: event streams", () => {
+  // Bun.serve withholds a response's headers until its body produces a byte,
+  // so the client's fetch() resolves when the *stream* first speaks, not when
+  // it opens. That makes the upstream's opening bytes load-bearing, and these
+  // tests pin the proxy's half of the contract: it must forward them the
+  // instant they arrive and add nothing of its own. borgo.SSE's own preamble
+  // is covered on the Go side, by TestSSEOpensWithBytesBeforeAnyEvent.
+  const upstream = (opening: string) => {
+    const server = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        data(sock) {
+          sock.write(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" +
+              `${opening.length.toString(16)}\r\n${opening}\r\n`,
+          );
+        },
+      },
+    });
+    return { url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) };
+  };
+
+  const withinBudget = async <T>(work: Promise<T>, ms: number, what: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${what} did not arrive within ${ms}ms`)), ms);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  test("an upstream that opens with a comment reaches the client at once", async () => {
+    const up = upstream(":ok\n\n");
+    const front = Bun.serve({
+      port: 0,
+      fetch: (req) => proxyRequest(req, opts({ target: `${up.url}/api/events`, deadlineMs: 0 })),
+    });
+    const res = await withinBudget(fetch(`http://127.0.0.1:${front.port}/api/events`), 2000, "response headers");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+
+    const reader = res.body!.getReader();
+    const first = await withinBudget(reader.read(), 2000, "first chunk");
+    // byte for byte what the upstream sent: the proxy neither buffers it nor
+    // adds a preamble of its own
+    expect(new TextDecoder().decode(first.value)).toBe(":ok\n\n");
+
+    await reader.cancel();
+    front.stop(true);
+    up.stop();
+  });
+
+  test("the stream body is forwarded untouched, whatever its content type", async () => {
+    for (const type of ["text/event-stream", "application/json", "text/plain", "application/octet-stream"]) {
+      const res = await proxyRequest(
+        req(),
+        opts({ fetchImpl: async () => new Response("data: 1\n\n", { headers: { "content-type": type } }) }),
+      );
+      expect(await res.text()).toBe("data: 1\n\n");
+    }
+  });
+});

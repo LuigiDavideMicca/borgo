@@ -190,6 +190,29 @@ describe("generateManifest", () => {
     expect(manifest).toContain('"Counter": island0,');
   });
 
+  // these two files are the only consumers of the registries, and their import
+  // lines are literal strings in build.ts: nothing typechecks them, so a wrong
+  // specifier here would surface as a broken build in every app rather than as
+  // a red test. the registries moved off the root entry at 0.21.
+  test.each([".borgo/client.tsx", ".borgo/islands-client.tsx"])(
+    "%s takes the registries from borgo-framework/internal, not the root entry",
+    async (file) => {
+      const entry = await Bun.file(join(dir, file)).text();
+      expect(entry).toContain('import { registerCsrf, registerIslands } from "borgo-framework/internal";');
+      expect(entry).not.toContain('from "borgo-framework";');
+      // the calls must still be there: a correct import of nothing is worse
+      expect(entry).toContain("registerIslands(islands, createElement);");
+      expect(entry).toContain("registerCsrf({ createElement, createContext, useContext });");
+    },
+  );
+
+  test("the runtime subpath is untouched by the move", async () => {
+    const entry = await Bun.file(join(dir, ".borgo/client.tsx")).text();
+    expect(entry).toContain('import { mount } from "borgo-framework/runtime";');
+    const islandsEntry = await Bun.file(join(dir, ".borgo/islands-client.tsx")).text();
+    expect(islandsEntry).toContain('import { mountIslands } from "borgo-framework/runtime";');
+  });
+
   test("dynamic segments sort after static ones", async () => {
     await Bun.write(
       join(dir, "pages/deep/[id].tsx"),

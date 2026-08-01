@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { gunzipSync } from "node:zlib";
-import { registerCsrf } from "../src/index";
+import { registerCsrf } from "../src/internal";
 import type { PageModule, Route } from "../src/router";
 import {
   DEV_INLINE_CLIENT,

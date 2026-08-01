@@ -6,7 +6,7 @@ import { makeApiClient } from "./api";
 import { buildAssets, compileCss } from "./build";
 import { banner, c, fmtMs, g, statusColor } from "./colors";
 import { buildAssetIndex, jsonResponse, serveAsset, serveIndexed, type AssetInfo } from "./compress";
-import { registerCsrf, registerIslands } from "./index";
+import { registerCsrf, registerIslands } from "./internal";
 import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
 import { matchRoute, safeDecode, type Route } from "./router";
@@ -16,6 +16,7 @@ import {
   envInt,
   headResponse,
   keysEqual,
+  metricsEnabled,
   prepareShell,
   proxyRequest,
   renderPage as renderDocument,
@@ -225,10 +226,11 @@ export async function serve({ dev = false } = {}) {
   }
 
   // observability: /healthz always answers (and probes the go api with a
-  // short timeout), /metrics appears with METRICS=1. both stay out of the
-  // request log, the metrics themselves and any compression.
+  // short timeout), /metrics appears with BORGO_METRICS=1 (or the legacy
+  // METRICS=1 alias). both stay out of the request log, the metrics themselves
+  // and any compression.
   const bootTime = Date.now();
-  const metrics = process.env.METRICS === "1" ? createMetrics(bootTime) : null;
+  const metrics = metricsEnabled(process.env) ? createMetrics(bootTime) : null;
 
   // /healthz answers anyone: a flood of probes must not become a flood of
   // probes against the api, so the result is shared for a second - the promise

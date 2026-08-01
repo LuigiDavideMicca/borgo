@@ -16,5 +16,16 @@
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+
+  // A .d.ts under test/ is not a fixture, it is an ambient declaration for the
+  // whole program: tsc picks it up from the include glob without anyone
+  // importing it, and a `declare module "borgo-framework"` inside one retypes
+  // every other test file. That is not hypothetical - a golden fixture named
+  // api-types.d.ts once broke 17 unrelated assertions, in files that never
+  // mentioned it, until it was renamed api-types.d.ts.golden. The rename was
+  // the fix for that file; this is the fix for the next one. Declarations that
+  // genuinely apply to the sources live in src/ (see src/ambient.d.ts), which
+  // is deliberately not excluded here.
+  "exclude": ["test/**/*.d.ts"]
 }

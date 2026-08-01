@@ -17,5 +17,14 @@
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["**/*", ".borgo/api-types.d.ts"]
+  // typescript skips dot-directories, so everything under .borgo/ has to be
+  // named. the generated client entries matter as much as the types: borgo
+  // writes their import statements, and a wrong specifier there breaks every
+  // app at build time while a typecheck of the app's own sources stays green
+  "include": [
+    "**/*",
+    ".borgo/api-types.d.ts",
+    ".borgo/client.tsx",
+    ".borgo/islands-client.tsx"
+  ]
 }

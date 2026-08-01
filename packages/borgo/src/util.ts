@@ -2,7 +2,8 @@ import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { c, g } from "./colors";
 import { documentStream, gzipStream, pickEncoding } from "./compress";
-import { CSRF_COOKIE, CSRF_FIELD, csrfCookieValue, withCsrf } from "./index";
+import { CSRF_COOKIE, CSRF_FIELD, csrfCookieValue } from "./index";
+import { withCsrf } from "./internal";
 import { resolveHead, type ActionContext, type Head, type Route } from "./router";
 
 // constant-time on the value, honest about the length: a comparison that
@@ -219,6 +220,25 @@ export function envInt(value: string | undefined, fallback: number): number {
   if (value === undefined || value === "") return fallback;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+}
+
+/**
+ * Whether /metrics is exposed.
+ *
+ * BORGO_METRICS is the real name. METRICS was the original one and stays a
+ * supported alias for all of 1.x - a bare `METRICS` in a shared environment is
+ * the single most collidable variable borgo ever read, but silently ignoring
+ * it would turn somebody's dashboard off on an upgrade.
+ *
+ * BORGO_METRICS wins whenever it is set, including when it is set to something
+ * other than "1": that is how you turn metrics *off* for borgo alone in an
+ * environment where a neighbouring process wants METRICS=1. An unset (or
+ * empty) BORGO_METRICS falls through to the alias.
+ */
+export function metricsEnabled(env: Record<string, string | undefined>): boolean {
+  // empty counts as unset, as it does for envInt: `BORGO_METRICS=` is how a
+  // shell unsets a variable it cannot delete, not a request to shadow METRICS
+  return (env.BORGO_METRICS || env.METRICS) === "1";
 }
 
 export const goBinName = () => "api" + (process.platform === "win32" ? ".exe" : "");
@@ -854,6 +874,15 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
         onError(`${new URL(target).pathname} answered 101; /api cannot tunnel an upgrade`);
         return new Response("api upgrade not supported", { status: 502 });
       }
+      // handed back untouched, body included. Worth knowing before you are
+      // tempted to wrap it: Bun.serve withholds a response's headers until its
+      // body produces a byte, so an upstream that opens a stream and then
+      // stays quiet leaves the client waiting on fetch(). The fix belongs
+      // upstream, and borgo.SSE does it - it opens with an SSE comment, so the
+      // headers go out at once. Re-wrapping the body here to inject that
+      // comment was tried and reverted: reading the native body through a
+      // JS ReadableStream and cancelling it when the client hangs up
+      // segfaults bun 1.3.14, which takes the whole front server with it.
       return upstream;
     } catch (err) {
       if (timedOut) return new Response("api timeout", { status: 504 });
