@@ -1,0 +1,25 @@
+{
+  "name": "borgo",
+  "framework": "borgo (this repo)",
+  "language": "TypeScript + Go",
+  "runtime": "bun (SSR front server) + go (API binary)",
+  "status": "implemented",
+  "port": 43000,
+  "readyPath": "/api/hello",
+  "install": ["bun", "install"],
+  "build": [
+    ["bun", "../../shared/copy-assets.ts", "public/static"],
+    ["go", "mod", "tidy"],
+    ["bun", "run", "build"]
+  ],
+  "start": ["bun", "node_modules/borgo-framework/src/cli.ts", "start"],
+  "env": {
+    "PORT": "${PORT}",
+    "API_PORT": "${API_PORT}",
+    "SESSION_SECRET": "bench-only-secret-0123456789abcdef",
+    "BUN_CONFIG_MAX_HTTP_REQUESTS": "16384"
+  },
+  "implements": ["hello-json", "api-list", "ssr-page", "static-asset", "memory-conn"],
+  "notes": "Two processes: the Bun front server on PORT and the Go API binary on API_PORT. /api/* is proxied by the front server, which is what a deployed borgo app does - so the JSON scenarios include the proxy hop. Measured against the borgo source in this repo (go.mod replace, package.json file: link), not a published release. BUN_CONFIG_MAX_HTTP_REQUESTS is raised from Bun's default of 256 because that default caps the number of concurrent requests the front server can have in flight to the Go API - which silently ceilings concurrent SSE streams at ~255. This is disclosed rather than quietly applied: see the finding in bench/README.md. Started via the CLI entrypoint directly, exactly as the shipped Dockerfile does, rather than through `bun run start`: the latter adds a shell and two launcher processes that RSS-of-the-tree would otherwise charge to borgo, and that no production deployment runs.",
+  "versionCommand": ["bun", "-e", "console.log(require('borgo-framework/package.json').version)"]
+}

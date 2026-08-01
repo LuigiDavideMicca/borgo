@@ -1,0 +1,20 @@
+{
+  "name": "bench-borgo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "borgo build",
+    "start": "borgo start"
+  },
+  "dependencies": {
+    "borgo-framework": "file:../../../packages/borgo",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "^5.9.0"
+  }
+}

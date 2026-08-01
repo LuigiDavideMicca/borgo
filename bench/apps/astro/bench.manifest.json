@@ -1,0 +1,19 @@
+{
+  "name": "astro",
+  "framework": "Astro 5 (node standalone adapter)",
+  "language": "JavaScript (Astro + React island)",
+  "runtime": "node",
+  "status": "implemented",
+  "port": 43021,
+  "readyPath": "/api/hello",
+  "install": ["bun", "install"],
+  "build": [
+    ["bun", "../../shared/copy-assets.ts", "public/static", "src/lib"],
+    ["bun", "x", "astro", "build"]
+  ],
+  "start": ["node", "./dist/server/entry.mjs"],
+  "env": { "PORT": "${PORT}", "HOST": "127.0.0.1", "NODE_ENV": "production" },
+  "implements": ["hello-json", "api-list", "ssr-page", "static-asset", "memory-conn"],
+  "notes": "Server output with the standalone Node adapter - self-hosted, like borgo. Every route sets `prerender = false`, because Astro's default would turn /page into a build-time static file and the scenario is per-request rendering. The React counter is an island (client:load), which is Astro's idiom; Astro therefore ships less client JS than the React frameworks here by design, not by accident. The shared dataset module is copied into src/lib at build time.",
+  "versionCommand": ["node", "-e", "console.log(require('astro/package.json').version)"]
+}

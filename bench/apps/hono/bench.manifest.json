@@ -1,0 +1,16 @@
+{
+  "name": "hono",
+  "framework": "Hono (Bun adapter)",
+  "language": "JavaScript",
+  "runtime": "bun",
+  "status": "implemented",
+  "port": 43010,
+  "readyPath": "/api/hello",
+  "install": ["bun", "install"],
+  "build": [["bun", "../../shared/copy-assets.ts", "public/static"]],
+  "start": ["bun", "server.js"],
+  "env": { "PORT": "${PORT}" },
+  "implements": ["hello-json", "api-list", "static-asset", "memory-conn"],
+  "notes": "A router, not a meta-framework: it does not claim the ssr-page scenario, because rendering React through Hono would be an application we wrote rather than anything Hono provides. Included as a floor - it shows what the request plumbing costs when there is almost no framework above it.",
+  "versionCommand": ["bun", "-e", "console.log(require('hono/package.json').version)"]
+}

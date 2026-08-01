@@ -10,7 +10,8 @@
     "typecheck": "cd packages/borgo && bunx tsc --noEmit && cd ../create-borgo && bunx tsc --noEmit && cd ../../examples/tasks && bunx tsc --noEmit",
     "test": "bun test packages/borgo/test packages/create-borgo/test",
     "test:go": "go test ./...",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "bench": "bun bench/run.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0"

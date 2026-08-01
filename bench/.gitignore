@@ -1,0 +1,20 @@
+# downloaded load generators and the pidfile that keeps runs from orphaning servers
+.tools/
+
+# per-app installs and build outputs; the sources are committed, the artefacts are not
+apps/*/node_modules/
+apps/*/dist/
+apps/*/.next/
+apps/*/.astro/
+apps/*/.borgo/*
+!apps/*/.borgo/api-types.d.ts
+apps/*/public/assets/
+apps/*/bun.lock
+
+# copies of shared/ made by copy-assets.ts at build time - the originals in
+# bench/shared are the committed source of truth, and a committed copy is a copy
+# that can drift
+apps/*/public/static/payload.json
+apps/*/static/static/payload.json
+apps/*/lib/items.js
+apps/*/src/lib/items.js

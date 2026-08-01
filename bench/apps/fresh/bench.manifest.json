@@ -1,0 +1,16 @@
+{
+  "name": "fresh",
+  "framework": "Fresh (Deno)",
+  "language": "TypeScript (Preact)",
+  "runtime": "deno",
+  "status": "stub",
+  "port": 43022,
+  "readyPath": "/api/hello",
+  "install": ["deno", "install"],
+  "build": [["bun", "../../shared/copy-assets.ts", "static/static"]],
+  "start": ["deno", "run", "-A", "main.ts"],
+  "env": { "PORT": "${PORT}" },
+  "implements": [],
+  "todo": "Deno is not installed on the machine this harness was built on, so a Fresh implementation could not be written and verified - only guessed at. It is left unimplemented on purpose: an unrun competitor is honest, a competitor we wrote blind and could not test is not. To finish it: install Deno, scaffold Fresh 2, implement routes/api/hello.ts, routes/api/items.ts, routes/api/events.ts (SSE with an immediate `: ping` flush) and routes/page.tsx per CONTRACT.md, copy the shared payload into static/, then flip status to \"implemented\" and fill in \"implements\".",
+  "notes": "Fresh renders Preact rather than React and does islands by default, so it is not a like-for-like React comparison; read its ssr-page number, when it exists, with that in mind."
+}

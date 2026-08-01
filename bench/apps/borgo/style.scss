@@ -1,0 +1,31 @@
+// deliberately small: page weight is not what the ssr scenario measures, and a
+// heavy stylesheet would only add noise that every implementation would have to
+// reproduce identically
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+main {
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+nav a {
+  margin-right: 0.75rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 1rem;
+}
+
+th,
+td {
+  border-bottom: 1px solid #ddd;
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+}

@@ -1,0 +1,967 @@
+{
+  "marker": "bench-static-asset",
+  "version": 1,
+  "generatedBy": "committed verbatim in bench/shared and copied into every app; never regenerated per framework",
+  "rows": [
+    {
+      "id": 1,
+      "title": "Row 1",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 2,
+      "title": "Row 2",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 3,
+      "title": "Row 3",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 4,
+      "title": "Row 4",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 5,
+      "title": "Row 5",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 6,
+      "title": "Row 6",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 7,
+      "title": "Row 7",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 8,
+      "title": "Row 8",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 9,
+      "title": "Row 9",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 10,
+      "title": "Row 10",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 11,
+      "title": "Row 11",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 12,
+      "title": "Row 12",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 13,
+      "title": "Row 13",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 14,
+      "title": "Row 14",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 15,
+      "title": "Row 15",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 16,
+      "title": "Row 16",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 17,
+      "title": "Row 17",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 18,
+      "title": "Row 18",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 19,
+      "title": "Row 19",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 20,
+      "title": "Row 20",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 21,
+      "title": "Row 21",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 22,
+      "title": "Row 22",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 23,
+      "title": "Row 23",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 24,
+      "title": "Row 24",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 25,
+      "title": "Row 25",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 26,
+      "title": "Row 26",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 27,
+      "title": "Row 27",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 28,
+      "title": "Row 28",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 29,
+      "title": "Row 29",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 30,
+      "title": "Row 30",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 31,
+      "title": "Row 31",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 32,
+      "title": "Row 32",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 33,
+      "title": "Row 33",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 34,
+      "title": "Row 34",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 35,
+      "title": "Row 35",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 36,
+      "title": "Row 36",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 37,
+      "title": "Row 37",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 38,
+      "title": "Row 38",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 39,
+      "title": "Row 39",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 40,
+      "title": "Row 40",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 41,
+      "title": "Row 41",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 42,
+      "title": "Row 42",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 43,
+      "title": "Row 43",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 44,
+      "title": "Row 44",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 45,
+      "title": "Row 45",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 46,
+      "title": "Row 46",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 47,
+      "title": "Row 47",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 48,
+      "title": "Row 48",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 49,
+      "title": "Row 49",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 50,
+      "title": "Row 50",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 51,
+      "title": "Row 51",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 52,
+      "title": "Row 52",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 53,
+      "title": "Row 53",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 54,
+      "title": "Row 54",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 55,
+      "title": "Row 55",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 56,
+      "title": "Row 56",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 57,
+      "title": "Row 57",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 58,
+      "title": "Row 58",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 59,
+      "title": "Row 59",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 60,
+      "title": "Row 60",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 61,
+      "title": "Row 61",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 62,
+      "title": "Row 62",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 63,
+      "title": "Row 63",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 64,
+      "title": "Row 64",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 65,
+      "title": "Row 65",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 66,
+      "title": "Row 66",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 67,
+      "title": "Row 67",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 68,
+      "title": "Row 68",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 69,
+      "title": "Row 69",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 70,
+      "title": "Row 70",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 71,
+      "title": "Row 71",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 72,
+      "title": "Row 72",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 73,
+      "title": "Row 73",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 74,
+      "title": "Row 74",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 75,
+      "title": "Row 75",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 76,
+      "title": "Row 76",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 77,
+      "title": "Row 77",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 78,
+      "title": "Row 78",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 79,
+      "title": "Row 79",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 80,
+      "title": "Row 80",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 81,
+      "title": "Row 81",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 82,
+      "title": "Row 82",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 83,
+      "title": "Row 83",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 84,
+      "title": "Row 84",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 85,
+      "title": "Row 85",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 86,
+      "title": "Row 86",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 87,
+      "title": "Row 87",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 88,
+      "title": "Row 88",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 89,
+      "title": "Row 89",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 90,
+      "title": "Row 90",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 91,
+      "title": "Row 91",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 92,
+      "title": "Row 92",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 93,
+      "title": "Row 93",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 94,
+      "title": "Row 94",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 95,
+      "title": "Row 95",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 96,
+      "title": "Row 96",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 97,
+      "title": "Row 97",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 98,
+      "title": "Row 98",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 99,
+      "title": "Row 99",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 100,
+      "title": "Row 100",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 101,
+      "title": "Row 101",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 102,
+      "title": "Row 102",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 103,
+      "title": "Row 103",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 104,
+      "title": "Row 104",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 105,
+      "title": "Row 105",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 106,
+      "title": "Row 106",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 107,
+      "title": "Row 107",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 108,
+      "title": "Row 108",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 109,
+      "title": "Row 109",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 110,
+      "title": "Row 110",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 111,
+      "title": "Row 111",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 112,
+      "title": "Row 112",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 113,
+      "title": "Row 113",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 114,
+      "title": "Row 114",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 115,
+      "title": "Row 115",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 116,
+      "title": "Row 116",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 117,
+      "title": "Row 117",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 118,
+      "title": "Row 118",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 119,
+      "title": "Row 119",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 120,
+      "title": "Row 120",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 121,
+      "title": "Row 121",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 122,
+      "title": "Row 122",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 123,
+      "title": "Row 123",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 124,
+      "title": "Row 124",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 125,
+      "title": "Row 125",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 126,
+      "title": "Row 126",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 127,
+      "title": "Row 127",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 128,
+      "title": "Row 128",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 129,
+      "title": "Row 129",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 130,
+      "title": "Row 130",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 131,
+      "title": "Row 131",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 132,
+      "title": "Row 132",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 133,
+      "title": "Row 133",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 134,
+      "title": "Row 134",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 135,
+      "title": "Row 135",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 136,
+      "title": "Row 136",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 137,
+      "title": "Row 137",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 138,
+      "title": "Row 138",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 139,
+      "title": "Row 139",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 140,
+      "title": "Row 140",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 141,
+      "title": "Row 141",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 142,
+      "title": "Row 142",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 143,
+      "title": "Row 143",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 144,
+      "title": "Row 144",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 145,
+      "title": "Row 145",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 146,
+      "title": "Row 146",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 147,
+      "title": "Row 147",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 148,
+      "title": "Row 148",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 149,
+      "title": "Row 149",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 150,
+      "title": "Row 150",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 151,
+      "title": "Row 151",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 152,
+      "title": "Row 152",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 153,
+      "title": "Row 153",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 154,
+      "title": "Row 154",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 155,
+      "title": "Row 155",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 156,
+      "title": "Row 156",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 157,
+      "title": "Row 157",
+      "tag": "beta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 158,
+      "title": "Row 158",
+      "tag": "gamma",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 159,
+      "title": "Row 159",
+      "tag": "delta",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    },
+    {
+      "id": 160,
+      "title": "Row 160",
+      "tag": "alpha",
+      "note": "static payload row, padded so the file is a realistic asset size and identical for every implementation"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "fastify",
+  "framework": "Fastify 5",
+  "language": "JavaScript",
+  "runtime": "node",
+  "status": "implemented",
+  "port": 43013,
+  "readyPath": "/api/hello",
+  "install": ["bun", "install"],
+  "build": [["bun", "../../shared/copy-assets.ts", "public/static"]],
+  "start": ["node", "server.js"],
+  "env": { "PORT": "${PORT}" },
+  "implements": ["hello-json", "api-list", "static-asset", "memory-conn"],
+  "notes": "Run on Node with the logger off. Fastify is fastest when given JSON response schemas so it can compile a serialiser; this implementation does not use them, because the contract's list is generated per request and the other implementations serialise generically. Fastify-with-schemas would be a fair separate entry, not a substitute for this one. Does not claim ssr-page.",
+  "versionCommand": ["node", "-e", "console.log(require('fastify/package.json').version)"]
+}

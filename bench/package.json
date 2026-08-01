@@ -1,0 +1,17 @@
+{
+  "name": "borgo-bench",
+  "private": true,
+  "type": "module",
+  "description": "Reproducible benchmark harness for borgo. Not published, not a workspace member.",
+  "scripts": {
+    "bench": "bun run.ts",
+    "list": "bun run.ts --list",
+    "cleanup": "bun run.ts --cleanup",
+    "typecheck": "bunx tsc --noEmit",
+    "get-oha": "bun tools/get-oha.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.0"
+  }
+}

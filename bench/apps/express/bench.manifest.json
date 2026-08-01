@@ -1,0 +1,16 @@
+{
+  "name": "express",
+  "framework": "Express 4",
+  "language": "JavaScript",
+  "runtime": "node",
+  "status": "implemented",
+  "port": 43012,
+  "readyPath": "/api/hello",
+  "install": ["bun", "install"],
+  "build": [["bun", "../../shared/copy-assets.ts", "public/static"]],
+  "start": ["node", "server.js"],
+  "env": { "PORT": "${PORT}" },
+  "implements": ["hello-json", "api-list", "static-asset", "memory-conn"],
+  "notes": "Run on Node, which is where Express lives; running it on Bun would be a different product. ETag generation is disabled because none of the other implementations hash their bodies - leaving it on would charge Express for a feature the comparison does not ask for. Does not claim ssr-page.",
+  "versionCommand": ["node", "-e", "console.log(require('express/package.json').version)"]
+}

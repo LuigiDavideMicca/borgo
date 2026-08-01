@@ -1,0 +1,8 @@
+{
+  "name": "bench-hono",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "hono": "^4.6.0"
+  }
+}

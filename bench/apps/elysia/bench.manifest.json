@@ -1,0 +1,16 @@
+{
+  "name": "elysia",
+  "framework": "Elysia",
+  "language": "JavaScript",
+  "runtime": "bun",
+  "status": "implemented",
+  "port": 43011,
+  "readyPath": "/api/hello",
+  "install": ["bun", "install"],
+  "build": [["bun", "../../shared/copy-assets.ts", "public/static"]],
+  "start": ["bun", "server.js"],
+  "env": { "PORT": "${PORT}" },
+  "implements": ["hello-json", "api-list", "static-asset", "memory-conn"],
+  "notes": "Bun-native router. Like Hono it does not claim the ssr-page scenario. Elysia's own benchmarks lean on compile-time schema specialisation that this plain implementation does not use, so treat these numbers as Elysia-as-written-here rather than Elysia-at-its-best.",
+  "versionCommand": ["bun", "-e", "console.log(require('elysia/package.json').version)"]
+}

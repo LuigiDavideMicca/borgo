@@ -1,0 +1,19 @@
+{
+  "name": "nextjs",
+  "framework": "Next.js (App Router)",
+  "language": "JavaScript (React)",
+  "runtime": "node",
+  "status": "implemented",
+  "port": 43020,
+  "readyPath": "/api/hello",
+  "install": ["bun", "install"],
+  "build": [
+    ["bun", "../../shared/copy-assets.ts", "public/static", "lib"],
+    ["bun", "x", "next", "build"]
+  ],
+  "start": ["bun", "x", "next", "start", "--port", "${PORT}"],
+  "env": { "PORT": "${PORT}", "NODE_ENV": "production" },
+  "implements": ["hello-json", "api-list", "ssr-page", "static-asset", "memory-conn"],
+  "notes": "Production build, self-hosted with `next start` on Node - the deployment borgo actually competes with, not Vercel's edge. Every route sets `dynamic = 'force-dynamic'`: left alone Next would prerender /page at build time and serve a static file, which is a different and much faster thing than server-rendering per request. Compression is off in next.config.mjs so every implementation ships identical bytes. The shared dataset module is copied into lib/ at build time because Next's bundler will not reach outside the project root.",
+  "versionCommand": ["node", "-e", "console.log(require('next/package.json').version)"]
+}

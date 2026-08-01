@@ -1,0 +1,44 @@
+---
+import Counter from "../components/Counter.jsx";
+import { items } from "../lib/items.js";
+
+// server-rendered per request, not prerendered at build time: prerendering
+// would make this a static file scenario, which is a different (and much
+// faster) thing than the one being compared
+export const prerender = false;
+
+const NAV = ["overview", "items", "docs", "about", "status"];
+const rows = items(20);
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>bench ssr page</title>
+  </head>
+  <body>
+    <main data-bench-page="ssr">
+      <h1>bench</h1>
+      <nav>
+        {NAV.map((entry) => <a href={`/page#${entry}`}>{entry}</a>)}
+      </nav>
+      <p>Twenty rows, server-rendered, plus one component that hydrates on the client.</p>
+      <Counter client:load />
+      <table>
+        <thead>
+          <tr><th>id</th><th>title</th><th>tag</th><th>done</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((item) => (
+            <tr>
+              <td>{item.id}</td>
+              <td>{item.title}</td>
+              <td>{item.tag}</td>
+              <td>{item.done ? "yes" : "no"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>
