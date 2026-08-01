@@ -3,19 +3,24 @@ import { subscribe, type Channel } from "borgo-framework";
 
 export const head = { title: "Live · {{name}}" };
 
+// the log only ever grows, so an entry's position when it arrives is a stable
+// key - the array index at render time is not, it shifts under every entry
+type Entry = { id: number; text: string };
+
 export default function Live() {
-  const [log, setLog] = useState<string[]>([]);
+  const [log, setLog] = useState<Entry[]>([]);
   const [present, setPresent] = useState(0);
   const [text, setText] = useState("");
   const channel = useRef<Channel<"live"> | null>(null);
 
   useEffect(() => {
+    const append = (text: string) => setLog((l) => [...l, { id: l.length, text }]);
     // typed events: "note-created" comes from borgo.PushT in go via borgogen,
     // "message" from ws-events.d.ts - checking the event narrows the data
     const ch = subscribe("live", (event, data) => {
       if (event === "__count") setPresent(data);
-      else if (event === "message") setLog((l) => [...l, `chat · ${data}`]);
-      else if (event === "note-created") setLog((l) => [...l, `go · note "${data}" created`]);
+      else if (event === "message") append(`chat · ${data}`);
+      else if (event === "note-created") append(`go · note "${data}" created`);
     });
     channel.current = ch;
     return () => ch.close();
@@ -41,11 +46,11 @@ export default function Live() {
       </p>
       <form onSubmit={send}>
         <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Say something" />
-        <button>Send</button>
+        <button type="submit">Send</button>
       </form>
       <ul>
-        {log.map((line, i) => (
-          <li key={i}>{line}</li>
+        {log.map((entry) => (
+          <li key={entry.id}>{entry.text}</li>
         ))}
       </ul>
     </main>

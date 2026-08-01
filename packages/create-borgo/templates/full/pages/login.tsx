@@ -34,7 +34,7 @@ export default function Login({ actionData }: { actionData?: { error?: string } 
         <CsrfField />
         <input name="username" placeholder="Username" autoComplete="username" />
         <input name="password" type="password" placeholder="Password" autoComplete="current-password" />
-        <button>Log in</button>
+        <button type="submit">Log in</button>
       </form>
       {actionData?.error && <p className="error">{actionData.error}</p>}
       <p>

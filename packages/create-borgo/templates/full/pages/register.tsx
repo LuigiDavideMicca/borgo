@@ -33,7 +33,7 @@ export default function Register({ actionData }: { actionData?: { error?: string
         <CsrfField />
         <input name="username" placeholder="Username" autoComplete="username" />
         <input name="password" type="password" placeholder="Password" autoComplete="new-password" />
-        <button>Create account</button>
+        <button type="submit">Create account</button>
       </form>
       {actionData?.error && <p className="error">{actionData.error}</p>}
       <p>

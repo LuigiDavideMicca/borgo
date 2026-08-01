@@ -47,7 +47,7 @@ export default function Home({ actionData }: { actionData?: { greeting?: string 
           <h2>Realtime →</h2>
           <p>Server-sent events from a Go goroutine, streamed through the front server.</p>
         </a>
-        <button className="card" onClick={greet}>
+        <button type="button" className="card" onClick={greet}>
           <h2>Call the Go API</h2>
           <p>
             {message || (
@@ -62,7 +62,7 @@ export default function Home({ actionData }: { actionData?: { greeting?: string 
           <h2>Form action →</h2>
           <p>{actionData?.greeting ?? "Posts to a server action, typed body end to end."}</p>
           <input name="name" placeholder="Your name" />
-          <button>Greet</button>
+          <button type="submit">Greet</button>
         </form>
         <a className="card" href="https://github.com/LuigiDavideMicca/borgo">
           <h2>Docs →</h2>

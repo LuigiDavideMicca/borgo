@@ -29,7 +29,7 @@ export default function Account({ me }: { me: Me }) {
       </p>
       <form method="post">
         <CsrfField />
-        <button>Log out</button>
+        <button type="submit">Log out</button>
       </form>
     </main>
   );

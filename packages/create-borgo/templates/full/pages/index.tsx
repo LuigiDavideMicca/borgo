@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { CsrfField, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
 import type { Note } from "../.borgo/api-types";
 
@@ -34,10 +34,12 @@ export default function Home({
   const [notes, setNotes] = useState(initialNotes);
   useEffect(() => setNotes(initialNotes), [initialNotes]);
 
-  const refresh = async () => {
+  // memoised so the subscription below depends on a value that does not
+  // change every render - without it the effect would resubscribe constantly
+  const refresh = useCallback(async () => {
     const res = await fetch("/api/notes");
     setNotes((await res.json()).notes);
-  };
+  }, []);
 
   // a note created or deleted in another tab appears here live
   useEffect(() => {
@@ -45,7 +47,7 @@ export default function Home({
     source.addEventListener("note-created", refresh);
     source.addEventListener("note-deleted", refresh);
     return () => source.close();
-  }, []);
+  }, [refresh]);
 
   const remove = async (id: number) => {
     await fetch(`/api/notes/${id}`, { method: "DELETE" });
@@ -60,14 +62,14 @@ export default function Home({
         <CsrfField />
         <input name="title" placeholder="Title" />
         <input name="body" placeholder="Details (optional)" />
-        <button>Add</button>
+        <button type="submit">Add</button>
       </form>
       {actionData?.error && <p className="error">{actionData.error}</p>}
       <ul className="notes">
         {notes.map((n) => (
           <li key={n.id}>
             <span>{n.title}</span>
-            <button onClick={() => remove(n.id)}>✕</button>
+            <button type="button" onClick={() => remove(n.id)}>✕</button>
           </li>
         ))}
       </ul>
