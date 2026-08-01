@@ -1,16 +1,24 @@
+# one container, one command: `docker compose up -d`.
+# the Dockerfile already sets NODE_ENV and BUN_CONFIG_MAX_HTTP_REQUESTS, so
+# what is left here is the port and whatever this app actually needs - which,
+# for the minimal template, is nothing: one page, one go route, no sessions and
+# no database. grow this file as the app grows, rather than shipping a volume
+# for data that does not exist.
 services:
   app:
     build: .
     ports:
       - "3000:3000"
     environment:
-      # SESSION_SECRET: use-a-long-random-string
-      # DB_PATH: /data/app.db
-      NODE_ENV: production
       PORT: "3000"
-    volumes:
-      - data:/data
     restart: unless-stopped
-
-volumes:
-  data:
+# adding persistence later? mount a volume and point the app's own path at it:
+#   environment:
+#     DB_PATH: /data/app.db
+#   volumes:
+#     - data:/data
+# volumes:
+#   data:
+#
+# adding sessions later? borgo.SetSession needs SESSION_SECRET (32+ random
+# bytes) or every session route answers 500 - see docs/auth-and-sessions.md.

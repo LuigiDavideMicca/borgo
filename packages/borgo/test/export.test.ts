@@ -2,8 +2,19 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { countAssets, exportSummary, fillPattern, freePorts, outputPath, planExport } from "../src/export";
+import {
+  countAssets,
+  exportSummary,
+  fillPattern,
+  freePorts,
+  markStaticExport,
+  outputPath,
+  planExport,
+  unsafeParamReason,
+} from "../src/export";
+import { buildDefine } from "../src/build";
 import type { Route } from "../src/router";
+import { propsPathEnabled } from "../src/runtime";
 
 const route = (pattern: string, module: Record<string, unknown>, islands = false): Route =>
   ({ pattern, file: pattern + ".tsx", module, layouts: [], islands }) as unknown as Route;
@@ -116,8 +127,58 @@ describe("fillPattern", () => {
     expect(() => fillPattern("/posts/:slug", { slug: ".." })).toThrow("dot segment");
     expect(() => fillPattern("/posts/:slug", { slug: "." })).toThrow("dot segment");
     expect(() => fillPattern("/a/:x/:y", { x: "..", y: ".." })).toThrow("dot segment");
-    expect(fillPattern("/posts/:slug", { slug: "...." })).toBe("/posts/....");
+    // a run of dots is not the dot segment, but windows strips trailing dots
+    // from a path component: mkdir("....") asks for a directory with no name
+    expect(() => fillPattern("/posts/:slug", { slug: "...." })).toThrow("windows");
     expect(fillPattern("/posts/:slug", { slug: "a.b" })).toBe("/posts/a.b");
+  });
+
+  // fillPattern percent-encodes and outputPath decodes each segment straight
+  // back to build the disk path, so every one of these is a url a static host
+  // serves happily and a directory windows refuses to create. Left unchecked,
+  // an app whose prerenderPaths return timestamps exported on linux and died
+  // with EINVAL on windows - and only on windows.
+  test("params windows cannot make a directory out of are rejected up front", () => {
+    const rejected: Array<[string, string]> = [
+      ["2024-01-01T00:00:00Z", "timestamps carry a colon"],
+      ["a?b", "a question mark"],
+      ["a*b", "a star"],
+      ['a"b', "a quote"],
+      ["a<b", "a less-than"],
+      ["a>b", "a greater-than"],
+      ["a|b", "a pipe"],
+      ["a\u0001b", "a control character"],
+      ["CON", "a reserved device name"],
+      ["nul.txt", "a reserved device name with an extension"],
+      ["lpt1", "a reserved device name, lowercased"],
+      ["trailing ", "a trailing space"],
+    ];
+    for (const [value, why] of rejected) {
+      expect(() => fillPattern("/posts/:slug", { slug: value })).toThrow(
+        // the message has to name the route and the param, or the app author
+        // is left guessing which of a hundred prerenderPaths entries it was
+        /prerenderPaths for \/posts\/:slug: param "slug"/,
+      );
+      expect(why).toBeTruthy();
+    }
+  });
+
+  test("what windows does allow still goes through, encoded", () => {
+    expect(fillPattern("/posts/:slug", { slug: "hello-world" })).toBe("/posts/hello-world");
+    expect(fillPattern("/posts/:slug", { slug: "città" })).toBe("/posts/citt%C3%A0");
+    expect(fillPattern("/posts/:slug", { slug: "a b" })).toBe("/posts/a%20b");
+    expect(fillPattern("/posts/:slug", { slug: "console" })).toBe("/posts/console");
+    expect(fillPattern("/posts/:id", { id: 42 })).toBe("/posts/42");
+  });
+
+  // the round trip is the whole point: whatever fillPattern lets through must
+  // survive outputPath's decode and still be a legal directory name
+  test("everything that survives fillPattern survives outputPath", () => {
+    for (const slug of ["hello-world", "città", "a b", "console", "a.b"]) {
+      const disk = outputPath(fillPattern("/posts/:slug", { slug }));
+      expect(disk).toBe(`posts/${slug}/index.html`);
+      expect(unsafeParamReason(slug)).toBeNull();
+    }
   });
 });
 
@@ -142,5 +203,39 @@ describe("outputPath", () => {
     expect(outputPath("/posts/citt%C3%A0")).toBe("posts/città/index.html");
     expect(outputPath("/a%20b")).toBe("a b/index.html");
     expect(outputPath("/100%")).toBe("100%/index.html");
+  });
+});
+
+// a static host has no ?__borgo=props endpoint: it answers that url with the
+// page's own html document and a 200, so res.ok passes, res.json() throws, and
+// the navigation ends in the full reload the catch does anyway - having paid
+// for a second whole document per link, and one more for every link a pointer
+// crossed, since prefetch caches that doomed promise on hover. The flag is set
+// before the bundle is built and reaches the runtime through the define map.
+describe("static export flag", () => {
+  test("markStaticExport reaches the bundle through buildDefine", () => {
+    const env: NodeJS.ProcessEnv = {};
+    expect(buildDefine(false, env)["process.env.BORGO_STATIC"]).toBe('"0"');
+    markStaticExport(env);
+    expect(env.BORGO_STATIC).toBe("1");
+    expect(buildDefine(false, env)["process.env.BORGO_STATIC"]).toBe('"1"');
+    // NODE_ENV is still the thing that decides dev vs production
+    expect(buildDefine(true, env)["process.env.NODE_ENV"]).toBe('"development"');
+  });
+
+  test("the runtime reads that exact key, and defaults to the props path", () => {
+    const saved = process.env.BORGO_STATIC;
+    try {
+      delete process.env.BORGO_STATIC;
+      expect(propsPathEnabled()).toBe(true);
+      // anything but the literal the define substitutes leaves it on
+      process.env.BORGO_STATIC = "0";
+      expect(propsPathEnabled()).toBe(true);
+      process.env.BORGO_STATIC = "1";
+      expect(propsPathEnabled()).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.BORGO_STATIC;
+      else process.env.BORGO_STATIC = saved;
+    }
   });
 });

@@ -156,8 +156,10 @@ Two processes, one front door:
 packages/borgo          npm: the bun/typescript core (cli, ssr server, router, build, runtime, typed api client)
 packages/create-borgo   npm: project scaffolder (three templates: base, minimal, full)
 *.go                    go module github.com/LuigiDavideMicca/borgo: route registry, server bootstrap,
-                        sse, websocket push, sessions, cache helpers (zero deps)
-cmd/borgogen            go: static analysis codegen for the typed bridge and route mounting (depends on x/tools)
+                        sse, websocket push, sessions, cache helpers (standard library only)
+cmd/borgogen            go: static analysis codegen for the typed bridge and route mounting. same module,
+                        so go.mod requires golang.org/x/tools - a build-time tool that never links into
+                        your api binary, which is why "zero deps" means zero *runtime* deps
 examples/tasks          demo app: tasks crud with gorm + sqlite, sse, websockets, islands, deferred hydration
 docs/                   getting started, then deep dives: pages, typed bridge, client nav, realtime,
                         auth, security, dev experience, pwa, deploy, faq
@@ -171,15 +173,15 @@ Scaffolded apps ship a multi-stage `Dockerfile` (Go builds static, the runtime i
 
 ## Tests
 
-Three layers, all run by CI on every push:
+Three layers, all run by CI on every pull request and on every push to `main`:
 
-- **Go** (`go test ./...`) — table-driven tests for the route registry, sessions (sign/verify/tamper/expiry), password hashing and the `borgo.Auth` handlers (login/register/logout, timing-safe 401s, `Authed`), cache headers, the `/healthz` handler, SSE stream framing and hub broadcast/slow-client behavior, `borgo.Push` and `borgo.Push`, and borgogen against a committed fixture app: route discovery (directives + `Handle` calls), helper following, `WriteJSON`, `Bind`, type overrides, `Push` event extraction, snapshot freshness, and the error paths (duplicate patterns, malformed directives, dynamic push topics).
+- **Go** (`go test ./...`) — table-driven tests for the route registry, sessions (sign/verify/tamper/expiry), password hashing and the `borgo.Auth` handlers (login/register/logout, timing-safe 401s, `Authed`), cache headers, the `/healthz` handler, SSE stream framing and hub broadcast/slow-client behavior, `borgo.Push`, and borgogen against a committed fixture app: route discovery (directives + `Handle` calls), helper following, `WriteJSON`, `Bind`, type overrides, `Push` event extraction, snapshot freshness, and the error paths (duplicate patterns, malformed directives, dynamic push topics).
 - **TypeScript** (`bun test packages/borgo/test`) — the router (patterns, matching, params), the api client (URL building, headers, `ApiError`, typed bodies plumbing), hydrate/refresh source parsing, manifest generation against a temp fixture (islands flags, client-route exclusion, precedence), every `borgo doctor` check against a fake environment, the export planner (loader/prerender/dynamic partitioning, path filling), the deploy config templates (ports, names, refuse-overwrite), and the Prometheus exposition format.
 - **End-to-end** (`npx playwright test`) — against a production build of `examples/tasks`: client navigation, hover/viewport prefetching, scroll restoration, islands, hydration modes, form actions (enhanced in-place submits, crash surfacing, anonymous-post CSRF), the auth round trip (register, loader guard, logout, login, forged-post CSRF rejection), the precache manifest, SSE, two-tab WebSockets with Go push, streaming SSR, error pages, `/healthz` on both servers, `/metrics` series, a `borgo doctor` smoke — plus a dev-server project asserting fast refresh preserves component state (including five consecutive rapid edits), hook add/remove remounts without a reload, custom hook edits hot-apply, Go edits reload exactly once and only after the api answers, CSS hot-swaps, and layouts fall back to a reload — and an export project that runs `borgo export` and serves `dist/site` from a plain static file server, asserting content, hydration against exported props, and the zero-JS page.
 
 ## Versioning and releases
 
-[release-please](https://github.com/googleapis/release-please) maintains a release PR from conventional commits; merging it tags `vX.Y.Z` and publishes both npm packages (`borgo-framework`, `create-borgo`) with linked versions via npm trusted publishing, provenance attached. The Go module `github.com/LuigiDavideMicca/borgo` lives at the repo root and resolves the **same** `vX.Y.Z` tag — one version number across all three artifacts.
+[release-please](https://github.com/googleapis/release-please) maintains a release PR from conventional commits; merging it tags `vX.Y.Z` and publishes both npm packages (`borgo-framework`, `create-borgo`) with linked versions via npm trusted publishing, provenance attached. The Go module `github.com/LuigiDavideMicca/borgo` lives at the repo root and resolves the **same** `vX.Y.Z` tag — one version number across all four artifacts that have to agree: the Go module, the two npm packages, and the `borgo` CLI that ships as `borgo-framework`'s `bin`. See [api stability](docs/api-stability.md#one-version-number-four-artifacts).
 
 ## How it compares
 
@@ -206,7 +208,7 @@ Honest comparison with the frameworks a borgo adopter would otherwise pick. ✓ 
 | Image/font optimization | — | ✓ | ✓ | — |
 | Plugin ecosystem | — | ✓ | ✓ | ✓ |
 | Deploy story | one box: Docker/compose/systemd, generated configs | Vercel or DIY | many presets | many presets |
-| Framework size | ~7k lines incl. codegen and cli tooling, readable in a sitting | large | large | medium |
+| Framework size | small enough to read: the whole thing, codegen and cli tooling included, is a few thousand lines of Go and TypeScript | large | large | medium |
 
 ## What this is not
 

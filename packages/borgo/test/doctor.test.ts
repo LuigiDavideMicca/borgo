@@ -23,6 +23,9 @@ import {
   versionAtLeast,
   type DoctorEnv,
 } from "../src/doctor";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function fakeEnv(overrides: Partial<DoctorEnv> = {}): DoctorEnv {
   return {
@@ -33,6 +36,7 @@ function fakeEnv(overrides: Partial<DoctorEnv> = {}): DoctorEnv {
     exists: () => false,
     mtime: () => null,
     listDir: () => [],
+    listTree: () => [],
     readFile: () => null,
     resolve: () => null,
     openForWrite: () => "ok",
@@ -125,6 +129,24 @@ describe("checkBun", () => {
 
     test("an unparseable engines range is ignored rather than trusted", () => {
       expect(bunMinimum(withEngines({ bun: "latest" })).source).toBe("borgo");
+    });
+
+    // an app may ask for a newer bun than borgo does; asking for an older one
+    // is not a relaxation it gets to grant itself. `"bun": "^1.2"` used to
+    // lower the floor below MIN_BUN outright, so doctor put a green tick next
+    // to a bun that `borgo build` then failed on
+    test("a floor below borgo's own is raised, not honoured", () => {
+      expect(bunMinimum(withEngines({ bun: "^1.2" }))).toEqual({ min: "1.3.0", source: "borgo" });
+      expect(bunMinimum(withEngines({ bun: ">=1.0.0" })).min).toBe("1.3.0");
+      // borgo's own floor exactly: either source is honest, the number is what matters
+      expect(bunMinimum(withEngines({ bun: "1.3.0" })).min).toBe("1.3.0");
+    });
+
+    test("a bun below borgo's floor fails even when the app declares less", () => {
+      const d = withEngines({ bun: "^1.2" });
+      const r = checkBun({ ...d, exec: () => ({ code: 0, out: "1.2.9\n" }) });
+      expect(r.ok).toBe(false);
+      expect(r.detail).toContain("1.3.0");
     });
 
     test("a bun that satisfies borgo but not the app is flagged as too old", () => {
@@ -542,7 +564,7 @@ describe("checkApiTypes", () => {
     const r = checkApiTypes(
       fakeEnv({
         exists: (p) => p === "api",
-        listDir: () => ["tasks.go", "notes.txt"],
+        listTree: () => ["tasks.go", "notes.txt"],
         mtime: (p) => (p === ".borgo/api-types.d.ts" ? 1000 : 500_000),
       }),
     );
@@ -554,11 +576,41 @@ describe("checkApiTypes", () => {
     const r = checkApiTypes(
       fakeEnv({
         exists: (p) => p === "api",
-        listDir: () => ["tasks.go"],
+        listTree: () => ["tasks.go"],
         mtime: (p) => (p === ".borgo/api-types.d.ts" ? 500_000 : 1000),
       }),
     );
     expect(r!.ok).toBe(true);
+  });
+
+  // borgogen reads every .go file under api/, at any depth. a non-recursive
+  // listing reported "fresh" for an app whose handlers live one directory
+  // down no matter how far behind the generated types had fallen - and that
+  // is the layout every api past a handful of endpoints grows into
+  test("a handler in a subdirectory is checked too", () => {
+    const r = checkApiTypes(
+      fakeEnv({
+        exists: (p) => p === "api",
+        listTree: () => ["users/handlers.go"],
+        mtime: (p) => (p === ".borgo/api-types.d.ts" ? 1000 : 500_000),
+      }),
+    );
+    expect(r!.ok).toBe(false);
+    expect(r!.detail).toContain("api/users/handlers.go");
+  });
+
+  // the real env, not a stub: the recursion has to survive readdirSync's
+  // parentPath shape and windows separators, which a hand-written fake hides
+  test("realEnv.listTree walks the whole tree with forward slashes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-tree-"));
+    try {
+      mkdirSync(join(dir, "users"), { recursive: true });
+      writeFileSync(join(dir, "root.go"), "package api");
+      writeFileSync(join(dir, "users", "handlers.go"), "package users");
+      expect(realEnv().listTree(dir).sort()).toEqual(["root.go", "users/handlers.go"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -21,7 +21,7 @@ The front server forwards the browser's cookies on every api call a loader or ac
 
 Four behaviors worth knowing before you design around them:
 
-- **`SESSION_SECRET` is checked at startup.** Missing, and the server refuses to boot; under 32 bytes, and it warns. It used to fail per request instead, which meant a green health check next to a broken login.
+- **An absent `SESSION_SECRET` is warned about, a short one is refused.** With none set, `borgo.Serve` logs `SESSION_SECRET not set: session and auth routes will fail until it is` before it binds and then boots anyway, because an app with no sessions is a legitimate app. The failure is per request and closed in both directions: `/healthz` stays green while `SetSession` returns `ErrNoSessionSecret`, login and register answer `500 {"error":"session write failed"}`, and no session verifies — so nothing can be forged against the missing key. With a secret **shorter than 32 bytes**, `Serve` stops instead of starting: that length is searchable offline from one captured cookie, and the rest of the framework treats such a value as no secret at all. Watch that log line on first boot; it is the only warning there is.
 - **The principal rides in the cookie**, so keep it small — a username, an id, a role. `SetSession` returns an error rather than writing a cookie the browser would silently drop for exceeding 4 KB, and that error is worth surfacing: a dropped cookie looks exactly like a successful login that did not stick.
 - **Logging in replaces any existing session**, so a session fixed on a victim before login cannot survive it.
 - **Two `borgo_session` cookies with different values are treated as none.** A sibling subdomain can plant a duplicate; guessing which one to trust is how an attacker chooses your session for you. See [security](security.md#duplicate-cookies-are-treated-as-no-cookie).
@@ -39,7 +39,7 @@ type PasswordHasher interface {
 
 Set `Auth.Hasher` to your own implementation and nothing else changes. Hashes embed their parameters (`pbkdf2$600000$<salt>$<key>`), so stored passwords keep verifying if defaults evolve — within bounds: a stored hash asking for parameters far beyond the defaults is rejected outright, because deriving the key it demands is minutes of CPU per attempt.
 
-Hashing is deliberately expensive, which makes it a resource to protect. `LoginHandler` runs at most `GOMAXPROCS/2` verifications at once and sheds the rest with `503` and a `Retry-After` after five seconds of queueing, so a burst of login attempts cannot starve every other route on the server. A failed lookup still runs a verification against a dummy hash — one built with *your* hasher, so swapping in argon2id does not reintroduce a timing oracle — which keeps "no such user" and "wrong password" indistinguishable in both the response and the clock.
+Hashing is deliberately expensive, which makes it a resource to protect. `LoginHandler` runs at most `max(1, GOMAXPROCS/2)` verifications at once — `BORGO_HASH_SLOTS` overrides that, read once at package init — and sheds the rest with `503` and a `Retry-After` after five seconds of queueing, so a burst of login attempts cannot starve every other route on the server. A failed lookup still runs a verification against a dummy hash — one built with *your* hasher, so swapping in argon2id does not reintroduce a timing oracle — which keeps "no such user" and "wrong password" indistinguishable in both the response and the clock.
 
 ## borgo.Auth: login, logout, register
 

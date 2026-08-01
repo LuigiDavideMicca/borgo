@@ -397,7 +397,143 @@ describe("serveAsset: the unindexed path", () => {
       );
     expect(await cc(hashed)).toBe("public, max-age=31536000, immutable");
     expect(await cc(sw)).toBe("no-cache");
-    expect(await cc(plain)).toBeNull();
+    // an asset with no policy of its own now carries a Last-Modified, and a
+    // browser is free to heuristically cache anything dated for a tenth of its
+    // age. In dev that is the rebuilt-in-place bundle pinned for the afternoon,
+    // so dev states no-cache: revalidate, and take the 304 when nothing moved.
+    expect(await cc(plain)).toBe("no-cache");
+    const prod = await serveAsset(new Request("http://app.test/x"), plain, Bun.file(plain), {
+      dev: false,
+    });
+    expect(prod.headers.get("Cache-Control")).toBeNull();
+  });
+
+  // This path used to emit no ETag, no Last-Modified and never consult
+  // If-Range, while negotiating br/gz per request off one url and handing back
+  // a rangeable Bun.file body. That is exactly the cross-encoding splice
+  // serveIndexed has nine lines of comment about - here with no mitigation and
+  // no validator a client could even have sent to be checked.
+  describe("validators", () => {
+    const serve = (path: string, headers: Record<string, string> = {}, dev = false) =>
+      serveAsset(new Request("http://app.test/style.css", { headers }), path, Bun.file(path), { dev });
+
+    test("every response carries an etag and a last-modified", async () => {
+      for (const path of [p("public", "style.css"), p("public", "logo.png"), p("public", "sw.js")]) {
+        const res = await serve(path);
+        expect(res.headers.get("ETag")).toMatch(/^"[0-9a-z]+-[0-9a-z]+"$/);
+        expect(Date.parse(res.headers.get("Last-Modified")!)).not.toBeNaN();
+      }
+    });
+
+    test("the etag revalidates: if-none-match answers 304 with no body", async () => {
+      const path = p("public", "style.css");
+      const etag = (await serve(path)).headers.get("ETag")!;
+      const res = await serve(path, { "if-none-match": etag });
+      expect(res.status).toBe(304);
+      expect(await res.text()).toBe("");
+      expect(res.headers.get("ETag")).toBe(etag);
+      // and a stale one still gets the file
+      const stale = await serve(path, { "if-none-match": '"nope-nope"' });
+      expect(stale.status).toBe(200);
+      expect(await stale.text()).toBe(RAW_CSS);
+    });
+
+    // each encoding of one url is its own representation. Sharing a validator
+    // is what lets a client revalidate the identity file and be handed a 304
+    // for the brotli one, or splice a range of one onto a prefix of the other.
+    test("each variant gets its own etag, and one does not answer for another", async () => {
+      const path = p("public", "style.css");
+      const identity = (await serve(path)).headers.get("ETag")!;
+      const gzipped = await serve(path, { "accept-encoding": "gzip" });
+      expect(gzipped.headers.get("Content-Encoding")).toBe("gzip");
+      expect(gzipped.headers.get("ETag")).not.toBe(identity);
+      expect(gzipped.headers.get("ETag")).toContain("-gzip");
+
+      // the identity etag must not 304 a request that would be answered gzipped
+      const crossed = await serve(path, {
+        "if-none-match": identity,
+        "accept-encoding": "gzip",
+      });
+      expect(crossed.status).toBe(200);
+      expect(crossed.headers.get("Content-Encoding")).toBe("gzip");
+    });
+
+    // rfc 9110 §13.1.5: a range whose validator no longer matches must be
+    // answered with the whole representation, or the client splices new bytes
+    // onto an old prefix and calls the result a file. bun ranges a Bun.file
+    // body without ever consulting If-Range, so the refusal is spelled as a
+    // stream body - which bun does not range. Only bun's own server turns a
+    // Range into a 206, so these two go over a real socket.
+    describe("over a real socket", () => {
+      let server: ReturnType<typeof Bun.serve>;
+      let base: string;
+
+      beforeAll(() => {
+        server = Bun.serve({
+          port: 0,
+          fetch(r) {
+            const path = join(dir, "public", new URL(r.url).pathname).replaceAll("\\", "/");
+            return serveAsset(r, path, Bun.file(path), { dev: false });
+          },
+        });
+        base = `http://localhost:${server.port}`;
+      });
+
+      afterAll(() => server.stop(true));
+
+      test("a range with a matching if-range is still a 206 of exactly those bytes", async () => {
+        const etag = (await fetch(`${base}/style.css`, {
+          headers: { "accept-encoding": "identity" },
+        })).headers.get("ETag")!;
+        const res = await fetch(`${base}/style.css`, {
+          headers: { range: "bytes=0-3", "if-range": etag, "accept-encoding": "identity" },
+        });
+        expect(res.status).toBe(206);
+        expect(await res.text()).toBe(RAW_CSS.slice(0, 4));
+      });
+
+      test("a range with a stale if-range gets the whole representation as 200", async () => {
+        const res = await fetch(`${base}/style.css`, {
+          headers: { range: "bytes=0-3", "if-range": '"an-old-etag"', "accept-encoding": "identity" },
+        });
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe(RAW_CSS);
+        expect(res.headers.get("Content-Range")).toBeNull();
+        // a stream body loses the type bun derives from a file, and under the
+        // global nosniff a typeless stylesheet is a refused stylesheet
+        expect(res.headers.get("Content-Type")).toContain("text/css");
+      });
+
+      // the splice this refusal exists for: resume a download started as
+      // identity, this time accepting gzip, and the range would be filled out
+      // of the compressed sibling
+      test("a resume that would cross encodings is refused, not spliced", async () => {
+        const identity = (await fetch(`${base}/style.css`, {
+          headers: { "accept-encoding": "identity" },
+        })).headers.get("ETag")!;
+        const res = await fetch(`${base}/style.css`, {
+          headers: { range: "bytes=0-3", "if-range": identity, "accept-encoding": "gzip" },
+        });
+        expect(res.status).toBe(200);
+        expect(res.headers.get("Content-Range")).toBeNull();
+      });
+    });
+
+    test("the etag moves when the file does", async () => {
+      const path = join(dir, "public", "mutable.css");
+      writeFileSync(path, "a{}");
+      const before = (await serve(path)).headers.get("ETag");
+      writeFileSync(path, "a{color:red}");
+      // the same size would still be a different mtime, but make both move
+      expect((await serve(path)).headers.get("ETag")).not.toBe(before);
+      rmSync(path, { force: true });
+    });
+
+    test("a file deleted between the caller's check and the read is a 404, not a throw", async () => {
+      const gone = join(dir, "public", "vanished.css").replaceAll("\\", "/");
+      const res = await serve(gone);
+      expect(res.status).toBe(404);
+    });
   });
 });
 

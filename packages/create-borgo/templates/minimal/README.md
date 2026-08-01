@@ -34,14 +34,18 @@ The `borgo` CLI also has `export` (prerender static pages into `dist/site/`) and
 
 ## Deploy
 
-`docker compose up -d` builds the multi-stage `Dockerfile` (small `oven/bun:slim` runtime, static Go binary) and mounts a volume at `/data` for SQLite or anything persistent. See the [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) for reverse proxy samples, systemd, and split-service setups.
+`docker compose up -d` builds the multi-stage `Dockerfile` (small `oven/bun:slim` runtime, static Go binary) and serves the app on port 3000. The compose file is deliberately bare, because this app is: no database, so no volume; no sessions, so no `SESSION_SECRET`. Both are commented into `docker-compose.yml` for the day you add one. See the [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) for reverse proxy samples, systemd, and split-service setups.
 
 ## Layout
 
-- `pages/` — React pages; file name is the route (`pages/hello/[name].tsx` → `/hello/:name`). Export a `loader` to fetch props on the server before rendering, `head` for the page title and metas, `action` to handle form posts, `hydrate` (`false` or `"visible"`) to ship less JavaScript. `_layout.tsx` wraps pages, `_404.tsx` / `_500.tsx` customize error pages.
-- `api/` — Go API routes; annotate a handler with `//borgo:route GET /api/path` (or register manually in `init()` with `borgo.Handle`). Respond with `borgo.JSON` and the route's TypeScript type is generated into `.borgo/api-types.d.ts`, so the `api` client in loaders is fully typed. `borgo.NewSSEHub()` gives you live server-sent events, proxied to the browser without buffering. For two-way live updates, browsers join WebSocket topics with `subscribe` from `borgo-framework` and Go publishes into them with `borgo.Push(topic, event, data)` — literal topic and event make the payload type flow into the `subscribe` callback. Need users? Signed-cookie sessions, password hashing and the `borgo.Auth` login/logout/register helpers are built in — see the [auth guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/auth-and-sessions.md).
+What this template ships is the whole list:
+
+- `pages/index.tsx` — the only page. The file name is the route, so this one is `/`; add `pages/about.tsx` and `/about` exists, add `pages/notes/[id].tsx` and `/notes/:id` does. A page may export a `loader` (props fetched on the server before rendering), `head` (title and metas), `action` (form posts), and `hydrate` (`false` or `"visible"`) to ship less JavaScript. A file whose name starts with `_` is never routed: `_layout.tsx` wraps its directory, `_404.tsx` and `_500.tsx` are the error pages, and anything else with that prefix is simply not served.
+- `api/hello.go` — the only Go route, mounted by its `//borgo:route GET /api/hello` directive (you can also register one by hand in `init()` with `borgo.Handle`). It responds with `borgo.JSON`, and that call is what types the route: `borgogen` reads the Go type and writes `.borgo/api-types.d.ts`, so the `api` client in a loader knows the response shape without you declaring it twice.
 - `main.go` — imports `api` and calls `borgo.Serve()`.
-- `index.html` — HTML shell. `style.scss` — global styles.
+- `index.html` — the HTML shell every page renders into. `style.scss` — global styles. `public/` — served as-is, which is where `logo.svg` comes from.
+
+Nothing else is wired up here on purpose. Sessions and auth, server-sent events, WebSocket topics and islands are all in the framework and none of them are in this template — `--template base` demonstrates SSE and islands, `--template full` adds auth and CRUD, and the [docs](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/README.md) cover each one on its own page.
 
 Ports: front server on `PORT` (default 3000), Go API on `API_PORT` (default 3501).
 

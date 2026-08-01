@@ -381,6 +381,113 @@ describe("runAction: the cookies the api issued", () => {
     const res = await runAction(post(), match({ action: async () => built }), opts());
     expect(res).toBe(built);
   });
+
+  // On the native path a render that threw after a successful action used to
+  // go straight out to the server's own handler, which renders the 500 page
+  // from the ORIGINAL request and knows nothing about the cookies this action
+  // collected. An action that logged the user in through go and then threw
+  // during render answered 500 with the session cookie dropped: go created the
+  // session, the browser never got it, and the login silently did not stick.
+  describe("a render that throws after the action must not drop them", () => {
+    const login = { apiFor: apiSetting("borgo_session=new; Path=/; HttpOnly") };
+    const boom = { renderPage: async () => { throw new Error("render exploded"); } };
+
+    test("production: the 500 page is rendered here, with the cookies", async () => {
+      let sawCookies: string[] | undefined;
+      const errorPage = route({ default: () => null }, { file: "_500.tsx" });
+      const res = await runAction(
+        post(),
+        match({ action: async () => ({ loggedIn: true }) }),
+        opts({
+          ...login,
+          serverError: errorPage,
+          renderPage: async (_r, rt, _p, status, _ep, extraCookies) => {
+            if (rt.file !== "_500.tsx") throw new Error("render exploded");
+            sawCookies = extraCookies;
+            expect(status).toBe(500);
+            return new Response(DOC, { status: 500 });
+          },
+        }),
+      );
+      expect(res!.status).toBe(500);
+      expect(sawCookies).toEqual(["borgo_session=new; Path=/; HttpOnly"]);
+    });
+
+    test("production without a _500 page: a bare 500 still carries them", async () => {
+      const res = await runAction(
+        post(),
+        match({ action: async () => ({}) }),
+        opts({ ...login, ...boom, serverError: null }),
+      );
+      expect(res!.status).toBe(500);
+      expect(res!.headers.getSetCookie()).toEqual(["borgo_session=new; Path=/; HttpOnly"]);
+    });
+
+    test("even when the _500 page throws in its turn", async () => {
+      const res = await runAction(
+        post(),
+        match({ action: async () => ({}) }),
+        opts({ ...login, ...boom, serverError: route({ default: () => null }, { file: "_500.tsx" }) }),
+      );
+      expect(res!.status).toBe(500);
+      expect(res!.headers.getSetCookie()).toEqual(["borgo_session=new; Path=/; HttpOnly"]);
+    });
+
+    test("dev: the overlay carries them too", async () => {
+      const res = await runAction(
+        post(),
+        match({ action: async () => ({}) }),
+        opts({ ...login, ...boom, dev: true }),
+      );
+      expect(res!.status).toBe(500);
+      expect(await res!.text()).toContain("overlay:");
+      expect(res!.headers.getSetCookie()).toEqual(["borgo_session=new; Path=/; HttpOnly"]);
+    });
+
+    test("with no cookies to save, the error is still the server's to render", async () => {
+      // nothing is lost by letting it out, and the server's handler is where
+      // the dev overlay, the _500 page and the abort -> 499 rule all live
+      expect(
+        runAction(post(), match({ action: async () => ({}) }), opts(boom)),
+      ).rejects.toThrow("render exploded");
+    });
+
+    test("a client that hung up mid-action is still the server's 499 to make", async () => {
+      const controller = new AbortController();
+      const req = new Request("http://app.test/x", { method: "POST", signal: controller.signal });
+      controller.abort();
+      expect(
+        runAction(req, match({ action: async () => ({}) }), opts({ ...login, ...boom })),
+      ).rejects.toThrow("render exploded");
+    });
+
+    test("the enhanced path is unchanged: a marked document, not a thrown error", async () => {
+      const res = await runAction(
+        enhanced(),
+        match({
+          action: async () => {
+            throw new Error("action exploded");
+          },
+        }),
+        opts({ ...login, dev: true }),
+      );
+      expect(marker(res!)).toBe("raw");
+      expect(res!.status).toBe(500);
+    });
+
+    // the happy native path still returns the rendered document, and the
+    // `return await` that makes the catch reachable must not have changed it
+    test("a render that succeeds is still handed back untouched", async () => {
+      const res = await runAction(
+        post(),
+        match({ action: async () => ({ ok: 1 }) }),
+        opts(login),
+      );
+      expect(res!.status).toBe(200);
+      expect(await res!.text()).toBe(DOC);
+      expect(marker(res!)).toBeNull();
+    });
+  });
 });
 
 describe("runAction: the post-action loader sees the new jar", () => {
@@ -636,11 +743,12 @@ describe("runAction: an action that throws", () => {
     expect(marker(res!)).toBe("raw");
   });
 
-  test("the cookies the api issued before the throw are dropped", async () => {
-    // recorded, not endorsed: an action that logs in and then fails leaves
-    // go holding a session the browser is never told about. the classic path
-    // loses them the same way (the throw carries nothing), so the two flows
-    // stay consistent - see the report
+  test("the cookies the api issued before the throw still reach the browser", async () => {
+    // an action that logs in through go and then throws during the render left
+    // go holding a session the browser was never told about: the user sees a
+    // 500, retries, and logs in against a session that already exists. Both
+    // flows carry them now - the native path was fixed first and this one had
+    // the same shape, which is why the test above it asserts the same thing
     const res = await runAction(
       enhanced(),
       match({
@@ -655,7 +763,7 @@ describe("runAction: an action that throws", () => {
         }) as ActionOptions["apiFor"],
       }),
     );
-    expect(res!.headers.getSetCookie()).toEqual([]);
+    expect(res!.headers.getSetCookie()).toEqual(["borgo_session=new; Path=/"]);
   });
 });
 
@@ -736,6 +844,38 @@ describe("carryHeaders", () => {
     const json = Response.json({});
     json.headers.append("Set-Cookie", "own=0");
     expect(carryHeaders(from, json).headers.getSetCookie()).toEqual(["own=0", "a=1", "b=2"]);
+  });
+
+  // only the headers of the source survive: its body is going nowhere, and
+  // nobody else holds a reference to cancel it. Whatever is behind that stream
+  // - an upstream socket for a Response the action proxied, a file handle -
+  // stayed open for the life of the tab, one leak per redirect-with-a-body.
+  // `redirect()` builds none, but a hand-written
+  // `new Response(html, { status: 302, headers: { Location } })` does.
+  test("the source's body is cancelled, not abandoned", async () => {
+    let cancelled: unknown = "not cancelled";
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("a fallback page nobody will read"));
+      },
+      cancel(reason) {
+        cancelled = reason ?? null;
+      },
+    });
+    const from = new Response(body, { status: 302, headers: { Location: "/done" } });
+    const res = carryHeaders(from, Response.json({ redirect: "/done" }));
+
+    expect(await res.json()).toEqual({ redirect: "/done" });
+    // a microtask for the cancel() promise to run
+    await Promise.resolve();
+    expect(cancelled).not.toBe("not cancelled");
+    expect(from.bodyUsed || from.body?.locked).toBeTruthy();
+  });
+
+  test("a bodyless source is no harder to carry than before", async () => {
+    const res = carryHeaders(new Response(null, { status: 303, headers: { Location: "/a", "X-Guard": "1" } }), Response.json({ redirect: "/a" }));
+    expect(res.headers.get("X-Guard")).toBe("1");
+    expect(await res.json()).toEqual({ redirect: "/a" });
   });
 });
 

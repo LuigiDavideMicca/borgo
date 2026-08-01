@@ -73,7 +73,7 @@ BORGO_CSRF=1    # force the check on in development
 BORGO_CSRF=0    # disable it (do not do this in production)
 ```
 
-`/api/*` is proxied straight to Go and is not covered by this check. It does not need to be: `borgo.Bind` rejects any request whose declared `Content-Type` is not `application/json`, and a cross-site HTML form cannot send that content type. See [the typed bridge](typed-bridge.md) for what `Bind` accepts.
+`/api/*` is proxied straight to Go and is not covered by this check. It does not need to be: `borgo.Bind` requires `Content-Type: application/json` and rejects anything else — including a request that sends no `Content-Type` at all, which matters because an empty-type `Blob` is a CORS-safelisted body that earns no preflight. A cross-site HTML form cannot declare JSON, and a cross-site `fetch` that does has already been preflighted, so every request that reaches a handler is same-origin or CORS-approved. See [the typed bridge](typed-bridge.md) for what `Bind` accepts.
 
 ## Cookies and sessions
 
@@ -88,7 +88,15 @@ Session cookies are signed with HMAC-SHA256 over a payload that includes the exp
 
 Set `SESSION_SECURE=1` in production. It is off by default only so that `http://localhost` works.
 
-`SESSION_SECRET` is required and checked at startup: a missing secret refuses to boot rather than failing per request with a healthy-looking health check, and a secret under 32 bytes logs a warning. Generate one properly:
+`SESSION_SECRET` is treated differently depending on how it is wrong, because the two cases fail in opposite directions.
+
+**Absent is reported, not enforced.** `borgo.Serve` logs `SESSION_SECRET not set: session and auth routes will fail until it is` before it binds the port, then boots: an app with no sessions is a legitimate app, and nothing at boot can tell one from the other. The failure is per request and it is closed — `SetSession` returns `ErrNoSessionSecret`, and borgo refuses to *verify* a session too, so a deployment that loses the variable logs everyone out rather than letting anyone in.
+
+**Shorter than 32 bytes refuses to boot.** A short key is not a weaker secret, it is a searchable one: the security of the cookie rests on nobody being able to produce its HMAC, and a handful of bytes can be exhausted offline from a single captured cookie. Setting one is a deliberate act with a wrong value, so borgo treats it like any other malformed environment variable and stops, naming the length it got and the length it needs. Everywhere else in the framework a secret under the floor is indistinguishable from no secret at all.
+
+So the failure mode is per request, and you should know its shape: `/healthz` stays green, every page that does not touch a session keeps working, and `SetSession` returns `ErrNoSessionSecret`, which `LoginHandler` and `RegisterHandler` answer as a `500` with `{"error":"session write failed"}`. **Read the startup log on first boot, or assert on it in your deploy script** — that line is the only warning you get. Making it fatal is on the table for a future major ([api stability](api-stability.md#what-counts-as-a-breaking-change) lists it as breaking), because tightening it would stop apps that boot fine today.
+
+Generate one properly:
 
 ```bash
 openssl rand -base64 48
@@ -111,7 +119,7 @@ This defends against **cookie tossing**. A cookie on a sibling subdomain (`blog.
 | Idle keep-alive connection | 2 m | `BORGO_IDLE_TIMEOUT` |
 | Whole-request read/write deadline | none | `BORGO_READ_TIMEOUT`, `BORGO_WRITE_TIMEOUT` |
 
-Over the `Bind` cap the client gets a `413`; a non-JSON `Content-Type` gets a `415`. Both come from `borgo.BindError`.
+Over the `Bind` cap the client gets a `413`; a missing or non-JSON `Content-Type` gets a `415`. Both come from `borgo.BindError`.
 
 The whole-request deadlines are deliberately unset. They are wall-clock limits on an entire exchange, so any value would eventually kill a legitimate server-sent-events stream or a slow upload. Header timeouts stop slowloris without that cost, `Bind` bounds the body, and if you set the deadlines anyway, `borgo.SSE` clears them on its own connection so streams survive.
 
@@ -141,7 +149,7 @@ Deliberate omissions. Each is a policy decision that belongs to your app or your
 
 ## Before you go live
 
-- `SESSION_SECRET` set, 32+ random bytes, out of version control.
+- `SESSION_SECRET` set, 32+ random bytes, out of version control — confirmed by the *absence* of the startup warning, since nothing else stops a secretless boot.
 - `SESSION_SECURE=1`, and TLS terminating in front of the app.
 - `BORGO_PUSH_KEY` set on both processes if they are not on the same loopback.
 - CSRF left on (`BORGO_CSRF` unset in production) and `<CsrfField />` in every `<form method="post">`.

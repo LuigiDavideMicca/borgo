@@ -223,6 +223,55 @@ export function envInt(value: string | undefined, fallback: number): number {
 }
 
 /**
+ * The changed files a dev rebuild hands to the front server, and from there to
+ * every connected browser.
+ *
+ * A newline separates them: a path may contain a comma or a space, and none of
+ * the paths a watcher reports can contain a newline. One file used to travel
+ * here, which meant two saves inside one debounce window announced one of them
+ * and the browser - which ignores an update naming a page other than the one on
+ * screen - could silently apply nothing at all.
+ */
+export const UNKNOWN_CHANGE = "__borgo_unknown__";
+
+export const encodeChanged = (files: readonly string[]): string => files.join("\n");
+
+export const decodeChanged = (value: string | undefined): string[] =>
+  value ? value.split("\n").filter(Boolean) : [];
+
+/**
+ * The socket read deadline, in seconds.
+ *
+ * bun's `idleTimeout` is not a response-side setting: the same number bounds
+ * how long the server waits for an inbound request's headers and body. Borgo
+ * used to disable it outright so that proxied event streams - which are idle
+ * by nature between events - were not cut, and the cost was that the
+ * internet-facing server had no read deadline at all: a POST declaring a
+ * Content-Length and then dribbling one byte was held indefinitely, and every
+ * path that reads a body parks on it. The deadline is back on, and the
+ * exemption is granted per response instead, through `server.timeout(req, 0)`
+ * once the response is known to be a stream that lives on purpose.
+ *
+ * bun caps idleTimeout at 255 seconds and rejects anything larger.
+ */
+export const IDLE_TIMEOUT_SECONDS = 30;
+export const IDLE_TIMEOUT_MAX = 255;
+
+export function idleTimeout(value: string | undefined): number {
+  return Math.min(envInt(value, IDLE_TIMEOUT_SECONDS), IDLE_TIMEOUT_MAX);
+}
+
+// responses whose whole point is to sit idle between writes, and which the
+// read deadline above would otherwise kill mid-stream. Content-Type is the
+// only honest signal here: the proxy learns nothing about the shape of an
+// upstream response beyond its headers.
+const LONG_LIVED_TYPES = /^(text\/event-stream|multipart\/x-mixed-replace)\b/;
+
+export function isLongLivedStream(res: Response): boolean {
+  return LONG_LIVED_TYPES.test((res.headers.get("content-type") ?? "").trim().toLowerCase());
+}
+
+/**
  * Whether /metrics is exposed.
  *
  * The name is prefixed for a reason: a bare `METRICS` is the single most
@@ -562,6 +611,13 @@ export function carryHeaders(from: Response, json: Response): Response {
     headers.set(key, value);
   });
   for (const c of from.headers.getSetCookie()) headers.append("Set-Cookie", c);
+  // only the headers of `from` survive; its body is going nowhere and holds
+  // whatever is behind it - an upstream socket for a Response the action
+  // proxied, a file handle - until the tab that started the request closes.
+  // a redirect with a body is not exotic: `Response.redirect` has none, but a
+  // hand-built `new Response(html, { status: 302, headers: { Location } })` is
+  // exactly what an action that wants a fallback page writes.
+  void from.body?.cancel().catch(() => {});
   return new Response(json.body, { status: json.status, headers });
 }
 
@@ -705,15 +761,57 @@ export async function runAction(
         }
         return withCookies(actionJson({ props: loaded, actionData: result }), apiCookies);
       }
-      return renderPage(freshReq, target.route, target.params, 200, { actionData: result }, apiCookies);
+      // awaited, not returned: `return promise` inside a try resolves the outer
+      // promise with it and leaves the try before it settles, so the catch
+      // below - the whole point of which is this render - would never see it
+      return await renderPage(
+        freshReq,
+        target.route,
+        target.params,
+        200,
+        { actionData: result },
+        apiCookies,
+      );
     } catch (error) {
-      if (!wantsJson) throw error;
+      // the native path normally lets the error out to the server's handler,
+      // which renders the 500 page from the *original* request - and knows
+      // nothing about the cookies this action collected. An action that logged
+      // the user in through go and then threw while rendering would answer 500
+      // with the session cookie dropped on the floor: the login ran, the
+      // browser never heard about it, and the user is told nothing happened.
+      // The error page is rendered here instead, with the cookies attached.
+      // A client that has already hung up is still the server's 499 to make.
+      if (!wantsJson && (!apiCookies.length || req.signal.aborted)) throw error;
+      onError(error);
+      if (!wantsJson) {
+        if (dev) {
+          return withCookies(
+            new Response(renderOverlay(error), {
+              status: 500,
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            }),
+            apiCookies,
+          );
+        }
+        if (serverError) {
+          try {
+            return await renderPage(req, serverError, {}, 500, undefined, apiCookies);
+          } catch {}
+        }
+        return withCookies(new Response("internal server error", { status: 500 }), apiCookies);
+      }
       // the native flow would show the overlay or the 500 page; the
       // enhanced flow must deliver that same document, not vanish the
-      // failure behind a silent reload
-      onError(error);
+      // failure behind a silent reload.
+      //
+      // And it carries the cookies the action already collected, for the same
+      // reason the native path does: an action that logged the user in through
+      // go and then threw during the render would otherwise answer 500 with the
+      // Set-Cookie dropped, so the login silently did not stick and the user
+      // retries against a session that was created.
+      const errorDocument = (doc: Response) => withCookies(rawDocument(doc), apiCookies);
       if (dev) {
-        return rawDocument(
+        return errorDocument(
           new Response(renderOverlay(error), {
             status: 500,
             headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -722,10 +820,10 @@ export async function runAction(
       }
       if (serverError) {
         try {
-          return rawDocument(await renderPage(req, serverError, {}, 500));
+          return errorDocument(await renderPage(req, serverError, {}, 500));
         } catch {}
       }
-      return rawDocument(new Response("internal server error", { status: 500 }));
+      return errorDocument(new Response("internal server error", { status: 500 }));
     }
   }
   if (wantsJson && target) {

@@ -2,7 +2,18 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assetsBuildMode, generateManifest, parseHydrate, precacheStamp, refreshTransform, renameUnsafeChunks } from "../src/build";
+import {
+  assetsBuildMode,
+  compileCss,
+  generateManifest,
+  isBuildOutput,
+  parseHydrate,
+  precacheStamp,
+  refreshTransform,
+  renameUnsafeChunks,
+  reservedRoutes,
+  sweepBuildOutput,
+} from "../src/build";
 
 describe("parseHydrate", () => {
   const cases: Array<[string, string, ReturnType<typeof parseHydrate>]> = [
@@ -225,6 +236,231 @@ describe("generateManifest", () => {
     const dynamicIdx = manifest.indexOf('pattern: "/deep/:id"');
     expect(staticIdx).toBeGreaterThan(-1);
     expect(dynamicIdx).toBeGreaterThan(staticIdx);
+  });
+});
+
+// `_layout.tsx` used to be matched with endsWith, which is also true of every
+// page whose name merely ends in those characters. pages/post_layout.tsx became
+// a route AND a layout for a directory "post/" - so the manifest imported
+// "../pages/post/_layout", which resolves to nothing, and dev, build and export
+// all died on it. PROVED against a real generateManifest.
+describe("a page named like a layout is a page", () => {
+  const originalCwd = process.cwd();
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "borgo-layoutish-"));
+    const write = (path: string, content: string) => {
+      mkdirSync(join(dir, path, ".."), { recursive: true });
+      return Bun.write(join(dir, path), content);
+    };
+    await write("pages/index.tsx", "export default function Home() { return null; }");
+    // no pages/post/ directory anywhere: this is a plain page
+    await write("pages/post_layout.tsx", "export default function PostLayout() { return null; }");
+    // and one with a real sibling directory, whose pages must not inherit a
+    // layout chain nobody wrote
+    await write("pages/blog_layout.tsx", "export default function BlogLayout() { return null; }");
+    await write("pages/blog/entry.tsx", "export default function Entry() { return null; }");
+    // the genuine article, to prove the narrowing did not throw layouts out
+    await write("pages/blog/_layout.tsx", "export default function L({ children }) { return children; }");
+    process.chdir(dir);
+    await generateManifest();
+  });
+
+  afterAll(() => {
+    process.chdir(originalCwd);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("no phantom layout import is emitted for it", async () => {
+    const manifest = await Bun.file(join(dir, ".borgo/routes.gen.tsx")).text();
+    expect(manifest).not.toContain('"../pages/post/_layout"');
+    expect(manifest).not.toContain('"../pages/blog_layout/_layout"');
+    // every import the manifest makes must resolve to a file that exists
+    for (const [, spec] of manifest.matchAll(/from "\.\.\/(pages\/[^"]+)"/g)) {
+      expect(existsSync(join(dir, `${spec}.tsx`))).toBe(true);
+    }
+  });
+
+  test("it is routed as an ordinary page, with no layouts of its own", async () => {
+    const manifest = await Bun.file(join(dir, ".borgo/routes.gen.tsx")).text();
+    expect(manifest).toContain('pattern: "/post_layout", file: "post_layout.tsx"');
+    expect(manifest).toMatch(/file: "post_layout\.tsx"[^\n]*layouts: \[\]/);
+  });
+
+  test("a real _layout.tsx still wraps the pages beside it", async () => {
+    const manifest = await Bun.file(join(dir, ".borgo/routes.gen.tsx")).text();
+    expect(manifest).toContain('import * as layout0 from "../pages/blog/_layout";');
+    expect(manifest).toMatch(/file: "blog\/entry\.tsx"[^\n]*layouts: \[layout0\]/);
+    // and the page named after that directory is not dragged into its chain
+    expect(manifest).toMatch(/file: "blog_layout\.tsx"[^\n]*layouts: \[\]/);
+  });
+});
+
+// the front server answers these before the route table is ever consulted, so
+// a page generated for one of them can never render - while the startup route
+// table prints it as though it works
+describe("reservedRoutes", () => {
+  test("names the paths the server takes first", () => {
+    const dead = reservedRoutes([
+      { pattern: "/api/users", file: "api/users.tsx" },
+      { pattern: "/api/:id", file: "api/[id].tsx" },
+      { pattern: "/ws", file: "ws.tsx" },
+      { pattern: "/healthz", file: "healthz.tsx" },
+      { pattern: "/metrics", file: "metrics.tsx" },
+      { pattern: "/__borgo/dev", file: "__borgo/dev.tsx" },
+    ]);
+    expect(dead.map((d) => d.pattern)).toEqual([
+      "/api/users",
+      "/api/:id",
+      "/ws",
+      "/healthz",
+      "/metrics",
+      "/__borgo/dev",
+    ]);
+    expect(dead[0].owner).toContain("go api");
+    expect(dead[0].file).toBe("api/users.tsx");
+  });
+
+  test("leaves reachable routes alone, prefixes included", () => {
+    // "/api" has no trailing slash: server.ts proxies startsWith("/api/"), so
+    // this one really does reach the router
+    expect(
+      reservedRoutes([
+        { pattern: "/", file: "index.tsx" },
+        { pattern: "/api", file: "api.tsx" },
+        { pattern: "/apidocs", file: "apidocs.tsx" },
+        { pattern: "/websocket", file: "websocket.tsx" },
+        { pattern: "/health", file: "health.tsx" },
+        { pattern: "/:slug", file: "[slug].tsx" },
+      ]),
+    ).toEqual([]);
+  });
+});
+
+// the pre-build sweep of public/assets. it used to take every .js in there,
+// which includes the analytics snippet or vendored widget an app dropped next
+// to the build output - deleted on the next build, with no warning.
+describe("isBuildOutput", () => {
+  test("claims what the build wrote", () => {
+    for (const f of [
+      "client.js",
+      "islands-client.js",
+      "precache.json",
+      "page-abc12345.js",
+      "chunk-0wj4r0a3.js",
+      "client.js.gz",
+      "client.js.br",
+      "page-abc12345.js.gz",
+      // the stylesheet's siblings are the build's; style.css itself is
+      // rewritten by compileCss before the sweep runs and is not swept
+      "style.css.gz",
+      "style.css.br",
+    ]) {
+      expect(isBuildOutput(f)).toBe(true);
+    }
+  });
+
+  test("leaves the app's own files in place", () => {
+    for (const f of [
+      "analytics.js",
+      "widget.js",
+      "vendor.min.js",
+      "style.css",
+      "logo.svg",
+      "data.json",
+      "analytics.js.gz",
+      // eight characters, but no dash before them
+      "abcd1234.js",
+    ]) {
+      expect(isBuildOutput(f)).toBe(false);
+    }
+  });
+});
+
+describe("sweepBuildOutput", () => {
+  test("clears the last build and leaves the app's files where they were", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-sweep-"));
+    try {
+      const mine = [
+        "analytics.js",
+        "widget.js",
+        "vendor.min.js",
+        "logo.svg",
+        "data.json",
+        "style.css",
+      ];
+      const theirs = [
+        "client.js",
+        "client.js.gz",
+        "client.js.br",
+        "islands-client.js",
+        "page-abc12345.js",
+        "page-abc12345.js.gz",
+        "precache.json",
+        "style.css.gz",
+        "style.css.br",
+      ];
+      for (const f of [...mine, ...theirs]) writeFileSync(join(dir, f), "x");
+
+      const removed = sweepBuildOutput(dir);
+
+      expect(removed.sort()).toEqual([...theirs].sort());
+      for (const f of theirs) expect(existsSync(join(dir, f))).toBe(false);
+      // the whole point: a file the app put here survives the next build
+      for (const f of mine) expect(existsSync(join(dir, f))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a directory that does not exist yet is not an error", () => {
+    expect(sweepBuildOutput(join(tmpdir(), "borgo-no-such-dir-" + Date.now()))).toEqual([]);
+  });
+});
+
+describe("compileCss", () => {
+  const originalCwd = process.cwd();
+
+  // compileCss returned early when style.scss was gone, so the css it emitted
+  // for the previous build stayed in public/assets: still served, still
+  // recompressed, still listed in precache.json, forever. Same on a rename,
+  // and same on the scss -> tailwind switch.
+  test("a deleted stylesheet takes its output and precompressed siblings with it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-css-"));
+    process.chdir(dir);
+    try {
+      mkdirSync(join(dir, "public/assets"), { recursive: true });
+      for (const f of ["style.css", "style.css.gz", "style.css.br"]) {
+        writeFileSync(join(dir, "public/assets", f), "body{color:red}");
+      }
+      // an app file in the same directory is not compileCss's to remove
+      writeFileSync(join(dir, "public/assets", "analytics.js"), "// mine");
+
+      expect(existsSync(join(dir, "public/assets/style.css"))).toBe(true);
+      await compileCss(false); // no style.scss here: the source is gone
+
+      for (const f of ["style.css", "style.css.gz", "style.css.br"]) {
+        expect(existsSync(join(dir, "public/assets", f))).toBe(false);
+      }
+      expect(existsSync(join(dir, "public/assets/analytics.js"))).toBe(true);
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a stylesheet that still exists is compiled, not dropped", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-css-live-"));
+    process.chdir(dir);
+    try {
+      writeFileSync(join(dir, "style.scss"), "body { color: red; }");
+      await compileCss(true);
+      expect(readFileSync(join(dir, "public/assets/style.css"), "utf8")).toContain("color");
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

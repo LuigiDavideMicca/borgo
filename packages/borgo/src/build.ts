@@ -1,7 +1,9 @@
 import { Glob } from "bun";
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, sep } from "node:path";
+import { c, g } from "./colors";
 import { precompressAssets } from "./compress";
+import { stampWorkerFile } from "./pwa";
 import { filePathToPattern } from "./router";
 
 const outDir = "public/assets";
@@ -21,6 +23,34 @@ export function assetsBuildMode(): "dev" | "production" | null {
 
 const dynamicSegments = (pattern: string) =>
   pattern.split("/").filter((s) => s.startsWith(":")).length;
+
+// paths the front server answers before the route table is consulted at all:
+// everything under /api/ is proxied to go, /__borgo/ is the dev channel and
+// the push endpoint, and the last three are borgo's own. a page generated for
+// one of them is dead code that the startup route table still prints as if it
+// worked, so it is called out where it is generated.
+const RESERVED_PREFIXES: Array<[string, string]> = [
+  ["/api/", "proxied to the go api"],
+  ["/__borgo/", "borgo's own dev and push endpoints"],
+];
+const RESERVED_PATHS: Array<[string, string]> = [
+  ["/ws", "the websocket endpoint"],
+  ["/healthz", "the health probe"],
+  ["/metrics", "the metrics endpoint"],
+];
+
+export type DeadRoute = { pattern: string; file: string; owner: string };
+
+export function reservedRoutes(pages: Array<{ pattern: string; file: string }>): DeadRoute[] {
+  const dead: DeadRoute[] = [];
+  for (const { pattern, file } of pages) {
+    const exact = RESERVED_PATHS.find(([path]) => path === pattern);
+    const prefix = RESERVED_PREFIXES.find(([start]) => pattern.startsWith(start));
+    const owner = exact?.[1] ?? prefix?.[1];
+    if (owner) dead.push({ pattern, file, owner });
+  }
+  return dead;
+}
 
 async function writeIfChanged(path: string, content: string) {
   const file = Bun.file(path);
@@ -54,8 +84,12 @@ export async function generateManifest(dev = false) {
   const sources = new Map<string, string>();
   for (const f of files) sources.set(f, await Bun.file(`pages/${f}`).text());
 
+  // a full basename, never a suffix: `endsWith` also matched page files, so
+  // pages/post_layout.tsx became a phantom layout for a pages/post/ directory
+  // that need not exist - emitting an import of "../pages/post/_layout" that
+  // resolves nowhere and takes dev, build and export down with it
   const layoutDirs = files
-    .filter((f) => f.endsWith("_layout.tsx"))
+    .filter((f) => f === "_layout.tsx" || f.endsWith("/_layout.tsx"))
     .map((f) => f.slice(0, -"_layout.tsx".length).replace(/\/$/, ""));
 
   // layout chain for a page, outermost first
@@ -78,6 +112,13 @@ export async function generateManifest(dev = false) {
         dynamicSegments(a.pattern) - dynamicSegments(b.pattern) ||
         a.pattern.localeCompare(b.pattern),
     );
+
+  for (const dead of reservedRoutes(pages)) {
+    console.warn(
+      `  ${c.red(g.err)} pages/${dead.file} routes ${dead.pattern}, which never reaches the router ` +
+        `${g.dot} ${dead.owner} answers it first`,
+    );
+  }
 
   const layoutName = (dir: string) => `layout${layoutDirs.indexOf(dir)}`;
   const chainFor = (file: string) => layoutsFor(file).map(layoutName).join(", ");
@@ -300,12 +341,52 @@ async function compileTailwind(dev: boolean) {
   await Bun.write(`${outDir}/style.css`, result.css);
 }
 
+// the emitted stylesheet and its precompressed siblings. dropped when the
+// source is gone, or the previous build's css outlives the file it came from:
+// still served, still recompressed, still listed in precache.json, forever.
+function dropStylesheet() {
+  for (const suffix of ["", ".gz", ".br"]) {
+    rmSync(`${outDir}/style.css${suffix}`, { force: true });
+  }
+}
+
 export async function compileCss(dev = false) {
   if (process.env.BORGO_TAILWIND === "1") return compileTailwind(dev);
-  if (!existsSync("style.scss")) return;
+  // a deleted or renamed style.scss - and the scss -> tailwind switch, which
+  // leaves BORGO_TAILWIND unset on the build that removed the scss - must take
+  // the stylesheet it produced with it
+  if (!existsSync("style.scss")) return dropStylesheet();
   const sass = await import("sass-embedded");
   const css = await sass.compileAsync("style.scss", { style: dev ? "expanded" : "compressed" });
   await Bun.write(`${outDir}/style.css`, css.css);
+}
+
+// what `borgo build` itself wrote into public/assets, and may therefore
+// delete. everything else in that directory belongs to the app - an analytics
+// snippet, a vendored widget - and the sweep used to take every .js with it.
+// style.css is excluded: compileCss has already rewritten it by then, and
+// removes it itself when the source is gone.
+const BUILD_OUTPUT = /^(client\.js|islands-client\.js|precache\.json|[^/\\]+-[a-z0-9]{8}\.js)$/i;
+
+export function isBuildOutput(file: string): boolean {
+  const sibling = file.match(/^(.*)\.(gz|br)$/);
+  if (sibling) return sibling[1] === "style.css" || BUILD_OUTPUT.test(sibling[1]);
+  return BUILD_OUTPUT.test(file);
+}
+
+// hashed chunk names change between builds, so the stale ones and their
+// precompressed siblings go before the new build writes. Only the build's own
+// output: this directory is also where an app drops an analytics snippet or a
+// vendored widget, and those used to be deleted here with no warning.
+export function sweepBuildOutput(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const removed: string[] = [];
+  for (const file of readdirSync(dir)) {
+    if (!isBuildOutput(file)) continue;
+    rmSync(`${dir}/${file}`, { force: true });
+    removed.push(file);
+  }
+  return removed;
 }
 
 // bun leaves the "[name]" token literal for a chunk it cannot name, which
@@ -338,20 +419,26 @@ export async function renameUnsafeChunks(paths: string[]): Promise<Map<string, s
   return renamed;
 }
 
+// what the bundler substitutes into the client bundle. BORGO_STATIC is how the
+// runtime learns it is being built for `borgo export`: a static host has no
+// ?__borgo=props endpoint, it answers the document for that url with a 200 the
+// runtime cannot parse, so the props path has to be compiled out rather than
+// tried and caught.
+export function buildDefine(dev: boolean, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  return {
+    "process.env.NODE_ENV": JSON.stringify(dev ? "development" : "production"),
+    "process.env.BORGO_STATIC": JSON.stringify(env.BORGO_STATIC === "1" ? "1" : "0"),
+  };
+}
+
 export async function buildAssets(dev = false): Promise<BuildResult> {
   if (dev) void loadBabelRefresh();
   const { hasIslands } = await generateManifest(dev);
   await compileCss(dev);
 
-  // hashed chunk names change between builds; drop the stale ones and any
-  // precompressed siblings so dev never serves an outdated .gz/.br
-  if (existsSync(outDir)) {
-    for (const f of readdirSync(outDir)) {
-      if (/\.(js|gz|br)$/.test(f) || f === "precache.json") rmSync(`${outDir}/${f}`, { force: true });
-    }
-  }
+  sweepBuildOutput(outDir);
 
-  const define = { "process.env.NODE_ENV": JSON.stringify(dev ? "development" : "production") };
+  const define = buildDefine(dev);
   const result = await Bun.build({
     entrypoints: [
       `${genDir}/client.tsx`,
@@ -376,10 +463,14 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
       .map((o) => "/assets/" + outPath(o.path).replaceAll("\\", "/").split("/").pop());
     if (existsSync(`${outDir}/style.css`)) files.push("/assets/style.css");
     files.sort();
-    await Bun.write(
-      `${outDir}/precache.json`,
-      JSON.stringify({ stamp: await precacheStamp(outDir, files), assets: files }),
-    );
+    const stamp = await precacheStamp(outDir, files);
+    await Bun.write(`${outDir}/precache.json`, JSON.stringify({ stamp, assets: files }));
+    // the stamp goes into the worker's own body too: a byte-identical sw.js is
+    // a worker the browser never reinstalls, so install (which fills the cache)
+    // and activate (which prunes the old ones) would never run again after the
+    // first deploy, and every later deploy's assets would be shadowed by the
+    // first one's for as long as the site data lives
+    stampWorkerFile(stamp);
   }
 
   // prod only: emit .gz/.br siblings once here instead of compressing on

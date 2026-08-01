@@ -29,6 +29,8 @@ export type DoctorEnv = {
   exists: (path: string) => boolean;
   mtime: (path: string) => number | null;
   listDir: (dir: string) => string[];
+  // every file under dir, at any depth, as paths relative to dir
+  listTree: (dir: string) => string[];
   readFile: (path: string) => string | null;
   resolve: (spec: string) => string | null;
   openForWrite: (path: string) => "ok" | "busy";
@@ -63,6 +65,15 @@ export const realEnv = (): DoctorEnv => ({
   listDir: (dir) => {
     try {
       return readdirSync(dir);
+    } catch {
+      return [];
+    }
+  },
+  listTree: (dir) => {
+    try {
+      return readdirSync(dir, { recursive: true, withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => join(entry.parentPath, entry.name).slice(dir.length + 1).replaceAll("\\", "/"));
     } catch {
       return [];
     }
@@ -164,13 +175,17 @@ const packageJson = (d: DoctorEnv): Record<string, unknown> | null => {
   }
 };
 
-// the app decides how new a bun it needs; the framework's own floor is the
-// fallback. a range like ">=1.3.2 <2" is read for its first version.
+// the app may ask for a newer bun than the framework does; it may not ask for
+// an older one. a declared floor below borgo's is not a relaxation, it is a
+// green check on a bun that `borgo build` will fail on, so the higher of the
+// two wins. a range like ">=1.3.2 <2" is read for its first version.
 export function bunMinimum(d: DoctorEnv): { min: string; source: string } {
   const engines = packageJson(d)?.engines as { bun?: string } | undefined;
   const declared = typeof engines?.bun === "string" ? parseVersion(engines.bun) : null;
   if (!declared) return { min: MIN_BUN, source: "borgo" };
-  return { min: declared.join("."), source: "package.json engines.bun" };
+  const asked = declared.join(".");
+  if (!versionAtLeast(asked, MIN_BUN)) return { min: MIN_BUN, source: "borgo" };
+  return { min: asked, source: "package.json engines.bun" };
 }
 
 // an npm-installed bun is a wrapper under node_modules, not the real binary:
@@ -462,7 +477,10 @@ export function checkApiTypes(d: DoctorEnv): Check | null {
   const fix = "go tool borgogen (borgo dev and borgo build run it for you)";
   const generated = d.mtime(types);
   if (generated === null) return { name, ok: false, detail: `${types} is missing`, fix };
-  for (const file of d.listDir("api")) {
+  // the whole tree, not just the top level: borgogen reads every .go file
+  // under api/, so an app that keeps handlers in api/users/ was reported
+  // "fresh" no matter how far behind the generated types had fallen
+  for (const file of d.listTree("api")) {
     if (!file.endsWith(".go")) continue;
     const changed = d.mtime(`api/${file}`);
     if (changed !== null && changed > generated + 1000) {

@@ -15,7 +15,10 @@ bunx create-borgo@latest my-app
 - `borgo start` — runs both servers from the build output (`--front-only` for split deployments, with `API_URL`)
 - `borgo export` — prerenders the statically exportable pages into `dist/site/`
 - `borgo deploy init <caddy|nginx|systemd|compose>` — writes the deploy guide's config for the project
+- `borgo pwa init` — writes `public/manifest.webmanifest` and a working service worker
 - `borgo doctor` — diagnoses the environment, one actionable fix per failing check
+
+`deploy init` and `pwa init` never overwrite a file that already exists; pass `--force` when you want them to.
 
 Run the CLI through Bun (`bun run dev` in an app). If you hit `error: bun is not installed in %PATH%`, the bin shim was spawned without Bun on `PATH` (e.g. by `npm run`) — see the [troubleshooting section](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/faq-and-troubleshooting.md).
 

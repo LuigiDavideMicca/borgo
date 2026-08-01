@@ -31,6 +31,37 @@ describe("templates", () => {
     }
   });
 
+  // `listen 443 ssl;` with no certificate directive anywhere in the file is
+  // not a config with a TODO in it: `nginx -t` hard-fails on it, so the file
+  // borgo generated could not start nginx at all. The comment said "point
+  // ssl_certificate at your certs" and there was nothing to point.
+  test("nginx ships the certificate lines it tells you to set", () => {
+    const out = nginxConf(ctx);
+    expect(out).toContain("listen 443 ssl;");
+    expect(out).toContain("ssl_certificate");
+    expect(out).toContain("ssl_certificate_key");
+    // commented, because a path that does not exist fails nginx -t just as
+    // hard: uncommenting them is the one documented edit
+    for (const directive of ["ssl_certificate ", "ssl_certificate_key"]) {
+      const line = out.split("\n").find((l) => l.trim().replace(/^#\s*/, "").startsWith(directive))!;
+      expect(line.trim().startsWith("#")).toBe(true);
+      expect(line.trim()).toEndWith(";");
+    }
+    // and the file still says what to do with them
+    expect(out).toContain("uncomment");
+  });
+
+  // nginx defaults to 1m and borgo to 32m (BORGO_MAX_BODY). Leaving the two
+  // disagreeing means an app with uploads works under `borgo start` and 413s
+  // behind the config borgo generated for it - and the 413 comes from nginx,
+  // so nothing in the app's logs explains it.
+  test("nginx raises the body cap to borgo's own", () => {
+    const out = nginxConf(ctx);
+    expect(out).toContain("client_max_body_size 32m;");
+    // the number matches server.ts's BORGO_MAX_BODY default of 32 MiB
+    expect(32 * 1024 * 1024).toBe(33554432);
+  });
+
   test("systemd unit carries the paths and env", () => {
     const out = systemdUnit(ctx);
     expect(out).toContain("[Unit]");
@@ -48,6 +79,33 @@ describe("templates", () => {
     expect(out).toContain('PORT: "8080"');
     expect(out).toContain("- data:/data");
     expect(out).toContain("restart: unless-stopped");
+  });
+
+  // docker creates the mounted volume root-owned, and the images borgo
+  // scaffolds run as `USER bun`. Uncommenting the DB_PATH line the file
+  // documents gives permission-denied at startup, with nothing in the compose
+  // file to suggest why - so the file says what the Dockerfile has to do.
+  test("compose says what /data needs before DB_PATH can be uncommented", () => {
+    const out = composeYml(ctx);
+    expect(out).toContain("# DB_PATH: /data/app.db");
+    expect(out).toContain("chown bun:bun /data");
+    expect(out).toContain("USER bun");
+    // the advice has to sit with the line it is about, not at the top
+    const advice = out.indexOf("chown bun:bun /data");
+    const dbPath = out.indexOf("# DB_PATH: /data/app.db");
+    expect(advice).toBeLessThan(dbPath);
+    expect(dbPath - advice).toBeLessThan(200);
+  });
+
+  test("compose is still valid yaml with the advice in it", () => {
+    const parsed = Bun.YAML.parse(composeYml(ctx)) as {
+      services: { app: { environment: Record<string, string>; volumes: string[] } };
+      volumes: Record<string, unknown>;
+    };
+    expect(parsed.services.app.volumes).toContain("data:/data");
+    // still commented out: an app with no DB_PATH must not be handed one
+    expect(parsed.services.app.environment.DB_PATH).toBeUndefined();
+    expect(parsed.volumes).toHaveProperty("data");
   });
 });
 

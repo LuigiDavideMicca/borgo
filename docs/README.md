@@ -2,7 +2,7 @@
 
 Start with [getting started](getting-started.md) if you have not built anything yet; everything else is a deep dive on one convention the [README](../README.md) summarizes. Each page opens with what it covers and ends with the honest limits of what it describes — skim the index, read what you need.
 
-Every TypeScript and Go example on these pages is compiled by CI against the real framework types. If a snippet appears here, it builds.
+CI compiles the examples on these pages against the real framework types — every `ts`/`tsx` block as a module inside the example app, every `go` block that is a whole declaration as a file in the example's module. Blocks that are deliberately partial carry `no-check` on the fence and are skipped, as are `go` fragments that are statements rather than declarations; a handful on these pages are. So: a snippet you can paste is a snippet CI compiled, and a snippet CI cannot compile is marked as such in the source.
 
 | Page | One line |
 | --- | --- |
@@ -12,7 +12,7 @@ Every TypeScript and Go example on these pages is compiled by CI against the rea
 | [Pages and routing](pages-and-routing.md) | pages and loaders, layouts, `<head>` management, streaming SSR, form actions, error pages |
 | [The typed bridge](typed-bridge.md) | Go API routes, borgogen, typed request bodies, type overrides, honest limits |
 | [Client navigation and hydration](client-navigation.md) | client-side transitions, prefetching, scroll restoration, code splitting, hydration modes, islands |
-| [Realtime](realtime.md) | server-sent events, WebSocket topics, typed event payloads, `borgo.Push`/`Push` |
+| [Realtime](realtime.md) | server-sent events, WebSocket topics, typed event payloads, `borgo.SSEHub` and `borgo.Push` |
 | [Auth and sessions](auth-and-sessions.md) | signed-cookie sessions, password hashing, `borgo.Auth`, guards on both sides of the bridge |
 | [Security](security.md) | the default posture: headers, CSP and nonces, CSRF, cookie rules, limits and timeouts, and what borgo leaves to you |
 | [Dev experience](dev-experience.md) | fast refresh and its contract, styling and Tailwind, the error overlay, `borgo doctor` |

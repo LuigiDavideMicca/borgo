@@ -1,6 +1,6 @@
 import { Island } from "borgo-framework";
 
-export const head = { title: "About · borgo app" };
+export const head = { title: "About · {{name}}" };
 
 // this page ships zero page javascript: only the island below hydrates
 export const hydrate = false;

@@ -2,9 +2,68 @@ import { readFileSync, renameSync, watch } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import { c, g } from "./colors";
-import { goBinName, runBorgogen } from "./util";
+import { encodeChanged, goBinName, runBorgogen, UNKNOWN_CHANGE } from "./util";
 
 const serverEntry = fileURLToPath(new URL("serve-entry.ts", import.meta.url));
+
+/**
+ * Batches file changes per side behind one debounce window.
+ *
+ * The window used to key only on the side and carry only the last file that
+ * landed in it, so two saves 20 ms apart - a "Save All" over index.tsx and
+ * about.tsx - rebuilt once and told the browser about one of them. The client
+ * ignores an update naming a page other than the one on screen, so if the
+ * survivor was the other file the edit you were looking at applied nothing and
+ * logged nothing. Every file in the window rides the rebuild it caused.
+ */
+export function createChangeBatcher(
+  delayMs: number,
+  flush: (side: string, files: string[]) => void,
+) {
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const pending = new Map<string, Set<string>>();
+  return (file: string, side: string) => {
+    let files = pending.get(side);
+    if (!files) pending.set(side, (files = new Set()));
+    files.add(file);
+    const timer = timers.get(side);
+    if (timer) clearTimeout(timer);
+    timers.set(
+      side,
+      setTimeout(() => {
+        timers.delete(side);
+        pending.delete(side);
+        flush(side, [...files]);
+      }, delayMs),
+    );
+  };
+}
+
+// content dedup for the watcher: windows delivers a straggler event for a
+// write that was already rebuilt, and identical content must not trigger a
+// second restart and reload. `forget` exists because a failed rebuild makes
+// the dedup a trap - the file on disk is unchanged, so the save the user is
+// told to make would be swallowed.
+export function createContentDedup(read: (file: string) => Uint8Array | Buffer) {
+  const lastSeen = new Map<string, string>();
+  return {
+    isUnchanged(file: string): boolean {
+      try {
+        const hash = String(Bun.hash(read(file)));
+        if (lastSeen.get(file) === hash) return true;
+        lastSeen.set(file, hash);
+      } catch {
+        // unreadable usually means deleted: forget the hash, or recreating the
+        // file with identical content (git stash pop) would never rebuild
+        lastSeen.delete(file);
+      }
+      return false;
+    },
+    forget() {
+      lastSeen.clear();
+    },
+  };
+}
 // node_modules and .git are ignored at any depth (workspaces nest them);
 // .borgo, public and dist are our own output dirs, ignored only at the root
 // so an app dir that happens to share a name stays watched
@@ -67,6 +126,10 @@ export async function dev() {
     return false;
   };
 
+  // windows can deliver a straggler event for a write that was already
+  // rebuilt; identical content must not trigger a second restart and reload
+  const dedup = createContentDedup(readFileSync);
+
   // build to a scratch name while the old api keeps serving, swap only once
   // the binary is ready; windows can hold the old file briefly after exit
   let liveGoHash = "";
@@ -100,7 +163,12 @@ export async function dev() {
         if (attempt >= 20) {
           // our own api was already killed to release its lock, so if the
           // rename still fails a stale process from a force-killed session
-          // holds the binary — and the api is down until the user acts
+          // holds the binary — and the api is down until the user acts.
+          // the advice is "save again", so the content dedup has to let that
+          // save through: a plain ctrl+s writes identical bytes, and the
+          // watcher would swallow it and leave the api down in silence
+          dedup.forget();
+          liveGoHash = "";
           console.error(
             `  ${c.red(g.err)} cannot replace ${goBin}: a stale api process still holds it.\n` +
               `  kill it (its name is "${goBinName().replace(/\.exe$/, "")}") and save again — the api is down until then.`,
@@ -139,7 +207,7 @@ export async function dev() {
 
   // a code change restarts the front server for a clean module graph; the
   // browser keeps its state and hot-applies the change when it reconnects
-  const startFront = async (changed?: string) => {
+  const startFront = async (changed?: string[]) => {
     frontProc?.kill();
     await frontProc?.exited;
     // process.execPath, not "bun": a PATH lookup can resolve to a shim (npm
@@ -159,7 +227,7 @@ export async function dev() {
         ...process.env,
         BORGO_DEV: "1",
         ...(reload ? { BORGO_RELOAD: "1" } : {}),
-        ...(changed ? { BORGO_CHANGED: changed } : {}),
+        ...(changed?.length ? { BORGO_CHANGED: encodeChanged(changed) } : {}),
         BORGO_PARENT_PID: String(process.pid),
       },
     });
@@ -181,7 +249,7 @@ export async function dev() {
 
   // a css edit normally hot-swaps in place; if the front server is parked on
   // a build error (fallback marks its responses), restart it instead
-  const swapCss = async (changed: string) => {
+  const swapCss = async (changed: string[]) => {
     const res = await notifyFront("css");
     if (res?.headers.get("x-borgo-fallback")) await startFront(changed);
   };
@@ -190,65 +258,50 @@ export async function dev() {
   await startFront();
   reload = true;
 
-  const timers = new Map<string, ReturnType<typeof setTimeout>>();
   let queue = Promise.resolve();
   let busy = 0;
-  const schedule = (file: string, side: string, fn: () => Promise<void>, log = true) => {
-    const timer = timers.get(side);
-    if (timer) clearTimeout(timer);
-    timers.set(
-      side,
-      setTimeout(() => {
-        if (log) {
-          console.log(`  ${c.terracotta(g.change)} ${file.replaceAll("\\", "/")} ${c.dim(`changed, rebuilding ${side}`)}`);
-        }
-        // errors must not poison the chain, or every later rebuild is skipped
-        queue = queue
-          .then(async () => {
-            busy++;
-            try {
-              await fn();
-            } finally {
-              setTimeout(() => busy--, 1_000);
-            }
-          })
-          .catch((error) => console.error(error));
-      }, 100),
-    );
+
+  // every side's rebuild, given the whole set of files that landed in its
+  // window. the set is what the browser is told about: one file per rebuild
+  // was how a "Save All" silently dropped the edit to the page on screen.
+  const rebuild: Record<string, (files: string[]) => Promise<void>> = {
+    api: () => startGo(),
+    css: (files) => swapCss(files),
+    app: (files) => startFront(files),
   };
 
-  // windows can deliver a straggler event for a write that was already
-  // rebuilt; identical content must not trigger a second restart and reload
-  const lastSeen = new Map<string, string>();
-  const isUnchanged = (file: string) => {
-    try {
-      const hash = String(Bun.hash(readFileSync(file)));
-      if (lastSeen.get(file) === hash) return true;
-      lastSeen.set(file, hash);
-    } catch {
-      // unreadable usually means deleted: forget the hash, or recreating the
-      // file with identical content (git stash pop) would never rebuild
-      lastSeen.delete(file);
-    }
-    return false;
-  };
+  const schedule = createChangeBatcher(100, (side, files) => {
+    const named = files.map((f) => (f === UNKNOWN_CHANGE ? "(events lost)" : f)).join(", ");
+    console.log(`  ${c.terracotta(g.change)} ${named} ${c.dim(`changed, rebuilding ${side}`)}`);
+    // errors must not poison the chain, or every later rebuild is skipped
+    queue = queue
+      .then(async () => {
+        busy++;
+        try {
+          await rebuild[side](files);
+        } finally {
+          setTimeout(() => busy--, 1_000);
+        }
+      })
+      .catch((error) => console.error(error));
+  });
 
   watch(".", { recursive: true }, (_, file) => {
     if (file && ignored.test(file)) return;
     if (!file) {
       // the watch buffer overflowed and events were lost; unless it was our
       // own rebuild writing, restart the front and force a full reload
-      if (!busy) schedule("(events lost)", "app", () => startFront("__borgo_unknown__"));
+      if (!busy) schedule(UNKNOWN_CHANGE, "app");
       return;
     }
     const normalized = file.replaceAll("\\", "/");
     if (file.endsWith(".go")) {
-      if (isUnchanged(file)) return;
-      schedule(file, "api", startGo);
-    } else if (/\.(scss|css)$/.test(file)) schedule(file, "css", () => swapCss(normalized));
+      if (dedup.isUnchanged(file)) return;
+      schedule(normalized, "api");
+    } else if (/\.(scss|css)$/.test(file)) schedule(normalized, "css");
     else if (/\.(tsx?|html)$/.test(file)) {
-      if (isUnchanged(file)) return;
-      schedule(file, "app", () => startFront(normalized));
+      if (dedup.isUnchanged(file)) return;
+      schedule(normalized, "app");
     }
   });
 

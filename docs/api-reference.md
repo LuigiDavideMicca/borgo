@@ -14,7 +14,7 @@ The rules those markers will mean once 1.0 ships are in [api stability](api-stab
 
 Anything not listed here is not public, whatever its capitalization.
 
-Counted at 0.21: **42** Go exports (counting struct fields and interface methods), **47** TypeScript exports across five entry points, **26** environment variables, **7** `borgo` subcommands plus `create-borgo` and `borgogen`, and the file conventions below. Twelve of those exports are provisional and twenty-three are internal but reachable from a published entry point — the [findings](#findings) at the end say what to do about each.
+What is catalogued below: the Go exports (struct fields and interface methods included), the TypeScript exports across five entry points, the environment variables, the `borgo` subcommands plus `create-borgo` and `borgogen`, and the file conventions. Deliberately without totals — no test counts any of them, so a number here would go stale between two commits while the tables underneath stayed right. The [findings](#findings) at the end say what to do about each entry still marked provisional or internal.
 
 ## Go: `github.com/LuigiDavideMicca/borgo`
 
@@ -37,9 +37,9 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | --- | --- | --- |
 | `JSON[T any](w, status int, v T)` | Writes `v` as a JSON response. The type parameter is what `borgogen` reads to type the route's response for TypeScript. | stable |
 | `WriteJSON(w, status int, v any)` | Same behaviour, untyped parameter. Also the framework's own internal JSON writer. | provisional |
-| `Bind[T any](r) (T, error)` | Decodes the request body as JSON into `T`, capped at 1 MB. Types the route's request body for TypeScript. | stable |
+| `Bind[T any](r) (T, error)` | Decodes the request body as JSON into `T`, capped at 1 MB. Requires `Content-Type: application/json` — a missing header is rejected like a wrong one. Types the route's request body for TypeScript. | stable |
 | `BindMax[T any](r, limit int64) (T, error)` | `Bind` with an explicit byte cap; `limit <= 0` disables it. | stable |
-| `BindError(w, err error)` | Answers a `Bind` error with the right status: 413 oversized, 415 wrong content type, 400 otherwise. | stable |
+| `BindError(w, err error)` | Answers a `Bind` error with the right status: 413 oversized, 415 missing or non-JSON content type, 400 otherwise. | stable |
 | `Cache(w, maxAge time.Duration, staleWhileRevalidate ...time.Duration)` | Marks the response publicly cacheable; downgrades to `private` if the response already carries `Set-Cookie`. | provisional |
 | `NoCache(w)` | Marks the response `no-store`. | stable |
 
@@ -96,11 +96,12 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | Symbol | What it is for | Stability |
 | --- | --- | --- |
 | `Push[T any](topic, event string, data T) error` | Publishes to a WebSocket topic on the front server. `borgogen` records `T` in the generated event map, typing the browser's `subscribe` callback. | stable |
-| `Push(topic, event string, data any) error` | The same call without a visible type parameter. | provisional |
+
+`push.go` declares exactly one exported function. `PushT` was folded into it in 0.21 — see [finding 2](#duplicated-apis).
 
 ### Not exported, but worth knowing
 
-`bindLimit` (1 MB), `sessionCookie` (`"borgo_session"`), `sessionCookieMaxLen` (4096), `gzipMinBytes` (1024), `sseWriteTimeout` (10 s), the PBKDF2 parameters, `hashSlots` (`max(1, GOMAXPROCS/2)`) and `hashWait` (5 s) are all unexported constants and variables. They are *behaviour* users can observe, so they are covered by [api stability](api-stability.md) as behaviour, but there is no symbol to import.
+`bindLimit` (1 MB), `sessionCookie` (`"borgo_session"`), `sessionCookieMaxLen` (4096), `gzipMinBytes` (1024), `sseWriteTimeout` (10 s), the PBKDF2 parameters, `hashSlots` (`max(1, GOMAXPROCS/2)` unless `BORGO_HASH_SLOTS` overrides it) and `hashWait` (5 s) are all unexported constants and variables. They are *behaviour* users can observe, so they are covered by [api stability](api-stability.md) as behaviour, but there is no symbol to import.
 
 ## TypeScript: `borgo-framework`
 
@@ -118,7 +119,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `ApiError` | Thrown by the api client for a non-2xx response. Carries `status`, `body` (first 2 KB) and a route-naming message. | stable |
 | `CSRF_COOKIE` (`"borgo_csrf"`) | The double-submit cookie name. | provisional |
 | `CSRF_FIELD` (`"__borgo_csrf"`) | The hidden form field name. | provisional |
-| `csrfCookieValue(header)` | Reads the CSRF token from a cookie header, treating conflicting duplicates as absent. | provisional |
+| `csrfCookieValue(header)` | Reads the CSRF token from a cookie header, treating conflicting duplicates as absent. Promoted from provisional in 0.21 — see [finding 4](#duplicated-apis). | stable |
 
 ### `borgo-framework` — types
 
@@ -146,12 +147,12 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 
 ### `borgo-framework/router`
 
-Imported by the generated `.borgo/routes.gen.tsx` for `type Route`. Everything it exports is also reachable from the root entry except `safeDecode`.
+Imported by the generated `.borgo/routes.gen.tsx` for `type Route`. Since 0.21 nothing here is reachable from the root entry: `filePathToPattern`, `matchRoute` and `resolveHead` were dropped from it ([finding 7](#duplicated-apis)) and `safeDecode` was never on it. The type re-exports below still name the same types the root entry exports.
 
 | Export | What it is for | Stability |
 | --- | --- | --- |
 | `safeDecode(s)` | `decodeURIComponent` that returns the input unchanged on a malformed escape. | internal |
-| `filePathToPattern`, `matchRoute`, `resolveHead` | As above. | internal |
+| `filePathToPattern`, `matchRoute`, `resolveHead` | File path → route pattern, pattern matching with params, and `head` resolution — shared between the build, the SSR server and the browser runtime. | internal |
 | `Route`, `PageModule`, `LayoutModule`, `LoaderContext`, `ActionContext`, `PrerenderContext`, `Head`, `HydrateMode` | Type re-exports. | see root entry |
 
 **The subpath itself is internal.** It exists because generated code needs a stable specifier.
@@ -174,10 +175,11 @@ Everything the generated client entries need and nothing an application should w
 
 | Export | What it is for | Stability |
 | --- | --- | --- |
-| `registerCsrf(token)` | Hands the client runtime the CSRF token the server rendered with. | internal |
-| `registerIslands(map)` | Registers the island components a `hydrate=false` page mounts. | internal |
+| `registerCsrf(react: CsrfReact \| null)` | Installs the React functions (`createElement`, `createContext`, `useContext`) the CSRF context is built from; `null` clears the registration. The token itself travels through `withCsrf`, not through this call. | internal |
+| `registerIslands(components, createElement)` | Registers the island components a `hydrate=false` page mounts, plus the app's own `createElement` — React is injected rather than imported so the framework never bundles a second copy. | internal |
 | `withCsrf(element, token)` | Wraps a tree in the CSRF context `CsrfField` reads. | internal |
 | `csrfRuntime()`, `islandRegistry()` | The registries themselves, read by the server and the runtime across module boundaries. | internal |
+| `CsrfReact` | Type of the React functions `registerCsrf` takes. | internal |
 
 ### `borgo-framework/refresh-runtime`
 
@@ -207,7 +209,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | --- | --- | --- | --- |
 | `PORT` (`3000`) | front server; Go, to find the front server for `Push` | Front server port. | stable |
 | `API_PORT` (`3501`) | Go server; front server, to build the proxy target | Go API port. | stable |
-| `SESSION_SECRET` | Go | HMAC key for signed-cookie sessions. Required for sessions; warned about at startup when missing or under 32 bytes. | stable |
+| `SESSION_SECRET` | Go | HMAC key for signed-cookie sessions. At least 32 bytes. Missing is logged at startup and fails session routes per request; **shorter than 32 bytes is fatal at startup** — see [sessions](auth-and-sessions.md#sessions). | stable |
 | `SESSION_SECURE` | Go and front server | `1` adds `Secure` to the session and CSRF cookies. | stable |
 | `BORGO_PUSH_KEY` | Go and front server | Shared secret for `Push` across hosts. Once set it *replaces* the loopback check. | stable |
 | `NO_COLOR` | Go and front server | Any value disables ANSI colour. | stable |
@@ -223,11 +225,11 @@ Read at runtime unless noted. Defaults in parentheses.
 | `BORGO_SECURITY_HEADERS` | `0` drops the security headers and the CSP. | stable |
 | `BORGO_CSP` | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request. | stable |
 | `BORGO_METRICS` | `1` exposes `/metrics` in Prometheus text format. | stable |
-| `BUN_CONFIG_MAX_HTTP_REQUESTS` (`256`, bun's default) | How many proxied requests may be in flight at once. Each event stream holds one for its whole life, so the default ceilings concurrent SSE subscribers at ~255. Read by bun at process start. | stable |
+| `BUN_CONFIG_MAX_HTTP_REQUESTS` (`16384` under `borgo dev` and `borgo start`; `256`, bun's default, otherwise) | How many proxied requests may be in flight at once. Each event stream holds one for its whole life, so bun's default ceilings concurrent SSE subscribers at ~255. Read by bun at process start. | stable |
 
 `BORGO_METRICS` was `METRICS` before 0.21. The old name is not honoured, and not honouring it is the point: a bare `METRICS` is the most collidable variable borgo ever read, and an alias kept for compatibility would keep the collision alive.
 
-`BUN_CONFIG_MAX_HTTP_REQUESTS` is bun's, not borgo's, but borgo is why you would set it — see [realtime](realtime.md#honest-limits). borgo raises it to `16384` in `borgo dev` and in every deploy config it writes; anywhere else it is yours to set, and only in the environment the process starts with.
+`BUN_CONFIG_MAX_HTTP_REQUESTS` is bun's, not borgo's, but borgo is why you would set it — see [realtime](realtime.md#honest-limits). A process cannot raise it for itself once bun has booted, so `borgo start` re-execs itself with `16384` when nothing set it, and `borgo dev` and every deploy config borgo writes set it too. Setting it yourself is still honoured: `start` sees a value and runs in one process rather than two.
 
 ### Go server only
 
@@ -241,7 +243,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `BORGO_SHUTDOWN_TIMEOUT` (`10s`) | Grace period for in-flight requests; `0` waits indefinitely. | stable |
 | `BORGO_HASH_SLOTS` (`max(1, GOMAXPROCS/2)`) | Password hashes that may run at once. A value that is not a positive integer is refused at startup. | stable |
 
-All six are Go duration strings. A malformed value panics at boot, before the startup banner.
+The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` is a positive integer and `FRONT_URL` a URL. A malformed duration or a non-positive slot count panics at boot, before the startup banner.
 
 ### Build, dev loop and internal
 
@@ -249,6 +251,7 @@ All six are Go duration strings. A malformed value panics at boot, before the st
 | --- | --- | --- |
 | `BORGO_TAILWIND` | Set to `1` by `--tailwind` for child processes. Use the flag, not the variable. | internal |
 | `BORGO_PARENT_PID` | How the CLI tells a child process whose death to exit with. | internal |
+| `BORGO_SUPERVISOR_PID` | Set by `borgo start` on the copy of itself it re-execs to raise `BUN_CONFIG_MAX_HTTP_REQUESTS`; the child polls it and exits when the supervisor does. | internal |
 | `BORGO_RELOAD` | Marks a restart so the banner prints the short form. | internal |
 | `BORGO_CHANGED` | Carries the changed file into the dev fallback server. | internal |
 | `BORGO_DEV` | Set by the dev loop for `serve-entry.ts`. | internal |
@@ -267,11 +270,11 @@ Run from an app root — the directory holding `pages/`.
 | --- | --- | --- |
 | `borgo dev` | Starts both servers, watches, fast-refreshes. | stable |
 | `borgo build` | Runs `borgogen`, builds client assets into `public/assets/`, compiles the Go binary into `dist/`. | stable |
-| `borgo start` | Runs from build output, supervising both processes. Rebuilds automatically if `public/assets` holds a dev build. | stable |
+| `borgo start` | Runs from build output, supervising both processes. Rebuilds automatically if `public/assets` holds a dev build. Re-execs itself once with `BUN_CONFIG_MAX_HTTP_REQUESTS=16384` when nothing set it — the supervisor forwards signals and exits with the child's code. | stable |
 | `borgo export` | Static site into `dist/site/`. | stable |
 | `borgo deploy init <caddy\|nginx\|systemd\|compose>` | Writes a deploy config. | stable |
 | `borgo pwa init` | Writes `public/manifest.webmanifest` and a service worker. | stable |
-| `borgo doctor` | Diagnoses the environment: Bun and Go versions, ports, api binary, generated types, dependencies. | stable |
+| `borgo doctor` | Runs fourteen checks over the toolchain (bun, a bun shim shadowing it, go, node, docker), the machine (both ports, disk space) and the project (api binary, generated types, `node_modules`, app deps, write access, playwright browsers). Checks that do not apply return nothing; informational ones (node, docker, the shim note) report without affecting the exit code. | stable |
 | `borgo` / `borgo --help` / `-h` / `--version` / `-v` | Banner and usage; exits 0. An unknown command exits 1. | stable |
 
 | Flag | Applies to | What it does | Stability |
@@ -286,10 +289,17 @@ The exit codes are part of the contract: `build` exits 1 if `borgogen` or `go bu
 
 | Form | What it does | Stability |
 | --- | --- | --- |
-| `bunx create-borgo@latest <name>` | Scaffolds a new app. Prompts for template and Tailwind in an interactive terminal. | stable |
+| `bunx create-borgo@latest <name>` | Scaffolds a new app. In an interactive terminal it asks six questions — template, Tailwind, linter, git, docker, vscode; anywhere else (CI, piped stdin) it takes the defaults without blocking. | stable |
 | `--template <base\|minimal\|full>`, `-t`, `--template=<x>` | Picks a template; default `base`. | stable |
-| `--tailwind` / `--no-tailwind` | Wires Tailwind, or declines without prompting. | stable |
+| `--tailwind` / `--no-tailwind` | Wires Tailwind, or declines without prompting. Default off. | stable |
+| `--linter <biome\|eslint\|none>`, `--linter=<x>` / `--no-linter` | Writes the chosen linter's config and the `lint` / `format` scripts. Default `none`. | stable |
+| `--git` / `--no-git` | `git init` plus an initial commit. Default on. | stable |
+| `--docker` / `--no-docker` | Keeps `Dockerfile`, `docker-compose.yml` and `.dockerignore`. Default on. | stable |
+| `--vscode` / `--no-vscode` | Writes `.vscode/extensions.json` and `settings.json`. Default on. | stable |
+| `--yes` / `-y` | Takes every default without opening stdin. | stable |
 | `--help` / `-h` | Usage. | stable |
+
+Every *on/off* option has a `--no-` twin. `--template` and `--linter` take a value instead, and only `--linter` has a `--no-` form (`--no-linter` means `none`).
 
 An unknown argument is an error, not a silently ignored token.
 
@@ -315,7 +325,7 @@ These are as much a public API as any function: an app depends on them, and chan
 | `index.html` | The SSR shell. | stable |
 | `style.scss` | Compiled to `public/assets/style.css` when present. | stable |
 | `style.css` | Tailwind entry, used only with `--tailwind`. | stable |
-| `.borgo/` | Generated: `api-types.d.ts`, `routes.gen.tsx`, `client-routes.gen.ts`, `client.tsx`, `islands-client.tsx`, `refresh.ts`. | internal |
+| `.borgo/` | Generated: `api-types.d.ts`, `routes.gen.tsx`, `client-routes.gen.ts`, `islands.gen.ts`, `client.tsx`, `islands-client.tsx`, `refresh.ts` (dev only), `build-mode`, and the dev api binary. Everything but `api-types.d.ts` is gitignored by the templates. | internal |
 | `dist/` | `borgo build` output (the Go binary) and `borgo export` output (`dist/site/`). | stable |
 
 ### Page module exports
@@ -376,7 +386,7 @@ It is tempting to collapse them into `Cache(w, 0)`, and it would be wrong: `Cach
 
 **4. `cookieValue` and `csrfCookieValue` — plus a third parser in `util.ts`. — landed in 0.21**
 `cookieValue(header, name)` is a generic cookie reader exported from the package root and **referenced by nothing** — not by application code, not by the framework, not by tests. `csrfCookieValue(header)` is the one that is actually used, and it is deliberately different: conflicting duplicate cookies read as absent, matching the Go side's treatment of ambiguous session cookies. `hasCookie(header, name)` in `util.ts` parses the same string a third way (internal, not exported).
-*Disposition taken:* **`cookieValue` was removed; `csrfCookieValue` is documented and promoted to stable.** `cookieValue`'s duplicate-tolerant behaviour is a footgun next to its neighbour. `csrfCookieValue` should be promoted from provisional to stable and documented, because an app doing hand-rolled `fetch` POSTs genuinely needs the token and `<CsrfField />` only covers `<form>`s.
+*Disposition taken:* **`cookieValue` was removed; `csrfCookieValue` is documented and promoted to stable.** `cookieValue`'s duplicate-tolerant behaviour is a footgun next to its neighbour. `csrfCookieValue` earned the promotion because an app doing hand-rolled `fetch` POSTs genuinely needs the token and `<CsrfField />` only covers `<form>`s.
 *Migration cost:* effectively zero for removal — the symbol is undocumented and unused. Promoting `csrfCookieValue` is documentation.
 
 **5. `Bind` and `BindMax` — justified duplication, keep.**
@@ -384,7 +394,7 @@ It is tempting to collapse them into `Cache(w, 0)`, and it would be wrong: `Cach
 *Disposition:* **keep.** *Cost:* zero.
 
 **6. `isConnRefused` implemented twice.**
-`packages/borgo/src/api.ts:6` defines a private copy; `packages/borgo/src/util.ts:770` exports another. Same predicate, two chances to drift.
+`packages/borgo/src/api.ts` defines a private copy; `packages/borgo/src/util.ts` exports another (`isConnRefused` in both). Same predicate, two chances to drift.
 *Disposition:* **have `api.ts` import the one from `util.ts`.** Both are internal, so this is a pure refactor.
 *Migration cost:* zero (no public surface involved).
 
@@ -437,8 +447,7 @@ Three verbs, and the two Go ones differ by transport rather than by intent.
 
 **4. Environment variable prefixes are inconsistent.**
 Most variables are `BORGO_*`; the exceptions are `PORT`, `API_PORT`, `API_URL`, `FRONT_URL`, `SESSION_SECRET`, `SESSION_SECURE` and `NO_COLOR`, plus bun's own `BUN_CONFIG_MAX_HTTP_REQUESTS`. Those are defensible — `PORT` and `NO_COLOR` are ecosystem conventions, `SESSION_*` is self-describing, and the bun one is not borgo's to rename. The two that were not defensible, `METRICS` and `DEV`, were prefixed in 0.21.
-*Disposition:* **rename `METRICS` → `BORGO_METRICS`, accepting `METRICS` as an alias through all of 1.x. Rename `DEV` → `BORGO_DEV`** (internal, so no alias needed).
-*Done in 0.21, without an alias.* `BORGO_DEV` is set only by borgo's own dev loop, so nothing outside the framework was reading it. `BORGO_METRICS` does not fall back to `METRICS`: honouring the old name would preserve the exact collision the prefix exists to end, and an app that wants metrics on an upgrade sets one variable.
+*Disposition taken:* **`METRICS` → `BORGO_METRICS` and `DEV` → `BORGO_DEV`, both in 0.21, neither with an alias.** An alias for `METRICS` was considered and rejected: honouring the old name would preserve the exact collision the prefix exists to end, and an app that wants metrics on an upgrade sets one variable. `BORGO_DEV` needed no alias either way — it is set only by borgo's own dev loop, so nothing outside the framework was reading it.
 
 **5. "Route" means three different things.**
 TypeScript `Route` is a *page*; Go's internal `route` and `ApiRouteKey` are *api endpoints*; `filePathToPattern` produces a page pattern while `Handle` takes an api pattern. The docs use "route" for both and rely on context.
@@ -450,14 +459,16 @@ TypeScript `Route` is a *page*; Go's internal `route` and `ApiRouteKey` are *api
 *Disposition:* **freeze as-is at 1.0 and document the set.** These are wire contracts; renaming any of them breaks stored cookies, running proxies and existing HTML.
 *Cost:* documentation only. Doing it later costs a major version.
 
-### Gaps worth filling before 1.0
+### Gaps the audit found — all four landed in 0.21
 
-Not duplication or naming, but things the audit surfaced that a 1.0 API should probably have:
+Not duplication or naming, but things a 1.0 API should have and did not. Every one of them was additive, so all four shipped in 0.21 and are marked **stable** in the tables above:
 
-- **No way to read borgo's version from Go.** The npm package exposes its version internally (`colors.ts`); the Go module exposes nothing. A `borgo.Version` constant would cost one line and make bug reports better.
-- **`SSEHub` has no subscriber count and no `Close`.** The WebSocket relay has a built-in `__count` event; the SSE hub has no equivalent, and no way to end all streams other than process shutdown.
-- **The hash-slot semaphore is not configurable.** `max(1, GOMAXPROCS/2)` is computed once at package init with no env override, so a box tuned for login throughput cannot be tuned. Adding `BORGO_HASH_SLOTS` is additive and cheap.
-- **`Serve()` cannot be composed or tested.** See the note above; `ServeContext(ctx) error` would be additive.
+- **No way to read borgo's version from Go.** → `borgo.Version`, kept honest by a test that reads `.release-please-manifest.json`.
+- **`SSEHub` had no subscriber count and no `Close`.** → `(*SSEHub).Subscribers() int` and `(*SSEHub).Close()`, the latter idempotent.
+- **The hash-slot semaphore was not configurable.** → `BORGO_HASH_SLOTS`, read once at package init; a value that is not a positive integer panics at boot rather than silently reinstating the default.
+- **`Serve()` could not be composed or tested.** → `ServeContext(ctx) error` beside it, rather than changing `Serve`'s shape.
+
+No gap of this kind is currently open. What remains before 1.0 is the open half of [finding 1](#duplicated-apis) — deprecating `WriteJSON` as public surface.
 
 ## What this page is not
 

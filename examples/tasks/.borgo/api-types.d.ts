@@ -22,7 +22,7 @@ export interface Task {
 }
 
 export interface TaskList {
-  tasks: Array<Task>;
+  tasks: Array<Task> | null;
 }
 
 export interface TaskCreate {

@@ -8,7 +8,7 @@ Build something small and complete: a page that reads data from a Go API, a form
 bunx create-borgo@latest notes
 ```
 
-It asks which template you want — pick `minimal`, the one this guide builds on — and whether you want Tailwind (say no; [styling](dev-experience.md#styling) covers it later). Then:
+In a terminal it asks six questions: template (pick `minimal`, the one this guide builds on), Tailwind (say no; [styling](dev-experience.md#styling) covers it later), a linter (`none` is fine here), then `git init`, the Docker files and the VS Code settings — the last three default to yes, so pressing enter three times is the right answer. Every question has a flag, and `--yes` skips all of them: `bunx create-borgo@latest notes -t minimal --yes` produces exactly what this guide assumes. Then:
 
 ```bash
 cd notes
@@ -21,19 +21,35 @@ Open http://localhost:3000. You should see the borgo logo and a line of text tha
 
 ## What you just got
 
-Nine files, and each one earns its place:
+A small tree, and no file in it is there by accident. The nine that make the app:
 
 ```
 pages/index.tsx       your first page - the file name is the route
 api/hello.go          your first API route
 main.go               the Go entrypoint: imports api, calls borgo.Serve()
-.borgo/               generated: the TypeScript types for your Go routes
+.borgo/               generated types for your Go routes (api-types.d.ts, the one
+                      file under .borgo/ you commit; everything else here is
+                      gitignored and rebuilt on every dev run and build)
 index.html            the HTML shell every page renders into
 style.scss            global styles
 package.json          bun scripts: dev, build, start, doctor
 go.mod                the Go module, with borgogen wired as a tool
 tsconfig.json         includes .borgo/api-types.d.ts explicitly (dot-dirs are skipped otherwise)
 ```
+
+And the rest, which the scaffolder's answers control rather than the template:
+
+```
+README.md             the template's own readme, trimmed to the answers you gave
+public/logo.svg       served as-is from /logo.svg - public/ is static files
+Dockerfile            multi-stage build, small bun runtime      \  --no-docker
+docker-compose.yml    the one-container deployment              |  drops
+.dockerignore         what the image build does not need        /  these three
+.gitignore            node_modules, .env, dist, build output
+.vscode/              extensions.json and settings.json         -  --no-vscode drops it
+```
+
+`--tailwind` would have left a `style.css` here instead of `style.scss`, and a `--linter` choice would add its config file plus `lint` and `format` scripts. Neither is in this walkthrough.
 
 Two processes are now running: a Bun server on `:3000` that renders your React pages, and a Go server on `:3501` that owns `/api/*`. The Bun server proxies to it, so from the browser there is one origin and one port.
 

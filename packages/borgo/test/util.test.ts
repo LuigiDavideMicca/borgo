@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   createSecurity,
+  decodeChanged,
+  encodeChanged,
   envInt,
   escapeHtml,
   freshCookieHeader,
@@ -9,10 +11,15 @@ import {
   forwardableHeaders,
   headHtml,
   headResponse,
+  idleTimeout,
+  IDLE_TIMEOUT_MAX,
+  IDLE_TIMEOUT_SECONDS,
+  isLongLivedStream,
   metricsEnabled,
   PROXY_RETRY_MAX_BODY,
   scriptJson,
   shouldBufferBody,
+  UNKNOWN_CHANGE,
 } from "../src/util";
 
 describe("freshCookieHeader", () => {
@@ -512,5 +519,160 @@ describe("metricsEnabled", () => {
   test("the pre-0.21 name is not honoured", () => {
     expect(metricsEnabled({ METRICS: "1" })).toBe(false);
     expect(metricsEnabled({ BORGO_METRICS: "", METRICS: "1" })).toBe(false);
+  });
+});
+
+// borgo used to run the front server with idleTimeout: 0, on the strength of a
+// comment about proxied SSE responses. But bun's idleTimeout is not a
+// response-side setting: the same number bounds how long the server waits for
+// an inbound request's headers and body. Disabling it left the internet-facing
+// server with no read deadline at all, while README and docs/security.md
+// advertised "a slowloris-resistant timeout matrix" that belongs to the GO
+// server. The deadline is back, and the exemption is per response.
+describe("the read deadline", () => {
+  test("defaults to a real number of seconds, not to none", () => {
+    expect(idleTimeout(undefined)).toBe(IDLE_TIMEOUT_SECONDS);
+    expect(idleTimeout("")).toBe(IDLE_TIMEOUT_SECONDS);
+    expect(IDLE_TIMEOUT_SECONDS).toBeGreaterThan(0);
+    // garbage must not silently disable it
+    expect(idleTimeout("soon")).toBe(IDLE_TIMEOUT_SECONDS);
+    expect(idleTimeout("-5")).toBe(IDLE_TIMEOUT_SECONDS);
+  });
+
+  test("BORGO_IDLE_TIMEOUT overrides it, and bun's ceiling is respected", () => {
+    expect(idleTimeout("5")).toBe(5);
+    // an explicit 0 is a deliberate opt-out and stays honoured
+    expect(idleTimeout("0")).toBe(0);
+    // bun rejects anything above 255 outright, which would take the server down
+    expect(idleTimeout("3600")).toBe(IDLE_TIMEOUT_MAX);
+    expect(IDLE_TIMEOUT_MAX).toBe(255);
+  });
+
+  test("a stream that lives on purpose is recognised by its content type", () => {
+    const res = (type?: string) => new Response(null, type ? { headers: { "Content-Type": type } } : {});
+    expect(isLongLivedStream(res("text/event-stream"))).toBe(true);
+    expect(isLongLivedStream(res("text/event-stream; charset=utf-8"))).toBe(true);
+    expect(isLongLivedStream(res("Text/Event-Stream"))).toBe(true);
+    expect(isLongLivedStream(res("multipart/x-mixed-replace; boundary=x"))).toBe(true);
+    // and everything else is bounded work that the deadline should apply to
+    expect(isLongLivedStream(res("text/html; charset=utf-8"))).toBe(false);
+    expect(isLongLivedStream(res("application/json"))).toBe(false);
+    expect(isLongLivedStream(res("text/event-streamish"))).toBe(false);
+    expect(isLongLivedStream(res())).toBe(false);
+  });
+
+  // the two halves against a real bun server: the deadline has to actually cut
+  // a dribbling body, and the exemption has to actually save a silent stream
+  test("bun enforces it on an inbound body, and server.timeout(req, 0) lifts it", async () => {
+    // measured against bun 1.3.14: an unexempted response-side stream is cut
+    // at ~4s no matter how small idleTimeout is (1, 2 and 3 all cut at ~4.0s),
+    // so the silence has to clear that floor for the exemption to be the thing
+    // under test rather than the clock
+    const SILENCE_MS = 6_000;
+    const server = Bun.serve({
+      port: 0,
+      idleTimeout: idleTimeout("1"),
+      async fetch(req, srv) {
+        if (new URL(req.url).pathname === "/sse") {
+          if (isLongLivedStream(SSE_HEADERS)) srv.timeout(req, 0);
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode("data: hi\n\n"));
+                // then sit silent well past the deadline, like a real feed
+                setTimeout(() => {
+                  try {
+                    controller.enqueue(new TextEncoder().encode("data: late\n\n"));
+                    controller.close();
+                  } catch {}
+                }, SILENCE_MS);
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        return new Response(`got ${(await req.text()).length}`);
+      },
+    });
+
+    const port = server.port!;
+
+    // a POST that promises 1000 bytes, sends one, and then says nothing
+    const slowloris = new Promise<string>((resolve) => {
+      const t0 = Date.now();
+      void Bun.connect({
+        hostname: "127.0.0.1",
+        port,
+        socket: {
+          open(socket) {
+            socket.write(
+              "POST /slow HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1000\r\n" +
+                "Content-Type: text/plain\r\n\r\nx",
+            );
+          },
+          close: () => resolve("dropped"),
+          error: () => resolve("dropped"),
+          data() {},
+        },
+      }).catch(() => resolve("dropped"));
+      setTimeout(() => resolve(`held for ${Date.now() - t0}ms`), SILENCE_MS);
+    });
+
+    // and, on the same server, an event stream that survives the same silence
+    const stream = (async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/sse`);
+      expect(res.headers.get("Content-Type")).toBe("text/event-stream");
+      let body = "";
+      const reader = res.body!.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) body += new TextDecoder().decode(value);
+      }
+      return body;
+    })();
+
+    try {
+      expect(await slowloris).toBe("dropped");
+      const body = await stream;
+      expect(body).toContain("data: hi");
+      expect(body).toContain("data: late");
+    } finally {
+      server.stop(true);
+    }
+  }, 30_000);
+});
+
+// the response the handler is about to return decides the exemption, so the
+// check runs against a real Response and not against a path or a guess
+const SSE_HEADERS = new Response(null, { headers: { "Content-Type": "text/event-stream" } });
+
+// two saves inside one 100 ms debounce window are one rebuild, and the browser
+// has to be told about both files: it ignores an update naming a page other
+// than the one on screen, so a single-file message could silently apply
+// nothing at all.
+describe("the changed-file list a rebuild carries", () => {
+  test("survives the round trip through the environment", () => {
+    const files = ["pages/index.tsx", "pages/about.tsx", "components/Nav.tsx"];
+    expect(decodeChanged(encodeChanged(files))).toEqual(files);
+  });
+
+  test("a newline separates them, because a path may hold anything else", () => {
+    // a comma or a space in a filename is legal on every platform borgo runs on
+    const files = ["pages/my page, v2.tsx", "pages/a b.tsx"];
+    expect(decodeChanged(encodeChanged(files))).toEqual(files);
+  });
+
+  test("no rebuild, no files", () => {
+    expect(decodeChanged(undefined)).toEqual([]);
+    expect(decodeChanged("")).toEqual([]);
+    expect(encodeChanged([])).toBe("");
+    expect(decodeChanged(encodeChanged([]))).toEqual([]);
+  });
+
+  test("the lost-events sentinel travels like any other entry", () => {
+    expect(decodeChanged(encodeChanged([UNKNOWN_CHANGE]))).toEqual([UNKNOWN_CHANGE]);
+    // and is not a module, so the client reloads rather than trying to refresh
+    expect(UNKNOWN_CHANGE).not.toMatch(/\.tsx?$/);
   });
 });

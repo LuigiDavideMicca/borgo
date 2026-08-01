@@ -33,7 +33,9 @@ The split is not decorative. React server rendering needs a JavaScript runtime t
 
 There is only one hop, and it is over loopback. The front server does not sit in front of Go for policy reasons — it does not authenticate, rewrite or interpret API responses. It forwards the request, strips the headers that belong to the browser-to-Bun connection, and hands the response back untouched, gzip and all.
 
-In production the two processes are supervised as one. `borgo start` spawns `dist/api` as a child and then runs the front server in the same Bun process, so `docker run` and a systemd unit both have exactly one thing to start and one thing to stop. If the API exits on its own, the front server exits with the API's code so a supervisor restarts the pair. `borgo start --front-only` skips the child entirely, for a split deployment where the Go server runs on another host and `API_URL` points at it.
+In production the two servers are supervised as one command. `borgo start` spawns `dist/api` as a child and runs the front server itself, so `docker run` and a systemd unit both have exactly one thing to start and one thing to stop. If the API exits on its own, the front server exits with the API's code so a supervisor restarts the pair. `borgo start --front-only` skips the child entirely, for a split deployment where the Go server runs on another host and `API_URL` points at it.
+
+"Itself" has a caveat. Bun fixes the size of its outbound fetch pool when the process starts and no code can raise it afterwards, so if `BUN_CONFIG_MAX_HTTP_REQUESTS` is not already in the environment, `borgo start` re-execs itself once with it set to `16384` and that child becomes the one holding both the front server and the API. The outer process stays as a thin supervisor: it forwards `SIGINT` and `SIGTERM` and exits with the child's code, so a service manager still sees one pid to signal and one exit status to trust, and the child polls `BORGO_SUPERVISOR_PID` so a hard kill of the supervisor cannot orphan it. Every deployment borgo writes — the Dockerfiles, the systemd unit, the compose file — sets the variable, so the re-exec only happens to a hand-launched server, which is exactly the one that was silently capped at ~255 concurrent event streams. See [realtime](realtime.md#honest-limits).
 
 In dev there are three processes: the `borgo dev` watcher, the Go binary it builds, and a separate Bun process running the front server — separate so a code change can be applied by restarting it without losing the watcher. More on that below.
 
@@ -125,8 +127,10 @@ The same endpoint is what hover prefetching warms. See [client navigation](clien
 `borgo build` runs `borgogen`, then the asset build, then `go build`. It leaves this:
 
 ```
-  .borgo/                     generated, gitignored, rebuilt at will
+  .borgo/                     generated, rebuilt at will - gitignored except api-types.d.ts
     api-types.d.ts            route pattern -> response and request types (borgogen)
+                              the one file here you commit: it is what makes a fresh
+                              checkout typecheck before anyone has run the generator
     routes.gen.tsx            the server route table: patterns, modules, layout chains
     client-routes.gen.ts      the client route table: patterns and dynamic import()s
     islands.gen.ts            island name -> component

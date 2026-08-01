@@ -65,6 +65,12 @@ export async function precompressAssets(dir: string) {
   }
 }
 
+// size and mtime, base36. the suffix distinguishes the encoded variants of one
+// url: they are separate representations, and a conditional request answered
+// for one of them must never be answered out of another.
+export const assetEtag = (size: number, mtimeMs: number, suffix: string): string =>
+  `"${size.toString(36)}-${Math.floor(mtimeMs).toString(36)}${suffix}"`;
+
 export type AssetVariant = { path: string; encoding?: "br" | "gzip"; etag: string; size: number };
 
 export type AssetInfo = {
@@ -104,7 +110,7 @@ export function buildAssetIndex(dir: string): Map<string, AssetInfo> {
   const base = dir.replaceAll("\\", "/").replace(/\/+$/, "");
   const tag = (path: string, suffix: string) => {
     const file = files.get(path)!;
-    return `"${file.size.toString(36)}-${Math.floor(file.mtimeMs).toString(36)}${suffix}"`;
+    return assetEtag(file.size, file.mtimeMs, suffix);
   };
 
   const index = new Map<string, AssetInfo>();
@@ -244,34 +250,74 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
   return new Response(Bun.file(variant.path), { headers });
 }
 
-// dev, and anything written into public/ after boot
-export async function serveAsset(
+// dev, and anything written into public/ after boot. the index cannot cover
+// these - it is a boot-time snapshot - but everything it does for an asset has
+// to happen here too, from a live stat instead of the snapshot: this path
+// negotiates the same br/gz variants off the same url, so it is exposed to the
+// same cross-encoding range splice serveIndexed refuses, and until now it
+// emitted no validator a client could even have sent to be checked.
+export function serveAsset(
   req: Request,
   path: string,
   asset: ReturnType<typeof Bun.file>,
   { dev }: { dev: boolean },
-): Promise<Response> {
-  const headers: Record<string, string> = {};
-  const cacheControl = assetCacheControl(path);
-  if (cacheControl) headers["Cache-Control"] = cacheControl;
-  // same reason as in serveIndexed: a HEAD keeps the headers and loses the
-  // body bun would have measured
-  const served = (file: ReturnType<typeof Bun.file>) =>
-    new Response(file, { headers: { ...headers, "Content-Length": String(file.size) } });
-  if (!isCompressiblePath(path)) return served(asset);
-  headers["Vary"] = "Accept-Encoding";
-  if (!dev) {
-    const encoding = pickEncoding(req.headers.get("accept-encoding"), ["br", "gzip"]);
+): Response {
+  let base: { size: number; mtimeMs: number };
+  try {
+    base = statSync(path);
+  } catch {
+    // deleted between the caller's exists() and here
+    return new Response("not found", { status: 404 });
+  }
+
+  const headers = new Headers();
+  // an asset with no explicit policy and a Last-Modified is an asset the
+  // browser may heuristically cache for a tenth of its age - in dev, where
+  // these are rebuilt in place under stable names, that is yesterday's bundle
+  // pinned for the afternoon. no-cache still allows the 304 below.
+  const cacheControl = assetCacheControl(path) || (dev ? "no-cache" : "");
+  if (cacheControl) headers.set("Cache-Control", cacheControl);
+
+  let file = asset;
+  let size = base.size;
+  let etag = assetEtag(base.size, base.mtimeMs, "");
+  if (isCompressiblePath(path)) {
+    headers.set("Vary", "Accept-Encoding");
+    // dev writes no precompressed siblings and serves identity
+    const encoding = dev ? null : pickEncoding(req.headers.get("accept-encoding"), ["br", "gzip"]);
     if (encoding) {
-      const sibling = Bun.file(`${path}.${encoding === "br" ? "br" : "gz"}`);
-      if (await sibling.exists()) {
-        headers["Content-Encoding"] = encoding;
-        headers["Content-Type"] = asset.type;
-        return served(sibling);
+      const siblingPath = `${path}.${encoding === "br" ? "br" : "gz"}`;
+      try {
+        const sibling = statSync(siblingPath);
+        file = Bun.file(siblingPath);
+        size = sibling.size;
+        etag = assetEtag(sibling.size, sibling.mtimeMs, `-${encoding}`);
+        headers.set("Content-Encoding", encoding);
+        headers.set("Content-Type", asset.type);
+      } catch {
+        // no sibling: identity, exactly as before
       }
     }
   }
-  return served(asset);
+
+  headers.set("ETag", etag);
+  // one date for every variant of the url, like serveIndexed - which is
+  // precisely why isRangeStale below refuses to accept a date as an If-Range
+  headers.set("Last-Modified", new Date(base.mtimeMs).toUTCString());
+  if (isNotModified(req, etag, base.mtimeMs)) {
+    return new Response(null, { status: 304, headers });
+  }
+  // same reason as in serveIndexed: a HEAD keeps the headers and loses the
+  // body bun would have measured
+  headers.set("Content-Length", String(size));
+  if (isRangeStale(req, etag)) {
+    // a stream body is how a range is refused: bun ranges files, not streams,
+    // and it never consults If-Range on its own. the type goes back on because
+    // a stream body loses the one bun derives from a file
+    headers.set("Content-Type", asset.type);
+    return new Response(file.stream(), { headers });
+  }
+  return new Response(file, { headers });
 }
 
 const encoder = new TextEncoder();

@@ -100,7 +100,7 @@ The generated entry now carries both directions, and a wrong body fails `tsc`:
 "POST /api/tasks": { response: TaskItem; request: TaskCreate };
 ```
 
-`Bind` reads at most 1 MB, so a route expecting a small payload cannot be fed gigabytes; `borgo.BindMax[T](r, 8<<20)` raises the cap where a route legitimately needs it (`limit <= 0` disables it), and borgogen types it identically. `borgo.BindError(w, err)` answers with the right status as JSON — `413` past the limit, `415` for a declared non-JSON content type, `400` for malformed JSON — and the proxy relays those verbatim, so the browser sees the API's answer rather than a wrapped error page.
+`Bind` reads at most 1 MB, so a route expecting a small payload cannot be fed gigabytes; `borgo.BindMax[T](r, 8<<20)` raises the cap where a route legitimately needs it (`limit <= 0` disables it), and borgogen types it identically. `borgo.BindError(w, err)` answers with the right status as JSON — `413` past the limit, `415` for a missing or non-JSON `Content-Type`, `400` for malformed JSON — and the proxy relays those verbatim, so the browser sees the API's answer rather than a wrapped error page.
 
 ## How Go types become TypeScript
 

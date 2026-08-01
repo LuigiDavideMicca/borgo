@@ -14,7 +14,7 @@ React components in `pages/`, routed by file name. There is no route configurati
 | `pages/tasks/[id].tsx` | `/tasks/:id` |
 | `pages/orgs/[org]/members/[id].tsx` | `/orgs/:org/members/:id` |
 
-A `[param]` segment matches exactly one path segment; there are no catch-all or optional segments. Trailing slashes are ignored when matching, so `/tasks/` and `/tasks` are the same route. Four names are special and never become routes of their own: `_layout.tsx`, `_404.tsx`, `_500.tsx`, and anything else starting with `_` is still routed — only those three are reserved, so name a shared component directory `components/` rather than `pages/_components/`.
+A `[param]` segment matches exactly one path segment; there are no catch-all or optional segments. Trailing slashes are ignored when matching, so `/tasks/` and `/tasks` are the same route. **A leading underscore means "not a route."** Every file in `pages/` whose basename starts with `_` is excluded from the route table; three of them are then given a job instead — `_layout.tsx` wraps its directory, `_404.tsx` and `_500.tsx` become the error pages. Any other `_`-prefixed file is simply never served: `pages/_helpers.tsx` builds and ships nothing, silently. Put shared components in `components/` rather than `pages/_components/`, so the build has a reason to look at them.
 
 ## Loaders
 

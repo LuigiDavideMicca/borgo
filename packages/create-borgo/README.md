@@ -20,7 +20,7 @@ Pick one with `--template` (`-t`); in an interactive terminal `create-borgo` ask
 
 ## Options
 
-Every question has a flag and a `--no-` twin, so nothing has to be answered interactively.
+Every question has a flag, so nothing has to be answered interactively. Every *on/off* question also has a `--no-` twin; the two that take a value do not — there is no `--no-template`, and `--no-linter` is spelled that way but simply means `--linter none`.
 
 | Question | Flags | Interactive default | Non-interactive |
 | --- | --- | --- | --- |
@@ -33,11 +33,11 @@ Every question has a flag and a `--no-` twin, so nothing has to be answered inte
 
 `--yes` (`-y`) takes every default without asking a thing.
 
-- **tailwind** — the scaffold arrives wired for Tailwind v4: the deps, a `style.css`, and the `--tailwind` flag already in every script.
+- **tailwind** — the scaffold arrives wired for Tailwind v4: the deps, a `style.css`, and the `--tailwind` flag appended to the three scripts that build CSS — `dev`, `build` and `start`. `doctor` does not take it and does not get it.
 - **linter** — `biome` writes `biome.json`; `eslint` writes a flat `eslint.config.js` plus `.prettierrc`. Either way you get the same two scripts, `bun run lint` and `bun run format`, and a fresh scaffold passes its own lint.
 - **git** — `git init` plus an initial commit, so the scaffold is undoable from the first second. Skipped when the target is already inside a repository.
 - **docker** — keeps the multi-stage `Dockerfile`, `docker-compose.yml` and `.dockerignore`.
-- **vscode** — `.vscode/extensions.json` recommends the Go extension plus the ones matching your Tailwind and linter choices, and `settings.json` sets format-on-save with the formatter those extensions provide.
+- **vscode** — `.vscode/extensions.json` recommends the Go extension plus the ones matching your Tailwind and linter choices. `settings.json` follows the linter answer: with `biome` or `eslint` it turns format-on-save on and names the formatter those extensions provide; with `none` it turns format-on-save **off** for everything except Go, because nothing would format a `.ts` or `.tsx` file and a silent no-op on every save is worse than an honest setting.
 
 ```bash
 bunx create-borgo@latest my-app --template full --tailwind --linter biome

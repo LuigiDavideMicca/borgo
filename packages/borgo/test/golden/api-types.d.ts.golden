@@ -4,13 +4,13 @@ export interface Note {
   id: number;
   title: string;
   body: string | null;
-  tags?: Array<string>;
-  meta: Record<string, string>;
+  tags?: Array<string> | null;
+  meta: Record<string, string> | null;
   archived?: boolean;
 }
 
 export interface NoteList {
-  notes: Array<Note>;
+  notes: Array<Note> | null;
   total: number;
 }
 

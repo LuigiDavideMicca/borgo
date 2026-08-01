@@ -99,7 +99,7 @@ The sends are non-blocking against a small per-subscriber buffer: a client too s
 
 **WebSocket topics are a relay, and the relay is dumb on purpose.** A publish serializes the message once and hands it to Bun's topic publish; fan-out is the server's, not a loop in framework code. There is no per-message business logic in the path — that belongs in Go routes, reachable over `/api/*`.
 
-**The event stream is not buffered anywhere.** The Go handler sets `X-Accel-Buffering: no`, the proxy forwards without a body deadline once headers have arrived, and the front server is bound with its idle timeout disabled so a long-lived stream is not cut. [Realtime](realtime.md#server-sent-events) has the handler side.
+**The event stream is not buffered anywhere, and one line of it is not decoration.** `borgo.SSE` writes a `:ok` comment — an SSE frame every client ignores — before it returns the stream to your handler, and without it a stream that stays quiet until its first real event leaves the browser hanging on `fetch()` for exactly that long. Flushing the headers is not enough: `Bun.serve`, which is borgo's *own* front server, does not send a response's headers downstream until the first body byte arrives. The `X-Accel-Buffering: no` header asks nginx and friends for the same favour, but they are the intermediaries you might not have; the one you always have is borgo's. Beyond that, the proxy forwards without a body deadline once headers have arrived, and the front server is bound with its idle timeout disabled so a long-lived stream is not cut. [Realtime](realtime.md#server-sent-events) has the handler side.
 
 ## The Go side
 

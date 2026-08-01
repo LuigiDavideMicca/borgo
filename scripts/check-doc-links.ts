@@ -258,7 +258,10 @@ if (goSnippets.length) {
     const out = build.stdout.toString() + build.stderr.toString();
     const before = failures;
     for (const line of out.split(/\r?\n/)) {
-      const m = line.match(/s(\d+)[\\/]snippet\.go:(\d+):(\d+):(.*)$/);
+      // ./docsnippets/p7/s12.go:34:2: error -> doc file and line. the file
+      // name is what the loop above writes, s<n>.go: matching anything else
+      // silently drops every go failure into the raw dump below
+      const m = line.match(/[\\/]s(\d+)\.go:(\d+):(\d+):(.*)$/);
       if (!m) continue;
       const s = goSnippets[Number(m[1])];
       // the generated file prepends a package clause and the import block

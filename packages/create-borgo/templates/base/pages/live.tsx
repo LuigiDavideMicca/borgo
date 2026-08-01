@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-export const head = { title: "Live · borgo app" };
+export const head = { title: "Live · {{name}}" };
 
 export default function Live() {
   const [tick, setTick] = useState<string | null>(null);

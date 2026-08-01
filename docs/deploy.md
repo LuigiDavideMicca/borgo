@@ -2,7 +2,9 @@
 
 Everything between `borgo build` and traffic: container and bare-metal layouts, reverse proxy configs, [static export](#static-export), caching, health checks and the full environment reference. You need this page once, when the app first ships — and the `borgo deploy init` templates write most of it for you.
 
-A borgo app in production is two processes: the Go API binary and the Bun front server. `borgo start` runs both and exits if either dies, so one supervisor — Docker, systemd, compose — supervises the pair.
+A borgo app in production is two servers: the Go API binary and the Bun front server. `borgo start` is the one thing your supervisor — Docker, systemd, compose — starts and stops; it holds the pair together and exits if either dies.
+
+One wrinkle worth knowing before you read a `ps` listing: bun sizes its outbound fetch pool when the process boots and cannot raise it afterwards, so when `BUN_CONFIG_MAX_HTTP_REQUESTS` is unset `borgo start` re-execs itself once with it set. You then see three processes — the supervisor `borgo start`, the child that actually runs the front server, and the Go binary the child spawned. The supervisor is the pid a service manager signals; it forwards `SIGINT`/`SIGTERM` to the child and exits with the child's code, and the child exits if the supervisor disappears. Set `BUN_CONFIG_MAX_HTTP_REQUESTS` yourself — every deploy config below does — and there is no re-exec and no third process.
 
 ## borgo deploy init
 
@@ -17,27 +19,33 @@ bunx borgo deploy init <caddy|nginx|systemd|compose> [--force]
 | `caddy` | `Caddyfile` | reverse proxy with automatic TLS, three lines | set your domain, `caddy run --config Caddyfile` |
 | `nginx` | `site.conf` | reverse proxy: websocket upgrades, `proxy_buffering off` for SSE, long read timeout | set domain and certs, link into `sites-enabled/` |
 | `systemd` | `borgo.service` | a unit running `bun run start` with the environment stubbed in | copy to `/etc/systemd/system/`, `systemctl enable --now` |
-| `compose` | `docker-compose.yml` | the scaffolded compose shape (build, ports, `/data` volume, restart policy) | `docker compose up -d` |
+| `compose` | `docker-compose.yml` | build, ports, a `SESSION_SECRET`/`DB_PATH` stub, a `/data` volume, `BUN_CONFIG_MAX_HTTP_REQUESTS`, restart policy | `docker compose up -d` |
 
 Which one? **One box, Docker installed** → `compose` and you are done. **One box, no Docker** → `systemd`, plus `caddy` or `nginx` in front for TLS. **A proxy already terminates TLS for other apps** → just `caddy`/`nginx` to add the site. The generated files are a starting point in your repo, not managed state — edit them freely; `deploy init` never touches them again without `--force`.
 
 ## Docker, one container (recommended)
 
-Every scaffolded app ships a multi-stage `Dockerfile` and a `docker-compose.yml` (missing one? `borgo deploy init compose` writes the same shape, templated with your app's port):
+Every scaffolded app ships a multi-stage `Dockerfile` and a `docker-compose.yml` (missing one? `borgo deploy init compose` writes one, and `--force` overwrites what is there):
 
 ```bash
 docker compose up -d
 ```
 
-The builder image compiles the Go binary (static, `CGO_ENABLED=0`) and the client assets; the runtime image is `oven/bun:slim` with the app sources the SSR server needs, production `node_modules`, and `dist/`. The compose file mounts a named volume at `/data` — point `DB_PATH` (or your own database path) there so SQLite survives redeploys.
+The builder image compiles the Go binary (static, `CGO_ENABLED=0`) and the client assets; the runtime image is `oven/bun:slim` with the app sources the SSR server needs, production `node_modules`, and `dist/`. `NODE_ENV` and `BUN_CONFIG_MAX_HTTP_REQUESTS` are set in the Dockerfile, so the compose file carries only what the *app* needs.
 
-Set real values before going live:
+Two of those are worth setting deliberately, because the failure modes are quiet:
 
 ```yaml
 environment:
   SESSION_SECRET: <long random string>   # required if you use sessions
-  DB_PATH: /data/app.db
+  DB_PATH: /data/app.db                  # with a matching volume, below
+volumes:
+  - data:/data
 ```
+
+`borgo deploy init compose` writes both of those with a named `/data` volume already declared, on the assumption that an app being deployed has data. The scaffolded templates do not: `base` and `minimal` have neither a database nor sessions and their compose files say so, and `full` signs sessions but keeps its stores in memory, so its compose file requires `SESSION_SECRET` — reading the random one `create-borgo` wrote into `.env` — and declares no volume. Add a volume when you add something to persist; a `data:` volume in front of an app with no database is a promise nothing keeps.
+
+Missing `SESSION_SECRET` is the quietest failure of the three: the Go server boots, `/healthz` is green, and only session routes fail. See [cookies and sessions](security.md#cookies-and-sessions).
 
 ## Docker, two services
 
@@ -149,12 +157,17 @@ Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=API_PORT=3501
 Environment=SESSION_SECRET=change-me
+# bun's outbound fetch pool defaults to 256, which ceilings concurrent
+# proxied requests - event streams above all - see docs/realtime.md
+Environment=BUN_CONFIG_MAX_HTTP_REQUESTS=16384
 Restart=on-failure
 User=www-data
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+Do not drop that `BUN_CONFIG_MAX_HTTP_REQUESTS` line when you edit the unit. Without it `borgo start` re-execs itself to set it, which works but gives systemd a supervisor process in front of the server for no reason; with it, the unit is one process tree with the pool already sized.
 
 `borgo start` exits when the Go process dies, and `Restart=on-failure` brings both back.
 
@@ -168,7 +181,7 @@ Set `BORGO_METRICS=1` and the front server also serves `/metrics` in Prometheus 
 - `borgo_http_request_duration_seconds{route, le}` — histogram, buckets `0.005 0.025 0.1 0.5 1 5`
 - `borgo_process_uptime_seconds` — gauge
 
-Route labels are the file-convention patterns (`/tasks/[id]`, not each concrete URL); after 100 distinct routes new ones fold into `route="other"`, so cardinality stays bounded.
+Route labels are the matched route *pattern*, not each concrete URL — and the pattern is the router's colon form, so `pages/tasks/[id].tsx` is labelled `route="/tasks/:id"`, never `/tasks/[id]` and never `/tasks/7`. After 100 distinct routes new ones fold into `route="other"`, so cardinality stays bounded.
 
 ## Environment reference
 
@@ -187,7 +200,7 @@ Route labels are the file-convention patterns (`/tasks/[id]`, not each concrete 
 | `BORGO_CSP` | unset | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request |
 | `BORGO_MAX_BODY` | `33554432` (32 MB) | front server: largest request body it will accept and buffer, in bytes |
 | `BORGO_API_TIMEOUT` | `30000` (30 s) | front server: milliseconds to wait for the api's response headers before answering `504`; `0` disables |
-| `BUN_CONFIG_MAX_HTTP_REQUESTS` | `256` (bun's default) | front server: how many proxied requests may be in flight at once. Each event stream holds one for its whole life, so the default ceilings concurrent SSE subscribers at ~255. borgo sets `16384` in `dev` and in the configs it generates; set it yourself if you launch the server another way. Read at process start — exporting it afterwards has no effect |
+| `BUN_CONFIG_MAX_HTTP_REQUESTS` | `16384` under `borgo dev` and `borgo start`; `256` (bun's default) otherwise | front server: how many proxied requests may be in flight at once. Each event stream holds one for its whole life, so bun's default ceilings concurrent SSE subscribers at ~255. `borgo dev` sets it, every config borgo generates sets it, and `borgo start` re-execs itself to set it when nothing else did. Read at process start — exporting it afterwards has no effect, which is why the re-exec exists |
 | `BORGO_READ_HEADER_TIMEOUT` | `5s` | go server: cap on reading request headers (slow-header clients) |
 | `BORGO_IDLE_TIMEOUT` | `2m` | go server: idle keep-alive connections are reclaimed after this |
 | `BORGO_READ_TIMEOUT` | `0` (off) | go server: whole-request read deadline — leave off unless you have no streams |

@@ -27,6 +27,7 @@ ENV NODE_ENV=production
 # holds one for the life of every proxied request - an event stream included.
 # it must be set in the environment: bun reads it when the process starts
 ENV BUN_CONFIG_MAX_HTTP_REQUESTS=16384
+RUN mkdir /data && chown bun:bun /data
 USER bun
 COPY --from=build --chown=bun:bun /out /app
 EXPOSE 3000

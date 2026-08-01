@@ -107,6 +107,36 @@ export function redirectUrl(raw: string): URL | null {
   }
 }
 
+// `borgo export` sets BORGO_STATIC and the bundler substitutes it here, so a
+// static build compiles the props path out entirely. There is no
+// ?__borgo=props endpoint on a static host: it answers that url with the
+// page's own html document and a 200, res.ok passes, res.json() throws, and
+// the navigation ends in the reload the catch does anyway - having paid for a
+// second full document, plus one more for every link a pointer passed over,
+// since prefetch caches that doomed promise on hover.
+export const propsPathEnabled = (): boolean => process.env.BORGO_STATIC !== "1";
+
+/**
+ * What a dev rebuild's changed files mean for the page on screen.
+ *
+ * "reload" for anything fast refresh cannot express, "apply" for a refreshable
+ * change that touches what is rendered, "skip" for a change confined to other
+ * pages. The set matters: a rebuild carrying index.tsx and about.tsx while you
+ * are on `/` has to apply, and deciding on one file of the two - whichever
+ * survived the debounce - is how such a save came to do nothing at all.
+ */
+export function devUpdatePlan(files: string[], currentFile: string | null): "reload" | "apply" | "skip" {
+  if (!files.length) return "skip";
+  // layouts, the shell, _404/_500 and anything not a module: not refreshable
+  if (files.some((f) => !/\.tsx?$/.test(f) || /(^|\/)_(layout|404|500)\.tsx$/.test(f))) {
+    return "reload";
+  }
+  if (!currentFile) return "reload";
+  // a module outside pages/ (a component, a hook) can be under the page on
+  // screen; a page module only matters when it is that page
+  return files.some((f) => !f.startsWith("pages/") || f === "pages/" + currentFile) ? "apply" : "skip";
+}
+
 // the server is not trusted to answer with an object: a string or an array
 // under "props" would blow up inside createElement
 export const asProps = (value: unknown): Record<string, unknown> =>
@@ -228,7 +258,7 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
     // surface as an unhandled rejection - and in dev, as the error overlay -
     // over a healthy page; a real navigation retries it with error handling
     matched.route.load().catch(() => {});
-    if (!withProps) return;
+    if (!withProps || !propsPathEnabled()) return;
     const cacheKey = to.pathname + to.search;
     const hit = propsCache.get(cacheKey);
     if (hit && performance.now() - hit.time < propsTtl) return;
@@ -293,7 +323,10 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
   async function navigate(to: URL, push: boolean | "replace", keepScroll = false, hops = 0) {
     const seq = ++navSeq;
     const matched = matchRoute(to.pathname, routes);
-    if (!matched) {
+    // a static export has no props endpoint to ask, and the page's props live
+    // in the document the host is about to serve: hand the navigation to the
+    // browser at once instead of fetching that document twice to discover it
+    if (!matched || !propsPathEnabled()) {
       location.assign(to.href);
       return;
     }
@@ -693,8 +726,15 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
     // the stamp survives reloads, so a boot's welcome message is applied once
     let lastStamp = Number(sessionStorage.getItem("borgo:devstamp") ?? 0);
 
-    async function applyUpdate(msg: { file: string; chunks: Record<string, string>; stamp: number }) {
-      const { file, chunks } = msg;
+    async function applyUpdate(msg: {
+      files?: string[];
+      file?: string;
+      chunks: Record<string, string>;
+      stamp: number;
+    }) {
+      const { chunks } = msg;
+      // `file` is what a server older than this runtime sends
+      const files = msg.files ?? (msg.file ? [msg.file] : []);
       if (msg.stamp && msg.stamp <= lastStamp) return;
       // a page loaded after the rebuild already runs the new code
       if (msg.stamp && msg.stamp <= performance.timeOrigin) return;
@@ -702,9 +742,6 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
       try {
         sessionStorage.setItem("borgo:devstamp", String(msg.stamp));
       } catch {}
-      if (!/\.tsx?$/.test(file) || /(^|\/)_(layout|404|500)\.tsx$/.test(file)) {
-        return location.reload();
-      }
       // reverting an edit restores the previous chunk hash, which the module
       // cache would silently serve stale; the stamp forces re-execution
       const bust = msg.stamp ? `?v=${msg.stamp}` : "";
@@ -713,7 +750,9 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
         if (chunk) route.load = () => import(chunk + bust);
       }
       if (!currentRoute || !root) return location.reload();
-      if (file.startsWith("pages/") && file !== "pages/" + currentRoute.file) return;
+      const plan = devUpdatePlan(files, currentRoute.file);
+      if (plan === "reload") return location.reload();
+      if (plan === "skip") return;
       const chunk = chunks[currentRoute.file];
       if (!chunk) return location.reload();
       try {

@@ -1,16 +1,30 @@
+# one container, one command: `docker compose up -d`.
+# the Dockerfile already sets NODE_ENV and BUN_CONFIG_MAX_HTTP_REQUESTS, so
+# what is left here is the port and the one thing this template genuinely
+# cannot run without: a session signing key.
 services:
   app:
     build: .
     ports:
       - "3000:3000"
     environment:
-      # SESSION_SECRET: use-a-long-random-string
-      # DB_PATH: /data/app.db
-      NODE_ENV: production
       PORT: "3000"
-    volumes:
-      - data:/data
+      # create-borgo generated a random SESSION_SECRET into .env next to this
+      # file, and docker compose reads .env from this directory - so this line
+      # needs no editing. it is required rather than optional on purpose: the
+      # api boots happily without a secret and then answers 500 on every login
+      # and register, so a missing key must fail the deploy, not the login.
+      SESSION_SECRET: "${SESSION_SECRET:?missing - create-borgo writes one into .env, or generate one with openssl rand -base64 48}"
+      # serving over https? uncomment, and the session and csrf cookies get
+      # the Secure attribute.
+      # SESSION_SECURE: "1"
     restart: unless-stopped
-
-volumes:
-  data:
+# users and notes live in memory in this template, so there is nothing to
+# persist yet and no volume here. swapping the stores in api/users.go and
+# api/notes.go for a real database? add one:
+#   environment:
+#     DB_PATH: /data/app.db
+#   volumes:
+#     - data:/data
+# volumes:
+#   data:

@@ -1,7 +1,7 @@
 import type { Head, LoaderContext } from "borgo-framework";
 
 export const head = (props: Record<string, unknown>): Head => ({
-  title: `${props.message ?? "Hello"} · borgo app`,
+  title: `${props.message ?? "Hello"} · {{name}}`,
 });
 
 export async function loader({ params, api }: LoaderContext) {

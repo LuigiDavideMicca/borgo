@@ -75,17 +75,26 @@ If the *build* is what broke, the fallback server keeps `/__borgo/dev` alive so 
 
 `bunx borgo doctor` diagnoses the environment — the class of problem that is never in your code:
 
-| Check | What it catches |
-| --- | --- |
-| bun | not on `PATH`, or an npm-installed shim shadowing the real one |
-| go | missing, or older than your `go.mod` requires |
-| ports | `PORT` and `API_PORT` already in use — naming the process and its pid |
-| api binary | a stale API process holding `.borgo/api.exe` so dev cannot swap a new build in |
-| api types | `.borgo/api-types.d.ts` stale against your `api/*.go` |
-| node_modules | missing or not installed |
-| app deps | `borgo-framework`, `react` and `react-dom` present and consistent |
+Fourteen checks, in three groups. A check that has nothing to say about your app — no `package.json`, no `api/`, no playwright dependency, a filesystem that will not report free space — is skipped rather than reported as passing.
 
-Every failing check prints its one-line fix, and the exit code is 1 so you can gate a script on it. On Windows it reads `netstat` by row shape rather than by the English word `LISTENING`, so it still names the process holding a port on a localized system.
+| Check | Group | What it catches |
+| --- | --- | --- |
+| bun | toolchain | not on `PATH`, older than the required minimum, or an npm-installed shim shadowing the real one |
+| bun on PATH | toolchain | a `.cmd`/`.bat`/`.ps1` shim resolving ahead of a real `bun.exe` that is also installed — *informational* |
+| go | toolchain | missing, or older than your `go.mod` requires |
+| node | toolchain | present or not, and its version — borgo needs none, so this is purely *informational* |
+| docker | toolchain | not installed, or installed with an unreachable daemon — *informational* |
+| port 3000 (front) | machine | `PORT` already in use, naming the process and its pid |
+| port 3501 (api) | machine | `API_PORT` already in use, same |
+| disk space | machine | less free space than a build wants |
+| api binary | project | a stale API process holding `.borgo/api.exe` so dev cannot swap a new build in |
+| api types | project | `.borgo/api-types.d.ts` missing, or stale against your `api/*.go` |
+| node_modules | project | missing or not installed |
+| app deps | project | `borgo-framework`, `react` and `react-dom` present and consistent, and `go.mod` carrying the `borgogen` tool directive |
+| write access | project | `.borgo`, `public/assets` or `dist` not writable — a read-only checkout, a synced folder, an antivirus |
+| playwright | project | playwright is a dependency but no browsers are installed |
+
+Every failing check prints its one-line fix. The exit code is 1 when a *real* check fails, so you can gate a script on it; the informational ones print a note in blue and are deliberately kept out of it, because not having Docker on a laptop is not a broken environment. On Windows it reads `netstat` by row shape rather than by the English word `LISTENING`, so it still names the process holding a port on a localized system.
 
 ## CLI reference
 
@@ -99,7 +108,7 @@ Run these through Bun (`bun run dev`) or directly (`bunx borgo dev`).
 | `borgo export` | prerenders exportable pages into `dist/site/` — see [static export](deploy.md#static-export) |
 | `borgo deploy init <target>` | writes a deploy config: `caddy`, `nginx`, `systemd` or `compose` — see [deploy](deploy.md#borgo-deploy-init) |
 | `borgo pwa init` | writes `public/manifest.webmanifest` and a working `public/sw.js` — see [PWA](pwa.md) |
-| `borgo doctor` | environment diagnosis, exit 1 on any failing check |
+| `borgo doctor` | environment diagnosis, exit 1 on any failing check that is not informational |
 
 Flags:
 
@@ -107,7 +116,7 @@ Flags:
 | --- | --- | --- |
 | `--tailwind` | `dev`, `build`, `start` | compile CSS with Tailwind instead of SCSS |
 | `--front-only` | `start` | run the front server alone, for split deployments where the API lives elsewhere (point `API_URL` at it) |
-| `--force` | `deploy init` | overwrite an existing config file |
+| `--force` | `deploy init`, `pwa init` | overwrite an existing generated file |
 | `-h`, `--help`, `-v`, `--version` | — | print the banner and exit 0 |
 
 `borgo build` fails loudly rather than shipping something stale: if type generation fails, the build stops instead of leaving you with yesterday's types. And `borgo start` notices when `public/assets` was last written by `borgo dev` — a development bundle, unminified and uncompressed — and rebuilds it for production instead of serving it silently.

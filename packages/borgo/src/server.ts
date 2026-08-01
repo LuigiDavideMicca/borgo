@@ -13,8 +13,11 @@ import { matchRoute, safeDecode, type Route } from "./router";
 import {
   createSecurity,
   csrfRejects,
+  decodeChanged,
   envInt,
   headResponse,
+  idleTimeout,
+  isLongLivedStream,
   keysEqual,
   metricsEnabled,
   prepareShell,
@@ -264,7 +267,7 @@ export async function serve({ dev = false } = {}) {
   // greets them with the changed file and the new page -> chunk map
   const devSockets = new Set<import("bun").ServerWebSocket<SocketData>>();
   const bootStamp = Date.now();
-  const changed = process.env.BORGO_CHANGED;
+  const changed = decodeChanged(process.env.BORGO_CHANGED);
   const broadcast = (msg: Record<string, unknown>) => {
     const data = JSON.stringify(msg);
     for (const ws of devSockets) ws.send(data);
@@ -302,9 +305,16 @@ export async function serve({ dev = false } = {}) {
   const server = await bindRetry(() => Bun.serve<SocketData, never>({
     port,
     maxRequestBodySize,
-    // long-lived proxied streams (sse) must not be killed by the default 10s
-    idleTimeout: 0,
+    // a real read deadline: this same number bounds how long bun waits for an
+    // inbound request's headers and body, so disabling it to protect proxied
+    // event streams left every body-reading path with no timeout at all. The
+    // streams keep their exemption, granted per response below with
+    // server.timeout(req, 0). BORGO_IDLE_TIMEOUT is in seconds, 0 disables it.
+    idleTimeout: idleTimeout(process.env.BORGO_IDLE_TIMEOUT),
     websocket: {
+      // websockets have their own deadline and bun pings them itself, so the
+      // read deadline above never applies to an upgraded socket
+      idleTimeout: 120,
       // every message a client sends is relayed to every subscriber: bun's
       // 16mb default would make one socket a broadcast amplifier
       maxPayloadLength: 1024 * 1024,
@@ -315,8 +325,13 @@ export async function serve({ dev = false } = {}) {
           return;
         }
         devSockets.add(ws);
-        if (changed) {
-          ws.send(JSON.stringify({ type: "js", file: changed, chunks: chunkMap, stamp: bootStamp }));
+        if (changed.length) {
+          // the whole set, not just the first: a browser told about one file
+          // of a two-file save may be told about the one it is not showing,
+          // and then it applies nothing
+          ws.send(
+            JSON.stringify({ type: "js", files: changed, chunks: chunkMap, stamp: bootStamp }),
+          );
         }
       },
       close(ws) {
@@ -465,6 +480,10 @@ export async function serve({ dev = false } = {}) {
         }
       }
       response = dropBody(response);
+      // an event stream is idle between events by design; the read deadline
+      // that protects every other path would cut it. lifted only for the
+      // connection that actually carries one
+      if (isLongLivedStream(response)) server.timeout(req, 0);
       if (metrics && !url.pathname.startsWith("/assets/") && url.pathname !== "/favicon.ico") {
         metrics.observe(label.route, response.status, (performance.now() - t0) / 1000);
       }

@@ -52,8 +52,36 @@ export function planExport(routes: Route[], notFound: Route | null = null): Expo
   return plan;
 }
 
-// the result is a url path (fed to fetch), so params are encoded; a param
-// with a path separator would silently change the route shape, reject it
+// characters windows refuses in a path component. every one of them is a legal
+// url character that encodeURIComponent happily escapes, and outputPath decodes
+// the segment straight back before mkdir - so an ISO timestamp param
+// ("2024-01-01T00:00:00Z") exports fine on linux and dies with EINVAL on
+// windows, which is the worst possible place to find out.
+const WINDOWS_ILLEGAL = /["*:<>?|\u0000-\u001f]/;
+// and the device names, which are reserved with or without an extension
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
+// null for a usable param, otherwise why it cannot become a directory
+export function unsafeParamReason(raw: string): string | null {
+  if (/[\\/]/.test(raw)) return "contains a path separator";
+  // outputPath turns each segment into a directory, so a dot segment would
+  // climb out of dist/site and write an index.html somewhere else entirely
+  if (raw === "." || raw === "..") return `is the dot segment "${raw}"`;
+  const illegal = raw.match(WINDOWS_ILLEGAL);
+  if (illegal) {
+    const shown = illegal[0] < " " ? `\\u${illegal[0].charCodeAt(0).toString(16).padStart(4, "0")}` : illegal[0];
+    return `contains "${shown}", which windows does not allow in a path`;
+  }
+  if (WINDOWS_RESERVED.test(raw)) return `is "${raw}", a reserved windows device name`;
+  // windows silently strips both, so the directory would not be the one the
+  // url names and the page would 404 on the host that serves it
+  if (/[. ]$/.test(raw)) return "ends in a dot or a space, which windows strips from a path";
+  return null;
+}
+
+// the result is a url path (fed to fetch), so params are encoded; a param that
+// cannot survive the round trip back to a directory name is rejected here,
+// where the message can name the route and the param
 export function fillPattern(pattern: string, params: Record<string, string | number>): string {
   return pattern.replace(/:(\w+)/g, (_, name) => {
     const value = params[name];
@@ -61,13 +89,9 @@ export function fillPattern(pattern: string, params: Record<string, string | num
       throw new Error(`prerenderPaths for ${pattern}: missing param "${name}"`);
     }
     const raw = String(value);
-    if (/[\\/]/.test(raw)) {
-      throw new Error(`prerenderPaths for ${pattern}: param "${name}" contains a path separator`);
-    }
-    // outputPath turns each segment into a directory, so a dot segment would
-    // climb out of dist/site and write an index.html somewhere else entirely
-    if (raw === "." || raw === "..") {
-      throw new Error(`prerenderPaths for ${pattern}: param "${name}" is the dot segment "${raw}"`);
+    const reason = unsafeParamReason(raw);
+    if (reason) {
+      throw new Error(`prerenderPaths for ${pattern}: param "${name}" ${reason}`);
     }
     return encodeURIComponent(raw);
   });
@@ -88,6 +112,17 @@ export function outputPath(path: string): string {
   };
   const dir = path.replace(/^\/+/, "").replace(/\/+$/, "").split("/").map(decode).join("/");
   return `${dir}/index.html`;
+}
+
+// the client bundle an export ships must not ask for ?__borgo=props: a static
+// host answers that url with the page's own html document and a 200, so res.ok
+// passes, res.json() throws, and the runtime falls back to a full reload -
+// after having downloaded the document twice, once per link, and a third time
+// for every link a pointer merely crossed (prefetch caches the doomed promise).
+// buildDefine turns this into a literal in the bundle, so the whole path is
+// compiled out rather than tried and caught.
+export function markStaticExport(env: NodeJS.ProcessEnv = process.env) {
+  env.BORGO_STATIC = "1";
 }
 
 const listenFree = () =>
@@ -135,6 +170,7 @@ export async function exportSite(): Promise<number> {
   console.log(`\n  ${banner("export")}\n`);
 
   if (!(await runBorgogen())) return 1;
+  markStaticExport();
   await buildAssets(false);
 
   const manifest = pathToFileURL(join(process.cwd(), ".borgo/routes.gen.tsx")).href;

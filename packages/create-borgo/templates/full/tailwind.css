@@ -58,7 +58,7 @@ header nav .session {
 header nav .session strong {
   color: #3d2f24;
 }
-header nav .session button {
+header nav button {
   background: none;
   border: none;
   padding: 0;
@@ -66,7 +66,7 @@ header nav .session button {
   color: #c06b45;
   cursor: pointer;
 }
-header nav .session button:hover {
+header nav button:hover {
   text-decoration: underline;
 }
 

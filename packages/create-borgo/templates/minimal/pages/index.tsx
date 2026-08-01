@@ -1,7 +1,7 @@
 import type { LoaderContext } from "borgo-framework";
 
 export const head = {
-  title: "borgo app",
+  title: "{{name}}",
   meta: [{ name: "description", content: "react pages server-rendered by bun, api routes in go" }],
 };
 

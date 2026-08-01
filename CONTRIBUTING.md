@@ -18,7 +18,7 @@ Playwright's browser is installed on demand:
 npx playwright install --with-deps chromium
 ```
 
-Node is not a dependency of development — it appears only in the publish workflow, where npm's trusted publishing needs it.
+Nothing borgo itself builds or runs needs Node — the CLI, the front server, the build and the tests are all Bun. Node still has to be on your machine to develop borgo, because two things around the edges want it: the `npx playwright` line above (and the same line in CI), and the publish workflow, where npm's trusted publishing needs it. `borgo doctor` reports Node for this reason and treats its absence as a note, not a failure.
 
 ## Setup
 
@@ -36,9 +36,12 @@ The example app under `examples/tasks` has a `replace` directive pointing the Go
 
 ```text
 *.go                     go module github.com/LuigiDavideMicca/borgo — route registry, server
-                         bootstrap, sessions, auth, sse, push, cache, gzip, watchdog. Zero deps.
+                         bootstrap, sessions, auth, sse, push, cache, gzip, watchdog.
+                         Standard library only.
 cmd/borgogen             the codegen binary: go/ast + go/types static analysis, no reflection.
-                         Depends on golang.org/x/tools. Fixtures live in cmd/borgogen/testdata.
+                         Part of the same module — it has no go.mod of its own — so the root
+                         go.mod requires golang.org/x/tools and a scaffolded app inherits it
+                         as an indirect requirement. Fixtures live in cmd/borgogen/testdata.
 packages/borgo           npm "borgo-framework": the CLI, the Bun SSR front server, the router,
                          the build, the browser runtime, the typed api client.
 packages/create-borgo    npm "create-borgo": the scaffolder and its three templates.
@@ -49,11 +52,11 @@ scripts/                 check-doc-links.ts — the docs gate.
 .github/workflows        ci.yml (everything below), release-please.yml, publish.yml.
 ```
 
-Two rules follow from the layout. The Go module at the root must stay dependency-free — `golang.org/x/tools` belongs to `cmd/borgogen`, which apps do not link into their binaries. And `packages/borgo` is the only package apps import, so its `exports` map is the whole public TypeScript surface; see docs/api-reference.md before adding to it.
+Two rules follow from the layout. **No package an app links into its binary may import anything outside the standard library** — that is the promise "zero deps" is shorthand for, and it is about the *runtime*, not about `go.mod`. `golang.org/x/tools` is in `go.mod` because `cmd/borgogen` lives in this module and needs it; it is a build-time tool, so nothing it imports reaches a deployed api binary. A new requirement is acceptable only if `cmd/borgogen` is the only thing that imports it; anything the root package needs must come from the standard library. And `packages/borgo` is the only package apps import, so its `exports` map is the whole public TypeScript surface; see docs/api-reference.md before adding to it.
 
 ## The gates
 
-CI runs all of these on every push and pull request. Run them locally before opening one — in this order, because the cheap ones fail fastest.
+CI runs all of these on every pull request and on every push to `main` — pushes to a branch with no pull request open are not built. Run them locally before opening one, in this order, because the cheap ones fail fastest.
 
 ```bash
 bun scripts/check-doc-links.ts     # docs links resolve, doc snippets compile
@@ -67,7 +70,7 @@ What each one actually is, verified against `package.json` and `.github/workflow
 
 - **`bun scripts/check-doc-links.ts`** — every internal link in the README, all of `docs/`, and each package and template README points at a file that exists, with the anchor it names. Then every `ts` / `tsx` fenced block becomes a module inside `examples/tasks` and is typechecked against the real framework types, and every `go` block that opens with a declaration is compiled inside the example's module. Failures are reported at the line of the doc file, not the scratch file.
 - **`bun run typecheck`** — `bunx tsc --noEmit` in `packages/borgo`, then `packages/create-borgo`, then `examples/tasks`.
-- **`bun run test`** — `bun test packages/borgo/test packages/create-borgo/test`. Unit tests only; nothing here starts a server.
+- **`bun run test`** — `bun test packages/borgo/test packages/create-borgo/test`. Mostly unit tests, but not exclusively: `proxy.test.ts`, `action-path.test.ts`, `serve-assets.test.ts`, `metrics.test.ts`, `util.test.ts` and `doctor.test.ts` each bind a real listener with `Bun.serve` on an ephemeral port (`port: 0`) and drive it over HTTP, and `create-borgo`'s suite spawns the scaffolder as a subprocess into a temp directory. They clean up after themselves and need no fixed port, so the suite is still safe to run beside a live `borgo dev` — but it is not a pure in-memory suite, and a change to the proxy or the asset server is genuinely exercised over a socket here.
 - **`go test -race ./...`** — the root module and `cmd/borgogen`, including its fixture apps under `testdata`. `bun run test:go` is the same suite without `-race`; CI uses `-race`, so use `-race`.
 - **`bunx playwright test`** — the root script `bun run e2e` and CI's `npx playwright test` run the same config. It builds and starts `examples/tasks` itself on port 3400, then runs four projects in dependency order: the app specs, the destructive `clear-all` spec, a dev-server project for fast refresh, and an export project last. Expect a few minutes.
 
@@ -109,7 +112,7 @@ Two hard rules on commits:
 - **One deliverable per commit.** A commit should be revertible on its own.
 - **No AI attribution.** No `Co-Authored-By` for an assistant, no generated-with trailers, no tool names in the message. The commit log is a record of what changed and why, and nothing else.
 
-Merging the release PR tags `vX.Y.Z` and publishes both npm packages with linked versions; the Go module resolves the same tag because it lives at the repository root. One version number, four artifacts — do not bump versions by hand.
+Merging the release PR tags `vX.Y.Z` and publishes both npm packages with linked versions; the Go module resolves the same tag because it lives at the repository root. One version number across the four things that must agree — the Go module, the two npm packages, and the `borgo` CLI that ships as `borgo-framework`'s `bin` (see docs/api-stability.md). Do not bump versions by hand.
 
 The one exception is `Version` in `borgo.go`, which release-please cannot reach: it resolves `extra-files` relative to a package's own path, and giving the repository root a package entry would have it claim the same tag `packages/borgo` already owns. So the release PR needs one extra commit setting that constant to the version the PR is cutting. You cannot forget silently — `TestVersionMatchesManifest` reads `.release-please-manifest.json` and fails the build when they disagree, naming the value it expected.
 

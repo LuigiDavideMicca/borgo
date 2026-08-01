@@ -3,4 +3,6 @@ node_modules
 dist
 public/assets
 *.db
+.env
+.env.*
 .git
