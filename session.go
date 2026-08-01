@@ -101,20 +101,16 @@ type sessionSigner struct {
 
 var sessionSigners sync.Pool
 
-// The empty signature is what an unset SESSION_SECRET produces, and nothing
-// ever equals it: hmac.Equal against "" is false for any real signature, and a
-// cookie carrying an empty one cannot be built because SetSession refuses
-// first. Callers already guard, but the guard is positional - it sits at the
-// top of one function - and the hole this closes was exactly a verify path
-// that reached the signer without one. Refusing here makes it structural, so a
-// future caller cannot reintroduce it by forgetting.
-const noSignature = ""
-
-func sessionSign(payload string) string {
-	secret := sessionSecret()
-	if secret == "" {
-		return noSignature
-	}
+// sessionSign takes the key rather than reading it, and that is the whole
+// point. It used to call sessionSecret() itself, which meant a caller checked
+// the secret and the signer then read it AGAIN from mutable process state - two
+// reads of one variable, with no guarantee they agree. A rotation that blanks
+// SESSION_SECRET between them made the signer return the empty string, and
+// hmac.Equal on two empty slices is TRUE: a cookie shaped "<payload>." with no
+// signature at all verified, and Authed admitted whatever principal the
+// attacker wrote. One read, passed down, makes the disagreement impossible to
+// express. The caller is responsible for having refused an unusable key.
+func sessionSign(payload, secret string) string {
 	s, _ := sessionSigners.Get().(*sessionSigner)
 	if s == nil || s.secret != secret {
 		s = &sessionSigner{secret: secret, mac: hmac.New(sha256.New, []byte(secret))}
@@ -133,7 +129,8 @@ func sessionSign(payload string) string {
 // it. Set SESSION_SECURE=1 (or "true") to add the Secure attribute behind
 // https. A maxAge of zero or less writes an already-expired session.
 func SetSession(w http.ResponseWriter, v any, maxAge time.Duration) error {
-	if sessionSecret() == "" {
+	secret := sessionSecret()
+	if secret == "" {
 		return ErrNoSessionSecret
 	}
 	data, err := json.Marshal(v)
@@ -146,7 +143,7 @@ func SetSession(w http.ResponseWriter, v any, maxAge time.Duration) error {
 	}
 	payload := base64.RawURLEncoding.EncodeToString(envelope)
 	cookie := newSessionCookie()
-	cookie.Value = payload + "." + sessionSign(payload)
+	cookie.Value = payload + "." + sessionSign(payload, secret)
 	// int(maxAge.Seconds()) would overflow a 32-bit int for a >68-year age,
 	// and a negative MaxAge serializes as Max-Age=0: the browser would delete
 	// the session the moment it was issued
@@ -196,7 +193,8 @@ func sessionPayload(r *http.Request) (string, bool) {
 	// that matters, because the failure direction here is open, not closed.
 	// A deploy that loses SESSION_SECRET must log everyone out, not let
 	// everyone in as anybody.
-	if sessionSecret() == "" {
+	secret := sessionSecret()
+	if secret == "" {
 		return "", false
 	}
 	var found string
@@ -212,7 +210,7 @@ func sessionPayload(r *http.Request) (string, bool) {
 			continue
 		}
 		payload, sig := cookie.Value[:dot], cookie.Value[dot+1:]
-		if !hmac.Equal([]byte(sessionSign(payload)), []byte(sig)) {
+		if !hmac.Equal([]byte(sessionSign(payload, secret)), []byte(sig)) {
 			continue
 		}
 		if valid++; valid > 1 {

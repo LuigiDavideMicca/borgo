@@ -20,6 +20,7 @@ import {
   scriptJson,
   shouldBufferBody,
   UNKNOWN_CHANGE,
+  sessionSecure,
 } from "../src/util";
 
 describe("freshCookieHeader", () => {
@@ -674,5 +675,33 @@ describe("the changed-file list a rebuild carries", () => {
     expect(decodeChanged(encodeChanged([UNKNOWN_CHANGE]))).toEqual([UNKNOWN_CHANGE]);
     // and is not a module, so the client reloads rather than trying to refresh
     expect(UNKNOWN_CHANGE).not.toMatch(/\.tsx?$/);
+  });
+});
+
+// SESSION_SECURE decides Secure on both the session cookie (go) and the csrf
+// cookie (here). One variable, one intent: if the two halves disagree about
+// what it says, one cookie downgrades in silence. Go parses it with
+// strconv.ParseBool, so this grammar has to be the same one.
+describe("sessionSecure", () => {
+  test("accepts everything go's ParseBool accepts, both ways", () => {
+    for (const v of ["1", "t", "T", "true", "TRUE", "True"]) {
+      expect(sessionSecure({ SESSION_SECURE: v })).toBe(true);
+    }
+    for (const v of ["0", "f", "F", "false", "FALSE", "False"]) {
+      expect(sessionSecure({ SESSION_SECURE: v })).toBe(false);
+    }
+  });
+
+  test("unset and empty mean not secure", () => {
+    expect(sessionSecure({})).toBe(false);
+    expect(sessionSecure({ SESSION_SECURE: "" })).toBe(false);
+  });
+
+  // the whole point: refusing is what keeps a typo from silently downgrading
+  // a cookie, exactly as the go half panics rather than reading it as false
+  test("refuses what it cannot read rather than defaulting to insecure", () => {
+    for (const v of ["yes", "on", "2", " 1", "true ", "secure"]) {
+      expect(() => sessionSecure({ SESSION_SECURE: v })).toThrow(/SESSION_SECURE/);
+    }
   });
 });

@@ -120,7 +120,7 @@ func TestSessionDuplicateCookies(t *testing.T) {
 	})
 
 	t.Run("an empty payload cookie is not a session", func(t *testing.T) {
-		if _, ok := GetSession[testSession](request("." + sessionSign(""))); ok {
+		if _, ok := GetSession[testSession](request("." + sessionSign("", sessionSecret()))); ok {
 			t.Fatal("a signed empty payload must not pass as a session")
 		}
 	})
@@ -206,11 +206,11 @@ func TestClearSession(t *testing.T) {
 // pooled macs must not outlive the secret they were built for
 func TestSessionSignFollowsTheSecret(t *testing.T) {
 	t.Setenv("SESSION_SECRET", "first-secret-first-secret-first-x")
-	first := sessionSign("a-payload")
+	first := sessionSign("a-payload", sessionSecret())
 	t.Setenv("SESSION_SECRET", "second-secret-second-secret-second")
-	second := sessionSign("a-payload")
+	second := sessionSign("a-payload", sessionSecret())
 	t.Setenv("SESSION_SECRET", "first-secret-first-secret-first-x")
-	again := sessionSign("a-payload")
+	again := sessionSign("a-payload", sessionSecret())
 
 	if first == second {
 		t.Fatal("a rotated secret must produce a different signature")

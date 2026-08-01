@@ -22,13 +22,13 @@ func FuzzGetSession(f *testing.F) {
 		f.Fatal(err)
 	}
 	payload := base64.RawURLEncoding.EncodeToString(envelope)
-	valid := payload + "." + sessionSign(payload)
+	valid := payload + "." + sessionSign(payload, sessionSecret())
 
 	f.Add("borgo_session=" + valid)
 	f.Add("borgo_session=" + valid + "; borgo_session=" + valid)
 	f.Add("borgo_session=" + payload + ".AAAA")
 	f.Add("borgo_session=junk; borgo_session=" + valid)
-	f.Add("borgo_session=." + sessionSign(""))
+	f.Add("borgo_session=." + sessionSign("", sessionSecret()))
 	f.Add("borgo_session=" + strings.Repeat("a", sessionCookieMaxLen+1) + ".sig")
 	f.Add("other=1; borgo_session=nodothere")
 	f.Fuzz(func(t *testing.T, header string) {

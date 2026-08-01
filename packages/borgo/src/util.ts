@@ -284,6 +284,22 @@ export function metricsEnabled(env: Record<string, string | undefined>): boolean
   return env.BORGO_METRICS === "1";
 }
 
+// SESSION_SECURE decides whether the session and csrf cookies carry Secure,
+// and the two halves have to agree on what it says. Go parses it with
+// strconv.ParseBool and refuses what it cannot read; this side tested === "1",
+// so SESSION_SECURE=true gave the session cookie Secure and left the csrf
+// cookie without it - one variable, one intent, two answers, silently, in the
+// direction that downgrades. Same grammar as ParseBool, same refusal.
+export function sessionSecure(env: Record<string, string | undefined>): boolean {
+  const v = env.SESSION_SECURE;
+  if (v === undefined || v === "") return false;
+  if (["1", "t", "T", "true", "TRUE", "True"].includes(v)) return true;
+  if (["0", "f", "F", "false", "FALSE", "False"].includes(v)) return false;
+  throw new Error(
+    `borgo: SESSION_SECURE: invalid value "${v}" (want "1"/"true" or "0"/"false"; unset means not secure)`,
+  );
+}
+
 export const goBinName = () => "api" + (process.platform === "win32" ? ".exe" : "");
 
 // rfc 9110 §7.6.1: these govern one connection and are meaningless - or

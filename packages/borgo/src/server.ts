@@ -28,6 +28,7 @@ import {
   type ActionOptions,
   type PropsOptions,
   type RenderPageOptions,
+  sessionSecure,
 } from "./util";
 
 // resolve react from the app, not from this package: with a linked borgo
@@ -121,7 +122,7 @@ export async function serve({ dev = false } = {}) {
   // production; BORGO_CSRF=1 forces the check in dev, BORGO_CSRF=0 disables.
   const csrfEnforced =
     process.env.BORGO_CSRF === "0" ? false : dev ? process.env.BORGO_CSRF === "1" : true;
-  const csrfCookieAttrs = `Path=/; SameSite=Lax${process.env.SESSION_SECURE === "1" ? "; Secure" : ""}`;
+  const csrfCookieAttrs = `Path=/; SameSite=Lax${sessionSecure(process.env) ? "; Secure" : ""}`;
 
   const renderOptions: RenderPageOptions = {
     dev,

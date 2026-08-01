@@ -114,18 +114,27 @@ func TestSessionsDoNotSurviveASecretRotation(t *testing.T) {
 	}
 }
 
-// The guard closing the forgery hole sits at the top of sessionPayload, which
-// is a position, not a rule: a future caller reaching the signer another way
-// would reopen it. So the signer refuses too, and this pins that - remove the
-// check in sessionPayload and the forgery test above still has to fail.
-func TestSignerRefusesWithoutASecret(t *testing.T) {
-	t.Setenv("SESSION_SECRET", "")
-	if sig := sessionSign("any-payload-at-all"); sig != "" {
-		t.Errorf("sessionSign produced %q without a secret; anything non-empty is a mac anyone can recompute", sig)
-	}
+// An empty signature must never verify. hmac.Equal on two empty slices is
+// TRUE - subtle.ConstantTimeCompare returns 1 for two zero-length inputs - so
+// a signer that returned "" for an unusable key made a cookie shaped
+// "<payload>." authenticate as whatever the attacker wrote. The signer takes
+// the key now instead of reading it, so the caller that refused an unusable
+// one cannot be contradicted by a second read; this pins the property from the
+// outside, through the exported API, whatever the internals do.
+func TestAnUnsignedCookieNeverVerifies(t *testing.T) {
 	t.Setenv("SESSION_SECRET", "a-real-secret-of-respectable-length")
-	if sessionSign("any-payload-at-all") == "" {
-		t.Error("sessionSign refused a real secret")
+	payload := forgeSession(t, map[string]string{"user": "attacker", "admin": "yes"}, "")
+	unsigned := payload[:strings.LastIndexByte(payload, 46)+1] // keep the dot, drop the mac
+
+	for _, value := range []string{unsigned, unsigned[:len(unsigned)-1], "."} {
+		req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: value})
+		if _, ok := GetSession[map[string]string](req); ok {
+			t.Errorf("a cookie with no signature verified: %q", value)
+		}
+		if hasValidSession(req) {
+			t.Errorf("hasValidSession accepted %q", value)
+		}
 	}
 }
 
@@ -142,8 +151,10 @@ func TestAShortSecretIsNoSecret(t *testing.T) {
 		if err := SetSession(httptest.NewRecorder(), map[string]string{"u": "a"}, time.Hour); !errors.Is(err, ErrNoSessionSecret) {
 			t.Errorf("SetSession(%d bytes) = %v, want ErrNoSessionSecret", len(secret), err)
 		}
-		if sig := sessionSign("payload"); sig != "" {
-			t.Errorf("sessionSign signed with a %d-byte key", len(secret))
+		// sessionSecret reports a short key as absent, which is what makes every
+		// existing guard cover this case without knowing about it
+		if sessionSecret() != "" {
+			t.Errorf("a %d-byte SESSION_SECRET was reported as usable", len(secret))
 		}
 		// and it cannot be used to forge either, which is the direction that matters
 		req := httptest.NewRequest(http.MethodGet, "/admin", nil)
@@ -155,7 +166,7 @@ func TestAShortSecretIsNoSecret(t *testing.T) {
 
 	// exactly at the floor is usable: the boundary belongs to the good side
 	t.Setenv("SESSION_SECRET", strings.Repeat("a", sessionSecretMinLen))
-	if sessionSign("payload") == "" {
+	if sessionSecret() == "" {
 		t.Errorf("a %d-byte secret was refused; the minimum must be inclusive", sessionSecretMinLen)
 	}
 }
