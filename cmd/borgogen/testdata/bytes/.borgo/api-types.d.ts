@@ -9,7 +9,7 @@ export interface Blob {
 
 export interface SelfBytes {
   text: Array<string> | null;
-  ptext: Array<string | number> | null;
+  ptext: Array<string> | null;
   js: Array<unknown> | null;
 }
 

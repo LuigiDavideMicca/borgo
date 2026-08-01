@@ -574,7 +574,10 @@ func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]s
 					unions[key] = &union{}
 					keys = append(keys, key)
 				}
-				unions[key].add(gen.tsType(inst.TypeArgs.At(0)))
+				// borgo.Push marshals the payload as a map value of type any:
+				// unaddressable twice over, so a pointer-receiver marshaler
+				// on the payload itself never runs
+				unions[key].add(gen.tsType(inst.TypeArgs.At(0), false))
 				return true
 			})
 		}
@@ -698,20 +701,41 @@ type tsGen struct {
 	expanding map[string]bool
 	defs      []string
 	apiPkg    *types.Package
-	overrides map[string]string
+	overrides *overrideSet
 }
 
-// collectTypeOverrides gathers every "//borgo:type Go TS" directive. The Go
-// type is "pkgpath.Name" for imported types or a bare name for api types.
+// overrideSet holds the "//borgo:type Go TS" directives of a run, resolved to
+// what each one names. A directive for an api type is bound to the single
+// declaration it picked out; one for an imported or predeclared type keeps its
+// spelling, which already names at most one type.
+type overrideSet struct {
+	byObj  map[*types.TypeName]string
+	byName map[string]string
+}
+
+// collectTypeOverrides gathers every "//borgo:type Go TS" directive and
+// resolves it to exactly one type. The Go type is "pkgpath.Name" for an
+// imported type, a bare name for an api or predeclared one, or - where a bare
+// name is ambiguous - "Name@file.go:line" for the declaration at that position.
+//
+// A bare name used to be the whole key, so a directive meant for a
+// package-level type also rewrote every function-local `type resp struct{...}`
+// of that name in the api, silently. It now names the package-level type if
+// there is one, the sole function-local one if there is not, and nothing at all
+// when several could answer to it: that is a question, and the run asks it.
 //
 // A directive that can never apply - one naming a Go type that does not exist,
 // or a second one for a type already claimed - fails the run. A malformed
 // directive already does; staying silent about a directive that is well formed
 // and still does nothing would read as "applied" and leave the user staring at
 // the type it was meant to replace.
-func collectTypeOverrides(pkg *packages.Package) map[string]string {
-	out := map[string]string{}
-	at := map[string]token.Position{}
+func collectTypeOverrides(pkg *packages.Package) *overrideSet {
+	out := &overrideSet{byObj: map[*types.TypeName]string{}, byName: map[string]string{}}
+	type claim struct {
+		ts  string
+		pos token.Position
+	}
+	claimed := map[any]claim{}
 	for _, file := range pkg.Syntax {
 		for _, group := range file.Comments {
 			for _, comment := range group.List {
@@ -726,62 +750,135 @@ func collectTypeOverrides(pkg *packages.Package) map[string]string {
 					continue
 				}
 				goType, ts := m[1], strings.TrimSpace(m[2])
-				if prev, dup := out[goType]; dup && prev != ts {
-					fail("%s: //borgo:type %s %s conflicts with %q at %s; a Go type maps to one TypeScript type", pos, goType, ts, prev, at[goType])
+				// two directives conflict when they land on one type, however
+				// each of them spelled it
+				var target any = goType
+				if obj := resolveOverride(pkg, goType, pos); obj != nil {
+					target = obj
 				}
-				if !overrideTargetExists(pkg, goType) {
-					fail("%s: //borgo:type names %s, which is not a type this api package can refer to; the directive would never apply", pos, goType)
+				if prev, dup := claimed[target]; dup && prev.ts != ts {
+					fail("%s: //borgo:type %s %s conflicts with %q at %s; a Go type maps to one TypeScript type", pos, goType, ts, prev.ts, prev.pos)
 				}
-				out[goType], at[goType] = ts, pos
+				claimed[target] = claim{ts, pos}
+				if obj, ok := target.(*types.TypeName); ok {
+					out.byObj[obj] = ts
+				} else {
+					out.byName[goType] = ts
+				}
 			}
 		}
 	}
 	return out
 }
 
-// overrideTargetExists reports whether a //borgo:type could ever match a Go
-// type. Only the two lookups tsGen.override actually performs are checked: a
-// bare name against the api package and the predeclared types, a "path.Name"
-// against the package imported under that path. A path the api package does
-// not import is left alone - it may still be reached through a helper package,
-// and guessing there would fail runs that are perfectly correct.
-func overrideTargetExists(pkg *packages.Package, goType string) bool {
-	i := strings.LastIndex(goType, ".")
-	if i < 0 {
-		// function bodies included: tsGen.override matches any api type by bare
-		// name, and a `type resp struct{...}` inside a handler is one of them
-		if pkg.Types != nil && scopeDeclaresType(pkg.Types.Scope(), goType) {
-			return true
+// resolveOverride binds a directive's Go type to the one declaration it names,
+// or returns nil for the spellings that already name at most one type and are
+// matched by string: an imported "pkgpath.Name", a predeclared name. It fails
+// the run for a name that resolves to nothing, and for a bare name that several
+// declarations answer to.
+func resolveOverride(pkg *packages.Package, goType string, pos token.Position) *types.TypeName {
+	bare, locator, located := strings.Cut(goType, "@")
+	if i := strings.LastIndex(bare, "."); i >= 0 {
+		if located {
+			fail("%s: //borgo:type %s: a @file:line locator picks out a function-local type of this api package, and %s names an imported one", pos, goType, bare)
 		}
-		_, ok := types.Universe.Lookup(goType).(*types.TypeName)
-		return ok
+		// an imported package-level name already names at most one type
+		checkImportedOverride(pkg, bare[:i], bare[i+1:], goType, pos)
+		return nil
 	}
-	path, name := goType[:i], goType[i+1:]
+	candidates := declaredTypes(pkg, bare)
+	if len(candidates) == 0 {
+		if _, ok := types.Universe.Lookup(bare).(*types.TypeName); ok && !located {
+			return nil // predeclared, and matched by name like an imported one
+		}
+		fail("%s: //borgo:type names %s, which is not a type this api package can refer to; the directive would never apply", pos, goType)
+	}
+	if located {
+		for _, obj := range candidates {
+			if shortPos(pkg, obj) == locator {
+				return obj
+			}
+		}
+		fail("%s: //borgo:type %s names no type declared there; this api package declares %s at %s",
+			pos, goType, bare, strings.Join(overridePositions(pkg, candidates), ", "))
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	// the package-level one wins outright: it is what a bare name means, and
+	// the function-local ones are not what the author was pointing at
+	for _, obj := range candidates {
+		if obj.Parent() == pkg.Types.Scope() {
+			return obj
+		}
+	}
+	fail("%s: //borgo:type %s is ambiguous: this api package declares %d types named %s, at %s. Name the one you mean as %s@%s",
+		pos, goType, len(candidates), bare, strings.Join(overridePositions(pkg, candidates), ", "),
+		bare, shortPos(pkg, candidates[0]))
+	return nil
+}
+
+// checkImportedOverride checks a "pkgpath.Name" against the package imported
+// under that path. A path the api package does not import is left alone - it
+// may still be reached through a helper package, and guessing there would fail
+// runs that are perfectly correct.
+func checkImportedOverride(pkg *packages.Package, path, name, goType string, pos token.Position) {
 	if pkg.Types == nil {
-		return true
+		return
 	}
 	for _, imp := range pkg.Types.Imports() {
 		if imp.Path() != path {
 			continue
 		}
-		_, ok := imp.Scope().Lookup(name).(*types.TypeName)
-		return ok
-	}
-	return true
-}
-
-// scopeDeclaresType reports whether a scope or any scope nested in it declares
-// a type of that name.
-func scopeDeclaresType(s *types.Scope, name string) bool {
-	if _, ok := s.Lookup(name).(*types.TypeName); ok {
-		return true
-	}
-	for i := 0; i < s.NumChildren(); i++ {
-		if scopeDeclaresType(s.Child(i), name) {
-			return true
+		if _, ok := imp.Scope().Lookup(name).(*types.TypeName); !ok {
+			fail("%s: //borgo:type names %s, which is not a type this api package can refer to; the directive would never apply", pos, goType)
 		}
 	}
-	return false
+}
+
+// declaredTypes returns every type of that name the api package declares, at
+// package level and in any function body, in source order so the run's errors
+// and its choices do not move between builds.
+func declaredTypes(pkg *packages.Package, name string) []*types.TypeName {
+	if pkg.Types == nil {
+		return nil
+	}
+	var found []*types.TypeName
+	var walk func(s *types.Scope)
+	walk = func(s *types.Scope) {
+		if obj, ok := s.Lookup(name).(*types.TypeName); ok {
+			// a type parameter is a name inside one signature, never a type a
+			// response can be built from
+			if _, isParam := obj.Type().(*types.TypeParam); !isParam {
+				found = append(found, obj)
+			}
+		}
+		for i := 0; i < s.NumChildren(); i++ {
+			walk(s.Child(i))
+		}
+	}
+	walk(pkg.Types.Scope())
+	sort.Slice(found, func(i, j int) bool {
+		a, b := pkg.Fset.Position(found[i].Pos()), pkg.Fset.Position(found[j].Pos())
+		if a.Filename != b.Filename {
+			return a.Filename < b.Filename
+		}
+		return a.Offset < b.Offset
+	})
+	return found
+}
+
+func overridePositions(pkg *packages.Package, objs []*types.TypeName) []string {
+	out := make([]string, 0, len(objs))
+	for _, obj := range objs {
+		out = append(out, shortPos(pkg, obj))
+	}
+	return out
+}
+
+func shortPos(pkg *packages.Package, obj *types.TypeName) string {
+	p := pkg.Fset.Position(obj.Pos())
+	return fmt.Sprintf("%s:%d", filepath.Base(p.Filename), p.Line)
 }
 
 type union struct {
@@ -982,21 +1079,23 @@ func (g *tsGen) bridgeTypes(pkg *packages.Package, decls map[*types.Func]*ast.Fu
 			switch name, sel := borgoFunc(pkg.TypesInfo, call); name {
 			case "JSON", "Bind", "BindMax":
 				if inst, ok := pkg.TypesInfo.Instances[sel]; ok && inst.TypeArgs.Len() == 1 {
+					// every one of these hands the value to encoding/json through
+					// an any, so what reaches the wire is the unaddressable shape
 					if name != "JSON" {
-						req.add(g.tsType(inst.TypeArgs.At(0)))
+						req.add(g.tsType(inst.TypeArgs.At(0), false))
 					} else if len(call.Args) != 3 || !isErrorStatus(pkg.TypesInfo, call.Args[1]) {
-						resp.add(g.tsType(inst.TypeArgs.At(0)))
+						resp.add(g.tsType(inst.TypeArgs.At(0), false))
 					}
 				}
 			case "WriteJSON":
 				if len(call.Args) == 3 && !isErrorStatus(pkg.TypesInfo, call.Args[1]) {
 					if tv := pkg.TypesInfo.Types[call.Args[2]]; tv.Type != nil {
-						resp.add(g.tsType(types.Default(tv.Type)))
+						resp.add(g.tsType(types.Default(tv.Type), false))
 					}
 				}
 			case "":
 				if t := encodedType(pkg.TypesInfo, call); t != nil {
-					resp.add(g.tsType(t))
+					resp.add(g.tsType(t, false))
 					return true
 				}
 				fn := callee(pkg.TypesInfo, call)
@@ -1046,39 +1145,27 @@ func isErrorStatus(info *types.Info, expr ast.Expr) bool {
 	return ok && v >= 300
 }
 
-// hasCustomMarshal reports whether t can marshal through json.Marshaler in some
-// position - slice elements and pointed-to values included, which are the
-// addressable ones a pointer-receiver MarshalJSON reaches.
-func hasCustomMarshal(t types.Type) bool { return hasMarshalMethod(t, "MarshalJSON", true) }
-
-// marshalsEverywhere reports whether t marshals through json.Marshaler in every
-// position. A MarshalJSON on the pointer receiver does not: inside
-// json.Marshal(v any) the root is unaddressable, and so are a struct field of it
-// and a map value, so those reach the wire as the Go shape instead - the same
-// split textMarshalTS handles for MarshalText.
-func marshalsEverywhere(t types.Type) bool { return hasMarshalMethod(t, "MarshalJSON", false) }
-
-// textMarshalTS types a value that reaches the wire through
-// encoding.TextMarshaler - how uuid.UUID, netip.Addr and hand written enums
-// become quoted strings whatever their Go shape is.
+// marshalTS reports the shape t reaches the wire as when it marshals itself,
+// for a value in an addressable position or not. It follows the order
+// encoding/json's newTypeEncoder does - MarshalJSON before MarshalText, and a
+// method declared on the pointer receiver only where the value can be
+// addressed - so a type carrying a pointer-receiver MarshalJSON and a
+// value-receiver MarshalText really does reach the wire both ways in one
+// response: "js" as a slice element, "txt" as the root.
 //
-// encoding/json only calls a MarshalText declared on the pointer receiver when
-// the value it holds is addressable, and inside a json.Marshal(v any) most are
-// not: not v itself, not a struct field of it, not a map value - but a slice
-// element is, and so is anything behind a pointer. One named type can reach
-// the wire both ways in a single response, so a pointer-only marshaler has no
-// single shape to report and the type is the union of the two. raw yields the
-// shape of the non-marshaling half and is called only when it is needed: an
-// anonymous struct is its own underlying type, so reaching for it through
-// tsType would not terminate.
-func (g *tsGen) textMarshalTS(t types.Type, raw func() string) (string, bool) {
-	if hasCustomMarshal(t) || !hasMarshalMethod(t, "MarshalText", true) {
-		return "", false
-	}
-	if hasMarshalMethod(t, "MarshalText", false) {
+// MarshalJSON output is unknown here (any JSON at all); MarshalText output is
+// always a quoted string, which is how uuid.UUID, netip.Addr and hand written
+// enums stay strings whatever their Go shape is.
+func marshalTS(t types.Type, addressable bool) (string, bool) {
+	switch {
+	case hasMarshalMethod(t, "MarshalJSON", false),
+		addressable && hasMarshalMethod(t, "MarshalJSON", true):
+		return "unknown", true
+	case hasMarshalMethod(t, "MarshalText", false),
+		addressable && hasMarshalMethod(t, "MarshalText", true):
 		return "string", true
 	}
-	return tsUnion("string", raw()), true
+	return "", false
 }
 
 // hasMarshalMethod looks for a method with the exact func() ([]byte, error)
@@ -1102,7 +1189,17 @@ func hasMarshalMethod(t types.Type, name string, addressable bool) bool {
 		sig.Results().At(1).Type().String() == "error"
 }
 
-func (g *tsGen) tsType(t types.Type) string {
+// tsType renders t as TypeScript. addressable says whether the value sits
+// where encoding/json can take its address, which is the whole of what decides
+// whether a MarshalJSON or MarshalText declared on the pointer receiver runs.
+// json.Marshal's own argument is not addressable, and neither is a map value or
+// anything behind an interface; a slice element and everything behind a pointer
+// always are; a struct field, an array element and a value-embedded struct
+// inherit from what holds them, while a group promoted through an embedded
+// pointer is reached with a dereference and so is addressable wherever the
+// outer value sits. Every one of these is pinned to a json.Marshal of the
+// shape it describes in TestAddressableVariantsMatchEncodingJSON.
+func (g *tsGen) tsType(t types.Type, addressable bool) string {
 	switch t := t.(type) {
 	case *types.Named:
 		obj := t.Obj()
@@ -1118,32 +1215,20 @@ func (g *tsGen) tsType(t types.Type) string {
 		if obj.Pkg() != nil && obj.Pkg().Path() == "encoding/json" && obj.Name() == "Number" {
 			return "number"
 		}
-		if marshalsEverywhere(t) {
-			return "unknown"
-		}
-		shape := func() string {
-			if s, ok := t.Underlying().(*types.Struct); ok {
-				return g.interfaceFor(t, s)
-			}
-			return g.namedFor(t)
-		}
-		if hasCustomMarshal(t) {
-			// pointer receiver only, so one type reaches the wire both ways in
-			// a single response - through the marshaler where it is addressable
-			// and as its Go shape where it is not
-			return tsUnion("unknown", shape())
-		}
-		if ts, ok := g.textMarshalTS(t, func() string { return g.tsType(t.Underlying()) }); ok {
+		if ts, ok := marshalTS(t, addressable); ok {
 			return ts
 		}
-		return shape()
+		if s, ok := t.Underlying().(*types.Struct); ok {
+			return g.interfaceFor(t, s, addressable)
+		}
+		return g.namedFor(t, addressable)
 	case *types.Alias:
 		// an alias is a name of its own, so a //borgo:type may target it
 		// instead of the type it stands for
 		if ts, ok := g.override(t.Obj()); ok {
 			return ts
 		}
-		return g.tsType(types.Unalias(t))
+		return g.tsType(types.Unalias(t), addressable)
 	case *types.Basic:
 		switch {
 		case t.Info()&types.IsBoolean != 0:
@@ -1155,28 +1240,28 @@ func (g *tsGen) tsType(t types.Type) string {
 		}
 		return "unknown"
 	case *types.Pointer:
-		return nullable(g.tsType(t.Elem()))
+		return nullable(g.tsType(t.Elem(), true))
 	case *types.Slice:
 		// encoding/json base64s a slice of any byte-kinded element, named or
 		// aliased, not just of the predeclared byte - unless that element
 		// marshals itself, by MarshalJSON or by MarshalText, in which case the
 		// slice is written element by element like any other. Slice elements
 		// are addressable, so a marshaler on the pointer receiver counts.
-		if b, ok := types.Unalias(t.Elem()).Underlying().(*types.Basic); ok &&
-			b.Kind() == types.Uint8 && !hasCustomMarshal(t.Elem()) &&
-			!hasMarshalMethod(t.Elem(), "MarshalText", true) {
-			return nullable("string")
+		if b, ok := types.Unalias(t.Elem()).Underlying().(*types.Basic); ok && b.Kind() == types.Uint8 {
+			if _, self := marshalTS(t.Elem(), true); !self {
+				return nullable("string")
+			}
 		}
 		// a nil slice is "null", never "[]": only an array is always there
-		return nullable("Array<" + g.tsType(t.Elem()) + ">")
+		return nullable("Array<" + g.tsType(t.Elem(), true) + ">")
 	case *types.Array:
-		return "Array<" + g.tsType(t.Elem()) + ">"
+		return "Array<" + g.tsType(t.Elem(), addressable) + ">"
 	case *types.Map:
 		// encoding/json keys an object by a string or an integer key, and
 		// rejects the whole value for anything else it cannot name - floats
 		// and complexes included, which IsNumeric would have let through
 		if b, ok := t.Key().Underlying().(*types.Basic); ok && b.Info()&(types.IsString|types.IsInteger) != 0 {
-			return nullable("Record<string, " + g.tsType(t.Elem()) + ">")
+			return nullable("Record<string, " + g.tsType(t.Elem(), false) + ">")
 		}
 		if hasMarshalMethod(t.Key(), "MarshalText", false) {
 			// encoding/json keys the object by MarshalText output, and only by
@@ -1184,40 +1269,125 @@ func (g *tsGen) tsType(t types.Type) string {
 			// carrying both is still a string key and not "unknown". A key is
 			// never addressable either, so a MarshalText on the pointer receiver
 			// does not apply - encoding/json refuses to marshal the map at all
-			return nullable("Record<string, " + g.tsType(t.Elem()) + ">")
+			return nullable("Record<string, " + g.tsType(t.Elem(), false) + ">")
 		}
 		return "unknown"
 	case *types.Struct:
 		// an anonymous struct promotes its embedded methods too, so one
 		// embedding a time.Time reaches the wire as a JSON string and never as
 		// the object its fields describe
-		if marshalsEverywhere(t) {
-			return "unknown"
-		}
-		object := func() string { return "{ " + strings.Join(g.fields(t), "; ") + " }" }
-		if hasCustomMarshal(t) {
-			return tsUnion("unknown", object())
-		}
-		if ts, ok := g.textMarshalTS(t, object); ok {
+		if ts, ok := marshalTS(t, addressable); ok {
 			return ts
 		}
-		return object()
+		return "{ " + strings.Join(g.fields(t, addressable), "; ") + " }"
 	}
 	return "unknown"
 }
 
+// addrSensitive reports whether t's shape depends on where the value sits -
+// whether a marshaler declared on the pointer receiver only is reachable from t
+// along a path that carries addressability. Such a type needs two declarations
+// in the generated file, one per position; every other type needs one.
+//
+// Only by-value containment carries addressability (struct fields, array
+// elements, value-embedded structs) and by-value containment cannot be cyclic
+// in Go, so this walk terminates on the shape of the type alone; seen guards
+// against the malformed types a half-broken build can still hand us.
+func (g *tsGen) addrSensitive(t types.Type) bool {
+	return g.sensitive(t, map[types.Type]bool{})
+}
+
+func (g *tsGen) sensitive(t types.Type, seen map[types.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch t := t.(type) {
+	case *types.Named:
+		obj := t.Obj()
+		if _, ok := g.override(obj); ok {
+			return false
+		}
+		if obj.Pkg() != nil && obj.Pkg().Path() == "time" && obj.Name() == "Time" {
+			return false
+		}
+		if obj.Pkg() != nil && obj.Pkg().Path() == "encoding/json" && obj.Name() == "Number" {
+			return false
+		}
+		if answered, differs := marshalsDiffer(t); answered {
+			return differs
+		}
+		return g.sensitive(t.Underlying(), seen)
+	case *types.Alias:
+		if _, ok := g.override(t.Obj()); ok {
+			return false
+		}
+		return g.sensitive(types.Unalias(t), seen)
+	case *types.Array:
+		return g.sensitive(t.Elem(), seen)
+	case *types.Struct:
+		if answered, differs := marshalsDiffer(t); answered {
+			return differs
+		}
+		return g.sensitiveFields(t, map[*types.Struct]bool{t: true}, seen)
+	}
+	// a pointer and a slice element are addressable wherever they sit; a map
+	// value and anything behind an interface never are. None of the four passes
+	// the caller's position on, so none of them can differ by it
+	return false
+}
+
+// marshalsDiffer reports whether t marshals itself at all, and if so whether it
+// does it differently in the two positions.
+func marshalsDiffer(t types.Type) (answered, differs bool) {
+	plain, okPlain := marshalTS(t, false)
+	addr, okAddr := marshalTS(t, true)
+	if !okPlain && !okAddr {
+		return false, false
+	}
+	return true, okPlain != okAddr || plain != addr
+}
+
+func (g *tsGen) sensitiveFields(s *types.Struct, expanded map[*types.Struct]bool, seen map[types.Type]bool) bool {
+	for i := 0; i < s.NumFields(); i++ {
+		plan := planField(s, i)
+		switch {
+		case plan.skip:
+		case plan.embedded != nil:
+			// a group promoted through an embedded pointer is reached with a
+			// dereference, so it is addressable whatever holds the outer value
+			// and cannot differ by position
+			if plan.viaPtr || expanded[plan.embedded] {
+				continue
+			}
+			expanded[plan.embedded] = true
+			differs := g.sensitiveFields(plan.embedded, expanded, seen)
+			delete(expanded, plan.embedded)
+			if differs {
+				return true
+			}
+		case g.sensitive(s.Field(i).Type(), seen):
+			return true
+		}
+	}
+	return false
+}
+
+// override returns the TypeScript a //borgo:type directive puts in place of a
+// Go type. A directive for an api type was bound to one declaration when it was
+// collected, so a type sharing its name in another function body is not it.
 func (g *tsGen) override(obj *types.TypeName) (string, bool) {
+	if ts, ok := g.overrides.byObj[obj]; ok {
+		return ts, true
+	}
 	if obj.Pkg() != nil {
-		if ts, ok := g.overrides[obj.Pkg().Path()+"."+obj.Name()]; ok {
+		if ts, ok := g.overrides.byName[obj.Pkg().Path()+"."+obj.Name()]; ok {
 			return ts, true
 		}
+		return "", false
 	}
-	if obj.Pkg() == nil || obj.Pkg() == g.apiPkg {
-		if ts, ok := g.overrides[obj.Name()]; ok {
-			return ts, true
-		}
-	}
-	return "", false
+	ts, ok := g.overrides.byName[obj.Name()] // predeclared
+	return ts, ok
 }
 
 // typeArgSuffix mangles instantiated type arguments into a readable,
@@ -1251,14 +1421,23 @@ func (g *tsGen) typeArgSuffix(args *types.TypeList) string {
 	return b.String()
 }
 
+// addrSuffix marks the declaration of a type as encoding/json writes it where
+// the value is addressable. "$" cannot occur in a Go identifier, so the variant
+// name can never be one a user type would claim.
+const addrSuffix = "$Addressable"
+
 // reserveName picks the TypeScript identifier for a Go type and claims it, so
 // two Go types that share a short name cannot collide in the generated file.
-func (g *tsGen) reserveName(t *types.Named) string {
+func (g *tsGen) reserveName(t *types.Named, addressable bool) string {
 	obj := t.Obj()
 	name := obj.Name() + g.typeArgSuffix(t.TypeArgs())
+	if addressable {
+		name += addrSuffix
+	}
 	if g.taken[name] && obj.Pkg() != nil {
-		pkgName := obj.Pkg().Name()
-		name = strings.ToUpper(pkgName[:1]) + pkgName[1:] + name
+		// title-cased, so the one-off `type resp struct{...}` a second handler
+		// declares reads ApiResp and not Apiresp
+		name = title(obj.Pkg().Name()) + title(name)
 	}
 	base := name
 	for i := 2; g.taken[name]; i++ {
@@ -1266,6 +1445,23 @@ func (g *tsGen) reserveName(t *types.Named) string {
 	}
 	g.taken[name] = true
 	return name
+}
+
+func title(s string) string {
+	for i, r := range s {
+		return string(unicode.ToUpper(r)) + s[i+len(string(r)):]
+	}
+	return s
+}
+
+// variantKey identifies one of the up to two declarations a named type gets:
+// its plain shape and, for a type whose shape depends on where the value sits,
+// the shape it takes where encoding/json can address it.
+func (g *tsGen) variantKey(t *types.Named, addressable bool) (string, bool) {
+	if !addressable || !g.addrSensitive(t) {
+		return typeKey(t), false
+	}
+	return typeKey(t) + "#addr", true
 }
 
 // typeKey identifies a named type across the names, expanding and taken maps.
@@ -1315,50 +1511,62 @@ func pointerCycle(t types.Type) bool {
 // unless the expansion re-enters this same type, which means the type is
 // recursive and has to be able to refer to itself. Then it gets a declaration
 // of its own and the inner reference resolves to that name.
-func (g *tsGen) namedFor(t *types.Named) string {
+func (g *tsGen) namedFor(t *types.Named, addressable bool) string {
 	if pointerCycle(t) {
 		return "null"
 	}
-	key := typeKey(t)
+	key, addr := g.variantKey(t, addressable)
 	if name, ok := g.names[key]; ok {
 		return name
 	}
 	if g.expanding[key] {
-		name := g.reserveName(t)
+		name := g.reserveName(t, addr)
 		g.names[key] = name
 		return name
 	}
 	g.expanding[key] = true
-	body := g.tsType(t.Underlying())
+	body := g.tsType(t.Underlying(), addr)
 	delete(g.expanding, key)
 	// a name appeared while we were inside: an inner frame hit the cycle and
 	// reserved one, and this frame owns the declaration that gives it meaning
 	if name, ok := g.names[key]; ok {
-		g.defs = append(g.defs, "export type "+name+" = "+body+";\n")
+		g.defs = append(g.defs, addrNote(t, addr)+"export type "+name+" = "+body+";\n")
 		return name
 	}
 	return body
 }
 
-func (g *tsGen) interfaceFor(t *types.Named, s *types.Struct) string {
-	key := typeKey(t)
+func (g *tsGen) interfaceFor(t *types.Named, s *types.Struct, addressable bool) string {
+	key, addr := g.variantKey(t, addressable)
 	if name, ok := g.names[key]; ok {
 		return name
 	}
-	name := g.reserveName(t)
+	name := g.reserveName(t, addr)
 	g.names[key] = name
 
-	fields := g.fields(s)
-	g.defs = append(g.defs, "export interface "+name+" {\n  "+strings.Join(fields, ";\n  ")+";\n}\n")
+	fields := g.fields(s, addr)
+	g.defs = append(g.defs, addrNote(t, addr)+"export interface "+name+" {\n  "+strings.Join(fields, ";\n  ")+";\n}\n")
 	return name
+}
+
+// addrNote heads the addressable variant of a type with the reason it exists:
+// two declarations for one Go type is otherwise a puzzle, and the reference
+// sites alone do not say which position produced which.
+func addrNote(t *types.Named, addressable bool) string {
+	if !addressable {
+		return ""
+	}
+	return "// " + t.Obj().Name() + " as encoding/json writes it where the value is\n" +
+		"// addressable - a slice element, or anything behind a pointer - so the\n" +
+		"// pointer-receiver marshalers inside it do run.\n"
 }
 
 // fields returns the interface members of a struct as encoding/json would
 // write it: json tags for naming, omitempty for optionality, embedded structs
 // flattened, and the name conflicts that flattening creates resolved.
-func (g *tsGen) fields(s *types.Struct) []string {
+func (g *tsGen) fields(s *types.Struct, addressable bool) []string {
 	var found []jsonField
-	g.collectFields(s, 0, false, map[*types.Struct]bool{s: true}, &found)
+	g.collectFields(s, 0, false, addressable, map[*types.Struct]bool{s: true}, &found)
 
 	// encoding/json's promotion rule: of the fields that would marshal under
 	// the same name, the shallowest wins; at equal depth exactly one tagged
@@ -1398,6 +1606,52 @@ type jsonField struct {
 	tagged   bool // named by a json tag rather than by the field name
 }
 
+// fieldPlan is what encoding/json's typeFields decides about one struct field
+// before any of it is typed: dropped, flattened into the parent, or written
+// under a name. It is split out so the shape walk and the addressability walk
+// cannot disagree about which fields reach the wire.
+type fieldPlan struct {
+	skip     bool
+	embedded *types.Struct // non-nil when the field is flattened into the parent
+	viaPtr   bool          // and reached through a pointer
+	name     string
+	tagged   bool // named by a json tag rather than by the field name
+	opts     string
+}
+
+func planField(s *types.Struct, i int) fieldPlan {
+	f := s.Field(i)
+	name, opts, skip := parseJSONTag(s.Tag(i))
+	if !validTagName(name) {
+		// not a name encoding/json will use; the field keeps its Go one
+		name = ""
+	}
+	et := f.Type()
+	p, ptr := types.Unalias(et).(*types.Pointer)
+	if ptr {
+		et = p.Elem()
+	}
+	var embedded *types.Struct
+	if named, ok := types.Unalias(et).(*types.Named); ok {
+		embedded, _ = named.Underlying().(*types.Struct)
+	}
+	if skip || (!f.Exported() && !(f.Embedded() && embedded != nil)) {
+		return fieldPlan{skip: true}
+	}
+	// no Marshaler check here, and none in encoding/json's typeFields either:
+	// an embedded struct is flattened whatever methods it carries, and the
+	// marshaler only decides anything once it is promoted to the outer type -
+	// in which case tsType answered before this ran
+	if f.Embedded() && name == "" && embedded != nil {
+		return fieldPlan{embedded: embedded, viaPtr: ptr}
+	}
+	tagged := name != ""
+	if !tagged {
+		name = f.Name()
+	}
+	return fieldPlan{name: name, tagged: tagged, opts: opts}
+}
+
 // collectFields walks a struct the way encoding/json's typeFields does,
 // flattening embedded structs - including embedded unexported struct types,
 // whose exported fields do reach the wire. expanded holds the struct types
@@ -1408,58 +1662,33 @@ type jsonField struct {
 // viaPtr marks the fields promoted through an embedded pointer. encoding/json
 // skips the whole promoted group when that pointer is nil - json.Marshal of a
 // zero Outer in `type Outer struct{ *Inner; B int }` is {"b":1}, with no sign
-// of Inner's fields - so none of them can be promised.
-func (g *tsGen) collectFields(s *types.Struct, depth int, viaPtr bool, expanded map[*types.Struct]bool, out *[]jsonField) {
+// of Inner's fields - so none of them can be promised. The same dereference
+// makes that group addressable whatever holds the outer value.
+func (g *tsGen) collectFields(s *types.Struct, depth int, viaPtr, addressable bool, expanded map[*types.Struct]bool, out *[]jsonField) {
 	for i := 0; i < s.NumFields(); i++ {
-		f := s.Field(i)
-		name, opts, skip := parseJSONTag(s.Tag(i))
-		if !validTagName(name) {
-			// not a name encoding/json will use; the field keeps its Go one
-			name = ""
-		}
-		et := f.Type()
-		p, ptr := types.Unalias(et).(*types.Pointer)
-		if ptr {
-			et = p.Elem()
-		}
-		named, _ := types.Unalias(et).(*types.Named)
-		var embeddedStruct *types.Struct
-		if named != nil {
-			embeddedStruct, _ = named.Underlying().(*types.Struct)
-		}
-
-		if !f.Exported() && !(f.Embedded() && embeddedStruct != nil) {
+		plan := planField(s, i)
+		if plan.skip {
 			continue
 		}
-		if skip {
-			continue
-		}
-		// no Marshaler check here, and none in encoding/json's typeFields
-		// either: an embedded struct is flattened whatever methods it carries,
-		// and the marshaler only decides anything once it is promoted to the
-		// outer type - in which case tsType answered before collectFields ran
-		if f.Embedded() && name == "" && embeddedStruct != nil {
-			if expanded[embeddedStruct] {
+		if plan.embedded != nil {
+			if expanded[plan.embedded] {
 				continue
 			}
-			expanded[embeddedStruct] = true
-			g.collectFields(embeddedStruct, depth+1, viaPtr || ptr, expanded, out)
-			delete(expanded, embeddedStruct)
+			expanded[plan.embedded] = true
+			g.collectFields(plan.embedded, depth+1, viaPtr || plan.viaPtr, addressable || plan.viaPtr, expanded, out)
+			delete(expanded, plan.embedded)
 			continue
 		}
-		tagged := name != ""
-		if !tagged {
-			name = f.Name()
-		}
+		f := s.Field(i)
 		optional := ""
-		if viaPtr || hasOpt(opts, "omitzero") || (hasOpt(opts, "omitempty") && canBeEmpty(f.Type())) {
+		if viaPtr || hasOpt(plan.opts, "omitzero") || (hasOpt(plan.opts, "omitempty") && canBeEmpty(f.Type())) {
 			// omitzero drops the field whenever the value is the zero of its
 			// type - or its IsZero() says so - which omitempty never does for
 			// a struct: a `json:"t,omitzero"` time.Time is routinely absent
 			optional = "?"
 		}
-		ts := g.tsType(f.Type())
-		if hasOpt(opts, "string") {
+		ts := g.tsType(f.Type(), addressable)
+		if hasOpt(plan.opts, "string") {
 			// ,string quotes booleans and pointed-to numbers too, not just
 			// plain ones: {"b":"true","p":"5"}
 			switch ts {
@@ -1469,7 +1698,7 @@ func (g *tsGen) collectFields(s *types.Struct, depth int, viaPtr bool, expanded 
 				ts = "string | null"
 			}
 		}
-		*out = append(*out, jsonField{name: name, optional: optional, ts: ts, depth: depth, tagged: tagged})
+		*out = append(*out, jsonField{name: plan.name, optional: optional, ts: ts, depth: depth, tagged: plan.tagged})
 	}
 }
 

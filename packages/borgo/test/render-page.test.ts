@@ -446,6 +446,40 @@ describe("prepareShell", () => {
     expect(s.stateTail).toBe(';window.__BORGO_TITLE__="Shell";window.__BORGO_DEV__=1</script>');
   });
 
+  // THE DEV FLAG HAS TO REACH EVERY PAGE THAT CAN RUN JS.
+  //
+  // __BORGO_DEV__ was written by the props script alone - and a hydrate=false
+  // page emits no props script. Such a page is not inert: islands hydrate on it
+  // through their own entry, so it runs client js with the flag absent, and
+  // every guard reading it silently took the production branch. The one that
+  // matters is registerServiceWorker, which index.ts advertises calling from an
+  // island: it installed a caching service worker over a development session,
+  // which then serves stale assets from cache and is the single most confusing
+  // state to debug out of. The signal has to cover the pages that can execute
+  // js, not the pages that hydrate.
+  test("a zero-js dev page carries the dev flag, with or without islands", () => {
+    const s = prepareShell(SHELL, true);
+    for (const tail of [s.zeroJsEnd.plain, s.zeroJsEnd.islands]) {
+      expect(tail).toContain("window.__BORGO_DEV__=1");
+    }
+    // the islands tail really is the zero-js page that still runs js
+    expect(s.zeroJsEnd.islands).toContain("islands-client.js");
+    expect(s.zeroJsEnd.islands).not.toContain("__PROPS__");
+    // and it is set before the reload client opens its socket, so anything the
+    // page runs afterwards sees it
+    const tail = s.zeroJsEnd.plain;
+    expect(tail.indexOf("__BORGO_DEV__")).toBeLessThan(tail.indexOf("WebSocket"));
+  });
+
+  test("production zero-js tails carry no dev flag and no reload client", () => {
+    const s = prepareShell(SHELL, false);
+    for (const tail of [s.zeroJsEnd.plain, s.zeroJsEnd.islands]) {
+      expect(tail).not.toContain("__BORGO_DEV__");
+      expect(tail).not.toContain("WebSocket");
+    }
+    expect(s.stateTail).not.toContain("__BORGO_DEV__");
+  });
+
   test("a shell missing optional markers degrades instead of throwing", () => {
     const bare = "<html><body><!--app--></body></html>";
     const s = prepareShell(bare, false);

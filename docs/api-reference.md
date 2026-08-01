@@ -210,7 +210,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `PORT` (`3000`) | front server; Go, to find the front server for `Push` | Front server port. | stable |
 | `API_PORT` (`3501`) | Go server; front server, to build the proxy target | Go API port. | stable |
 | `SESSION_SECRET` | Go | HMAC key for signed-cookie sessions. At least 32 bytes. Missing is logged at startup and fails session routes per request; **shorter than 32 bytes is fatal at startup** — see [sessions](auth-and-sessions.md#sessions). | stable |
-| `SESSION_SECURE` | Go and front server | `1` adds `Secure` to the session and CSRF cookies. | stable |
+| `SESSION_SECURE` | Go and front server | `1`/`true` adds `Secure` to the session and CSRF cookies; `0`/`false` and unset do not. Both halves parse it with the same grammar and **refuse a value that is neither** at startup, rather than reading it as "not secure". | stable |
 | `BORGO_PUSH_KEY` | Go and front server | Shared secret for `Push` across hosts. Once set it *replaces* the loopback check. | stable |
 | `NO_COLOR` | Go and front server | Any value disables ANSI colour. | stable |
 
@@ -221,7 +221,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `API_URL` (`http://localhost:$API_PORT`) | Where the front server reaches the api, for split deployments. | stable |
 | `BORGO_API_TIMEOUT` (`30000`) | Milliseconds to wait for api response headers before answering 504; `0` disables. | stable |
 | `BORGO_MAX_BODY` (`33554432`) | Largest request body the front server accepts and buffers, in bytes. | stable |
-| `BORGO_IDLE_TIMEOUT` (`30`) | Socket read deadline in **seconds** — how long bun waits for an inbound request's headers and body. `0` disables it; bun caps it at `255` and borgo clamps to that. Event streams are exempted per response, so raising this is not what keeps SSE alive. **Read by the Go server too, under the same name and a different grammar** — see the note below. | stable |
+| `BORGO_FRONT_READ_TIMEOUT` (`30`) | Socket read deadline in **seconds** — how long bun waits for an inbound request's headers and body. `0` disables it; bun caps it at `255` and borgo clamps to that. The deadline is lifted per *request* the moment nothing is left to dribble at us (a request with no body at all, at the top of `fetch()`; a proxied one, once its body is buffered in full), so raising this is not what keeps SSE alive. **`FRONT` is load-bearing** — see the note below. | stable |
 | `BORGO_CSRF` | `0` disables CSRF checks on form actions, `1` forces them in dev. | stable |
 | `BORGO_SECURITY_HEADERS` | `0` drops the security headers and the CSP. | stable |
 | `BORGO_CSP` | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request. | stable |
@@ -238,15 +238,15 @@ Read at runtime unless noted. Defaults in parentheses.
 | --- | --- | --- |
 | `FRONT_URL` (`http://localhost:$PORT`) | Where `Push` reaches the front server. | stable |
 | `BORGO_READ_HEADER_TIMEOUT` (`5s`) | Cap on reading request headers. | stable |
-| `BORGO_IDLE_TIMEOUT` (`2m`) | Idle keep-alive reclaim. **Also read by the front server**, as seconds — see the note below. | stable |
-| `BORGO_READ_TIMEOUT` (`0`, off) | Whole-request read deadline. | stable |
+| `BORGO_IDLE_TIMEOUT` (`2m`) | Idle keep-alive reclaim. Go only — the front server stopped reading this name in 0.21. | stable |
+| `BORGO_READ_TIMEOUT` (`0`, off) | Whole-request read deadline. Go only — the front server's own read deadline is `BORGO_FRONT_READ_TIMEOUT`. | stable |
 | `BORGO_WRITE_TIMEOUT` (`0`, off) | Whole-response write deadline; `SSE` exempts its own connection. | stable |
 | `BORGO_SHUTDOWN_TIMEOUT` (`10s`) | Grace period for in-flight requests; `0` waits indefinitely. | stable |
 | `BORGO_HASH_SLOTS` (`max(1, GOMAXPROCS/2)`) | Password hashes that may run at once. A value that is not a positive integer is refused at startup. | stable |
 
 The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` is a positive integer and `FRONT_URL` a URL. A malformed duration or a non-positive slot count panics at boot, before the startup banner.
 
-> **`BORGO_IDLE_TIMEOUT` is one name read by both halves, and they do not agree on it.** The Go server parses it as a duration (`time.ParseDuration`) and **panics at boot** on anything it cannot read. The front server parses it as an integer number of **seconds** and, on anything it cannot read, **silently falls back to 30**. So `BORGO_IDLE_TIMEOUT=2m` gives Go two minutes and leaves the front server on its default; `BORGO_IDLE_TIMEOUT=120` gives the front server two minutes and stops the Go binary from booting. `borgo start` exports one environment to both children, so there is no value that means the same thing to both. Until the two are separated, set it only if you are running the halves as separate processes with separate environments, and check which half you are actually configuring.
+> **Why the front server's read deadline is called `BORGO_FRONT_READ_TIMEOUT`.** `borgo start` hands both children one environment, so a name both halves read is a name that cannot mean one thing. This knob was `BORGO_IDLE_TIMEOUT` once — which Go parses as a duration and **panics at boot** on anything it cannot read, while the front server parses whole **seconds** and **silently falls back to 30**. So `=2m` gave Go two minutes and left the front server quietly on its default, and `=120` gave the front server two minutes and stopped the Go binary from starting. Renaming it to `BORGO_READ_TIMEOUT` reproduced the defect exactly, because `newServer` in `borgo.go` reads *that* name too, with the same duration grammar and the same panic. A rename moves a collision; it does not close one. `FRONT` is the part that closes it, and a test fails the build if either grammar is ever pointed back at the other half's variable. Neither older name is honoured as an alias — an alias kept for compatibility keeps the collision alive.
 
 ### Build, dev loop and internal
 
@@ -349,9 +349,25 @@ These are as much a public API as any function: an app depends on them, and chan
 | Directive | Meaning | Stability |
 | --- | --- | --- |
 | `//borgo:route METHOD /path` | Mounts the following package-level handler. Must be the function's doc comment, no space after `//`, and the handler must be `func(http.ResponseWriter, *http.Request)` with no type parameters. | stable |
-| `//borgo:type <GoType> <TSType>` | Overrides the TypeScript type generated for a named Go type. | stable |
+| `//borgo:type <GoType> <TSType>` | Overrides the TypeScript type generated for a named Go type. May sit anywhere in the `api` package. | stable |
+| `//borgo:type <GoType>@<file.go>:<line> <TSType>` | The same, aimed at one specific declaration — for when a bare name is ambiguous. | stable |
 
 A comment that *looks* like a route directive but is not attached to a handler produces a warning rather than silence — as does a directive in a file the build excludes.
+
+`<GoType>` takes three spellings, and each resolves to **at most one** type:
+
+- `pkgpath.Name` for an imported type (`gorm.io/gorm.DeletedAt`). Checked against what the `api` package imports; a path it does not import is left alone, since the type may still be reached through a helper package.
+- a bare `Name` for a type the `api` package declares, or a predeclared one. It resolves to the **package-level** type if there is one, and to the sole function-local one if there is not.
+- `Name@file.go:line` to name one declaration outright. This form picks out a function-local type of the `api` package, so pairing it with a dotted imported name is an error.
+
+A bare name used to apply to *every* type of that name, so a directive meant for a package-level type silently rewrote each function-local `type resp struct{…}` that shared it. When a bare name is genuinely ambiguous borgogen now **fails the run**, listing every candidate and the spelling that settles it:
+
+```
+ambig.go:13:1: //borgo:type stamp is ambiguous: this api package declares 2 types
+named stamp, at ambig.go:17, ambig.go:25. Name the one you mean as stamp@ambig.go:17
+```
+
+Failing is the point: a directive that is well formed and still does nothing reads as applied, and leaves you looking at the type it was meant to replace. For the same reason the run also fails on a malformed directive, on one naming a Go type the `api` package cannot refer to, and on two directives mapping one type to different TypeScript.
 
 ### Markers, params and headers the runtime owns
 

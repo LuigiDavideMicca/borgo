@@ -231,6 +231,12 @@ export function Island({ name, props = {}, client = "load" }: IslandProps) {
 // registers a service worker in production only: a dev session held by a
 // caching sw is the fastest way to debug ghosts. safe to call from any
 // hydrated page or island; no-ops server-side and in unsupported browsers.
+//
+// __BORGO_DEV__ is the dev signal, and it has to be present on every page that
+// can run this - which is not the same set as the pages that hydrate. It used
+// to be written by the props script alone, so a `hydrate = false` page running
+// islands had no flag and installed the worker in development; prepareShell's
+// DEV_INLINE_CLIENT now carries it too, which is the half those pages get.
 export function registerServiceWorker(path = "/sw.js") {
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
   if (typeof window !== "undefined" && (window as { __BORGO_DEV__?: number }).__BORGO_DEV__) return;

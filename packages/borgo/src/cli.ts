@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assetsBuildMode, buildAssets, BundleFailed, warnDeadRoutes, type BuildResult } from "./build";
 import { banner, c, fmtMs, g } from "./colors";
-import { parseInitArgv } from "./deploy";
+import { parseInitArgv, unknownArg } from "./deploy";
 import { goBinName, runBorgogen } from "./util";
 
 const command = process.argv[2];
@@ -12,6 +12,17 @@ const command = process.argv[2];
 // tailwind is strictly opt-in: the flag (never detection) hands the css
 // pipeline to @tailwindcss/cli; the env carries it into child processes
 if (process.argv.includes("--tailwind")) process.env.BORGO_TAILWIND = "1";
+
+// refused here, before any command runs: a flag borgo does not know is a flag
+// the operator believes is doing something, and a build that ignores it exits 0
+// having done something other than what was asked
+const badArg = unknownArg(command, process.argv.slice(3));
+if (badArg) {
+  console.log(`\n  ${banner(command)}\n`);
+  console.log(`  ${c.red(g.err)} ${badArg}`);
+  console.log(`  usage: borgo ${command}${command === "start" ? " [--front-only]" : ""} [--tailwind]\n`);
+  process.exit(1);
+}
 
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} kB`;
 

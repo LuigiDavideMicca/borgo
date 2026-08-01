@@ -9,18 +9,22 @@
  *      pidfile that `--cleanup` drains.
  *   4. An implementation we could not run is reported as "not implemented",
  *      never as a zero and never omitted.
+ *   5. Whatever the harness cannot enforce in code, the report says out loud:
+ *      an unattested machine, a sweep that drifted, a knob given to one
+ *      subject only, bodies of different sizes behind the same path.
  *
  * Usage: bun bench/run.ts --help
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { captureEnvironment } from "./lib/env";
+import { checkCanonicalBody } from "./lib/canonical";
+import { captureClose, captureEnvironment, environmentWarnings } from "./lib/env";
 import { loadArgv, resolveLoadTool, runLoad, summarise, type LoadTool } from "./lib/load";
 import { listApps, resolveArgv, resolveEnv, type App } from "./lib/manifest";
-import { measureMemory, settledRss, sseHandshake } from "./lib/memory";
+import { measureMemory, sseHandshake, stableIdleRss } from "./lib/memory";
 import { resultsDir } from "./lib/paths";
 import { capture, cleanupStale, installCleanupHooks, killAll, portInUse, run, spawnServer, waitPortFree, type Spawned } from "./lib/proc";
-import { reportMarkdown, type Report, type RunConfig } from "./lib/report";
+import { driftBetweenPasses, reportMarkdown, type Report, type RunConfig } from "./lib/report";
 import { ALL_SCENARIO_IDS, SCENARIOS, scenarioById } from "./lib/scenarios";
 import type { AppResult, ResponseSample, ScenarioId, ScenarioResult } from "./lib/types";
 
@@ -213,6 +217,13 @@ async function waitReady(url: string, timeoutMs: number, proc: Spawned): Promise
  * a floor under the response so a suspiciously short body fails rather than
  * scores.
  *
+ * And where the contract pins the answer exactly, the answer is compared
+ * exactly: `expect.body` against an independent transliteration of CONTRACT.md
+ * (values and key order, not just key counts), `expect.exactBytes` and
+ * `expect.sha256` against the octets that arrived. Counting `"done":` a hundred
+ * times passes an implementation whose `done` is always false, which is cheaper
+ * to compute than the contract's items.
+ *
  * Returns what it saw, so the report can print response size beside req/s.
  */
 async function verify(base: string, id: ScenarioId): Promise<ResponseSample | undefined> {
@@ -240,9 +251,11 @@ async function verify(base: string, id: ScenarioId): Promise<ResponseSample | un
   if (scenario.expect.contentType && !contentType.includes(scenario.expect.contentType)) {
     throw new Error(`GET ${scenario.path} content-type "${contentType}" does not include "${scenario.expect.contentType}"`);
   }
-  const body = await res.text();
-  // bytes, not characters: the load tool moves bytes and so does the network
-  const bytes = Buffer.byteLength(body, "utf8");
+  // the raw octets, because that is what the load tool moves and what the
+  // contract's sha256 is over; the text is decoded from them
+  const raw = new Uint8Array(await res.arrayBuffer());
+  const body = new TextDecoder().decode(raw);
+  const bytes = raw.byteLength;
 
   for (const needle of scenario.expect.contains ?? []) {
     if (!body.includes(needle)) {
@@ -267,6 +280,27 @@ async function verify(base: string, id: ScenarioId): Promise<ResponseSample | un
       `GET ${scenario.path} returned ${bytes} bytes; the contract's floor is ${scenario.expect.minBytes}. ` +
         "A short body is not a fast body - refusing to time this.",
     );
+  }
+  if (scenario.expect.exactBytes !== undefined && bytes !== scenario.expect.exactBytes) {
+    throw new Error(
+      `GET ${scenario.path} returned ${bytes} bytes; the contract pins exactly ${scenario.expect.exactBytes}. ` +
+        "Fewer bytes and more bytes are both a different amount of work - refusing to time this.",
+    );
+  }
+  if (scenario.expect.sha256 !== undefined) {
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(raw);
+    const digest = hasher.digest("hex");
+    if (digest !== scenario.expect.sha256) {
+      throw new Error(
+        `GET ${scenario.path} served sha256 ${digest}; the contract pins ${scenario.expect.sha256}. ` +
+          "This is not the committed file.",
+      );
+    }
+  }
+  if (scenario.expect.body) {
+    const wrong = checkCanonicalBody(scenario.expect.body, body);
+    if (wrong) throw new Error(`GET ${scenario.path}: ${wrong}`);
   }
 
   return { status: res.status, contentType, bytes };
@@ -333,9 +367,15 @@ async function benchmarkApp(app: App, opts: Options, tool: LoadTool): Promise<Ap
     step(`start: ${start.join(" ")}`);
     server = spawnServer(start, { cwd: app.dir, env });
     const ttfr = await waitReady(base + app.manifest.readyPath, 120_000, server);
-    const boot = await settledRss(server.pid, { samples: 3, intervalMs: 300 });
-    result.startup = { timeToFirstResponseMs: ttfr, bootRssBytes: boot.rss };
-    step(`ready in ${ttfr.toFixed(0)} ms, ${(boot.rss / 1024 ** 2).toFixed(1)} MiB RSS`);
+    // polled to stability rather than sampled 600 ms in: a runtime read while
+    // it is still allocating reports how far along its growth curve it got,
+    // and the runtimes here do not grow at the same rate
+    const boot = await stableIdleRss(server.pid, { maxMs: 15_000 });
+    result.startup = { timeToFirstResponseMs: ttfr, bootRssBytes: boot.rss, bootRssStable: boot.stable };
+    step(
+      `ready in ${ttfr.toFixed(0)} ms, ${(boot.rss / 1024 ** 2).toFixed(1)} MiB RSS` +
+        (boot.stable ? "" : " [still growing when read]"),
+    );
 
     // memory first, always. Its baseline is "this server at rest", and a server
     // that has just absorbed thirty seconds of load at full concurrency is not
@@ -505,6 +545,15 @@ async function main() {
   if (selected.length === 0) throw new Error(`no implementation matched --apps ${opts.apps?.join(",")}`);
 
   const environment = await captureEnvironment(tool, opts.note);
+  // said out loud before an hour of measuring, not only in a file afterwards
+  log(
+    `  machine: ${(environment.idleCheck.busyRatioAtStart * 100).toFixed(1)}% cpu busy before starting` +
+      (environment.idleCheck.quiet ? " (idle enough)" : "  [NOT IDLE - these numbers will be contaminated]"),
+  );
+  if (!opts.note.trim()) {
+    log("  no --note given: nothing on the record about mains power, thermal state or what else was running\n");
+  }
+
   const results: AppResult[] = [];
   const passOrders: string[][] = [];
 
@@ -547,7 +596,8 @@ async function main() {
       .slice(1)
       .join(" "),
   };
-  const report: Report = { schema: 1, environment, config, results };
+  environment.close = await captureClose(environment);
+  const report: Report = { schema: 2, environment, config, results };
 
   mkdirSync(opts.out, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
@@ -559,6 +609,21 @@ async function main() {
 
   log(`\n  wrote ${jsonPath}`);
   log(`  wrote ${mdPath}\n`);
+
+  // the same caveats the markdown carries, on the terminal of the person who
+  // just spent an hour producing the numbers - the moment they are most likely
+  // to be believed uncritically
+  const caveats = environmentWarnings(environment);
+  const drifted = opts.passes > 1 ? driftBetweenPasses(results).filter((row) => row.drifted) : [];
+  if (drifted.length > 0) {
+    caveats.push(
+      `${drifted.length} app/scenario comparison(s) differ between the two sweeps by more than their own ` +
+        `run-to-run noise (worst: ${drifted[0]!.app} ${drifted[0]!.scenario}, ${drifted[0]!.spreadPct.toFixed(1)}%). ` +
+        "That difference is the machine, not the framework.",
+    );
+  }
+  for (const caveat of caveats) console.error(`  CAVEAT ${caveat}`);
+  if (caveats.length > 0) console.error("");
 
   const failed = results.filter((r) => r.status === "failed");
   if (failed.length > 0) {

@@ -13,6 +13,7 @@ import {
   headResponse,
   metricsEnabled,
   PROXY_RETRY_MAX_BODY,
+  pushAuthorized,
   readTimeout,
   READ_TIMEOUT_MAX,
   READ_TIMEOUT_SECONDS,
@@ -546,43 +547,85 @@ describe("metricsEnabled", () => {
 describe("the read deadline: how long a REQUEST may take to arrive", () => {
   test("defaults to a real number of seconds, not to none", () => {
     expect(readTimeout({})).toBe(READ_TIMEOUT_SECONDS);
-    expect(readTimeout({ BORGO_READ_TIMEOUT: "" })).toBe(READ_TIMEOUT_SECONDS);
+    expect(readTimeout({ BORGO_FRONT_READ_TIMEOUT: "" })).toBe(READ_TIMEOUT_SECONDS);
     expect(READ_TIMEOUT_SECONDS).toBeGreaterThan(0);
     // garbage must not silently disable it
-    expect(readTimeout({ BORGO_READ_TIMEOUT: "soon" })).toBe(READ_TIMEOUT_SECONDS);
-    expect(readTimeout({ BORGO_READ_TIMEOUT: "-5" })).toBe(READ_TIMEOUT_SECONDS);
+    expect(readTimeout({ BORGO_FRONT_READ_TIMEOUT: "soon" })).toBe(READ_TIMEOUT_SECONDS);
+    expect(readTimeout({ BORGO_FRONT_READ_TIMEOUT: "-5" })).toBe(READ_TIMEOUT_SECONDS);
   });
 
-  test("BORGO_READ_TIMEOUT overrides it, and bun's ceiling is respected", () => {
-    expect(readTimeout({ BORGO_READ_TIMEOUT: "5" })).toBe(5);
+  test("BORGO_FRONT_READ_TIMEOUT overrides it, and bun's ceiling is respected", () => {
+    expect(readTimeout({ BORGO_FRONT_READ_TIMEOUT: "5" })).toBe(5);
     // an explicit 0 is a deliberate opt-out and stays honoured
-    expect(readTimeout({ BORGO_READ_TIMEOUT: "0" })).toBe(0);
+    expect(readTimeout({ BORGO_FRONT_READ_TIMEOUT: "0" })).toBe(0);
     // bun rejects anything above 255 outright, which would take the server down
-    expect(readTimeout({ BORGO_READ_TIMEOUT: "3600" })).toBe(READ_TIMEOUT_MAX);
+    expect(readTimeout({ BORGO_FRONT_READ_TIMEOUT: "3600" })).toBe(READ_TIMEOUT_MAX);
     expect(READ_TIMEOUT_MAX).toBe(255);
   });
 
-  // BORGO_IDLE_TIMEOUT is the go api's: go parses it with time.ParseDuration
-  // and PANICS on anything else. The systemd unit and the compose file put both
-  // processes in one environment block, so one name meant two things at once -
-  // the documented BORGO_IDLE_TIMEOUT=2m gave go two minutes and gave this side
-  // a silent 30 seconds, and BORGO_IDLE_TIMEOUT=120 panicked the go api at
-  // boot. Same collision class as the METRICS and SESSION_SECURE renames, and
-  // like those the old name is not honoured as an alias, because an alias keeps
-  // the collision alive.
-  test("the go api's BORGO_IDLE_TIMEOUT is not this side's variable", () => {
-    // go's own grammar: neither of these is a number of seconds
-    expect(readTimeout({ BORGO_IDLE_TIMEOUT: "2m" })).toBe(READ_TIMEOUT_SECONDS);
-    expect(readTimeout({ BORGO_IDLE_TIMEOUT: "120" })).toBe(READ_TIMEOUT_SECONDS);
-    expect(readTimeout({ BORGO_IDLE_TIMEOUT: "0" })).toBe(READ_TIMEOUT_SECONDS);
-    // and one env block carrying both gives each side what it asked for
-    expect(readTimeout({ BORGO_IDLE_TIMEOUT: "2m", BORGO_READ_TIMEOUT: "45" })).toBe(45);
+  // ONE NAME MUST NOT MEAN TWO THINGS.
+  //
+  // This started as BORGO_IDLE_TIMEOUT, which is the go api's: go parses it with
+  // time.ParseDuration and PANICS on anything else. The systemd unit and the
+  // compose file put both processes in one environment block, so one name meant
+  // two things at once - BORGO_IDLE_TIMEOUT=2m gave go two minutes and gave this
+  // side a silent 30 seconds, and BORGO_IDLE_TIMEOUT=120 panicked the go api at
+  // boot.
+  //
+  // The first fix renamed this side's knob to BORGO_READ_TIMEOUT - which
+  // newServer in borgo.go also reads, also as a duration, also panicking. The
+  // rename moved the collision onto a new spelling and the test written with it
+  // asserted the move was a fix ("one env block carrying both gives each side
+  // what it asked for", on an env whose BORGO_READ_TIMEOUT=45 stops the go
+  // binary from booting at all). It is rewritten here, because it certified the
+  // bug.
+  //
+  // Neither old name is honoured as an alias: an alias keeps the collision alive.
+  test("no name the go api parses is this side's variable", () => {
+    for (const name of ["BORGO_IDLE_TIMEOUT", "BORGO_READ_TIMEOUT"]) {
+      // go's own grammar; none of these is a number of seconds to this side
+      expect(readTimeout({ [name]: "2m" })).toBe(READ_TIMEOUT_SECONDS);
+      expect(readTimeout({ [name]: "120" })).toBe(READ_TIMEOUT_SECONDS);
+      expect(readTimeout({ [name]: "0" })).toBe(READ_TIMEOUT_SECONDS);
+    }
+    // and one env block carrying all three gives each side what it asked for
+    expect(
+      readTimeout({
+        BORGO_IDLE_TIMEOUT: "2m",
+        BORGO_READ_TIMEOUT: "45s",
+        BORGO_FRONT_READ_TIMEOUT: "45",
+      }),
+    ).toBe(45);
   });
 
   test("the front server reads the name it owns, and no other", () => {
     const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
     expect(src).toContain("readTimeout(process.env)");
     expect(src).not.toContain("BORGO_IDLE_TIMEOUT");
+  });
+
+  // The structural guard, so the next rename cannot recreate what two renames
+  // already created. Go reads its timeouts through envDuration (a duration
+  // string, malformed panics at boot); the front server reads its own through
+  // envInt (a plain number, malformed silently falls back). A name in both sets
+  // is a value that cannot mean the same thing to both halves, and `borgo start`
+  // hands one environment to both children.
+  test("envNamesDoNotCollide: no variable is read as a duration AND as a number", () => {
+    const read = (path: string) => readFileSync(join(import.meta.dir, path), "utf8");
+    const names = (src: string, re: RegExp) => new Set([...src.matchAll(re)].map((m) => m[1]));
+
+    const goDurations = names(read("../../../borgo.go"), /envDuration\("(\w+)"/g);
+    const frontInts = new Set([
+      ...names(read("../src/server.ts"), /envInt\(\s*(?:process\.)?env\.(\w+)/g),
+      ...names(read("../src/util.ts"), /envInt\(\s*(?:process\.)?env\.(\w+)/g),
+    ]);
+
+    // the regexes have to be finding something, or this passes by reading nothing
+    expect(goDurations.has("BORGO_IDLE_TIMEOUT")).toBe(true);
+    expect(goDurations.has("BORGO_READ_TIMEOUT")).toBe(true);
+    expect(frontInts.has("BORGO_FRONT_READ_TIMEOUT")).toBe(true);
+
+    expect([...frontInts].filter((name) => goDurations.has(name))).toEqual([]);
   });
 });
 
@@ -616,7 +659,7 @@ describe("the response clock: when the deadline stops applying", () => {
     const enc = new TextEncoder();
     const server = Bun.serve({
       port: 0,
-      idleTimeout: readTimeout({ BORGO_READ_TIMEOUT: "1" }),
+      idleTimeout: readTimeout({ BORGO_FRONT_READ_TIMEOUT: "1" }),
       async fetch(req, srv) {
         // exactly what serve() does, and with the real predicate: a body-less
         // request is lifted before the handler decides anything at all
@@ -763,5 +806,89 @@ describe("sessionSecure", () => {
     for (const v of ["yes", "on", "2", " 1", "true ", "secure"]) {
       expect(() => sessionSecure({ SESSION_SECURE: v })).toThrow(/SESSION_SECURE/);
     }
+  });
+});
+
+// BORGO_PUSH_KEY HAS TO HOLD ON BOTH HALVES.
+//
+// /__borgo/publish relays whatever it is handed to every browser subscribed to
+// the topic, so who may call it is the whole of its security. Two ways to say
+// "you may": a shared key, or - with no key configured anywhere - the request
+// having come from loopback and not through a proxy.
+//
+// The two misconfigurations were not symmetric. Key on the front server only:
+// the api sends none, every push is refused, the operator sees it. Key on the
+// API ONLY: this side never read the header at all and fell straight through to
+// the loopback rule, so every push was accepted. The operator had a setting that
+// reads as authentication and authenticated nothing - and loopback is not that
+// rule's equal, because `borgo start` puts both halves on one host, so it admits
+// every other local process and every other tenant of a shared box.
+describe("pushAuthorized: the two halves must agree that key auth is on", () => {
+  const local = "127.0.0.1";
+
+  test("both halves configured: the key decides, and nothing else has to", () => {
+    expect(pushAuthorized({ key: "s3cret", presented: "s3cret", address: local, forwarded: null })).toBe("ok");
+    // cross-host push is the entire reason the key exists, so a key holder is
+    // not additionally required to be on loopback or unproxied
+    expect(pushAuthorized({ key: "s3cret", presented: "s3cret", address: "10.0.0.9", forwarded: "1.2.3.4" })).toBe("ok");
+  });
+
+  test("a wrong or missing key is refused when one is configured here", () => {
+    expect(pushAuthorized({ key: "s3cret", presented: "wrong", address: local, forwarded: null })).toBe("bad-key");
+    // the front-server-only asymmetry: the api sends nothing, and this closes
+    expect(pushAuthorized({ key: "s3cret", presented: null, address: local, forwarded: null })).toBe("bad-key");
+    expect(pushAuthorized({ key: "s3cret", presented: "", address: local, forwarded: null })).toBe("bad-key");
+    // a prefix of the key is not the key
+    expect(pushAuthorized({ key: "s3cret", presented: "s3cre", address: local, forwarded: null })).toBe("bad-key");
+  });
+
+  // THE ONE THAT USED TO FAIL OPEN
+  test("a key presented to a front server that has none is refused, not downgraded", () => {
+    expect(pushAuthorized({ key: undefined, presented: "s3cret", address: local, forwarded: null })).toBe(
+      "half-configured",
+    );
+    // and it stays refused however loopback-ish the caller looks - the whole
+    // defect was that this fell back to exactly that test
+    for (const address of [local, "::1", "::ffff:127.0.0.1"]) {
+      expect(pushAuthorized({ key: undefined, presented: "anything", address, forwarded: null })).toBe(
+        "half-configured",
+      );
+    }
+    // an empty key env is not a configured key
+    expect(pushAuthorized({ key: "", presented: "s3cret", address: local, forwarded: null })).toBe(
+      "half-configured",
+    );
+  });
+
+  test("with no key anywhere, loopback and only loopback may push", () => {
+    for (const address of [local, "::1", "::ffff:127.0.0.1"]) {
+      expect(pushAuthorized({ key: undefined, presented: null, address, forwarded: null })).toBe("ok");
+    }
+    for (const address of [undefined, "10.0.0.9", "192.168.1.4", "1.2.3.4"]) {
+      expect(pushAuthorized({ key: undefined, presented: null, address, forwarded: null })).toBe("not-local");
+    }
+  });
+
+  // behind a local reverse proxy every external request arrives from 127.0.0.1,
+  // so the forwarding headers the proxy stamps are what tells the two apart
+  test("a forwarded request is not local, whatever address it arrived from", () => {
+    expect(pushAuthorized({ key: undefined, presented: null, address: local, forwarded: "1.2.3.4" })).toBe(
+      "not-local",
+    );
+    expect(pushAuthorized({ key: undefined, presented: null, address: "::1", forwarded: "for=1.2.3.4" })).toBe(
+      "not-local",
+    );
+  });
+
+  // the wiring: server.ts must refuse on anything but "ok", and must say so
+  test("the front server refuses every verdict that is not ok", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    expect(src).toContain("pushAuthorized({");
+    expect(src).toContain('if (verdict !== "ok") return secure(new Response("forbidden", { status: 403 }));');
+    // and the half-configured case is not silent: an operator who set the key on
+    // one side has to be told the other side is refusing because of it
+    expect(src).toContain('if (verdict === "half-configured") warnHalfConfiguredPushKey();');
+    // the old shape read the key and fell through to the loopback test
+    expect(src).not.toContain("isLoopback(server.requestIP(req)?.address) && !forwarded");
   });
 });

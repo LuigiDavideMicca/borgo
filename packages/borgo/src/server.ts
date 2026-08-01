@@ -23,10 +23,10 @@ import {
   decodeChanged,
   envInt,
   headResponse,
-  keysEqual,
   metricsEnabled,
   prepareShell,
   proxyRequest,
+  pushAuthorized,
   readTimeout,
   renderPage as renderDocument,
   requestFullyRead,
@@ -296,8 +296,17 @@ export async function serve({ dev = false } = {}) {
       JSON.stringify({ topic, event: "__count", data: server.subscriberCount(wsTopic(topic)) }),
     );
   };
-  const isLoopback = (address: string | undefined) =>
-    address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+  // said once, not per push: a refused pusher can retry as fast as it likes,
+  // and the operator needs the line, not a flood of it
+  let warnedPushKey = false;
+  const warnHalfConfiguredPushKey = () => {
+    if (warnedPushKey) return;
+    warnedPushKey = true;
+    console.error(
+      `  ${c.red(g.err)} a push arrived with X-Borgo-Key but BORGO_PUSH_KEY is not set on the front server ` +
+        `${c.dim(`${g.dot} refusing rather than falling back to the loopback rule - set it on both halves`)}`,
+    );
+  };
 
   // a dev restart can try to bind before the os releases the previous
   // server's port; dying here would take the dev channel down for good
@@ -322,7 +331,9 @@ export async function serve({ dev = false } = {}) {
     // *request* to arrive. How long a *response* may live is a different clock
     // with no honest bound, and it is expressed by lifting this one per
     // request; readTimeout in util.ts owns both halves of that argument.
-    // BORGO_READ_TIMEOUT is in seconds, 0 disables it.
+    // BORGO_FRONT_READ_TIMEOUT is in seconds, 0 disables it - and it is the
+    // front server's alone, because go reads every other timeout name as a
+    // duration and panics on what this side takes.
     idleTimeout: readTimeout(process.env),
     // bun's fallback error page embeds a base64 payload that decodes to the
     // absolute path of the file on the server, and it appears whenever
@@ -436,15 +447,17 @@ export async function serve({ dev = false } = {}) {
 
       // go -> browser push: accepted from loopback (or with the shared key)
       if (req.method === "POST" && url.pathname === "/__borgo/publish") {
-        const key = process.env.BORGO_PUSH_KEY;
         // without a key, loopback-only - but behind a local reverse proxy
         // every external request arrives from 127.0.0.1, so anything the
         // proxy forwarded (it stamps forwarding headers) is rejected too
-        const forwarded = req.headers.get("x-forwarded-for") || req.headers.get("forwarded");
-        const authorized = key
-          ? keysEqual(req.headers.get("x-borgo-key") ?? "", key)
-          : isLoopback(server.requestIP(req)?.address) && !forwarded;
-        if (!authorized) return secure(new Response("forbidden", { status: 403 }));
+        const verdict = pushAuthorized({
+          key: process.env.BORGO_PUSH_KEY,
+          presented: req.headers.get("x-borgo-key"),
+          address: server.requestIP(req)?.address,
+          forwarded: req.headers.get("x-forwarded-for") ?? req.headers.get("forwarded"),
+        });
+        if (verdict === "half-configured") warnHalfConfiguredPushKey();
+        if (verdict !== "ok") return secure(new Response("forbidden", { status: 403 }));
         const msg = await req.json().catch(() => null);
         if (!msg || typeof msg.topic !== "string" || typeof msg.event !== "string") {
           return secure(new Response("bad request", { status: 400 }));

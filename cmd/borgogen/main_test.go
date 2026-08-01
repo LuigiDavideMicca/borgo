@@ -9,11 +9,14 @@ import (
 	"testing"
 	"time"
 
+	addrapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/addressable/api"
+	bytesapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/bytes/api"
 	closureapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/closurehandle/api"
 	deeph3 "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/deeppush/h3"
 	deeph4 "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/deeppush/h4"
 	embedapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/embed/api"
 	recursiveapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/recursive/api"
+	textapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/textmarshal/api"
 	wireapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/wire/api"
 )
 
@@ -370,42 +373,33 @@ func TestTextMarshalersAreStrings(t *testing.T) {
 }
 
 // A MarshalText on the pointer receiver runs only where encoding/json holds an
-// addressable value, so one named type reaches the wire as a string in a slice
-// and as its underlying shape in a plain field - see the json.Marshal output
-// spelled out in testdata/textmarshal/api/text.go.
-func TestPointerReceiverTextMarshalerCoversBothShapes(t *testing.T) {
-	root := filepath.Join("testdata", "textmarshal")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
-	for _, want := range []string{
-		"export interface PtrText {\n  one: string | number;\n  many: Array<string | number> | null;\n" +
+// addressable value, so one named type is a string in a slice and its
+// underlying shape in a plain field - each position typed as what the wire
+// really carries, not as the union of both.
+func TestPointerReceiverTextMarshalerFollowsThePosition(t *testing.T) {
+	marshals(t, textapi.PtrText{Many: []textapi.Tier{0}, Keyed: map[textapi.Tier]int{0: 0}},
+		`{"one":0,"many":["tier"],"keyed":{"0":0},"deep":{"one":0}}`)
+
+	wants(t, generate(t, "textmarshal"),
+		"export interface PtrText {\n  one: number;\n  many: Array<string> | null;\n"+
 			"  keyed: Record<string, number> | null;\n  deep: TierBox;\n}",
-		"export interface TierBox {\n  one: string | number;\n}",
-	} {
-		if !strings.Contains(types, want) {
-			t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
-		}
-	}
+		"export interface TierBox {\n  one: number;\n}",
+	)
 }
 
 func TestByteSlicesAreBase64Strings(t *testing.T) {
-	root := filepath.Join("testdata", "bytes")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
-	for _, want := range []string{
+	marshals(t, bytesapi.Blob{Raw: []byte{1, 2, 3}, Alias: []byte{1, 2, 3}, Defined: []bytesapi.ByteDef{1, 2, 3}},
+		`{"raw":"AQID","alias":"AQID","defined":"AQID","arr":[0,0,0,0]}`)
+	// a slice element is addressable, so the pointer-receiver MarshalText runs
+	marshals(t, bytesapi.SelfBytes{Text: []bytesapi.TextByte{0}, PText: []bytesapi.PtrTextByte{0}, JS: []bytesapi.JSONByte{0}},
+		`{"text":["tb"],"ptext":["pb"],"js":["jb"]}`)
+
+	wants(t, generate(t, "bytes"),
 		// a nil []byte is "null", not "" - only the array is always there
 		"export interface Blob {\n  raw: string | null;\n  alias: string | null;\n  defined: string | null;\n  arr: Array<number>;\n}",
 		// a byte-kinded element that marshals itself leaves the base64 path
-		"export interface SelfBytes {\n  text: Array<string> | null;\n  ptext: Array<string | number> | null;\n  js: Array<unknown> | null;\n}",
-	} {
-		if !strings.Contains(types, want) {
-			t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
-		}
-	}
+		"export interface SelfBytes {\n  text: Array<string> | null;\n  ptext: Array<string> | null;\n  js: Array<unknown> | null;\n}",
+	)
 }
 
 // Promoted fields follow encoding/json's rules, so the interfaces below match
@@ -557,8 +551,8 @@ func TestAnonymousStructWithPromotedTextMarshaler(t *testing.T) {
 		t.Fatal(err)
 	}
 	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
-	want := "export interface Tagged {\n  l: string;\n  p: string | { N: number; extra: number };\n" +
-		"  many: Array<string | { N: number; extra: number }> | null;\n}"
+	want := "export interface Tagged {\n  l: string;\n  p: { N: number; extra: number };\n" +
+		"  many: Array<string> | null;\n}"
 	if !strings.Contains(types, want) {
 		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
 	}
@@ -828,9 +822,9 @@ func TestFunctionLocalNamedTypesDoNotCollide(t *testing.T) {
 	types := generate(t, "localtypes")
 	wants(t, types,
 		"export interface resp {\n  a: number;\n}",
-		"export interface Apiresp {\n  b: string;\n  c: boolean;\n}",
+		"export interface ApiResp {\n  b: string;\n  c: boolean;\n}",
 		`"GET /api/alpha": { response: resp };`,
-		`"GET /api/beta": { response: Apiresp };`,
+		`"GET /api/beta": { response: ApiResp };`,
 		// a non-struct local collides the same way: the recursive one needs a
 		// declaration and claims the name, and the plain slice next to it used
 		// to resolve to that declaration instead of to its own shape
@@ -868,23 +862,79 @@ func TestEmbeddedMarshalersAreStillFlattened(t *testing.T) {
 	wants(t, generate(t, "embed"),
 		"export interface Amb {\n  x: number;\n  y: number;\n  z: number;\n}",
 		`"GET /api/amb": { response: Amb };`,
+		// the root of a response is not addressable, so PtrM's marshaler cannot
+		// run there and the flattened shape is the only one it can be
 		"export interface PtrEmbed {\n  x: number;\n  z: number;\n}",
-		`"GET /api/ptrembed": { response: unknown | PtrEmbed };`,
+		`"GET /api/ptrembed": { response: PtrEmbed };`,
 	)
 }
 
 // A MarshalJSON on the pointer receiver runs only where encoding/json holds an
-// addressable value, so one named type reaches the wire as its Go shape in a
-// plain field and as the marshaler's output in a slice - the same split
-// textMarshalTS already covers for MarshalText.
-func TestPointerReceiverJSONMarshalerKeepsTheGoShape(t *testing.T) {
+// addressable value, and each of these four positions has one answer: a plain
+// field of an unaddressable struct and a map value get the Go shape, a slice
+// element and a pointed-to value get the marshaler's output.
+func TestPointerReceiverJSONMarshalerFollowsThePosition(t *testing.T) {
 	marshals(t, wireapi.PMHolder{Many: []wireapi.PM{{}}, Ptr: &wireapi.PM{}, Keyed: map[string]wireapi.PM{"k": {}}},
 		`{"one":{"x":0},"many":["pm"],"ptr":"pm","keyed":{"k":{"x":0}}}`)
 
 	wants(t, generate(t, "wire"),
 		"export interface PM {\n  x: number;\n}",
-		"export interface PMHolder {\n  one: unknown | PM;\n  many: Array<unknown | PM> | null;\n"+
-			"  ptr: unknown | PM | null;\n  keyed: Record<string, unknown | PM> | null;\n}",
+		"export interface PMHolder {\n  one: PM;\n  many: Array<unknown> | null;\n"+
+			"  ptr: unknown | null;\n  keyed: Record<string, PM> | null;\n}",
+	)
+}
+
+// PM alone is a leaf: where it is addressable it is just the marshaler's
+// output, and there is no second shape to declare. Outer merely holds a PM by
+// value, and that is enough to give Outer itself two shapes on one wire - the
+// case a single generated interface cannot describe, and the one a cheap fix
+// gets backwards. Every expectation below is pinned to the json.Marshal above
+// it, field by field.
+func TestAddressableVariantsMatchEncodingJSON(t *testing.T) {
+	marshals(t, addrapi.Holder{
+		Many:   []addrapi.Outer{{}},
+		Keyed:  map[string]addrapi.Outer{"k": {}},
+		Ptr:    &addrapi.Outer{},
+		ArrIn:  [][1]addrapi.Outer{{}},
+		Boxes:  []addrapi.ArrBox{{}},
+		Deref:  addrapi.Deref{Inner: &addrapi.Inner{}},
+		Derefs: []addrapi.Deref{{Inner: &addrapi.Inner{}}},
+		BothIn: []addrapi.Both{{}},
+	}, `{"plain":{"p":{"x":0}},"many":[{"p":"pm"}],"keyed":{"k":{"p":{"x":0}}},"ptr":{"p":"pm"},`+
+		`"arr":[{"p":{"x":0}}],"arrin":[[{"p":"pm"}]],"box":{"a":[{"p":{"x":0}}]},"boxes":[{"a":[{"p":"pm"}]}],`+
+		`"deref":{"p":"pm","b":0},"derefs":[{"p":"pm","b":0}],"both":"txt","bothin":["js"]}`)
+	// the three responses on their own, which is where the trap is: the slice
+	// of Outer is the marshaled shape and the map of Outer is not
+	marshals(t, addrapi.Outer{}, `{"p":{"x":0}}`)
+	marshals(t, []addrapi.Outer{{}}, `[{"p":"pm"}]`)
+	marshals(t, map[string]addrapi.Outer{"k": {}}, `{"k":{"p":{"x":0}}}`)
+	// recursive and sensitive at once: every hop past the first is behind a
+	// pointer, so the addressable variant has to refer to itself
+	marshals(t, addrapi.Node{}, `{"p":{"x":0},"next":null}`)
+	marshals(t, addrapi.Node{Next: &addrapi.Node{}}, `{"p":{"x":0},"next":{"p":"pm","next":null}}`)
+
+	wants(t, generate(t, "addressable"),
+		"export interface Node {\n  p: PM;\n  next: Node$Addressable | null;\n}",
+		"export interface Node$Addressable {\n  p: unknown;\n  next: Node$Addressable | null;\n}",
+		"export interface PM {\n  x: number;\n}",
+		"export interface Outer {\n  p: PM;\n}",
+		"export interface Outer$Addressable {\n  p: unknown;\n}",
+		// an array element inherits, so ArrBox splits in two as well
+		"export interface ArrBox {\n  a: Array<Outer>;\n}",
+		"export interface ArrBox$Addressable {\n  a: Array<Outer$Addressable>;\n}",
+		// a group promoted through an embedded pointer is reached with a
+		// dereference, so it is addressable wherever the outer value sits and
+		// Deref has one shape - a second declaration of it would be noise
+		"export interface Deref {\n  p?: unknown;\n  b: number;\n}",
+		"export interface Holder {\n  plain: Outer;\n  many: Array<Outer$Addressable> | null;\n"+
+			"  keyed: Record<string, Outer> | null;\n  ptr: Outer$Addressable | null;\n"+
+			"  arr: Array<Outer>;\n  arrin: Array<Array<Outer$Addressable>> | null;\n"+
+			"  box: ArrBox;\n  boxes: Array<ArrBox$Addressable> | null;\n"+
+			"  deref: Deref;\n  derefs: Array<Deref> | null;\n"+
+			"  both: string;\n  bothin: Array<unknown> | null;\n}",
+		`"GET /api/outer": { response: Outer };`,
+		`"GET /api/outers": { response: Array<Outer$Addressable> | null };`,
+		`"GET /api/outermap": { response: Record<string, Outer> | null };`,
 	)
 }
 
@@ -985,9 +1035,66 @@ func TestPushBeyondTheHopCapWarns(t *testing.T) {
 	}
 }
 
-// tsGen.override matches an api type by bare name whatever scope declares it,
-// so a //borgo:type naming a function-local one does apply. Rejecting it failed
-// the whole run over a directive that was perfectly good.
+// A //borgo:type naming a function-local type does apply, as long as the name
+// picks out exactly one. Rejecting it failed a run whose directive was
+// perfectly good.
 func TestTypeOverrideOnAFunctionLocalType(t *testing.T) {
 	wants(t, generate(t, "localoverride"), "export interface resp {\n  at: string;\n}")
+}
+
+// reserveName's collision path prefixes the package name, and used to paste it
+// onto the type's own name unchanged: a second function-local `type resp
+// struct{...}` came out Apiresp. ApiRecord and ApiArray were already right only
+// because those names start capitalised.
+func TestPrefixedCollisionNamesAreTitleCased(t *testing.T) {
+	types := generate(t, "localtypes")
+	wants(t, types, "export interface ApiResp {", `"GET /api/beta": { response: ApiResp };`)
+	if strings.Contains(types, "Apiresp") {
+		t.Errorf("the package prefix must title-case the name it prefixes:\n%s", types)
+	}
+}
+
+// The override key was the bare name alone, so a directive written for a
+// package-level type also rewrote every function-local type that happened to
+// share its name - silently, in handlers the author never touched.
+func TestBareTypeOverrideDoesNotReachOtherScopes(t *testing.T) {
+	types := generate(t, "overridescope")
+	wants(t, types,
+		// the package-level Stamp the directive names
+		"export interface PkgResp {\n  at: string;\n}",
+		// and the unrelated one declared inside another handler, untouched
+		"export interface Stamp {\n  nano: number;\n}",
+		"export interface resp {\n  at: Stamp;\n}",
+	)
+}
+
+// A bare name that several declarations answer to is a question, not a default:
+// the run stops and says which ones it found and how to pick one.
+func TestAmbiguousBareTypeOverrideFails(t *testing.T) {
+	err := run(filepath.Join("testdata", "ambigtype"))
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{
+		"is ambiguous",
+		"2 types named stamp",
+		"ambig.go:17",
+		"ambig.go:25",
+		"stamp@ambig.go:17",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+}
+
+// And the spelling that error hands the author does resolve to the one
+// declaration, leaving the other alone.
+func TestTypeOverrideCanNameOneDeclarationByPosition(t *testing.T) {
+	types := generate(t, "postype")
+	wants(t, types,
+		"export interface resp {\n  at: string;\n}",
+		"export interface stamp {\n  nano: number;\n}",
+		"export interface ApiResp {\n  at: stamp;\n}",
+	)
 }

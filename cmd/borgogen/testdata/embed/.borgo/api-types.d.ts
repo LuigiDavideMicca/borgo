@@ -49,7 +49,7 @@ declare module "borgo-framework" {
     "GET /api/deep": { response: Deep };
     "GET /api/diamond": { response: Diamond };
     "GET /api/doc": { response: Doc };
-    "GET /api/ptrembed": { response: unknown | PtrEmbed };
+    "GET /api/ptrembed": { response: PtrEmbed };
     "GET /api/ptrouter": { response: PtrOuter };
     "GET /api/tie": { response: Tie };
   }

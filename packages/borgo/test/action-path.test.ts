@@ -461,6 +461,76 @@ describe("runAction: the cookies the api issued", () => {
       ).rejects.toThrow("render exploded");
     });
 
+    // ...and it is the SAME 499 whichever way the form was posted. The abort
+    // check used to sit inside the native branch alone, so an enhanced submit
+    // (X-Borgo-Action: 1) from a client that was already gone still bought a
+    // full _500 ssr render and its go round trip, written to a socket nobody
+    // was reading - the exact waste the 499 in serve() says it closed. And it
+    // is reachable with no credentials at all: csrfRejects returns false
+    // immediately for a cookie-less client, so anyone able to open a connection
+    // and hang up could buy one render per request.
+    test("the enhanced path hands the abort back too, instead of rendering for nobody", async () => {
+      const controller = new AbortController();
+      const req = new Request("http://app.test/x", {
+        method: "POST",
+        headers: { "X-Borgo-Action": "1" },
+        signal: controller.signal,
+      });
+      controller.abort();
+
+      let rendered = 0;
+      const errorPage = route({ default: () => null }, { file: "_500.tsx" });
+      expect(
+        runAction(
+          req,
+          match({
+            action: async () => {
+              throw new Error("action exploded");
+            },
+          }),
+          opts({
+            ...login,
+            serverError: errorPage,
+            renderPage: async () => {
+              rendered++;
+              return new Response(DOC, { status: 500 });
+            },
+          }),
+        ),
+      ).rejects.toThrow("action exploded");
+      // nothing was rendered for a client that is already gone: no _500 page,
+      // no loader, no go round trip
+      expect(rendered).toBe(0);
+    });
+
+    // the guard is the abort, not the marker: an enhanced submit from a live
+    // client still gets its document, and the cookies the action collected
+    // before it threw ride along with it
+    test("a live enhanced client still gets the error document, cookies attached", async () => {
+      let rendered = 0;
+      const errorPage = route({ default: () => null }, { file: "_500.tsx" });
+      const res = await runAction(
+        enhanced(),
+        match({
+          action: async () => {
+            throw new Error("action exploded");
+          },
+        }),
+        opts({
+          ...login,
+          serverError: errorPage,
+          renderPage: async () => {
+            rendered++;
+            return new Response(DOC, { status: 500 });
+          },
+        }),
+      );
+      expect(rendered).toBe(1);
+      expect(marker(res!)).toBe("raw");
+      expect(res!.status).toBe(500);
+      expect(res!.headers.getSetCookie()).toEqual(["borgo_session=new; Path=/; HttpOnly"]);
+    });
+
     test("the enhanced path is unchanged: a marked document, not a thrown error", async () => {
       const res = await runAction(
         enhanced(),

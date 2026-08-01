@@ -1,3 +1,5 @@
+import type { BodySpec } from "./canonical";
+
 export type ScenarioId = "hello-json" | "api-list" | "ssr-page" | "static-asset" | "memory-conn";
 
 export interface Scenario {
@@ -25,6 +27,21 @@ export interface Scenario {
      * contract describes would otherwise post a very good req/s number.
      */
     minBytes?: number;
+    /**
+     * an exact body length. A floor only catches a body that is too short; the
+     * static asset is one committed file and CONTRACT.md says "nobody serves a
+     * different number of bytes", so for that scenario the floor was the wrong
+     * tripwire in both directions.
+     */
+    exactBytes?: number;
+    /** sha256 of the body, hex. The contract pins one for the static asset. */
+    sha256?: string;
+    /**
+     * the body must equal, value for value, what CONTRACT.md specifies. Counting
+     * `"done":` occurrences passes an implementation whose `done` is always
+     * false - which is cheaper to produce than the contract's items.
+     */
+    body?: BodySpec;
   };
   description: string;
 }
@@ -144,6 +161,16 @@ export interface StartupResult {
   timeToFirstResponseMs: number;
   /** RSS after the ready probe, before any load */
   bootRssBytes: number;
+  /**
+   * Had it stopped growing when it was read?
+   *
+   * This used to be three samples over 600 ms, taken while a JIT runtime is
+   * still allocating. Whichever runtime grows slowest wins a column measuring
+   * how far along its growth curve it happened to be, which is not a property
+   * of a framework. It is now polled to stability, and when it never settles
+   * the report says so instead of publishing the snapshot bare.
+   */
+  bootRssStable: boolean;
 }
 
 /**

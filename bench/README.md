@@ -99,6 +99,20 @@ the framework: measured on this machine, boot RSS was 131.0 MiB through
 `bun run start` and 93.2 MiB through the CLI entrypoint, a 37.8 MiB difference
 that is entirely wrapper processes.
 
+**That exemption used to be borgo's alone.** Next.js was started with
+`bun x next start`, which interposes exactly the kind of launcher borgo had been
+excused from, and its boot and idle RSS were charged for it. It now starts on
+`node node_modules/next/dist/bin/next start`, the same shape as everybody else,
+and `bench/test/parity.test.ts` fails any manifest that reintroduces a launcher.
+Expect borgo's margin over Next.js in the startup and memory tables to be
+smaller than it was, by roughly the size of a bunx process.
+
+Boot RSS is also polled until it stops moving, rather than sampled 600 ms after
+the first response. A runtime read mid-allocation reports how far along its
+growth curve it happened to be, and these runtimes do not grow at the same rate.
+If it never settles, the row says so. This raises the figure for the runtimes
+that grow lazily, borgo's Bun front server among them.
+
 Honest limits of this metric:
 
 - Absolute RSS says more about an allocator's growth policy than about a
@@ -184,16 +198,31 @@ measured 4,550 req/s over 3 s at 16 connections and 17,127 req/s over 10 s at
 quarter of its steady-state throughput. Any benchmark of Bun, Node or Deno with
 sub-10-second runs should be disbelieved, including ours if we ever publish one.
 
-The report also prints the **relative standard deviation** of the runs. If the
-RSD is large, the median is not telling you much, and the table says so instead
-of hiding it.
+Beside the median the report prints the **range over the runs**, a **95%
+confidence interval** of the mean, and the **relative standard deviation**. Three
+runs is a small sample and the interval is correspondingly wide; that width is
+the point. With fewer than two runs there is no dispersion at all, and the
+columns say `n/a` rather than `0.0%` — a figure that has never been repeated is
+not a figure with zero variance.
+
+Each app is measured once early and once late in the campaign (two sweeps, in
+opposite directions), and the report **compares them**: if an app's two sweeps
+disagree by more than the run-to-run noise inside a sweep, that row is marked as
+drift and is not a framework comparison. The second sweep costs an hour and used
+to buy nothing but a second row.
 
 ### Correctness before speed
 
-Before any scenario is loaded, the runner issues one request and checks the
-status, the content type and required substrings of the body against the
-contract. A scenario that fails the check is reported as `failed` with the
-reason. A fast wrong answer is not a result.
+Before any scenario is loaded, the runner issues one request and checks it
+against the contract: status, content type, required substrings, structural
+counts, and — where CONTRACT.md pins the answer exactly — the **whole body**.
+`/api/hello` and `/api/items` are compared value for value, including the key
+order on the wire, against an independent transliteration of the contract in
+`lib/canonical.ts`. `/static/payload.json` is compared by exact length and
+sha256. A scenario that fails the check is reported as `failed` with the reason.
+A fast wrong answer is not a result, and an item list whose `done` flag is
+permanently `false` is a fast wrong answer that a count-based check could not
+see.
 
 After the load, a median success rate below 99% fails the scenario too, so a
 server that hits its concurrency ceiling and starts refusing connections cannot
@@ -211,9 +240,28 @@ memory, the versions of Go, Bun, Node, npm and Deno, the borgo package version,
 the repository commit **and whether the working tree was dirty**, and the load
 tool and its version.
 
-What the runner cannot know — mains power, thermal state, what else was running
-— is what `--note` is for. It is recorded verbatim and printed in the report.
-Please use it.
+It also carries a **CPU-idle reading taken before the first app is started and
+another after the last one is killed**. "Run it on a quiet machine" was advice
+and nothing more: a campaign run alongside a build produced numbers that looked
+exactly like a campaign run on an idle box. If more than 10% of CPU time was
+busy before anything was measured, the runner says so on the terminal and the
+report opens with a warning that the numbers are contaminated. Free memory is
+recorded at both ends for the same reason.
+
+What the runner still cannot know — mains power, thermal state, what else was
+running — is what `--note` is for. It is recorded verbatim and printed in the
+report. If it is omitted, the report says out loud that nobody attested to any
+of it, rather than printing an empty cell.
+
+### What the report says it cannot check
+
+Every report ends with a section listing what the harness does not enforce: that
+each competitor is implemented as well as its own experts would implement it,
+that borgo was not written with more care than the others, that the load
+generator is not itself the bottleneck, that the machine stayed quiet
+*throughout*, and that the latency percentiles are anything other than
+saturation percentiles. A harness that cannot enforce a condition has to print
+that fact, not stay quiet and let the table imply otherwise.
 
 ### Process hygiene
 
@@ -390,9 +438,11 @@ bench/
     paths.ts             directory resolution
     proc.ts              spawning, tree-kill, pidfile, port checks
     report.ts            JSON and markdown output
+    canonical.ts         CONTRACT.md's bodies, transliterated as an oracle
     scenarios.ts         the scenario definitions
-    stats.ts             median, RSD
+    stats.ts             median, RSD, range, 95% CI
     types.ts             shared types
+  test/                  the harness's own tests: stats, oracle, report, parity
   shared/
     items.js             the one dataset definition for every JS implementation
     payload.json         the one static asset, copied into every app

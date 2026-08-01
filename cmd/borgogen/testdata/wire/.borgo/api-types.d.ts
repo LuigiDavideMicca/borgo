@@ -30,10 +30,10 @@ export interface PM {
 }
 
 export interface PMHolder {
-  one: unknown | PM;
-  many: Array<unknown | PM> | null;
-  ptr: unknown | PM | null;
-  keyed: Record<string, unknown | PM> | null;
+  one: PM;
+  many: Array<unknown> | null;
+  ptr: unknown | null;
+  keyed: Record<string, PM> | null;
 }
 
 export interface Stamped {
@@ -43,8 +43,8 @@ export interface Stamped {
 
 export interface Tagged {
   l: string;
-  p: string | { N: number; extra: number };
-  many: Array<string | { N: number; extra: number }> | null;
+  p: { N: number; extra: number };
+  many: Array<string> | null;
 }
 
 export interface Uint8Marshal {

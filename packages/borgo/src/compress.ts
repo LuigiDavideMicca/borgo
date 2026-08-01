@@ -13,7 +13,16 @@ export const isCompressiblePath = (path: string) => compressibleRe.test(path);
 export const isHashedAsset = (path: string) =>
   /(^|\/)assets\/[^/]+-[a-z0-9]{8}\.(js|css)$/i.test(path.replaceAll("\\", "/"));
 
-// picks the first server-preferred encoding the client accepts (q > 0)
+// picks the first server-preferred encoding the client accepts (q > 0).
+//
+// the parameter name is matched case-insensitively, like the coding name beside
+// it: rfc 9110 5.6.6 makes parameter names case-insensitive, so "gzip;Q=0" is a
+// client refusing gzip in a spelling no less valid than "gzip;q=0". Matching
+// only the lowercase one left the refusal unread and the quality at its default
+// 1 - so every asset, every json payload and every rendered document went out
+// compressed to a client that had just said it cannot decode gzip. gzip.go's
+// refusesCoding folds the same name for the same reason; the two halves negotiate
+// the same header and must read it the same way.
 export function pickEncoding(
   acceptEncoding: string | null,
   preferred: readonly string[],
@@ -27,7 +36,7 @@ export function pickEncoding(
     let quality = 1;
     for (const param of params) {
       const [key, value] = param.trim().split("=");
-      if (key.trim() === "q") quality = Number(value);
+      if (key.trim().toLowerCase() === "q") quality = Number(value);
     }
     q.set(token, Number.isNaN(quality) ? 0 : quality);
   }

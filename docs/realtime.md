@@ -4,7 +4,7 @@ Live updates in both directions: server-sent events for one-way feeds, WebSocket
 
 ## Server-sent events
 
-`borgo.SSE(w, r)` turns any handler into an event stream — it returns the stream, with `Send(event, data)` (data JSON-encoded), `Ping()` to keep idle proxies from closing it, and `Done()` for the client's disconnect:
+`borgo.SSE(w, r)` turns any handler into an event stream — it returns the stream, with `Send(event, data)` (data JSON-encoded), `Ping()` to keep idle proxies from closing it, and `Done()` for the end of the stream — the client disconnecting, or the server beginning to shut down:
 
 ```go no-check
 //borgo:route GET /api/ticker
@@ -81,7 +81,7 @@ channel.publish("message", "hello");   // browser -> everyone on the topic
 channel.close();
 ```
 
-The built-in `__count` event reports the topic's subscriber count (presence for free), and the connection reconnects itself. On the Go side, `borgo.Push(topic, event, data)` publishes into the same topics — it POSTs to the front server's internal endpoint, accepted from loopback. When the two halves are on different hosts, set `FRONT_URL` and the same `BORGO_PUSH_KEY` on both: once a key is set it *replaces* the loopback check, so a key on one side only means every push is refused.
+The built-in `__count` event reports the topic's subscriber count (presence for free), and the connection reconnects itself. On the Go side, `borgo.Push(topic, event, data)` publishes into the same topics — it POSTs to the front server's internal endpoint, accepted from loopback. When the two halves are on different hosts, set `FRONT_URL` and the same `BORGO_PUSH_KEY` on both. A key *replaces* the loopback check on the side that has it, and the two one-sided configurations fail in opposite directions: with the key on the **front server only**, Go sends no `X-Borgo-Key` and every push is refused — loud, and closed. With the key on the **Go side only**, the front server never learns there is a key, ignores the header Go now sends, and falls back to accepting anything from loopback — so on a single box that setting is a no-op that reads like protection. Set it on both halves or neither.
 
 ```go
 borgo.Push("live", "task-created", task.Title)
@@ -115,7 +115,7 @@ The relay itself stays dumb by design: the front server forwards `{event, data}`
 
 - **The relay is not a message broker.** There is no durability, no replay, no delivery guarantee and no ordering guarantee across topics. A subscriber that was offline missed what happened. If a client must not miss an event, give it a way to re-fetch state on reconnect — which is what the SSE example above does by refetching rather than applying a delta.
 - **Nothing is authorized per topic.** Any browser that can open the socket can subscribe to any topic name, so treat topic names as public and never put a secret in one. Scope by unguessable id, and keep anything sensitive behind an authenticated API route.
-- **Limits are enforced**: 32 topics per client, 128 characters per topic name, 1 MB per message, and a same-origin check on the upgrade. See [security](security.md#realtime-surface).
+- **Limits are enforced**: 32 topics per client, 128 characters per topic name, 1 MB per message, and a same-origin check on the upgrade — which is skipped when the request carries no `Origin` header at all. Browsers always send one on a handshake, which is the attack the check exists for; a non-browser client is not stopped by it. See [security](security.md#realtime-surface).
 - **Reconnection is exponential and capped** at 30 seconds. After a long outage a client can be up to half a minute behind before it even tries; a page that must feel live should refetch on reconnect rather than trusting the gap was empty.
 - **SSE holds a connection per subscriber.** That is cheap in Go, but it is not free at the proxy in front of you: make sure it does not buffer, and does not cut idle connections shorter than your ping interval. [`borgo deploy init nginx`](deploy.md#borgo-deploy-init) writes a config that gets both right.
 - **One of those proxies is borgo's own front server**, and it has a limit worth knowing about even though borgo handles it for you. Every `/api` request it forwards to Go holds one slot in Bun's outbound fetch pool for its whole life — which for an event stream means hours. That pool defaults to 256, so past roughly 255 concurrent streams new subscribers would queue instead of connecting, with nothing logged. `BUN_CONFIG_MAX_HTTP_REQUESTS` sets the pool size, and borgo sets it to 16384: in `borgo dev`, in the Dockerfile the templates ship, in the systemd and compose configs `borgo deploy init` writes, and — because Bun fixes the pool when the process starts, so a running server cannot raise it for itself — by re-running itself once at the top of `borgo start` when nothing set it. Set it yourself, to any value you prefer, and `borgo start` uses that value and does **not** re-run itself — the extra process exists only to supply a variable nobody supplied. Every deployment borgo writes sets it, so none of them ever spawns one.

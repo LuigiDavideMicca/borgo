@@ -19,7 +19,7 @@ bunx borgo deploy init <caddy|nginx|systemd|compose> [--force]
 | `caddy` | `Caddyfile` | reverse proxy with automatic TLS, three lines | set your domain, `caddy run --config Caddyfile` |
 | `nginx` | `site.conf` | reverse proxy: websocket upgrades, `proxy_buffering off` for SSE, long read timeout | set domain and certs, link into `sites-enabled/` |
 | `systemd` | `borgo.service` | a unit running `bun run start` with the environment stubbed in | copy to `/etc/systemd/system/`, `systemctl enable --now` |
-| `compose` | `docker-compose.yml` | build, ports, a `SESSION_SECRET`/`DB_PATH` stub, a `/data` volume, `BUN_CONFIG_MAX_HTTP_REQUESTS`, restart policy | `docker compose up -d` |
+| `compose` | `docker-compose.yml` | build, ports, `BUN_CONFIG_MAX_HTTP_REQUESTS`, restart policy, a required `SESSION_SECRET` if the app already signs sessions, and a commented-out `DB_PATH`/volume block | `docker compose up -d` |
 
 Which one? **One box, Docker installed** → `compose` and you are done. **One box, no Docker** → `systemd`, plus `caddy` or `nginx` in front for TLS. **A proxy already terminates TLS for other apps** → just `caddy`/`nginx` to add the site. The generated files are a starting point in your repo, not managed state — edit them freely; `deploy init` never touches them again without `--force`.
 
@@ -37,15 +37,16 @@ Two of those are worth setting deliberately, because the failure modes are quiet
 
 ```yaml
 environment:
-  SESSION_SECRET: <long random string>   # required if you use sessions
-  DB_PATH: /data/app.db                  # with a matching volume, below
+  # 32 characters minimum, or the Go binary refuses to boot
+  SESSION_SECRET: "${SESSION_SECRET:?missing - openssl rand -base64 48}"
+  DB_PATH: /data/app.db   # with a matching volume, below
 volumes:
   - data:/data
 ```
 
-`borgo deploy init compose` writes both of those with a named `/data` volume already declared, on the assumption that an app being deployed has data. The scaffolded templates do not: `base` and `minimal` have neither a database nor sessions and their compose files say so, and `full` signs sessions but keeps its stores in memory, so its compose file requires `SESSION_SECRET` — reading the random one `create-borgo` wrote into `.env` — and declares no volume. Add a volume when you add something to persist; a `data:` volume in front of an app with no database is a promise nothing keeps.
+`borgo deploy init compose` writes neither of those on spec. It reads your `.env` first, and only writes the `SESSION_SECRET` line when the app *already* has a usable key there — as the required form above, interpolated by compose from that same `.env`, which the image itself never receives (`.dockerignore` excludes it). An app that signs nothing gets no line at all, because a line the app does not need is a line that overrides the key it does: a real environment variable beats `.env` in bun, so a stub here silently invalidates every session the app ever issued. The `DB_PATH` and volume block is written **commented out**, for a different reason: nothing in a scaffolded app persists anything yet, and a mount docker creates root-owned is a permission error waiting for the first app that uses it. The scaffolded `Dockerfile` already creates `/data` owned by the image's user, so uncommenting the block is the whole change when you do have something to store. The scaffolded templates match: `base` and `minimal` have neither a database nor sessions and their compose files say so, and `full` signs sessions but keeps its stores in memory, so its compose file requires `SESSION_SECRET` — reading the random one `create-borgo` wrote into `.env` — and declares no volume.
 
-Missing `SESSION_SECRET` is the quietest failure of the three: the Go server boots, `/healthz` is green, and only session routes fail. See [cookies and sessions](security.md#cookies-and-sessions).
+The two ways `SESSION_SECRET` can be wrong fail in opposite directions, and only one of them is loud. **Missing** is the quietest failure on this page: the Go server boots, `/healthz` is green, and only session routes fail — closed, never open, so nothing forges against the absent key. **Set but shorter than 32 bytes** is the reverse: `borgo.Serve` refuses to start at all, so the container restart-loops with the reason on stdout. See [cookies and sessions](security.md#cookies-and-sessions).
 
 ## Docker, two services
 
@@ -89,24 +90,41 @@ example.com {
 }
 ```
 
-nginx needs the upgrade headers for WebSockets and SSE left unbuffered:
+nginx needs the upgrade headers for WebSockets, SSE left unbuffered, and a forwarding header it does not add on its own:
 
 ```nginx
+# at http level, which is where sites-enabled is included from: `Connection:
+# upgrade` belongs on a request that asked to upgrade and on no other. A fixed
+# value sends it on every proxied request, which stops nginx from keeping the
+# upstream connection alive and hands borgo a hop-by-hop header to strip.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 server {
     listen 443 ssl;
     server_name example.com;
+
+    # borgo's own limit is 32m (BORGO_MAX_BODY); nginx defaults to 1m and
+    # would 413 an upload the app is happy to accept
+    client_max_body_size 32m;
 
     location / {
         proxy_pass http://localhost:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;
         proxy_read_timeout 1h;
     }
 }
 ```
+
+That `X-Forwarded-For` line is not cosmetic. borgo authorizes `/__borgo/publish` as *from loopback and not forwarded*; behind a proxy on the same box every request arrives from loopback, so with no forwarding header the second half of the test never fires and anyone on the internet can broadcast into every subscribed browser. Caddy sets it by default, which is why only nginx needs it spelled out. Set `BORGO_PUSH_KEY` on both halves if you would rather not depend on a proxy header at all — see [realtime](realtime.md).
 
 Behind https, set `SESSION_SECURE=1` so session cookies carry the `Secure` attribute. Responses marked with `borgo.Cache` carry ordinary `Cache-Control` headers — see [Caching](#caching) below.
 
@@ -147,7 +165,7 @@ An exported site is pages only: [form actions](pages-and-routing.md#form-actions
 
 ## systemd, no Docker
 
-Build on the server (`bun install && bun run build`), then drop in a unit — `borgo deploy init systemd` generates exactly this file as `borgo.service`, with your app's name and ports filled in:
+Build on the server (`bun install && bun run build`), then drop in a unit — `borgo deploy init systemd` writes this file as `borgo.service`, with your app's name and ports filled in:
 
 ```ini
 [Unit]
@@ -156,11 +174,18 @@ After=network.target
 
 [Service]
 WorkingDirectory=/srv/my-app
+# absolute path is systemd's rule, not borgo's: check yours with `command -v bun`.
+# the official installer writes ~/.bun/bin/bun, which is not readable by User=
+# below - copy or symlink it somewhere system-wide, or point this line at it.
 ExecStart=/usr/local/bin/bun run start
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=API_PORT=3501
-Environment=SESSION_SECRET=change-me
+# generated by borgo deploy init, unique to this file, 32+ characters because
+# anything shorter stops the Go binary from booting at all. shipping a .env
+# instead? delete this line: bun reads .env from the working directory, and a
+# real environment variable would override it.
+Environment=SESSION_SECRET=FdIG2E2GGNmclKN6C_4CEaAh8oaVyKqZ36PeFtVipkiKKQXf
 # bun's outbound fetch pool defaults to 256, which ceilings concurrent
 # proxied requests - event streams above all - see docs/realtime.md
 Environment=BUN_CONFIG_MAX_HTTP_REQUESTS=16384
@@ -170,6 +195,10 @@ User=www-data
 [Install]
 WantedBy=multi-user.target
 ```
+
+That `SESSION_SECRET` is not a placeholder to fill in later, and there is no `change-me` in the file borgo writes: a value under 32 characters is not a weak key but a refusal, and the api exits at startup rather than signing with it — the unit would restart-loop instead of serving. `deploy init` generates a fresh 48-character key from the CSPRNG for this line, unique to the file it just wrote.
+
+It writes that line only when it has to. If your project's `.env` already holds a usable `SESSION_SECRET`, the generated unit deliberately sets **no** `Environment=SESSION_SECRET` at all and says so in a comment: bun loads `.env` from the working directory, a real environment variable wins over it, so a unit that sets its own key would override the one `create-borgo` generated and invalidate every session the app had already issued. Copy `.env` to the server instead.
 
 Do not drop that `BUN_CONFIG_MAX_HTTP_REQUESTS` line when you edit the unit. Without it `borgo start` re-execs itself to set it, which works but gives systemd a supervisor process in front of the server for no reason; with it, the unit is one process tree with the pool already sized.
 
@@ -196,8 +225,8 @@ Route labels are the matched route *pattern*, not each concrete URL — and the 
 | `API_URL` | `http://localhost:$API_PORT` | where the front server reaches the api (split deployments) |
 | `FRONT_URL` | `http://localhost:$PORT` | where `borgo.Push` reaches the front server |
 | `BORGO_PUSH_KEY` | unset | shared secret for `borgo.Push` across hosts — once set it *replaces* the loopback check, so set it on both halves or neither |
-| `SESSION_SECRET` | unset | HMAC key for signed-cookie sessions (required to use them) |
-| `SESSION_SECURE` | unset | `1` adds `Secure` to the session and csrf cookies |
+| `SESSION_SECRET` | unset | HMAC key for signed-cookie sessions, **32 bytes minimum**. Unset warns and boots anyway — session routes then fail per request, closed in both directions. Set but shorter than 32 is fatal at startup: `borgo.Serve` refuses to bind |
+| `SESSION_SECURE` | unset | `1`/`true` adds `Secure` to the session and csrf cookies; `0`/`false` and unset do not. A value that is neither is refused at startup by both halves, rather than read as "not secure" |
 | `BORGO_CSRF` | unset | `0` disables csrf checks on form actions, `1` forces them in dev |
 | `BORGO_METRICS` | unset | `1` exposes `/metrics` (Prometheus text) on the front server |
 | `BORGO_SECURITY_HEADERS` | unset | `0` drops the security headers *and* the CSP — see [security](security.md#changing-the-policy) |
@@ -206,18 +235,21 @@ Route labels are the matched route *pattern*, not each concrete URL — and the 
 | `BORGO_API_TIMEOUT` | `30000` (30 s) | front server: milliseconds to wait for the api's response headers before answering `504`; `0` disables |
 | `BUN_CONFIG_MAX_HTTP_REQUESTS` | `16384` under `borgo dev` and `borgo start`; `256` (bun's default) otherwise | front server: how many proxied requests may be in flight at once. Each event stream holds one for its whole life, so bun's default ceilings concurrent SSE subscribers at ~255. `borgo dev` sets it, every config borgo generates that *launches* the app sets it (Dockerfile, compose, systemd — not the caddy/nginx proxy configs, which set no environment), and `borgo start` re-execs itself to set it when nothing else did. Read at process start — exporting it afterwards has no effect, which is why the re-exec exists |
 | `BORGO_READ_HEADER_TIMEOUT` | `5s` | go server: cap on reading request headers (slow-header clients) |
-| `BORGO_IDLE_TIMEOUT` | go `2m`, front server `30` | **one name, both halves, two grammars** — go reads a duration and panics on anything else; the front server reads whole seconds (its socket read deadline, capped at 255, `0` disables) and silently keeps its default on anything else. See the warning under this table |
-| `BORGO_READ_TIMEOUT` | `0` (off) | go server: whole-request read deadline — leave off unless you have no streams |
+| `BORGO_FRONT_READ_TIMEOUT` | `30` | front server: inbound socket read deadline in whole seconds, capped at `255`, `0` disables. A value it cannot parse is silently replaced by `30`. See the note under this table for why the name says `FRONT` |
+| `BORGO_IDLE_TIMEOUT` | `2m` | go server: idle keep-alive reclaim (duration string) |
+| `BORGO_READ_TIMEOUT` | `0` (off) | go server: whole-request read deadline (duration string) — leave off unless you have no streams |
 | `BORGO_WRITE_TIMEOUT` | `0` (off) | go server: whole-response write deadline — `borgo.SSE` streams exempt themselves |
 | `BORGO_SHUTDOWN_TIMEOUT` | `10s` | go server: grace period for in-flight requests on shutdown; `0` waits indefinitely |
 | `BORGO_HASH_SLOTS` | `max(1, GOMAXPROCS/2)` | go server: password hashes that may run at once. One costs ~140 ms of cpu, so the cap is what keeps a login flood from starving every other route. A value that is not a positive integer is refused at startup rather than ignored |
 | `NO_COLOR` | unset | disable ANSI colors in logs |
 
-The Go timeouts are duration strings (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot rather than silently defaulting; the front server's three — `BORGO_MAX_BODY` in bytes, `BORGO_API_TIMEOUT` in milliseconds, `BORGO_IDLE_TIMEOUT` in seconds — are plain numbers, and a malformed one is silently replaced by the default. `DB_PATH` in the samples above is the app's own variable, not the framework's.
+The Go timeouts are duration strings (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot rather than silently defaulting; the front server's three — `BORGO_MAX_BODY` in bytes, `BORGO_API_TIMEOUT` in milliseconds, `BORGO_FRONT_READ_TIMEOUT` in seconds — are plain numbers, and a malformed one is silently replaced by the default. `DB_PATH` in the samples above is the app's own variable, not the framework's.
 
-> **Careful with `BORGO_IDLE_TIMEOUT`.** Both halves read that one name and neither knows the other does. `2m` is two minutes to Go and unparseable to the front server, which keeps 30 s without saying so; `120` is two minutes to the front server and a boot panic for the Go binary. `borgo start` hands both children the same environment, so there is no setting that means one thing. Leave it unset unless you run the two halves as separate processes with separate environments — and note that raising it is *not* how you keep event streams alive on the front server: streams are exempted from the deadline per response, automatically.
+> **Why `BORGO_FRONT_READ_TIMEOUT` spells out `FRONT`.** `borgo start` hands both children one environment, so a variable both halves read cannot mean one thing. That knob was `BORGO_IDLE_TIMEOUT` once, and Go still reads that name as a duration: `=2m` gave Go two minutes and left the front server silently on 30 seconds, while `=120` gave the front server two minutes and panicked the Go binary at boot. Renaming it to `BORGO_READ_TIMEOUT` reproduced the defect exactly, since the Go server reads that name too, same grammar, same panic. A rename moves a collision; `FRONT` is what closes it, and a test now fails the build if either half is ever pointed back at the other's variable. Neither old name is honoured as an alias.
+>
+> Note also that raising the front server's deadline is *not* how you keep event streams alive: it is lifted per request the moment nothing is left for a client to dribble at us — at the top of `fetch()` for a request with no body at all (every GET and HEAD), and in the proxy the instant a buffered request body has been read in full. A response that outlives the deadline is unaffected either way.
 
-Three more exist for the build, not the runtime: `BORGO_TAILWIND=1` is what `borgo build --tailwind` sets for its child processes (use the flag, not the variable — see [styling](dev-experience.md#styling)); `BORGO_STATIC=1` is what `borgo export` sets for the build it drives, and it is substituted into the client bundle rather than read at runtime, which is what compiles the props-fetching navigation path out of an exported site; and `BORGO_PARENT_PID` is how the CLI tells its children whose death to exit with. `BORGO_RELOAD` and `BORGO_CHANGED` are internal to the dev loop — the latter carries the whole set of changed files, newline-separated.
+Three more exist for the build, not the runtime: `BORGO_TAILWIND=1` is what `borgo build --tailwind` sets for its child processes (use the flag, not the variable — see [styling](dev-experience.md#styling)); `BORGO_STATIC=1` is what `borgo export` sets for the build it drives, and it is substituted into the client bundle rather than read at runtime, which is what compiles the props-fetching navigation path out of an exported site; and `BORGO_PARENT_PID` is how the CLI tells the Go api whose death to exit with (`BORGO_SUPERVISOR_PID` is the same trick pointing the other way, set on the copy of itself `borgo start` re-execs). `BORGO_RELOAD` and `BORGO_CHANGED` are internal to the dev loop — the latter carries the whole set of changed files, newline-separated.
 
 ## Shutdown and zero-downtime redeploys
 

@@ -15,6 +15,6 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["bun"]
   },
-  "include": ["run.ts", "lib/**/*.ts", "tools/**/*.ts"],
+  "include": ["run.ts", "lib/**/*.ts", "tools/**/*.ts", "test/**/*.ts"],
   "exclude": ["apps", "node_modules", ".tools"]
 }

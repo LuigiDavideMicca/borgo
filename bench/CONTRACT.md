@@ -16,6 +16,13 @@ mapping is exactly the crack a flattering shortcut crawls in through.
 - An implementation may run more than one process (borgo runs a Bun front
   server and a Go API binary). The runner measures the whole process tree, so
   a multi-process design is charged for all of it.
+- For the same reason, `start` must launch the server **directly**, not through
+  `bun x`, `bunx`, `npx`, `bun run` or a package-manager script. A launcher is a
+  process, tree-summed RSS charges it to the framework underneath it, and no
+  deployment runs one. borgo was already exempting itself from that overhead by
+  invoking its CLI entrypoint directly while Next.js went through `bun x`; the
+  rule now applies to everyone and `bench/test/parity.test.ts` fails a manifest
+  that breaks it.
 - `API_PORT` is provided for implementations that need a second port. Do not
   expose it to the load tool.
 
@@ -66,6 +73,16 @@ file rather than each keeping a copy that can drift. The canonical Go
 implementation is `bench/apps/borgo/api/items.go`. New implementations should
 import or transliterate one of them, not reinvent it.
 
+The runner checks the whole body, value for value, and the key order as it
+appears on the wire, against `bench/lib/canonical.ts` — which is a third
+implementation, written from the paragraph above rather than imported from
+either of the two. An oracle that imports the module the subject imports agrees
+with the subject by construction; it can only catch an implementation that wrote
+its own dataset, and it goes blind exactly when the shared module drifts. The
+earlier check counted occurrences of `"done":`, which an implementation
+returning a hundred items with `done` permanently `false` passes while doing
+less work than this asks for.
+
 ### `GET /page` — scenario `ssr-page`
 
 Server-rendered HTML, `content-type: text/html`. It must contain:
@@ -94,6 +111,11 @@ string `bench-static-asset`.
 Every implementation copies that exact file in as a build step
 (`bun ../../shared/copy-assets.ts <public-dir>`) so nobody serves a different
 number of bytes.
+
+That is now enforced rather than asserted: the pre-flight check hashes the body
+that actually arrived and compares both its length and its sha256 with the
+values above. A build step is a promise about what is on disk; the hash is a
+fact about what went on the wire, and `--skip-build` means the two can differ.
 
 ### `GET /api/events` — scenario `memory-conn`
 
@@ -134,6 +156,15 @@ is how the probe ends.
   "notes": "free text shown in the report"
 }
 ```
+
+`notes` and every non-plumbing entry in `env` are printed in the report, in a
+table above the results, along with the exact `start` argv. Any key set by
+exactly one implementation is additionally called out as tuning that one subject
+received and the others did not. This is not bookkeeping: the two things most
+worth disclosing in this directory — that borgo raises
+`BUN_CONFIG_MAX_HTTP_REQUESTS`, and that Fastify and Elysia are deliberately run
+without their fast serialisation modes — both lived only in `notes`, which
+nothing printed.
 
 `status` is the honesty valve:
 

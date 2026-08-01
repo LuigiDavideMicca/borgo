@@ -84,9 +84,9 @@ Session cookies are signed with HMAC-SHA256 over a payload that includes the exp
 | `HttpOnly` | always — JavaScript cannot read the session |
 | `SameSite` | `Lax` |
 | `Path` | `/` |
-| `Secure` | when `SESSION_SECURE=1` |
+| `Secure` | when `SESSION_SECURE` is `1`/`true` |
 
-Set `SESSION_SECURE=1` in production. It is off by default only so that `http://localhost` works.
+Set `SESSION_SECURE=1` in production. It is off by default only so that `http://localhost` works. A value that is neither a true nor a false spelling is refused at startup rather than read as "not secure" — that check used to be `== "1"`, which meant `SESSION_SECURE=true` silently issued a cookie the browser would send back over plain http.
 
 `SESSION_SECRET` is treated differently depending on how it is wrong, because the two cases fail in opposite directions.
 
@@ -94,7 +94,7 @@ Set `SESSION_SECURE=1` in production. It is off by default only so that `http://
 
 **Shorter than 32 bytes refuses to boot.** A short key is not a weaker secret, it is a searchable one: the security of the cookie rests on nobody being able to produce its HMAC, and a handful of bytes can be exhausted offline from a single captured cookie. Setting one is a deliberate act with a wrong value, so borgo treats it like any other malformed environment variable and stops, naming the length it got and the length it needs. Everywhere else in the framework a secret under the floor is indistinguishable from no secret at all.
 
-So the failure mode is per request, and you should know its shape: `/healthz` stays green, every page that does not touch a session keeps working, and `SetSession` returns `ErrNoSessionSecret`, which `LoginHandler` and `RegisterHandler` answer as a `500` with `{"error":"session write failed"}`. **Read the startup log on first boot, or assert on it in your deploy script** — that line is the only warning you get. Making it fatal is on the table for a future major ([api stability](api-stability.md#what-counts-as-a-breaking-change) lists it as breaking), because tightening it would stop apps that boot fine today.
+The *absent* case is the one whose failure mode is per request, and you should know its shape: `/healthz` stays green, every page that does not touch a session keeps working, and `SetSession` returns `ErrNoSessionSecret`, which `LoginHandler` and `RegisterHandler` answer as a `500` with `{"error":"session write failed"}`. **Read the startup log on first boot, or assert on it in your deploy script** — that line is the only warning you get. Making it fatal is on the table for a future major ([api stability](api-stability.md#what-counts-as-a-breaking-change) lists it as breaking), because tightening it would stop apps that boot fine today.
 
 Generate one properly:
 
@@ -117,14 +117,16 @@ This defends against **cookie tossing**. A cookie on a sibling subdomain (`blog.
 | Waiting for the Go API's response headers | 30 s | `BORGO_API_TIMEOUT` (ms, `0` disables) |
 | Reading a client's request headers (Go) | 5 s | `BORGO_READ_HEADER_TIMEOUT` |
 | Idle keep-alive connection (Go) | 2 m | `BORGO_IDLE_TIMEOUT` (duration; malformed panics at boot) |
-| Reading a client's request headers and body (front server) | 30 s | `BORGO_IDLE_TIMEOUT` (seconds, max 255, `0` disables; malformed is silently ignored) |
-| Whole-request read/write deadline | none | `BORGO_READ_TIMEOUT`, `BORGO_WRITE_TIMEOUT` |
+| Reading a client's request headers and body (front server) | 30 s | `BORGO_FRONT_READ_TIMEOUT` (seconds, max 255, `0` disables; malformed is silently ignored) |
+| Whole-request read/write deadline (Go) | none | `BORGO_READ_TIMEOUT` (duration), `BORGO_WRITE_TIMEOUT` |
 
 Over the `Bind` cap the client gets a `413`; a missing or non-JSON `Content-Type` gets a `415`. Both come from `borgo.BindError`.
 
 The whole-request deadlines are deliberately unset. They are wall-clock limits on an entire exchange, so any value would eventually kill a legitimate server-sent-events stream or a slow upload. Header timeouts stop slowloris without that cost, `Bind` bounds the body, and if you set the deadlines anyway, `borgo.SSE` clears them on its own connection so streams survive.
 
-The front server's own read deadline is the internet-facing one, and it is the reason the table lists `BORGO_IDLE_TIMEOUT` twice. Bun's `idleTimeout` bounds the wait for an inbound request's headers *and* body, so switching it off — which borgo used to do, to protect proxied event streams — left every body-reading path with no deadline at all: a POST declaring a `Content-Length` and then dribbling a byte at a time was held open indefinitely. The deadline is on, and the exemption for streams is granted per response instead, on the connections whose `Content-Type` says they are meant to sit idle. **The two halves read that one variable name with different grammars** — Go a duration, the front server whole seconds — and the failure modes differ too: Go panics at boot on a value it cannot parse, the front server silently keeps 30 s. Setting it in an environment both halves share means one of them is not getting what you wrote. See the [environment reference](deploy.md#environment-reference).
+The front server's own read deadline is the internet-facing one, and it has its own variable for a reason given below. Bun's `idleTimeout` bounds the wait for an inbound request's headers *and* body, so switching it off — which borgo used to do, to protect proxied event streams — left every body-reading path with no deadline at all: a POST declaring a `Content-Length` and then dribbling a byte at a time was held open indefinitely. The deadline is on, and the exemption is granted per *request* instead, at the two moments where a client provably has nothing left to dribble: at the top of `fetch()` when the request carries no body at all, which is every GET and HEAD, and in the proxy the instant a buffered request body has been read in full. `Content-Type` was tried as the discriminator and was wrong in kind — it truncated every long-lived response outside the allowlist, and granted the exemption only after the handler had already resolved, which is too late for anything slower than the deadline. The cost of the design that replaced it: a request whose body borgo never finished reading keeps its deadline for its whole life, so a proxied upload too large to buffer is still cut.
+
+**The two halves deliberately do not share a name for any of this.** They parse with different grammars — Go a duration, the front server whole seconds — and fail in different directions: Go panics at boot on a value it cannot parse, the front server silently keeps 30 s. `borgo start` gives both children one environment, so a shared name would mean one of them is never getting what you wrote; that is why the front server's knob is `BORGO_FRONT_READ_TIMEOUT` and Go's are `BORGO_READ_TIMEOUT` and `BORGO_IDLE_TIMEOUT`. See the [environment reference](deploy.md#environment-reference).
 
 A hung Go handler cannot take the front server with it: past `BORGO_API_TIMEOUT` the request answers `504` and the upstream body is cancelled.
 

@@ -146,13 +146,19 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 // map just before it reaches the wire, discarding any later mutation. A nil
 // snapshot (Flush before WriteHeader) commits the live headers as they are,
 // which is what net/http's implicit commit does too.
+//
+// It is also the one place where every header a response will carry is staged
+// at once, which is why the Set-Cookie/Cache-Control guard runs here: at commit
+// the order the handler set them in no longer exists to depend on. Every path
+// that reaches the wire goes through this - startGzip, startPassthrough and
+// finish - so no response leaves committing to a scope it did not mean.
 func (g *gzipResponseWriter) commitHeader() {
-	if g.header == nil {
-		return
-	}
 	h := g.rw.Header()
-	clear(h)
-	maps.Copy(h, g.header)
+	if g.header != nil {
+		clear(h)
+		maps.Copy(h, g.header)
+	}
+	privateIfCookies(h)
 }
 
 func (g *gzipResponseWriter) Write(p []byte) (int, error) {

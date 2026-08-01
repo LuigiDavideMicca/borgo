@@ -32,7 +32,7 @@ main.go               the Go entrypoint: imports api, calls borgo.Serve()
                       gitignored and rebuilt on every dev run and build)
 index.html            the HTML shell every page renders into
 style.scss            global styles
-package.json          bun scripts: dev, build, start, doctor
+package.json          bun scripts: dev, build, start, export, doctor
 go.mod                the Go module, with borgogen wired as a tool
 tsconfig.json         includes .borgo/api-types.d.ts explicitly (dot-dirs are skipped otherwise)
 ```
@@ -156,7 +156,7 @@ The `?? []` is not defensive padding. A nil Go slice marshals to `null`, not `[]
 Now try to break it on purpose. Change the route string to `"GET /api/note"`:
 
 ```
-error: Argument of type '"GET /api/note"' is not assignable to parameter of type keyof ApiRoutes
+error TS2345: Argument of type '"GET /api/note"' is not assignable to parameter of type '"GET /api/notes"'.
 ```
 
 The typo is a compile error, not a 404 you find in production. Change it back, then try `notes.map((note) => note.tilte)` — same story. This is the point of the bridge: the Go handler and the React page cannot disagree without someone failing to build.
@@ -239,7 +239,7 @@ Add a note. Three things worth noticing:
 - Submitting an empty title shows the error, because returning an object from an action gives the page an `actionData` prop; returning `redirect()` re-runs the loader instead.
 - It also works with JavaScript disabled. Turn it off in your browser and add another note: the classic post/redirect/get cycle takes over. The enhancement is an enhancement, not a requirement.
 
-`<CsrfField />` is what makes a cross-site copy of this form fail. See [security](security.md#csrf-protection) for why.
+`<CsrfField />` is what makes a cross-site copy of this form fail. Note that the check is *off* by default in the dev session you are in right now — `BORGO_CSRF=1` turns it on — and enforced in production, so a missing field is a bug you will not see until you deploy. See [security](security.md#csrf-protection) for why.
 
 ## Make one piece interactive
 
@@ -274,7 +274,7 @@ export default function About() {
 }
 ```
 
-Open `/about` with the network tab filtered to JS. The page itself ships no bundle — `hydrate = false` means exactly that — and only the island's code loads. The button still works.
+Open `/about` with the network tab filtered to JS. The page's own component ships no client code — `hydrate = false` means exactly that — and what loads instead is the islands entry: React plus the island modules, and nothing of the page itself. The button still works.
 
 ## Ship it
 

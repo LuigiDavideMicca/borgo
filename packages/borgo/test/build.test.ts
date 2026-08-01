@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assetsBuildMode,
+  buildAssets,
   buildModeFor,
+  BundleFailed,
   compileCss,
   cssSource,
   generateManifest,
@@ -763,5 +765,100 @@ describe("renameUnsafeChunks", () => {
     expect(renamed.size).toBe(0);
     expect(existsSync(file)).toBe(true);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// A BUILD THAT FAILS MUST CHANGE NOTHING.
+//
+// Bun.build reports failure two ways and borgo used to notice neither: with
+// `throw: true` (its default) an AggregateError escapes as a raw trace, and with
+// the result checked by hand `result.success` was simply never read. So a failed
+// bundle fell through to the sweep and to `.borgo/build-mode = production`, over
+// a tree it had just emptied - the sweep ran BEFORE the bundle, so one parse
+// error left public/assets holding nothing but style.css: client.js, every
+// chunk, precache.json and every precompressed sibling gone, and the last build
+// that actually worked gone with them. public/assets is gitignored by every
+// template, so there was nothing to restore it from.
+//
+// The inventory is read before the bundle and swept only after it succeeds.
+describe("a failed bundle leaves the last good build alone", () => {
+  const originalCwd = process.cwd();
+  let dir: string;
+
+  // the previous build's output, as it would be sitting on disk
+  const PREVIOUS = {
+    "client.js": "// the last build that worked",
+    "page-a1b2c3d4.js": "// a hashed chunk of it",
+    "precache.json": '{"stamp":"old","assets":[]}',
+    "style.css": "body{color:red}",
+  };
+  // and an app file that lives in the same directory and is nobody's output
+  const APP_FILE = ["analytics-9f8e7d6c.js", "// vendored, hashed, and not borgo's"] as const;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "borgo-failed-build-"));
+    mkdirSync(join(dir, "pages"), { recursive: true });
+    mkdirSync(join(dir, "public/assets"), { recursive: true });
+    mkdirSync(join(dir, ".borgo"), { recursive: true });
+
+    // a page that cannot be bundled: the failure has to come from the bundler,
+    // not from a missing directory the manifest step would have caught first
+    writeFileSync(join(dir, "pages/index.tsx"), "export default function Home() { return ( }\n");
+    // the app keeps its stylesheet entry: with none, compileCss drops the
+    // emitted style.css as an orphan, which is its job and not what is under test
+    writeFileSync(join(dir, "style.css"), "body{color:red}");
+
+    for (const [name, body] of Object.entries(PREVIOUS)) {
+      writeFileSync(join(dir, "public/assets", name), body);
+    }
+    writeFileSync(join(dir, "public/assets", APP_FILE[0]), APP_FILE[1]);
+    // what that previous build recorded as its own, and the mode it left
+    writeFileSync(
+      join(dir, ".borgo/build-output.json"),
+      JSON.stringify({ files: ["client.js", "page-a1b2c3d4.js", "precache.json"] }) + "\n",
+    );
+    writeFileSync(join(dir, ".borgo/build-mode"), "production");
+    process.chdir(dir);
+  });
+
+  afterAll(() => {
+    process.chdir(originalCwd);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("it fails as a BundleFailed, framed rather than thrown raw", async () => {
+    let caught: unknown;
+    try {
+      await buildAssets(true);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(BundleFailed);
+    expect((caught as BundleFailed).name).toBe("BundleFailed");
+    // one detail per bundler message, so the cli can print them as its own lines
+    expect((caught as BundleFailed).details.length).toBeGreaterThan(0);
+  });
+
+  test("every byte of the previous build is still there", () => {
+    for (const [name, body] of Object.entries(PREVIOUS)) {
+      const path = join(dir, "public/assets", name);
+      expect(existsSync(path)).toBe(true);
+      expect(readFileSync(path, "utf8")).toBe(body);
+    }
+  });
+
+  test("and so is the app's own file, which was never borgo's to sweep", () => {
+    expect(readFileSync(join(dir, "public/assets", APP_FILE[0]), "utf8")).toBe(APP_FILE[1]);
+  });
+
+  test("the recorded build mode still describes the build that is on disk", () => {
+    // the failed run must not claim the tree is a production build: `borgo
+    // start` reads this to decide whether to rebuild, and a mode written by a
+    // build that emitted nothing is a mode that describes nothing
+    expect(assetsBuildMode()).toBe("production");
+  });
+
+  test("and the inventory still names what is actually on disk", () => {
+    expect(readBuildInventory()).toEqual(["client.js", "page-a1b2c3d4.js", "precache.json"]);
   });
 });

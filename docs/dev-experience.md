@@ -8,12 +8,12 @@ What `borgo dev` does while you work: what hot-applies and what reloads, how sty
 
 - **Component, page and hook edits apply in place** through [react-refresh](https://www.npmjs.com/package/react-refresh) with the full Babel transform (dev builds only). The current route's new chunk is imported, loader props are refetched, and component state survives a body edit. Change a component's *hooks* — add, remove, reorder, or alter a custom hook's signature — and just that component remounts, Next-style; the rest of the page keeps its state. Editing a custom hook's body hot-applies with dependent state intact.
 - **Style edits swap the stylesheet in place** — no reload, no state loss.
-- **Everything else is a full reload**: layouts and error pages (they live in the shared entry chunk), `index.html`, and any Go change. On a Go edit the API binary is rebuilt while the old one keeps serving, swapped in, and the browser reloads exactly once — *after* the new API actually answers, so you never land on a dead backend.
+- **Everything else is a full reload**: layouts, error pages, `index.html`, and any Go change. Layouts because they are imported statically into the shared entry chunk; `_404`/`_500` because the update planner reloads on them by name, there being no safe in-place swap for a page the router may not currently be showing. On a Go edit the API binary is rebuilt while the old one keeps serving, swapped in, and the browser reloads exactly once — *after* the new API actually answers, so you never land on a dead backend.
 - **A broken build does not take the port down.** The front server keeps serving the error overlay and the dev channel, and the page reloads itself when the next good save lands.
 
 The mechanics, honestly: an edit restarts the front server so the server module graph is clean. The browser never reloads for that — it reconnects and hot-applies the change from the boot greeting it receives.
 
-Two details you would otherwise discover the hard way. Identical content does not trigger a rebuild: the watcher hashes what it reads, so an editor that touches a file without changing it costs nothing. And the Go rebuild is deduplicated on its *output*, because Windows can deliver a change event while the file is still half-written — a torn read that fails to compile no longer queues a second pointless rebuild.
+Two details you would otherwise discover the hard way. Identical content does not trigger a rebuild: the watcher hashes what it reads, so an editor that touches a `.go`, `.tsx`/`.ts` or `.html` file without changing it costs nothing. Stylesheets are exempt — an unchanged save of `style.scss` still recompiles and reswaps. And the Go rebuild is deduplicated on its *output*, because Windows can deliver a change event while the file is still half-written — a torn read that fails to compile no longer queues a second pointless rebuild.
 
 ## Nothing outlives the session
 
@@ -54,10 +54,13 @@ And pass the flag in `package.json`:
   "scripts": {
     "dev": "borgo dev --tailwind",
     "build": "borgo build --tailwind",
-    "start": "borgo start --tailwind"
+    "start": "borgo start --tailwind",
+    "export": "borgo export --tailwind"
   }
 }
 ```
+
+`export` is on that list for a reason, and leaving it off is not cosmetic: `borgo export` compiles CSS too, so without the flag it looks for the `style.scss` the Tailwind setup deleted, finds none, and removes `public/assets/style.css` — the app's only stylesheet, in a gitignored directory, while the pages it just exported still link it. `create-borgo --tailwind` appends the flag to all four scripts.
 
 With the flag, Tailwind owns the stylesheet: it scans your pages and islands for class names and rewrites `public/assets/style.css`, minified in production builds. Editing a page hot-applies new utilities through the normal refresh cycle, and editing `style.css` swaps the stylesheet in place. Without the flag, the SCSS pipeline stays in charge and `style.css` is ignored.
 
@@ -114,7 +117,7 @@ Flags:
 
 | Flag | Applies to | Meaning |
 | --- | --- | --- |
-| `--tailwind` | `dev`, `build`, `start` | compile CSS with Tailwind instead of SCSS |
+| `--tailwind` | any command (parsed globally); it matters to `dev`, `build`, `start` and `export`, the four that compile CSS | compile CSS with Tailwind instead of SCSS |
 | `--front-only` | `start` | run the front server alone, for split deployments where the API lives elsewhere (point `API_URL` at it) |
 | `--force` | `deploy init`, `pwa init` | overwrite an existing generated file |
 | `-h`, `--help`, `-v`, `--version` | — | print the banner and exit 0 |

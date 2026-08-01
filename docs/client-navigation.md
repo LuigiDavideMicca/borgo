@@ -70,7 +70,7 @@ Every failure mode falls back to something that works rather than to a broken pa
 | The destination is not a known route | full navigation |
 | A loader redirects to another origin | the browser navigates there |
 | A redirect chain exceeds ten hops | full navigation, rather than looping forever |
-| A redirect with a `javascript:` or `data:` scheme | refused, then a reload |
+| A redirect with a `javascript:` or `data:` scheme | refused; a navigation falls back to a full load of the link target, a form submit reloads |
 | The server answers a submit with something unparseable | reload, so the page reflects whatever the mutation did |
 
 The runtime never leaves a mutation in an unknown state silently: if it cannot interpret the answer, it goes and asks the server again.

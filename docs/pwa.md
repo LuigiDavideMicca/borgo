@@ -81,6 +81,8 @@ if (event.request.mode === "navigate") {
 
 `registerServiceWorker(path = "/sw.js")` no-ops server-side, in browsers without support, and **in development**. That last one is deliberate: a caching worker attached to a dev server will serve you yesterday's chunks while you edit, and you will spend an afternoon convincing yourself that fast refresh is broken. Production builds register normally.
 
+The dev guard has one hole, and it fails open. It reads a flag the server writes into the props script — so on a page with `hydrate = false`, which ships no props script, the flag is absent and the call registers the worker even under `borgo dev`. Such a page can still run islands, and an island is exactly where you would call this. If you register from an island, put the page's own `hydrate` back on, or guard the call yourself.
+
 If you need to test the worker locally, run a production build: `bun run build && bun run start`.
 
 ## Caveats, honestly

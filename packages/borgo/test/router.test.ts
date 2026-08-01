@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { filePathToPattern, matchRoute, resolveHead } from "../src/router";
+import { filePathToPattern, matchRoute, resolveHead, safeHeadAttrs } from "../src/router";
+import { headHtml } from "../src/util";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 describe("filePathToPattern", () => {
   const cases: Array<[string, string]> = [
@@ -98,5 +101,82 @@ describe("resolveHead", () => {
 
   test("absent head", () => {
     expect(resolveHead({ default: component }, {})).toEqual({});
+  });
+});
+
+// ONE head() EXPORT, ONE HEAD.
+//
+// A head export may be computed from loader data, so its attribute NAMES are as
+// untrusted as its values. The server rendered through this filter already; the
+// browser runtime's applyHead called setAttribute on whatever it was given, so
+// the same meta that the server had escaped or dropped behaved differently on a
+// client navigation to the very same page. Two ways, both bad:
+//
+//   - a name starting with `on` installed a live event handler on an element
+//     built out of loader data, which is script execution the csp never sees
+//     (it is not an inline script, it is a DOM property assignment);
+//   - a name that is not an html token made setAttribute throw
+//     InvalidCharacterError - from inside navigate(), AFTER root.render(), so
+//     the page was already swapped in, the head half-applied, and the rejection
+//     unhandled. Every meta after the bad one was silently lost.
+//
+// The filter lives in router.ts precisely so both halves import the same one.
+describe("safeHeadAttrs: the filter both halves render through", () => {
+  test("ordinary meta attributes pass through as strings", () => {
+    expect(safeHeadAttrs({ name: "description", content: "hello" })).toEqual([
+      ["name", "description"],
+      ["content", "hello"],
+    ]);
+    // values are stringified, never handed on as-is
+    expect(safeHeadAttrs({ content: 42 })).toEqual([["content", "42"]]);
+    // the og:/twitter: family, and data-/aria- names, are all legal tokens
+    expect(safeHeadAttrs({ property: "og:title", "data-x": "1", "aria-label": "a" })).toEqual([
+      ["property", "og:title"],
+      ["data-x", "1"],
+      ["aria-label", "a"],
+    ]);
+  });
+
+  test("an event-handler name never becomes an attribute, in any casing", () => {
+    for (const name of ["onclick", "onClick", "ONERROR", "onmouseover", "onload"]) {
+      expect(safeHeadAttrs({ [name]: "alert(1)" })).toEqual([]);
+    }
+  });
+
+  test("a name setAttribute would throw on is dropped, not passed to the dom", () => {
+    for (const name of ["a b", "a=b", '"', "<script>", "", "1abc", "a\nb", "a/b"]) {
+      expect(safeHeadAttrs({ [name]: "x" })).toEqual([]);
+    }
+  });
+
+  test("a refused name does not take the attributes after it with it", () => {
+    expect(safeHeadAttrs({ onclick: "alert(1)", name: "description", content: "kept" })).toEqual([
+      ["name", "description"],
+      ["content", "kept"],
+    ]);
+  });
+
+  // the point of the shared filter: what the server wrote into the document and
+  // what applyHead builds on a client navigation have to be the same set
+  test("the server's rendered head agrees with it, name for name", () => {
+    const meta = { name: "description", onclick: "alert(1)", "bad name": "x", content: "hello" };
+    const html = headHtml({ meta: [meta] });
+    for (const [name, value] of safeHeadAttrs(meta)) {
+      expect(html).toContain(`${name}="${value}"`);
+    }
+    expect(html).not.toContain("onclick");
+    expect(html).not.toContain("bad name");
+  });
+
+  // applyHead is inside mount()'s closure and cannot be imported; this is the
+  // wiring assertion that it goes through the filter rather than Object.entries
+  test("the browser runtime applies a head through it, not through Object.entries", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/runtime.ts"), "utf8");
+    const applyHead = src.slice(src.indexOf("function applyHead"), src.indexOf("const propsTtl"));
+    expect(applyHead).toContain("safeHeadAttrs(meta)");
+    expect(applyHead).not.toContain("Object.entries(meta)");
+    // and every meta it appends is marked, so the next navigation removes it
+    expect(applyHead).toContain('setAttribute("data-borgo-head", "")');
+    expect(applyHead).toContain('querySelectorAll("[data-borgo-head]")');
   });
 });

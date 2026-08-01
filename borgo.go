@@ -249,6 +249,24 @@ type recoverWriter struct {
 	wrote bool
 }
 
+// commit is the last point a response passes through before its headers reach
+// the wire - whatever it was written by, and whether or not the handler set a
+// status explicitly. That makes it the one place the Set-Cookie/Cache-Control
+// guard can be order-independent: by now every cookie the handler set is
+// staged, so it no longer matters whether borgo.Cache ran before or after
+// SetSession.
+//
+// It belongs here rather than in gzipResponseWriter because that one is only
+// installed for clients that accept gzip - a request with no Accept-Encoding
+// goes straight to the handler, which is exactly the request a naive cache
+// probe makes. recoverWriter wraps unconditionally.
+func (w *recoverWriter) commit() {
+	if w.wrote {
+		return
+	}
+	privateIfCookies(w.Header())
+}
+
 func (w *recoverWriter) WriteHeader(status int) {
 	// an informational 1xx leaves the response uncommitted: a handler that
 	// panics right after sending early hints must still get its 500
@@ -256,16 +274,21 @@ func (w *recoverWriter) WriteHeader(status int) {
 		w.ResponseWriter.WriteHeader(status)
 		return
 	}
+	w.commit()
 	w.wrote = true
 	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *recoverWriter) Write(p []byte) (int, error) {
+	// net/http commits an implicit 200 on the first write without routing it
+	// back through WriteHeader, so the guard has to run from here too
+	w.commit()
 	w.wrote = true
 	return w.ResponseWriter.Write(p)
 }
 
 func (w *recoverWriter) Flush() {
+	w.commit()
 	w.wrote = true
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()

@@ -41,9 +41,9 @@ func RecentTasks(w http.ResponseWriter, r *http.Request) {
 
 The bridge does not care where your data came from — it reads the type you hand to `borgo.JSON`, so a route backed by GORM, `database/sql`, an HTTP call to another service or a hard-coded slice all type identically. `examples/tasks` in this repository uses GORM with SQLite; the `full` template uses in-memory maps so it has no dependencies to install.
 
-What has zero dependencies is the **framework**: `github.com/LuigiDavideMicca/borgo` pulls in nothing but the standard library, so the only third-party code in your binary is the code you chose. Types from a dependency reach TypeScript like any other — `time.Time` becomes a string, a type with `MarshalText` becomes a string, and anything with a custom `MarshalJSON` maps to `unknown` until you point a [`//borgo:type` override](#type-overrides) at it, which is exactly what the GORM example does for `gorm.DeletedAt`.
+What has zero dependencies is the **framework**: `github.com/LuigiDavideMicca/borgo` pulls in nothing but the standard library, so the only third-party code in your binary is the code you chose. Types from a dependency reach TypeScript like any other — `time.Time` becomes a string, a type with `MarshalText` becomes a string, and one whose custom `MarshalJSON` runs where it is used maps to `unknown` until you point a [`//borgo:type` override](#type-overrides) at it, which is exactly what the GORM example does for `gorm.DeletedAt`. Whether a marshaler runs at all can depend on the value's position — see [addressability](#addressability-one-type-two-shapes).
 
-A malformed directive fails the generator *before* it writes anything, so a typo can never leave behind a half-generated `borgo.gen.go` that keeps breaking the build after you fix it. Registering the same pattern twice, or registering after `borgo.Serve()` has snapshotted the table, panics with a message naming the file and line.
+A malformed directive fails the generator *before* it writes anything, so a typo can never leave behind a half-generated `borgo.gen.go` that keeps breaking the build after you fix it. Registering the same pattern twice, or registering after `borgo.Serve()` has snapshotted the table, panics naming the offending pattern. (Only the *malformed* pattern panic also names the registering file and line.)
 
 ## What borgogen reads
 
@@ -52,7 +52,7 @@ A malformed directive fails the generator *before* it writes anything, so a typo
 - `.borgo/api-types.d.ts` — a TypeScript interface per Go struct, plus a route map from pattern to request and response types
 - `api/borgo.gen.go` — the mounting code for `//borgo:route` handlers
 
-It finds a route's **response type** from `borgo.JSON[T]`, `borgo.WriteJSON`, and inline `json.NewEncoder(w).Encode(v)` calls reachable from the handler — including through helper functions, both inside the `api` package and across other packages of your module:
+It finds a route's **response type** from `borgo.JSON[T]`, `borgo.WriteJSON`, and inline `json.NewEncoder(w).Encode(v)` calls reachable from the handler — including through helper functions, both inside the `api` package and — within the bounds listed under [honest limits](#honest-limits) — across other packages of your module:
 
 ```go
 func respondTask(w http.ResponseWriter, status int, task Task) {
@@ -116,8 +116,9 @@ Fields follow `encoding/json` semantics, because that is what will actually be o
 | `map[string]T` | `Record<string, T> \| null` | numeric keys too — Go writes them as strings; a nil map is `null` |
 | `time.Time` | `string` | RFC 3339 |
 | `json.RawMessage` | `unknown` | |
-| a type with `MarshalText` | `string` | see the addressability note below |
-| a type with `MarshalJSON` | `unknown` | override it with `//borgo:type` |
+| a type with a value-receiver `MarshalText` | `string` | |
+| a type with a value-receiver `MarshalJSON` | `unknown` | override it with `//borgo:type` |
+| a type whose marshaler has a **pointer receiver** | depends on where the value sits | see [addressability](#addressability-one-type-two-shapes) below |
 | `json:"name,omitempty"` | `name?: T` | strings, numbers, bools, slices, maps, pointers — not structs, which Go always writes |
 | `json:"name,omitzero"` | `name?: T` | Go 1.24+ |
 | `json:"-"` | omitted | but `json:"-,"` means a field literally named `-` |
@@ -125,11 +126,64 @@ Fields follow `encoding/json` semantics, because that is what will actually be o
 
 Embedded structs are flattened using the standard library's own depth rules: a field on the outer struct shadows a promoted one at greater depth, and two promoted fields tied at the same depth cancel out, exactly as `encoding/json` drops them. Fields promoted from an *unexported* embedded type are included, because they are marshalled. Two same-named structs in different packages get distinct interfaces, prefixed by package. Recursive types terminate. A JSON tag that is not a valid TypeScript identifier is emitted quoted, so `json:"user-name"` cannot break your typecheck.
 
-One deliberate imprecision, worth knowing because it is otherwise invisible. When a type's `MarshalText` has a **pointer receiver**, `encoding/json` calls it only where the value is addressable — inside a slice, or through a pointer — and not for a plain struct field. The same named type can therefore reach the wire in two different shapes within one response. borgogen types it as `string | number`: correct in every position, rather than precise in one and wrong in another. Give the marshaler a value receiver and the type is simply `string`.
+### Addressability: one type, two shapes
+
+`encoding/json` calls a marshaler declared on a **pointer receiver** only where it can take the value's address. So a type carrying one does not have *a* JSON shape — it has two, and which one you get depends on the position the value sits in, not on the type. borgogen models this exactly rather than picking a winner.
+
+The rules it follows, which are `reflect.Value.CanAddr`'s:
+
+| Position | Addressable? |
+| --- | --- |
+| `json.Marshal`'s own argument — the root of a response | no |
+| a slice element, anything behind a pointer | **yes**, always |
+| a struct field, an array element, a value-embedded struct | inherits from whatever holds it |
+| a map value, a map key, anything behind an interface | no, ever |
+| a field promoted through an **embedded pointer** | **yes** — reaching it dereferences, so it is addressable even inside a map value |
+
+The case worth seeing, because it is the one that surprises:
+
+```go
+type PM struct {
+	X int `json:"x"`
+}
+
+func (p *PM) MarshalJSON() ([]byte, error) { return []byte(`"pm"`), nil }
+
+type Outer struct {
+	P PM `json:"p"`
+}
+```
+
+`Outer` never mentions a pointer, and yet:
+
+```
+Outer{}                    ->  {"p":{"x":0}}
+[]Outer{{}}                ->  [{"p":"pm"}]
+map[string]Outer{"k": {}}  ->  {"k":{"p":{"x":0}}}
+```
+
+Same type, three positions, two different JSON shapes — the slice element is addressable, so `PM`'s marshaler runs there and nowhere else. A map value behaves like the root, not like the slice.
+
+Where the shape genuinely depends on position, borgogen emits a second interface beside the first and each reference site picks the right one:
+
+```ts no-check
+export interface Outer {
+  p: PM;
+}
+
+// Outer as encoding/json writes it where the value is addressable
+export interface Outer$Addressable {
+  p: unknown;
+}
+```
+
+`$` cannot appear in a Go identifier, so the variant name can never collide with a type of yours. A type whose two renderings are identical — the overwhelming majority — gets one interface as before.
+
+This also means the two positions can run *different methods*. A type with `MarshalJSON` on the pointer receiver and `MarshalText` on the value one is `unknown` where it is addressable and `string` where it is not, because that is the order `encoding/json` resolves them in. Give a marshaler a value receiver and all of this collapses: one shape, one interface, everywhere.
 
 ## Type overrides
 
-A type borgogen cannot see through — anything with a custom `MarshalJSON` — maps to `unknown`. Override the mapping for any named type with a directive anywhere in the `api` package:
+A type borgogen cannot see through — one whose custom `MarshalJSON` runs in the position it is used — maps to `unknown`. Override the mapping for any named type with a directive anywhere in the `api` package:
 
 ```go
 //borgo:type gorm.io/gorm.DeletedAt string | null
@@ -214,6 +268,7 @@ Every template ships this. If your editor suddenly cannot find the route types, 
 The bridge is static analysis, and it says `unknown` rather than guessing. What it cannot see:
 
 - helper functions **outside your module** — a response written by a vendored or third-party package;
+- helper functions in another package of your module that are more than **three package hops** away, or that are methods, or that do not take an `http.ResponseWriter`/`*http.Request`. In-package helpers have none of these restrictions; the hop limit is warned about, the other two are not;
 - an encoder stored in a variable before use (`enc := json.NewEncoder(w)`) rather than the inline chain;
 - dynamically chosen types: `borgo.JSON(w, s, any(x))` types as the static type of the expression, which is `any`;
 - anything reached through reflection.

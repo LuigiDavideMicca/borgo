@@ -654,3 +654,110 @@ describe("the process ends", () => {
     expect(existsSync(join(app, ".vscode"))).toBe(true); // vscode
   }, 30_000);
 });
+
+// THE SIGNING KEY, AND THE FILE IT LIVES IN.
+//
+// session.go refuses a SESSION_SECRET shorter than 32 bytes outright - it will
+// not boot, because a key that short is not a weaker secret but a searchable
+// one, exhaustible offline from a single captured cookie. So the nine bytes of
+// `SESSION_SECRET=change-me` were never a placeholder to fill in later: they
+// were a generated app that could not start, and a generated deploy config that
+// could not start the app it was written for.
+//
+// The two shortcuts that look easier are both worse: a literal in main.go is the
+// same key in every app anyone scaffolds, and one derived from the project name
+// is public - the title, the repo and the hostname all carry it - so anyone can
+// compute the HMAC and mint a session as anybody.
+const SESSION_SECRET_MIN = 32;
+const SECRET_ASSIGNMENT = /SESSION_SECRET[=:]\s*["']?([^"'\s,}]*)/g;
+
+describe("the generated signing key", () => {
+  test("the full template writes a real one into .env", () => {
+    run(["app", "--template", "full", NG]);
+    const env = readFileSync(join(cwd, "app", ".env"), "utf8");
+    const value = env.match(/^SESSION_SECRET=(.*)$/m)?.[1];
+    expect(value).toBeDefined();
+    expect(value!.length).toBeGreaterThanOrEqual(SESSION_SECRET_MIN);
+    // base64url out of the CSPRNG: safe unquoted on a systemd Environment= line
+    expect(value!).toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+
+  test("it is unique per app, not a constant and not derived from the name", () => {
+    run(["one", "--template", "full", NG]);
+    run(["two", "--template", "full", NG]);
+    const read = (app: string) =>
+      readFileSync(join(cwd, app, ".env"), "utf8").match(/^SESSION_SECRET=(.*)$/m)![1];
+    const a = read("one");
+    const b = read("two");
+    expect(a).not.toBe(b);
+    // nothing public may appear in it
+    for (const value of [a, b]) {
+      expect(value.toLowerCase()).not.toContain("one");
+      expect(value.toLowerCase()).not.toContain("two");
+      expect(value.toLowerCase()).not.toContain("borgo");
+    }
+  });
+
+  // the scan, not a spot check: every generated file of every template, so a
+  // placeholder reintroduced anywhere fails here rather than at someone's boot
+  test("no generated file anywhere assigns a secret too short to boot with", () => {
+    for (const template of ["minimal", "base", "full"] as const) {
+      const app = `app-${template}`;
+      run([app, "--template", template, NG]);
+      const root = join(cwd, app);
+      const files = [...new Bun.Glob("**/*").scanSync({ cwd: root, dot: true, onlyFiles: true })];
+      expect(files.length).toBeGreaterThan(0);
+      for (const rel of files) {
+        let text: string;
+        try {
+          text = readFileSync(join(root, rel), "utf8");
+        } catch {
+          continue;
+        }
+        for (const [, value] of text.matchAll(SECRET_ASSIGNMENT)) {
+          // `${SESSION_SECRET}`-style references and :?error forms name the
+          // variable rather than assigning a value to it
+          if (value.startsWith("$") || value === "") continue;
+          // the file and the value ride in the message: a failure here has to
+          // name what to go and look at
+          expect(`${rel}: ${value}`.length).toBeGreaterThanOrEqual(
+            rel.length + 2 + SESSION_SECRET_MIN,
+          );
+        }
+      }
+    }
+  }, 60_000);
+
+  // a key in a file git will commit is a key in the repository history, and the
+  // .env is the only place it exists
+  test(".env is gitignored by every template, and never committed", () => {
+    for (const template of ["minimal", "base", "full"] as const) {
+      const app = `ig-${template}`;
+      run([app, "--template", template, NG]);
+      expect(readFileSync(join(cwd, app, ".gitignore"), "utf8").split("\n")).toContain(".env");
+    }
+    // and with git on, the initial commit really does leave it out
+    run(["committed", "--template", "full"]);
+    expect(existsSync(join(cwd, "committed", ".env"))).toBe(true);
+    const tracked = git("committed", "ls-files").out.split("\n");
+    expect(tracked).not.toContain(".env");
+    expect(tracked).toContain(".gitignore");
+  }, 60_000);
+
+  // a key that exists in exactly one gitignored file is a key the operator will
+  // lose on the first deploy unless something says so, and losing it logs every
+  // user out
+  test("the summary tells the user the file exists and must travel", () => {
+    const { out } = run(["app", "--template", "full", NG]);
+    expect(out).toContain(".env");
+    expect(out).toContain("SESSION_SECRET");
+    // the consequence, not just the filename
+    expect(out.toLowerCase()).toContain("copy it to the server");
+  });
+
+  // only the template that actually has sessions
+  test("a template without auth is not given a key it does not use", () => {
+    run(["minimal-app", "--template", "minimal", NG]);
+    expect(existsSync(join(cwd, "minimal-app", ".env"))).toBe(false);
+  });
+});

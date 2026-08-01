@@ -2,7 +2,18 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { caddyfile, composeYml, deployInit, nginxConf, projectContext, systemdUnit } from "../src/deploy";
+import {
+  caddyfile,
+  composeYml,
+  COMMAND_FLAGS,
+  deployInit,
+  nginxConf,
+  parseInitArgv,
+  projectContext,
+  SESSION_SECRET_MIN,
+  systemdUnit,
+  unknownArg,
+} from "../src/deploy";
 
 const ctx = { name: "my-app", port: "3000", apiPort: "3501" };
 
@@ -203,5 +214,147 @@ describe("the outbound request cap", () => {
       // environment as it stood, so placement is part of the assertion
       expect(text.indexOf("BUN_CONFIG_MAX_HTTP_REQUESTS")).toBeLessThan(text.indexOf("CMD"));
     }
+  });
+});
+
+// A cli that ignores an argument does the wrong thing and exits 0, which the
+// operator cannot tell from having done the right thing. `borgo <deploy|pwa>
+// init` refused unknown arguments through parseInitArgv; every other command
+// took whatever it was handed and dropped it.
+describe("argument refusals", () => {
+  describe("parseInitArgv", () => {
+    test("init alone, and init with a target, are accepted", () => {
+      expect(parseInitArgv(["init"], 0)).toEqual({ ok: true, target: undefined, force: false });
+      expect(parseInitArgv(["init", "nginx"], 1)).toEqual({ ok: true, target: "nginx", force: false });
+      expect(parseInitArgv(["init", "--force"], 0)).toEqual({ ok: true, target: undefined, force: true });
+    });
+
+    test("--tailwind is global and legal after any command", () => {
+      expect(parseInitArgv(["init", "--tailwind"], 0).ok).toBe(true);
+    });
+
+    // the old parser was argv.filter(a => !a.startsWith("--")), which drops a
+    // flag and keeps its value: the value then read as the target
+    test("a flag's value is never mistaken for a positional", () => {
+      expect(parseInitArgv(["init", "nginx", "--port", "8080"], 1)).toEqual({
+        ok: false,
+        reason: 'unknown option "--port"',
+      });
+      expect(parseInitArgv(["init", "--port", "8080", "nginx"], 1)).toEqual({
+        ok: false,
+        reason: 'unknown option "--port"',
+      });
+    });
+
+    test("a missing or wrong subcommand is named, not guessed at", () => {
+      expect(parseInitArgv([], 0)).toEqual({ ok: false, reason: "missing subcommand" });
+      expect(parseInitArgv(["setup"], 0)).toEqual({ ok: false, reason: 'unknown subcommand "setup"' });
+    });
+
+    test("a surplus positional is refused by name", () => {
+      expect(parseInitArgv(["init", "nginx", "caddy"], 1)).toEqual({
+        ok: false,
+        reason: 'unexpected argument "caddy"',
+      });
+      expect(parseInitArgv(["init", "nginx"], 0)).toEqual({
+        ok: false,
+        reason: 'unexpected argument "nginx"',
+      });
+    });
+  });
+
+  describe("unknownArg", () => {
+    test("the commands take their own flags and the global one", () => {
+      for (const command of Object.keys(COMMAND_FLAGS)) {
+        expect(unknownArg(command, [])).toBeNull();
+        expect(unknownArg(command, ["--tailwind"])).toBeNull();
+      }
+      expect(unknownArg("start", ["--front-only"])).toBeNull();
+      expect(unknownArg("start", ["--front-only", "--tailwind"])).toBeNull();
+    });
+
+    // each of these ran and exited 0 having done something other than what was
+    // asked: the port stayed 3000, the build was not minified, no tailwind was
+    // compiled. A flag borgo does not know is a flag its user believes is doing
+    // something.
+    test("a flag borgo does not know is refused, not ignored", () => {
+      expect(unknownArg("start", ["--port", "4000"])).toBe('unknown option "--port"');
+      expect(unknownArg("build", ["--minify"])).toBe('unknown option "--minify"');
+      expect(unknownArg("dev", ["--tailwnid"])).toBe('unknown option "--tailwnid"');
+      expect(unknownArg("export", ["--out", "site"])).toBe('unknown option "--out"');
+      expect(unknownArg("doctor", ["--json"])).toBe('unknown option "--json"');
+    });
+
+    test("a stray positional is refused too", () => {
+      expect(unknownArg("build", ["prod"])).toBe('unexpected argument "prod"');
+      expect(unknownArg("start", ["8080"])).toBe('unexpected argument "8080"');
+    });
+
+    // --front-only is start's alone: on any other command it did nothing
+    test("one command's flag is not another's", () => {
+      expect(unknownArg("build", ["--front-only"])).toBe('unknown option "--front-only"');
+      expect(unknownArg("dev", ["--front-only"])).toBe('unknown option "--front-only"');
+    });
+
+    // deploy and pwa have their own parser, and an unrecognised command is the
+    // cli's default branch to answer with usage
+    test("commands this does not own are left to their own parsers", () => {
+      expect(unknownArg("deploy", ["init", "nginx"])).toBeNull();
+      expect(unknownArg("pwa", ["init"])).toBeNull();
+      expect(unknownArg("--help", [])).toBeNull();
+      expect(unknownArg("nonsense", ["--whatever"])).toBeNull();
+    });
+  });
+
+  // the wiring: the refusal has to be reached before any command runs, or it is
+  // a function nobody calls
+  test("the cli refuses before it dispatches", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/cli.ts"), "utf8");
+    expect(src).toContain("unknownArg(command, process.argv.slice(3))");
+    expect(src.indexOf("unknownArg(command")).toBeLessThan(src.indexOf("switch (command)"));
+  });
+});
+
+// TEXT WE WRITE FOR AN OPERATOR HAS TO NAME THE RIGHT FAILURE.
+//
+// The systemd comment said a too-short SESSION_SECRET produces "an app whose
+// every login answers 500". It does not: CheckEnv returns the refusal and Serve
+// turns it into a fatal before the listener binds, so the api does not start at
+// all. The difference is the whole of what an operator does next - hunt a
+// failing route, or read the boot log - and the wrong one sends them looking at
+// the app instead of at the unit file they are editing.
+describe("the systemd unit describes the real failure", () => {
+  const shortSecretAdvice = /SESSION_SECRET[\s\S]{0,200}?(?:answers?\s+500|boot|start)/i;
+
+  test("it says the api refuses to boot, not that logins answer 500", () => {
+    const unit = systemdUnit({ ...ctx, secret: null });
+    expect(unit).toMatch(shortSecretAdvice);
+    // the wrong direction must not appear anywhere in the generated unit
+    expect(unit).not.toContain("answers 500");
+    expect(unit).not.toContain("answer 500");
+    expect(unit.toLowerCase()).toContain("does not boot");
+  });
+
+  test("and it still writes a key that clears the floor it describes", () => {
+    const unit = systemdUnit({ ...ctx, secret: null });
+    const value = unit.match(/^Environment=SESSION_SECRET=(.*)$/m)?.[1];
+    expect(value).toBeDefined();
+    expect(value!.length).toBeGreaterThanOrEqual(SESSION_SECRET_MIN);
+  });
+
+  // the app-already-has-a-key branch sets nothing, so it has no failure to
+  // describe - it explains the override instead
+  test("the branch that sets no key makes no claim about one", () => {
+    const unit = systemdUnit({ ...ctx, secret: "a".repeat(48) });
+    expect(unit).not.toContain("Environment=SESSION_SECRET=");
+    expect(unit).not.toContain("answers 500");
+  });
+
+  // composeYml's parallel comment is about adding sessions later with no secret
+  // set at all, which really is a 500 per auth route (ErrNoSessionSecret) and
+  // not a boot refusal - different case, correct as written
+  test("compose still describes its own, different case", () => {
+    const yml = composeYml(ctx);
+    expect(yml).toContain("500");
   });
 });

@@ -12,7 +12,12 @@ export const SCENARIOS: Scenario[] = [
     title: "hello-world JSON",
     kind: "load",
     path: "/api/hello",
-    expect: { status: 200, contentType: "application/json", contains: ['"hello, world"'] },
+    expect: {
+      status: 200,
+      contentType: "application/json",
+      contains: ['"hello, world"'],
+      body: { kind: "hello" },
+    },
     description:
       "The floor: serialise one tiny object. Measures request plumbing, not application work. " +
       "For borgo this crosses the Bun front server and the Go API, because that is what a " +
@@ -37,6 +42,11 @@ export const SCENARIOS: Scenario[] = [
         { pattern: '"done"\\s*:', flags: "g", min: 100, label: "100 objects each carrying a done flag" },
       ],
       minBytes: 8_000,
+      // and the values, not just the shape. Counting keys says nothing about
+      // `done = id % 3 == 0` or the tag cycle, and an implementation that
+      // returns 100 items with `done: false` and one constant tag does less
+      // work than the contract asks for while passing every regex above.
+      body: { kind: "item-list", n: 100 },
     },
     description:
       "A realistic API response: 100 deterministic objects, generated per request (no cache), " +
@@ -83,9 +93,18 @@ export const SCENARIOS: Scenario[] = [
     title: "static asset",
     kind: "load",
     path: "/static/payload.json",
-    // the file is byte-identical in every app by construction (shared/copy-assets.ts
-    // copies one committed file), so an exact floor is the right tripwire
-    expect: { status: 200, contains: ["bench-static-asset"], minBytes: 31_607 },
+    // CONTRACT.md pins this file's length and its sha256 and says "nobody
+    // serves a different number of bytes". A floor said only "not shorter
+    // than", so an app serving a bigger or simply different 31 kB file passed
+    // - and the difference in bytes on the wire would have shown up as a
+    // difference in req/s. Both pins are now checked against the body that
+    // actually arrived.
+    expect: {
+      status: 200,
+      contains: ["bench-static-asset"],
+      exactBytes: 31_607,
+      sha256: "ad25993fad9a7fce485dcfbf570e6559666046c5d532d84f78467b70d14e944c",
+    },
     description:
       "The same committed 31,607-byte file, served by each implementation's own idea of a " +
       "static file. It is NOT the same amount of work everywhere, and the difference is not " +

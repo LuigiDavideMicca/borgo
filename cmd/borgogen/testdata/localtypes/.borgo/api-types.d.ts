@@ -4,7 +4,7 @@ export interface resp {
   a: number;
 }
 
-export interface Apiresp {
+export interface ApiResp {
   b: string;
   c: boolean;
 }
@@ -14,7 +14,7 @@ export type node = Record<string, node> | null;
 declare module "borgo-framework" {
   interface ApiRoutes {
     "GET /api/alpha": { response: resp };
-    "GET /api/beta": { response: Apiresp };
+    "GET /api/beta": { response: ApiResp };
     "GET /api/cyc": { response: node };
     "GET /api/list": { response: Array<number> | null };
   }

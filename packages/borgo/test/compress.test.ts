@@ -30,6 +30,20 @@ describe("pickEncoding", () => {
     ["fractional q", "gzip;q=0.5", ["gzip"], "gzip"],
     ["case insensitive", "GZIP", ["gzip"], "gzip"],
     ["curl --compressed", "deflate, gzip, br, zstd", ["br", "gzip"], "br"],
+
+    // rfc 9110 5.6.6: parameter names are case-insensitive, so "Q=0" is a
+    // refusal in a spelling no less valid than "q=0". Only the lowercase one was
+    // matched, which left the refusal unread and the quality at its default 1 -
+    // so an asset, a json payload and a rendered document all went out gzip- or
+    // brotli-encoded to a client that had just said it cannot decode them. The
+    // coding name beside it was already folded; the parameter was not. gzip.go's
+    // refusesCoding folds both, and the two halves read the same header.
+    ["uppercase Q=0 is still a refusal", "gzip;Q=0", ["gzip"], null],
+    ["uppercase Q=0 with space", "gzip; Q=0.00", ["gzip"], null],
+    ["uppercase Q=0 falls through to the next coding", "br;Q=0, gzip", ["br", "gzip"], "gzip"],
+    ["a wildcard refusal is honoured in either case", "*;Q=0", ["gzip"], null],
+    ["and a nonzero uppercase Q still accepts", "gzip;Q=0.5", ["gzip"], "gzip"],
+    ["mixed case name and parameter", "GZIP;Q=0", ["gzip"], null],
   ];
   for (const [name, header, preferred, want] of cases) {
     test(name, () => {

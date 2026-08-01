@@ -291,20 +291,30 @@ export const READ_TIMEOUT_SECONDS = 30;
 export const READ_TIMEOUT_MAX = 255;
 
 /**
- * BORGO_READ_TIMEOUT: this side's own name, in seconds.
+ * BORGO_FRONT_READ_TIMEOUT: this side's own name, in seconds.
  *
  * It used to read BORGO_IDLE_TIMEOUT, which is the go api's - go parses that
  * one with `time.ParseDuration` and panics on anything it cannot read. The
  * systemd unit and the compose file put both processes in one environment
  * block, so the documented `BORGO_IDLE_TIMEOUT=2m` gave go two minutes and
  * gave the front server a silent 30 seconds, while `BORGO_IDLE_TIMEOUT=120`
- * panicked the go api at boot. One name, two grammars, two meanings. Same
- * collision class as the METRICS and SESSION_SECURE renames: the old name is
- * not honoured here at all, because an alias kept for compatibility is an
- * alias that keeps the collision alive.
+ * panicked the go api at boot. One name, two grammars, two meanings.
+ *
+ * The first fix for that renamed this side's knob to BORGO_READ_TIMEOUT, which
+ * `newServer` in borgo.go ALSO reads, also with `time.ParseDuration`, also
+ * panicking. That is the same defect under a new spelling: `=45` boots the
+ * front server on forty-five seconds and stops the go binary from starting at
+ * all, `=45s` gives go forty-five seconds and silently leaves this side on its
+ * default 30. Renaming a collision moves it; it does not close it. The name
+ * has to be one no other half reads, which is what FRONT says - and
+ * `envNamesDoNotCollide` in util.test.ts fails the build if a later edit points
+ * either grammar back at the other's variable.
+ *
+ * Neither older name is honoured as an alias, here or anywhere: an alias kept
+ * for compatibility is an alias that keeps the collision alive.
  */
 export function readTimeout(env: Record<string, string | undefined>): number {
-  return Math.min(envInt(env.BORGO_READ_TIMEOUT, READ_TIMEOUT_SECONDS), READ_TIMEOUT_MAX);
+  return Math.min(envInt(env.BORGO_FRONT_READ_TIMEOUT, READ_TIMEOUT_SECONDS), READ_TIMEOUT_MAX);
 }
 
 // nothing is left for a client to dribble at us: the request is entirely in
@@ -339,6 +349,45 @@ export function sessionSecure(env: Record<string, string | undefined>): boolean 
   throw new Error(
     `borgo: SESSION_SECURE: invalid value "${v}" (want "1"/"true" or "0"/"false"; unset means not secure)`,
   );
+}
+
+/**
+ * Who may POST /__borgo/publish.
+ *
+ * BORGO_PUSH_KEY has to hold on both halves, and the two failure directions
+ * were not symmetric. Set on the front server only: the api sends no key, every
+ * push is refused - visible, and closed. Set on the api ONLY: this side never
+ * looked at the header at all and fell straight through to the loopback rule,
+ * so every push was accepted and the operator had a setting that reads as
+ * authentication and authenticates nothing.
+ *
+ * Loopback is not that rule's equal. `borgo start` puts both halves on one host,
+ * so "came from 127.0.0.1" admits every other process on the box, every
+ * container sharing the network namespace, and every other tenant of a shared
+ * one - and /__borgo/publish relays whatever it is given to every browser
+ * subscribed to the topic.
+ *
+ * So a presented key is the api's statement that key auth is in force, and a
+ * side that cannot check it refuses rather than quietly applying the weaker
+ * rule. The asymmetry now fails the same way round whichever half is
+ * misconfigured, and says so on the way past.
+ *
+ * With a key on both sides the loopback and forwarding checks do not apply:
+ * cross-host push is the entire reason the key exists.
+ */
+export type PushVerdict = "ok" | "bad-key" | "half-configured" | "not-local";
+
+export function pushAuthorized(req: {
+  key: string | undefined;
+  presented: string | null;
+  address: string | undefined;
+  forwarded: string | null;
+}): PushVerdict {
+  if (req.key) return keysEqual(req.presented ?? "", req.key) ? "ok" : "bad-key";
+  if (req.presented !== null) return "half-configured";
+  const local =
+    req.address === "127.0.0.1" || req.address === "::1" || req.address === "::ffff:127.0.0.1";
+  return local && !req.forwarded ? "ok" : "not-local";
 }
 
 export const goBinName = () => "api" + (process.platform === "win32" ? ".exe" : "");
@@ -474,9 +523,18 @@ export function withCookies(res: Response, cookies: string[]): Response {
 }
 
 // in dev a tiny inline client keeps a zero-js page live: css swaps in
-// place, anything else is a full reload
+// place, anything else is a full reload.
+//
+// It also sets __BORGO_DEV__, and that is not decoration. The flag used to be
+// written by the props script alone, which a hydrate=false page does not emit -
+// but such a page can still run client js, because islands hydrate on it
+// through their own entry. So on exactly those pages the flag was absent in
+// development, and every guard that reads it silently took its production
+// branch: registerServiceWorker installed a caching service worker over a dev
+// session, which is the single most confusing state to debug from. The signal
+// has to reach every page that can execute js, not every page that hydrates.
 export const DEV_INLINE_CLIENT =
-  "<script>(()=>{const c=()=>{const w=new WebSocket(`ws://${location.host}/__borgo/dev`);" +
+  "<script>window.__BORGO_DEV__=1;(()=>{const c=()=>{const w=new WebSocket(`ws://${location.host}/__borgo/dev`);" +
   'w.onmessage=(e)=>{const m=JSON.parse(e.data);if(m.type==="css"){for(const l of document.querySelectorAll(\'link[rel="stylesheet"]\'))l.href=l.href.split("?")[0]+"?t="+Date.now();}' +
   'else if(!m.stamp||(m.stamp>performance.timeOrigin&&Number(sessionStorage.getItem("borgo:devstamp")||0)<m.stamp)){if(m.stamp)sessionStorage.setItem("borgo:devstamp",String(m.stamp));location.reload();}};' +
   "w.onclose=()=>setTimeout(c,300);};c();})()</script>";

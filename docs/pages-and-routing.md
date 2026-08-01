@@ -14,7 +14,7 @@ React components in `pages/`, routed by file name. There is no route configurati
 | `pages/tasks/[id].tsx` | `/tasks/:id` |
 | `pages/orgs/[org]/members/[id].tsx` | `/orgs/:org/members/:id` |
 
-A `[param]` segment matches exactly one path segment; there are no catch-all or optional segments. Trailing slashes are ignored when matching, so `/tasks/` and `/tasks` are the same route. **A leading underscore means "not a route."** Every file in `pages/` whose basename starts with `_` is excluded from the route table; three of them are then given a job instead — `_layout.tsx` wraps its directory, `_404.tsx` and `_500.tsx` become the error pages. Any other `_`-prefixed file is simply never served: `pages/_helpers.tsx` builds and ships nothing, silently. Put shared components in `components/` rather than `pages/_components/`, so the build has a reason to look at them.
+A `[param]` segment matches exactly one path segment; there are no catch-all or optional segments. Trailing slashes are ignored when matching, so `/tasks/` and `/tasks` are the same route. **A leading underscore means "not a route."** Every file in `pages/` whose basename starts with `_` is excluded from the route table; three of them are then given a job instead — `_layout.tsx` wraps its directory, `_404.tsx` and `_500.tsx` become the error pages. Any other `_`-prefixed file is simply never served: `pages/_helpers.tsx` builds and ships nothing, silently. The rule is on the *basename*, not the directory, so an underscore on a folder hides nothing: `pages/_components/Button.tsx` has a plain basename and becomes a live route at `/_components/Button`. Put shared components in `components/`, outside `pages/` entirely.
 
 ## Loaders
 
@@ -109,7 +109,7 @@ export const head = (props: { task: Task }): Head => ({
 });
 ```
 
-During server rendering the title replaces the shell's `<title>` and the metas are injected into `<head>`. After hydration the runtime owns both, updating them on every client-side navigation and restoring the shell's title on a page that exports no `head`. Meta entries are arbitrary attribute maps, so `property`, `name`, `httpEquiv` and the rest all work.
+During server rendering the title replaces the shell's `<title>` and the metas are injected into `<head>`. After hydration the runtime owns both, updating them on every client-side navigation and restoring the shell's title on a page that exports no `head`. Meta entries are attribute maps written through verbatim — no React, so no camelCase translation: the key you write is the attribute that lands, and the spelling is the HTML one (`"http-equiv"`, not `httpEquiv`). Names that are not plain attribute names, and anything starting with `on`, are dropped silently on both the server and the client path.
 
 ## Streaming SSR
 
@@ -180,9 +180,9 @@ Forms the runtime cannot re-render in place stay native: a `GET` form, a cross-o
 </form>;
 ```
 
-`<CsrfField />` is required inside every `<form method="post">` — see [CSRF protection](security.md#csrf-protection) for what it defends against.
+`<CsrfField />` is required inside every `<form method="post">` — see [CSRF protection](security.md#csrf-protection) for what it defends against. Required in *production*, that is: under `borgo dev` the check is off unless you set `BORGO_CSRF=1`, and it is skipped for a request carrying neither a session nor a csrf cookie. So a form that forgot the field works all the way through development and fails on the first real deploy. Add the field as you write the form, not when something 403s.
 
-One limit worth stating: an action that returns its **own HTML document** (rather than props or a redirect) is swapped into the page by the runtime, and because that reuses the current browsing context, inline scripts in that document are blocked by the page's existing Content-Security-Policy and the page's hydration does not re-run. It is the right behavior for the error documents this path actually serves; if you need to send a custom HTML page from an action, redirect to a route that renders it instead.
+One limit worth stating: an action that returns its **own HTML document** (rather than props or a redirect) is swapped into the page by the runtime, and because that reuses the current browsing context, inline scripts in that document are blocked by the page's existing Content-Security-Policy — in production, where that policy is strict; under `borgo dev` it carries `'unsafe-inline'` and they run — and the page's hydration does not re-run. It is the right behavior for the error documents this path actually serves; if you need to send a custom HTML page from an action, redirect to a route that renders it instead.
 
 ## Hydration control
 
