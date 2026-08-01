@@ -186,7 +186,7 @@ The client forwards the browser's cookies on every call, so Go sees the session 
 
 Loader and action code is stripped from client bundles at build time, so server-only imports and secrets used there never reach the browser. CI greps the built assets for a sentinel string to keep that honest.
 
-The same analysis types [WebSocket events](realtime.md#typed-events) from `borgo.PushT` calls.
+The same analysis types [WebSocket events](realtime.md#typed-events) from `borgo.Push` calls.
 
 ## Generated files and CI
 

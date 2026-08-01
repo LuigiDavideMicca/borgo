@@ -68,7 +68,7 @@ Every request enters one `fetch` handler. The order below is the order in the so
     +-- POST /__borgo/publish  go -> browser push (loopback, or BORGO_PUSH_KEY)
     +-- /__borgo/dev* ...... dev only: the fast-refresh channel
     +-- /healthz ........... status of both halves
-    +-- /metrics ........... prometheus text, only with METRICS=1
+    +-- /metrics ........... prometheus text, only with BORGO_METRICS=1
     |
     +-- /api/* ............. proxied to the go server
     +-- GET|HEAD + a file in public/ ..... static asset
@@ -164,7 +164,7 @@ The asset build is one `Bun.build` call with `splitting: true` and two entry poi
   borgo.WriteJSON(w, 200, v)        (helpers followed)               your binary)
   json.NewEncoder(w).Encode(v)
   borgo.Bind[T](r)              --> request types        -->  .borgo/api-types.d.ts
-  borgo.PushT("t", "e", v)      --> websocket payloads         declare module "borgo-framework"
+  borgo.Push("t", "e", v)      --> websocket payloads         declare module "borgo-framework"
 ```
 
 The load uses `go/packages` with syntax and type information but without a full source re-typecheck of the dependency graph — dependency types come from export data, which is what keeps the run fast enough to sit in the dev loop.
@@ -252,7 +252,7 @@ Both outputs are written only after every check has passed, so a failed run neve
      |
      |-- go build -o .borgo/next-api .   -> swap -> spawn -> poll until it answers
      |                                                          |
-     |-- bun serve-entry.ts (DEV=1) -----------------------------+-> front server :3000
+     |-- bun serve-entry.ts (BORGO_DEV=1) -----------------------+-> front server :3000
      |                                                                |
      |   fs.watch(".", recursive)                                     |  ws /__borgo/dev
      |     *.go     -> borgogen, rebuild, restart api, reload         v

@@ -18,7 +18,7 @@ The cheapest request is the one that finds everything already computed. borgo's 
 
 **Compression happens at build time where it can.** `borgo build` writes `.gz` and `.br` siblings next to every compressible asset — gzip at maximum level, brotli at maximum quality with a size hint — and keeps them only when they are actually smaller. At request time the server picks a variant and streams the file off disk. Nothing is compressed per request that could have been compressed once.
 
-**Metrics reuse the match the request already did.** The route pattern is the label a Prometheus histogram wants, and it is handed back from the single match rather than recomputed, so turning `METRICS=1` on does not add a second scan of the route table. Asset paths and `/favicon.ico` skip the histogram and the request log entirely.
+**Metrics reuse the match the request already did.** The route pattern is the label a Prometheus histogram wants, and it is handed back from the single match rather than recomputed, so turning `BORGO_METRICS=1` on does not add a second scan of the route table. Asset paths and `/favicon.ico` skip the histogram and the request log entirely.
 
 ## Static assets
 

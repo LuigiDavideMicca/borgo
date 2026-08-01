@@ -108,10 +108,10 @@ Plain `<a>` tags become client-side transitions — no `<Link>` component — wi
 
 ### Realtime
 
-`borgo.SSE` and `borgo.NewSSEHub` make any handler an event stream, proxied without buffering. The front server is also a native WebSocket server: browsers join named topics with `subscribe`, Go publishes into them with `borgo.PushT(topic, event, data)` — and borgogen types the payloads end to end, so checking `event` narrows `data` and an undeclared event name fails `tsc`.
+`borgo.SSE` and `borgo.NewSSEHub` make any handler an event stream, proxied without buffering. The front server is also a native WebSocket server: browsers join named topics with `subscribe`, Go publishes into them with `borgo.Push(topic, event, data)` — and borgogen types the payloads end to end, so checking `event` narrows `data` and an undeclared event name fails `tsc`.
 
 ```go
-borgo.PushT("live", "task-created", task.Title)
+borgo.Push("live", "task-created", task.Title)
 ```
 
 Deep dive: [realtime](docs/realtime.md).
@@ -143,7 +143,7 @@ A locked-down default posture, not a checklist you assemble: security headers an
 
 ### Health checks and metrics
 
-The front server answers `/healthz` with `{status, uptime, api}` — probing the Go server's own `/healthz` (mounted automatically by `borgo.Serve`). Set `METRICS=1` and `/metrics` serves Prometheus text: request counts and a duration histogram by route pattern and status, hand-rolled, zero dependencies. Deep dive: [deploy guide](docs/deploy.md#health-and-metrics).
+The front server answers `/healthz` with `{status, uptime, api}` — probing the Go server's own `/healthz` (mounted automatically by `borgo.Serve`). Set `BORGO_METRICS=1` and `/metrics` serves Prometheus text: request counts and a duration histogram by route pattern and status, hand-rolled, zero dependencies. Deep dive: [deploy guide](docs/deploy.md#health-and-metrics).
 
 ## Architecture
 
@@ -173,7 +173,7 @@ Scaffolded apps ship a multi-stage `Dockerfile` (Go builds static, the runtime i
 
 Three layers, all run by CI on every push:
 
-- **Go** (`go test ./...`) — table-driven tests for the route registry, sessions (sign/verify/tamper/expiry), password hashing and the `borgo.Auth` handlers (login/register/logout, timing-safe 401s, `Authed`), cache headers, the `/healthz` handler, SSE stream framing and hub broadcast/slow-client behavior, `borgo.Push` and `borgo.PushT`, and borgogen against a committed fixture app: route discovery (directives + `Handle` calls), helper following, `WriteJSON`, `Bind`, type overrides, `PushT` event extraction, snapshot freshness, and the error paths (duplicate patterns, malformed directives, dynamic push topics).
+- **Go** (`go test ./...`) — table-driven tests for the route registry, sessions (sign/verify/tamper/expiry), password hashing and the `borgo.Auth` handlers (login/register/logout, timing-safe 401s, `Authed`), cache headers, the `/healthz` handler, SSE stream framing and hub broadcast/slow-client behavior, `borgo.Push` and `borgo.Push`, and borgogen against a committed fixture app: route discovery (directives + `Handle` calls), helper following, `WriteJSON`, `Bind`, type overrides, `Push` event extraction, snapshot freshness, and the error paths (duplicate patterns, malformed directives, dynamic push topics).
 - **TypeScript** (`bun test packages/borgo/test`) — the router (patterns, matching, params), the api client (URL building, headers, `ApiError`, typed bodies plumbing), hydrate/refresh source parsing, manifest generation against a temp fixture (islands flags, client-route exclusion, precedence), every `borgo doctor` check against a fake environment, the export planner (loader/prerender/dynamic partitioning, path filling), the deploy config templates (ports, names, refuse-overwrite), and the Prometheus exposition format.
 - **End-to-end** (`npx playwright test`) — against a production build of `examples/tasks`: client navigation, hover/viewport prefetching, scroll restoration, islands, hydration modes, form actions (enhanced in-place submits, crash surfacing, anonymous-post CSRF), the auth round trip (register, loader guard, logout, login, forged-post CSRF rejection), the precache manifest, SSE, two-tab WebSockets with Go push, streaming SSR, error pages, `/healthz` on both servers, `/metrics` series, a `borgo doctor` smoke — plus a dev-server project asserting fast refresh preserves component state (including five consecutive rapid edits), hook add/remove remounts without a reload, custom hook edits hot-apply, Go edits reload exactly once and only after the api answers, CSS hot-swaps, and layouts fall back to a reload — and an export project that runs `borgo export` and serves `dist/site` from a plain static file server, asserting content, hydration against exported props, and the zero-JS page.
 
@@ -219,7 +219,7 @@ Everything here is a deliberate choice, with the reason attached:
 - **Loader data is not streamed on client navigations** — one JSON payload, fetched in parallel with the route chunk (and usually prefetched on hover). Streaming applies to initial SSR, where it matters most.
 - **Auth is mechanics, not policy.** Signed cookie, hashing, login/logout/register handlers and CSRF for actions are provided; the user store, its schema, OAuth and everything beyond username/password stay in your hands.
 - **The typed bridge is static analysis, no runtime reflection.** Helpers are followed across the packages of your module, inline `json.NewEncoder(w).Encode(v)` is read, and `//borgo:type` covers custom marshalers; what stays invisible is a helper *outside* your module, an encoder stored in a variable, and a dynamically chosen type — those routes type as `unknown`, so the escape hatch is visible, not silent.
-- **WebSocket topics are a relay, not RPC.** The front server forwards `{event, data}` between subscribers and Go; per-message business logic belongs in Go routes. `borgo.PushT` types the payloads end to end — the relay itself stays dumb.
+- **WebSocket topics are a relay, not RPC.** The front server forwards `{event, data}` between subscribers and Go; per-message business logic belongs in Go routes. `borgo.Push` types the payloads end to end — the relay itself stays dumb.
 
 Development happens in [issues](https://github.com/LuigiDavideMicca/borgo/issues).
 

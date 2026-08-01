@@ -53,7 +53,6 @@ Partially. `http.ResponseController` (flush, deadlines) works through borgo's mi
 - **The browser shows yesterday's app in production** — if you registered a service worker, remember its cache keys on the [precache stamp](pwa.md); if not, check you rebuilt: `borgo start` refuses to serve a dev-built asset tree and rebuilds it for production.
 - **Odd characters like `âŒ‚` in the terminal** — a legacy Windows console codepage renders UTF-8 as mojibake; borgo detects this and falls back to plain ASCII marks. `chcp 65001`, or Windows Terminal, brings the branded glyphs back.
 - **`borgo build` fails oddly while `borgo dev` is running** — both write `public/assets`, and they will fight over it. Stop the dev session first.
-- **`Blocked 1 postinstall` after installing with Tailwind** — Bun blocks lifecycle scripts it does not trust, and Tailwind's CLI pulls in `@parcel/watcher`, whose postinstall would compile a native watcher from source. borgo never uses that watcher: it invokes the Tailwind CLI once per compile and does its own file watching. Compilation works in both `dev` and `build` with the script blocked, so leave it blocked.
 - **`go: finding module for package …/cmd/borgogen`** — progress output from `go mod tidy`, not an error. The code generator is wired as a Go tool dependency, so the first tidy fetches it.
 
 ## Reporting a bug

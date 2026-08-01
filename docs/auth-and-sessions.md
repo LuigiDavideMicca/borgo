@@ -28,7 +28,7 @@ Four behaviors worth knowing before you design around them:
 
 ## Password hashing
 
-`borgo.DefaultHasher` is PBKDF2-HMAC-SHA256 with OWASP parameters (600,000 iterations, 16-byte random salt), from the standard library's `crypto/pbkdf2`. The choice, honestly: argon2id is the state of the art, but it lives in `golang.org/x/crypto`, and the Go runtime's zero-dependency guarantee is part of what borgo is. PBKDF2 at these parameters is an OWASP-recommended configuration and FIPS-approved; if your threat model wants argon2id, the hasher is one small interface away:
+`borgo.DefaultHasher()` returns PBKDF2-HMAC-SHA256 with OWASP parameters (600,000 iterations, 16-byte random salt), from the standard library's `crypto/pbkdf2`. The choice, honestly: argon2id is the state of the art, but it lives in `golang.org/x/crypto`, and the Go runtime's zero-dependency guarantee is part of what borgo is. PBKDF2 at these parameters is an OWASP-recommended configuration and FIPS-approved; if your threat model wants argon2id, the hasher is one small interface away:
 
 ```go
 type PasswordHasher interface {
@@ -74,7 +74,7 @@ func init() {
 - `RegisterHandler` hashes the password, calls `Register`, starts the session, responds 201. `borgo.ErrUserExists` becomes a 409; with no `Register` configured the route answers 404.
 - `LogoutHandler` clears the cookie, responds 204.
 
-Defaults: 7-day sessions (`MaxAge`), `DefaultHasher` (`Hasher`), the user itself as principal (`Principal`). All three are fields, not policy.
+Defaults: 7-day sessions (`MaxAge`), `DefaultHasher()` (`Hasher`), the user itself as principal (`Principal`). All three are fields, not policy — and `Hasher` is the only way to change hashing, deliberately: `DefaultHasher` is a function, so no code in the process can reassign the default out from under an `Auth` that did not ask for it.
 
 ## Guarding api routes: borgo.Authed
 
@@ -164,7 +164,7 @@ That is the whole obligation. The front server issues a `borgo_csrf` cookie with
 
 borgo gives you the mechanics. These remain your decisions, and none of them are hard — but nothing here will do them for you:
 
-- **Password policy.** Nothing enforces a minimum length or checks a breach list. `DefaultHasher` makes a weak password expensive to crack, not safe.
+- **Password policy.** Nothing enforces a minimum length or checks a breach list. `DefaultHasher()` makes a weak password expensive to crack, not safe.
 - **Rate limiting and lockout.** The login handler caps concurrent hashing and sheds excess with `503`, which protects the *server*; it does not slow an attacker down per account. Count failures yourself, or rate-limit `/login` at the proxy.
 - **Registration abuse.** No email verification, no captcha, no duplicate-signup throttling. `RegisterHandler` answers `409` on a taken username, which is an existence oracle you accept in exchange for a usable signup form — mask it if your threat model cannot.
 - **Password reset, email change, 2FA, OAuth, SSO.** All absent by design. They are product decisions with wildly different answers per app, and each needs a channel (email, TOTP, an identity provider) that borgo has no business owning.

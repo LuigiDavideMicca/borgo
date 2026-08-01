@@ -21,8 +21,10 @@ Run the CLI through Bun (`bun run dev` in an app). If you hit `error: bun is not
 
 ## Exports
 
-- `borgo-framework` — browser-safe: `redirect`, `Island`/`registerIslands`, `CsrfField`, the websocket `subscribe` helper (typed against the borgogen-generated event map), `ApiError`, plus `LoaderContext`, `ActionContext`, `PrerenderContext`, `Head`, `PageModule`, `Route` types and the router functions
-- `borgo-framework/server` — `serve`, the SSR front server (server-only)
+The root entry is the application-facing API: what you write by hand, and nothing else. Everything the generated code needs lives on a subpath whose name says it is not for you.
+
+- `borgo-framework` — browser-safe: `redirect`, `Island`, `CsrfField`, `registerServiceWorker`, the websocket `subscribe` helper (typed against the borgogen-generated event map), `ApiError`, `csrfCookieValue`, plus the `LoaderContext`, `ActionContext`, `PrerenderContext`, `Head` and `PageModule` types
+- `borgo-framework/internal` — the CSRF and island registries the generated client entries import. No stability promise
 - `borgo-framework/router` — router internals shared by server and client
 - `borgo-framework/runtime` — the hydration/navigation runtime and islands mounter, imported by the generated client entries
 - `borgo-framework/refresh-runtime` — react-refresh re-export used by the generated dev entry

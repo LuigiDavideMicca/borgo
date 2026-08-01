@@ -38,7 +38,7 @@ bunx create-borgo@latest my-app --tailwind
 For an existing app, three steps. Install it:
 
 ```bash
-bun add tailwindcss @tailwindcss/cli
+bun add tailwindcss @tailwindcss/postcss postcss
 ```
 
 Create `style.css` in the app root:
@@ -59,9 +59,11 @@ And pass the flag in `package.json`:
 }
 ```
 
-With the flag, `@tailwindcss/cli` owns the stylesheet: it scans your pages and islands for class names and rewrites `public/assets/style.css`, minified in production builds. Editing a page hot-applies new utilities through the normal refresh cycle, and editing `style.css` swaps the stylesheet in place. Without the flag, the SCSS pipeline stays in charge and `style.css` is ignored.
+With the flag, Tailwind owns the stylesheet: it scans your pages and islands for class names and rewrites `public/assets/style.css`, minified in production builds. Editing a page hot-applies new utilities through the normal refresh cycle, and editing `style.css` swaps the stylesheet in place. Without the flag, the SCSS pipeline stays in charge and `style.css` is ignored.
 
-`bun install` will report `Blocked 1 postinstall` — Tailwind's CLI depends on a native file watcher that wants to compile itself from source. borgo does its own watching and only ever asks the Tailwind CLI for a one-shot compile, so leave that script blocked: everything works with it off.
+borgo drives Tailwind through its PostCSS plugin rather than its CLI, and the reason is worth knowing if you are wiring this by hand: the CLI is a process spawned per rebuild, while the plugin stays in the one borgo already runs — a warm rebuild goes from roughly 300 ms to under 20. It also drops the CLI's native file-watcher dependency, whose install script Bun blocks by default. An app still on `@tailwindcss/cli` keeps working: borgo falls back to it when the plugin is not installed.
+
+One honest edge of staying in-process: within a single long-lived `borgo dev` session, a utility class you *delete* keeps its rule in the stylesheet until you restart. The rule is inert — nothing references the class — and `borgo build` is always a fresh process, so production output is exact.
 
 ## The error overlay
 

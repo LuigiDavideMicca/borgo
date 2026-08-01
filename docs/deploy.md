@@ -162,7 +162,7 @@ WantedBy=multi-user.target
 
 Point the uptime monitor at the front server's `/healthz` — it returns `{status, uptime, api}`, probing the Go server's own `/healthz` (mounted by `borgo.Serve`) with a short timeout. The answer is always HTTP 200: `status` is `"ok"` or `"degraded"` and `api` is `"reachable"` or `"down"`, so a monitor that only checks the status code will never fire — match on the body.
 
-Set `METRICS=1` and the front server also serves `/metrics` in Prometheus text format, hand-rolled, zero dependencies:
+Set `BORGO_METRICS=1` and the front server also serves `/metrics` in Prometheus text format, hand-rolled, zero dependencies:
 
 - `borgo_http_requests_total{route, status}` — counter by route pattern and status code
 - `borgo_http_request_duration_seconds{route, le}` — histogram, buckets `0.005 0.025 0.1 0.5 1 5`
@@ -182,16 +182,18 @@ Route labels are the file-convention patterns (`/tasks/[id]`, not each concrete 
 | `SESSION_SECRET` | unset | HMAC key for signed-cookie sessions (required to use them) |
 | `SESSION_SECURE` | unset | `1` adds `Secure` to the session and csrf cookies |
 | `BORGO_CSRF` | unset | `0` disables csrf checks on form actions, `1` forces them in dev |
-| `METRICS` | unset | `1` exposes `/metrics` (Prometheus text) on the front server |
+| `BORGO_METRICS` | unset | `1` exposes `/metrics` (Prometheus text) on the front server |
 | `BORGO_SECURITY_HEADERS` | unset | `0` drops the security headers *and* the CSP — see [security](security.md#changing-the-policy) |
 | `BORGO_CSP` | unset | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request |
 | `BORGO_MAX_BODY` | `33554432` (32 MB) | front server: largest request body it will accept and buffer, in bytes |
 | `BORGO_API_TIMEOUT` | `30000` (30 s) | front server: milliseconds to wait for the api's response headers before answering `504`; `0` disables |
+| `BUN_CONFIG_MAX_HTTP_REQUESTS` | `256` (bun's default) | front server: how many proxied requests may be in flight at once. Each event stream holds one for its whole life, so the default ceilings concurrent SSE subscribers at ~255. borgo sets `16384` in `dev` and in the configs it generates; set it yourself if you launch the server another way. Read at process start — exporting it afterwards has no effect |
 | `BORGO_READ_HEADER_TIMEOUT` | `5s` | go server: cap on reading request headers (slow-header clients) |
 | `BORGO_IDLE_TIMEOUT` | `2m` | go server: idle keep-alive connections are reclaimed after this |
 | `BORGO_READ_TIMEOUT` | `0` (off) | go server: whole-request read deadline — leave off unless you have no streams |
 | `BORGO_WRITE_TIMEOUT` | `0` (off) | go server: whole-response write deadline — `borgo.SSE` streams exempt themselves |
 | `BORGO_SHUTDOWN_TIMEOUT` | `10s` | go server: grace period for in-flight requests on shutdown; `0` waits indefinitely |
+| `BORGO_HASH_SLOTS` | `max(1, GOMAXPROCS/2)` | go server: password hashes that may run at once. One costs ~140 ms of cpu, so the cap is what keeps a login flood from starving every other route. A value that is not a positive integer is refused at startup rather than ignored |
 | `NO_COLOR` | unset | disable ANSI colors in logs |
 
 The Go timeouts are duration strings (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot rather than silently defaulting; the front server's two are plain numbers. `DB_PATH` in the samples above is the app's own variable, not the framework's.

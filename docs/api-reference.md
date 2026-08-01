@@ -25,9 +25,11 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | Symbol | What it is for | Stability |
 | --- | --- | --- |
 | `Handle(pattern string, h http.HandlerFunc)` | Registers a handler under a `"METHOD /path"` pattern. Panics on a malformed pattern, a nil handler, a duplicate, or a call after `Serve`. | stable |
-| `Serve()` | Mounts every registered route, adds `GET /healthz` unless an app route claims it, listens on `API_PORT`, and handles graceful shutdown. Blocks. | provisional |
+| `Serve()` | Mounts every registered route, adds `GET /healthz` unless an app route claims it, listens on `API_PORT`, handles signals and graceful shutdown. Blocks, and calls `log.Fatal` if the listener fails. | stable |
+| `ServeContext(ctx) error` | The same server, ended by cancelling `ctx` and returning the error instead of exiting. For embedding in a larger program, and for tests. | stable |
+| `Version` | The released version this binary was built from, kept honest by a test that reads the release manifest. | stable |
 
-`Serve` is provisional only in its *shape*: it returns nothing and calls `log.Fatal` when the listener fails, so it cannot be embedded in a larger program or exercised from a test. The intended fix is additive (a `ServeContext(ctx) error` alongside it), so depending on `Serve()` today is safe.
+`Serve` was provisional in 0.20 only in its *shape*: returning nothing and calling `log.Fatal` made it impossible to embed or to exercise from a test. 0.21 added `ServeContext` beside it rather than changing it, so both are stable and `Serve` stays the one you want when the process exists to be the server.
 
 ### Responses
 
@@ -61,7 +63,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `Auth.Register func(ctx, username, hash string) (U, error)` | Optional. Without it, `RegisterHandler` answers 404. Return `ErrUserExists` for a taken name. | stable |
 | `Auth.Principal func(u U) any` | Optional. Maps the user to what the session stores. | provisional |
 | `Auth.MaxAge time.Duration` | Session lifetime; default 7 days. | stable |
-| `Auth.Hasher PasswordHasher` | Password hasher; default `DefaultHasher`. | stable |
+| `Auth.Hasher PasswordHasher` | Password hasher; default `DefaultHasher()`. | stable |
 | `(*Auth[U]).LoginHandler` | Verifies credentials, starts a session, responds with the principal. 503 + `Retry-After` when the hash queue is saturated. | stable |
 | `(*Auth[U]).LogoutHandler` | Clears the session cookie, 204. | stable |
 | `(*Auth[U]).RegisterHandler` | Hashes, creates, starts a session, 201. 409 for a taken username. | stable |
@@ -69,9 +71,9 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `Credentials` | The `{username, password}` JSON body the login and register handlers decode. | stable |
 | `ErrUserExists` | Sentinel for `Auth.Register`, answered as 409. | stable |
 | `PasswordHasher` | Interface: `Hash(password) (string, error)`, `Verify(password, hash) bool`. | stable |
-| `DefaultHasher` | The PBKDF2-SHA256 hasher used when `Auth.Hasher` is nil. | provisional |
+| `DefaultHasher() PasswordHasher` | Returns the PBKDF2-SHA256 hasher used when `Auth.Hasher` is nil. | stable |
 
-`Auth.Principal` is provisional because it returns `any` in a struct that is otherwise generic over `U` — the one place in the Go API where a type is thrown away. `DefaultHasher` is provisional because it is a package-level *variable* of interface type: any code in the process can reassign it and silently change hashing for every `Auth` that did not set `Hasher`.
+`Auth.Principal` is provisional because it returns `any` in a struct that is otherwise generic over `U` — the one place in the Go API where a type is thrown away. `DefaultHasher` was a package-level *variable* of interface type until 0.21, which meant any code in the process could reassign it and silently change hashing for every `Auth` that did not set `Hasher`; it is a function now, and to use another algorithm you set `Hasher` on the `Auth` you own.
 
 ### Server-sent events
 
@@ -86,12 +88,14 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `NewSSEHub() *SSEHub` | Constructor. | stable |
 | `(*SSEHub).Publish(event string, data any)` | Sends to every subscriber; slow clients skip rather than block the publisher. | stable |
 | `(*SSEHub).ServeHTTP(w, r)` | Streams hub events to one client. Register it as a route handler. | stable |
+| `(*SSEHub).Subscribers() int` | How many clients are connected right now. | stable |
+| `(*SSEHub).Close()` | Ends every stream on the hub and drops its subscribers. Idempotent. | stable |
 
 ### WebSocket push
 
 | Symbol | What it is for | Stability |
 | --- | --- | --- |
-| `PushT[T any](topic, event string, data T) error` | Publishes to a WebSocket topic on the front server. `borgogen` records `T` in the generated event map, typing the browser's `subscribe` callback. | stable |
+| `Push[T any](topic, event string, data T) error` | Publishes to a WebSocket topic on the front server. `borgogen` records `T` in the generated event map, typing the browser's `subscribe` callback. | stable |
 | `Push(topic, event string, data any) error` | The same call without a visible type parameter. | provisional |
 
 ### Not exported, but worth knowing
@@ -100,7 +104,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 
 ## TypeScript: `borgo-framework`
 
-`packages/borgo/package.json` declares five importable entry points plus `./package.json`. Only the root is intended for application code.
+`packages/borgo/package.json` declares five importable entry points — the root, `/internal`, `/router`, `/runtime` and `/refresh-runtime` — plus `./package.json`. Only the root is intended for application code; the others exist because generated code has to import from somewhere, and their names say so.
 
 ### `borgo-framework` — values
 
@@ -115,20 +119,13 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `CSRF_COOKIE` (`"borgo_csrf"`) | The double-submit cookie name. | provisional |
 | `CSRF_FIELD` (`"__borgo_csrf"`) | The hidden form field name. | provisional |
 | `csrfCookieValue(header)` | Reads the CSRF token from a cookie header, treating conflicting duplicates as absent. | provisional |
-| `cookieValue(header, name)` | Generic cookie reader. | internal |
-| `registerCsrf(react \| null)` | Injects React into the CSRF context. Called by the SSR server and the generated client entry. | internal |
-| `withCsrf(element, token)` | Wraps a tree in the CSRF context provider. | internal |
-| `registerIslands(components, createElement)` | Installs the island registry. Called by the generated entries. | internal |
-| `filePathToPattern(file)` | `pages/tasks/[id].tsx` → `/tasks/:id`. | internal |
-| `matchRoute(pathname, routes)` | Matches a path against a route list. | internal |
-| `resolveHead(module, props)` | Resolves a page's `head` export, calling it if it is a function. | internal |
 
 ### `borgo-framework` — types
 
 | Export | What it is for | Stability |
 | --- | --- | --- |
 | `ApiRoutes` | Empty interface the generated `.borgo/api-types.d.ts` augments with one entry per Go route. The seam of the typed bridge. | stable |
-| `WsEvents` | Empty interface mapping `"topic/event"` to a payload type. Filled by `borgo.PushT` calls, or declared by hand for browser-published events. | stable |
+| `WsEvents` | Empty interface mapping `"topic/event"` to a payload type. Filled by `borgo.Push` calls, or declared by hand for browser-published events. | stable |
 | `LoaderContext` | `{ request, params, api, apiUrl }` handed to a page's `loader`. | stable |
 | `ActionContext` | The same shape, handed to a page's `action`. | stable |
 | `PrerenderContext` | `{ api, apiUrl }` handed to `prerenderPaths` during `borgo export`. | stable |
@@ -171,13 +168,16 @@ The browser runtime. Imported by the generated client entries (`.borgo/client.ts
 | `asProps(value)` | Coerces an untrusted loader payload to a props object. | internal |
 | `ClientPageModule`, `ClientRoute`, `MountOptions`, `MountIslandsOptions` | Types of the above. `ClientRoute` appears in generated code. | internal |
 
-### `borgo-framework/server`
+### `borgo-framework/internal`
+
+Everything the generated client entries need and nothing an application should write by hand. The name is the contract: this subpath carries no stability promise and may change in any release.
 
 | Export | What it is for | Stability |
 | --- | --- | --- |
-| `serve({ dev = false })` | Boots the Bun front server: SSR, static assets, api proxy, WebSocket relay, dev channel. | provisional |
-
-Nothing in the repository imports this through the subpath — the CLI reaches `serve` by relative path. It is published either as a supported embedding point or by accident; 1.0 has to decide which.
+| `registerCsrf(token)` | Hands the client runtime the CSRF token the server rendered with. | internal |
+| `registerIslands(map)` | Registers the island components a `hydrate=false` page mounts. | internal |
+| `withCsrf(element, token)` | Wraps a tree in the CSRF context `CsrfField` reads. | internal |
+| `csrfRuntime()`, `islandRegistry()` | The registries themselves, read by the server and the runtime across module boundaries. | internal |
 
 ### `borgo-framework/refresh-runtime`
 
@@ -222,9 +222,12 @@ Read at runtime unless noted. Defaults in parentheses.
 | `BORGO_CSRF` | `0` disables CSRF checks on form actions, `1` forces them in dev. | stable |
 | `BORGO_SECURITY_HEADERS` | `0` drops the security headers and the CSP. | stable |
 | `BORGO_CSP` | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request. | stable |
-| `METRICS` | `1` exposes `/metrics` in Prometheus text format. | provisional |
+| `BORGO_METRICS` | `1` exposes `/metrics` in Prometheus text format. | stable |
+| `BUN_CONFIG_MAX_HTTP_REQUESTS` (`256`, bun's default) | How many proxied requests may be in flight at once. Each event stream holds one for its whole life, so the default ceilings concurrent SSE subscribers at ~255. Read by bun at process start. | stable |
 
-`METRICS` is provisional purely because of its name: it is the only unprefixed, entirely generic variable borgo reads, and it is the one most likely to collide in a shared environment.
+`BORGO_METRICS` was `METRICS` before 0.21. The old name is not honoured, and not honouring it is the point: a bare `METRICS` is the most collidable variable borgo ever read, and an alias kept for compatibility would keep the collision alive.
+
+`BUN_CONFIG_MAX_HTTP_REQUESTS` is bun's, not borgo's, but borgo is why you would set it — see [realtime](realtime.md#honest-limits). borgo raises it to `16384` in `borgo dev` and in every deploy config it writes; anywhere else it is yours to set, and only in the environment the process starts with.
 
 ### Go server only
 
@@ -236,6 +239,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `BORGO_READ_TIMEOUT` (`0`, off) | Whole-request read deadline. | stable |
 | `BORGO_WRITE_TIMEOUT` (`0`, off) | Whole-response write deadline; `SSE` exempts its own connection. | stable |
 | `BORGO_SHUTDOWN_TIMEOUT` (`10s`) | Grace period for in-flight requests; `0` waits indefinitely. | stable |
+| `BORGO_HASH_SLOTS` (`max(1, GOMAXPROCS/2)`) | Password hashes that may run at once. A value that is not a positive integer is refused at startup. | stable |
 
 All six are Go duration strings. A malformed value panics at boot, before the startup banner.
 
@@ -247,7 +251,7 @@ All six are Go duration strings. A malformed value panics at boot, before the st
 | `BORGO_PARENT_PID` | How the CLI tells a child process whose death to exit with. | internal |
 | `BORGO_RELOAD` | Marks a restart so the banner prints the short form. | internal |
 | `BORGO_CHANGED` | Carries the changed file into the dev fallback server. | internal |
-| `DEV` | Set by the dev loop for `serve-entry.ts`. | internal |
+| `BORGO_DEV` | Set by the dev loop for `serve-entry.ts`. | internal |
 | `BORGO_FORCE_PROMPT` | Test hook: forces `create-borgo`'s interactive path. | internal |
 | `NODE_ENV` | Not read at runtime — it is a build-time `define` substituted into client bundles. | internal |
 
@@ -272,7 +276,7 @@ Run from an app root — the directory holding `pages/`.
 
 | Flag | Applies to | What it does | Stability |
 | --- | --- | --- | --- |
-| `--tailwind` | any command (parsed globally) | Hands the CSS pipeline to `@tailwindcss/cli`; sets `BORGO_TAILWIND=1` for children. | stable |
+| `--tailwind` | any command (parsed globally) | Hands the CSS pipeline to Tailwind (the `@tailwindcss/postcss` plugin); sets `BORGO_TAILWIND=1` for children. | stable |
 | `--front-only` | `start` | Skips the Go binary, for split deployments. | stable |
 | `--force` | `pwa init`, `deploy init` | Overwrites existing files. | stable |
 
@@ -351,7 +355,7 @@ A comment that *looks* like a route directive but is not attached to a handler p
 
 ## Findings
 
-The rest of this page is the audit, not the reference. Nothing here has been implemented; each entry is a recommendation with its migration cost, for a decision before 1.0.
+The rest of this page is the audit, not the reference: what the surface got wrong, what it costs to fix, and what was decided. Entries marked **landed in 0.21** are done and the reference above already reflects them; the others are still recommendations awaiting a decision before 1.0.
 
 ### Duplicated APIs
 
@@ -360,19 +364,19 @@ The rest of this page is the audit, not the reference. Nothing here has been imp
 *Disposition:* **deprecate `WriteJSON` as public, keep it internal.** `JSON(w, status, v)` with `v` of interface type infers exactly what `WriteJSON` did, so the public replacement is a mechanical rename. Documentation should stop mentioning `WriteJSON` first.
 *Migration cost:* low. A `sed` in application code; `borgogen` keeps recognising both through the deprecation window. Affects every app that followed an older tutorial, which is most of them — so this needs a full minor's warning.
 
-**2. `Push` and `PushT` — same call, one with a visible type parameter.**
-`PushT[T]` is `Push` with `T` exposed to static analysis; it delegates directly. Identical to the `JSON`/`WriteJSON` split, with the opposite naming convention (see naming, below).
-*Disposition:* **make `Push` generic and remove `PushT`.** `Push[T any](topic, event string, data T) error` is source-compatible with almost every existing `Push` call, since Go infers `T` from the argument. Untyped call sites that pass an `any`-typed value keep compiling with `T = any`.
-*Migration cost:* low-to-medium. Source-compatible for `Push` callers; `PushT` callers do a rename. The risk is silent: a call that used to type as `any` starts typing precisely, which *adds* type information to the browser — an improvement, but a visible diff in generated files.
+**2. `Push` and `PushT` — same call, one with a visible type parameter. — landed in 0.21**
+`PushT[T]` was `Push` with `T` exposed to static analysis, delegating straight to it: the same split as `JSON`/`WriteJSON`, with the opposite naming convention (see naming, below).
+*Disposition taken:* **`Push` became generic and `PushT` was removed** — no deprecation window, since the alias existed only to carry the type parameter that `Push` now has. `Push[T any](topic, event string, data T) error` compiles unchanged at almost every existing call site, because Go infers `T` from the argument; a site passing an `any`-typed value still types as `T = any`.
+*Migration:* rename `PushT` to `Push`. The one shape Go cannot infer is an untyped `nil` — write `Push[any](topic, event, nil)`. Calls that used to type as `any` may now type precisely, which *adds* information to the browser: an improvement, and a visible diff in generated files.
 
 **3. `Cache` and `NoCache` — not actually duplicates. Keep both.**
 It is tempting to collapse them into `Cache(w, 0)`, and it would be wrong: `Cache(w, 0)` emits `public, max-age=0`, which is cacheable-with-revalidation, while `NoCache` emits `no-store`, which forbids storage entirely. On a personalized page the difference is a data leak.
 *Disposition:* **keep both, document the difference explicitly.** The asymmetry worth fixing is `Cache`'s variadic tail, not its existence.
 *Migration cost:* zero (documentation only). Replacing the variadic with an options struct would be a breaking change; defer to 2.0 or add `CacheStale(w, maxAge, swr)` additively.
 
-**4. `cookieValue` and `csrfCookieValue` — plus a third parser in `util.ts`.**
+**4. `cookieValue` and `csrfCookieValue` — plus a third parser in `util.ts`. — landed in 0.21**
 `cookieValue(header, name)` is a generic cookie reader exported from the package root and **referenced by nothing** — not by application code, not by the framework, not by tests. `csrfCookieValue(header)` is the one that is actually used, and it is deliberately different: conflicting duplicate cookies read as absent, matching the Go side's treatment of ambiguous session cookies. `hasCookie(header, name)` in `util.ts` parses the same string a third way (internal, not exported).
-*Disposition:* **remove `cookieValue` from the public surface; keep `csrfCookieValue` and document it.** `cookieValue`'s duplicate-tolerant behaviour is a footgun next to its neighbour. `csrfCookieValue` should be promoted from provisional to stable and documented, because an app doing hand-rolled `fetch` POSTs genuinely needs the token and `<CsrfField />` only covers `<form>`s.
+*Disposition taken:* **`cookieValue` was removed; `csrfCookieValue` is documented and promoted to stable.** `cookieValue`'s duplicate-tolerant behaviour is a footgun next to its neighbour. `csrfCookieValue` should be promoted from provisional to stable and documented, because an app doing hand-rolled `fetch` POSTs genuinely needs the token and `<CsrfField />` only covers `<form>`s.
 *Migration cost:* effectively zero for removal — the symbol is undocumented and unused. Promoting `csrfCookieValue` is documentation.
 
 **5. `Bind` and `BindMax` — justified duplication, keep.**
@@ -384,10 +388,9 @@ It is tempting to collapse them into `Cache(w, 0)`, and it would be wrong: `Cach
 *Disposition:* **have `api.ts` import the one from `util.ts`.** Both are internal, so this is a pure refactor.
 *Migration cost:* zero (no public surface involved).
 
-**7. `filePathToPattern`, `matchRoute`, `resolveHead` are public on two paths.**
+**7. `filePathToPattern`, `matchRoute`, `resolveHead` are public on two paths. — landed in 0.21**
 Re-exported from the root entry *and* reachable via `borgo-framework/router`. No application imports them from either.
-*Disposition:* **drop them from the root entry.** The generated `routes.gen.tsx` only needs `type Route` from `/router`.
-*Migration cost:* low, and only theoretical — no known caller. Do it in one minor with a deprecation note in case someone has built on them.
+*Disposition taken:* **dropped from the root entry**, and still exported from `/router`, where the generated routes file already reaches them. No deprecation note: the symbols were undocumented and no known caller existed.
 
 **8. `SSEHub.Publish`, `Push`, and `Channel.publish` — three names for "send an event".**
 Not redundant (SSE hub, Go→front WebSocket relay, browser→relay respectively) but confusing enough that users conflate them.
@@ -399,28 +402,28 @@ The Go surface is clean: every exported Go symbol has an application-facing reas
 
 | Export | Entry point | Why it is exported | Disposition | Migration cost |
 | --- | --- | --- | --- | --- |
-| `cookieValue` | root | Nothing. Dead. | **remove** | zero — unused, undocumented |
-| `registerCsrf` | root | The generated client entry emits `import { registerCsrf, registerIslands } from "borgo-framework"` | **hide behind `borgo-framework/internal`** | low — change the generated string in `build.ts`; `.borgo/` is regenerated on every build |
-| `registerIslands` | root | Same | **hide** | same |
-| `withCsrf` | root | Used by `runtime.ts` and `util.ts` across module boundaries | **hide** | zero — cross-module only |
+| `cookieValue` | root | Nothing. Dead. | **removed in 0.21** | zero — unused, undocumented |
+| `registerCsrf` | root | The generated client entry emitted `import { registerCsrf, registerIslands } from "borgo-framework"` | **moved to `borgo-framework/internal` in 0.21** | low — the generated string in `build.ts` changed; `.borgo/` is regenerated on every build |
+| `registerIslands` | root | Same | **moved in 0.21** | same |
+| `withCsrf` | root | Used by `runtime.ts` and `util.ts` across module boundaries | **moved in 0.21** | zero — cross-module only |
 | `CSRF_COOKIE` | root | Internal constant | **hide** | zero |
 | `CSRF_FIELD` | root | Internal constant, but arguably useful to an app building a form by hand | **keep, document** | zero |
-| `filePathToPattern`, `matchRoute`, `resolveHead` | root + `/router` | Shared between build, server and runtime | **drop from root** | low |
+| `filePathToPattern`, `matchRoute`, `resolveHead` | root + `/router` | Shared between build, server and runtime | **dropped from root in 0.21** | low |
 | `safeDecode` | `/router` | Shared between router and server | **leave; mark the subpath internal** | zero |
 | `mount`, `mountIslands`, `redirectUrl`, `asProps` | `/runtime` | Generated entries and unit tests | **leave; mark the subpath internal** | zero |
 | `ApiRouteKey`, `TopicEvents`, `TopicEventName`, `PublishArgs` | root | Inference machinery for `api()` and `subscribe()` | **leave; mark internal in docs** | zero — removing them would break the public types that reference them |
 | `Route` | root + `/router` | Manifest shape | **mark internal** | zero |
-| `serve` | `/server` | Nothing imports the subpath | **decide: document it or drop the subpath** | dropping is a breaking change to `exports`; do it before 1.0 or never |
+| `serve` | `/server` | Nothing imported the subpath | **subpath dropped in 0.21** | it was a breaking change to `exports`, taken before 1.0 rather than never |
 | `default` | `/refresh-runtime` | Generated dev entry | **leave; mark internal** | zero |
 
 The pattern is clear enough to state as a rule: **the root entry point should contain only what an application writes by hand.** Everything the generated code needs belongs on a subpath whose name says "not for you".
 
 ### Naming inconsistencies
 
-**1. The typed-variant convention contradicts itself.**
-On the response side, the *plain* name is the typed one (`JSON[T]`) and the untyped one is prefixed (`WriteJSON`). On the push side, the *suffixed* name is the typed one (`PushT`) and the plain one is untyped (`Push`). A user who learns one learns the wrong lesson about the other.
-*Disposition:* **pick "the plain name is the typed one"** and land it via findings 1 and 2. This is the single most valuable rename on the list, because it is the one users trip over while learning.
-*Cost:* medium — see findings 1 and 2. Both changes are in the same direction, so do them in the same release.
+**1. The typed-variant convention contradicted itself. — half landed in 0.21**
+On the response side the *plain* name is the typed one (`JSON[T]`) and the untyped one is prefixed (`WriteJSON`). On the push side it used to be the reverse: `PushT` was the typed one and plain `Push` the untyped one, so a user who learned one learned the wrong lesson about the other.
+*Rule chosen:* **the plain name is the typed one.** The push half landed with finding 2 — `Push` is now the generic one and there is no second name. The response half is finding 1 and still open.
+*Cost:* the remaining half is finding 1's cost.
 
 **2. `Push` (Go, WebSocket) vs `Publish` (Go, SSE hub) vs `publish` (TS, channel).**
 Three verbs, and the two Go ones differ by transport rather than by intent.
@@ -433,9 +436,9 @@ Three verbs, and the two Go ones differ by transport rather than by intent.
 *Cost:* zero.
 
 **4. Environment variable prefixes are inconsistent.**
-Sixteen variables are `BORGO_*`; nine are not (`PORT`, `API_PORT`, `API_URL`, `FRONT_URL`, `SESSION_SECRET`, `SESSION_SECURE`, `METRICS`, `NO_COLOR`, `DEV`). Most of the exceptions are defensible — `PORT` and `NO_COLOR` are ecosystem conventions, `SESSION_*` is self-describing — but `METRICS` and `DEV` are generic names in a shared process environment.
+Most variables are `BORGO_*`; the exceptions are `PORT`, `API_PORT`, `API_URL`, `FRONT_URL`, `SESSION_SECRET`, `SESSION_SECURE` and `NO_COLOR`, plus bun's own `BUN_CONFIG_MAX_HTTP_REQUESTS`. Those are defensible — `PORT` and `NO_COLOR` are ecosystem conventions, `SESSION_*` is self-describing, and the bun one is not borgo's to rename. The two that were not defensible, `METRICS` and `DEV`, were prefixed in 0.21.
 *Disposition:* **rename `METRICS` → `BORGO_METRICS`, accepting `METRICS` as an alias through all of 1.x. Rename `DEV` → `BORGO_DEV`** (internal, so no alias needed).
-*Cost:* low. One extra `process.env` read and a documented alias; `DEV` is set only by borgo's own dev loop.
+*Done in 0.21, without an alias.* `BORGO_DEV` is set only by borgo's own dev loop, so nothing outside the framework was reading it. `BORGO_METRICS` does not fall back to `METRICS`: honouring the old name would preserve the exact collision the prefix exists to end, and an app that wants metrics on an upgrade sets one variable.
 
 **5. "Route" means three different things.**
 TypeScript `Route` is a *page*; Go's internal `route` and `ApiRouteKey` are *api endpoints*; `filePathToPattern` produces a page pattern while `Handle` takes an api pattern. The docs use "route" for both and rely on context.

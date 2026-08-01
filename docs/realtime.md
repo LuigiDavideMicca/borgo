@@ -84,12 +84,12 @@ channel.close();
 The built-in `__count` event reports the topic's subscriber count (presence for free), and the connection reconnects itself. On the Go side, `borgo.Push(topic, event, data)` publishes into the same topics — it POSTs to the front server's internal endpoint, accepted from loopback. When the two halves are on different hosts, set `FRONT_URL` and the same `BORGO_PUSH_KEY` on both: once a key is set it *replaces* the loopback check, so a key on one side only means every push is refused.
 
 ```go
-borgo.PushT("live", "task-created", task.Title)
+borgo.Push("live", "task-created", task.Title)
 ```
 
 ## Typed events
 
-`borgo.PushT` is `Push` with the payload visible to static analysis: called with literal topic and event strings, borgogen records the payload type in a generated `"topic/event"` map, exactly like `borgo.JSON[T]` types a route. The `subscribe` callback for that topic then narrows — checking `event` types `data`, and an event name nobody declared fails `tsc`. `channel.publish` is held to the same map: on a topic with declared events, only a declared event name with its payload type compiles (CI proves both directions with deliberate wrong-payload files). Browser-published events join the map through declaration merging in any `.d.ts` of the app (see `ws-events.d.ts` in the tasks example):
+`borgo.Push` makes the payload visible to static analysis: called with literal topic and event strings, borgogen records the payload type in a generated `"topic/event"` map, exactly like `borgo.JSON[T]` types a route. The `subscribe` callback for that topic then narrows — checking `event` types `data`, and an event name nobody declared fails `tsc`. `channel.publish` is held to the same map: on a topic with declared events, only a declared event name with its payload type compiles (CI proves both directions with deliberate wrong-payload files). Browser-published events join the map through declaration merging in any `.d.ts` of the app (see `ws-events.d.ts` in the tasks example):
 
 ```ts
 declare module "borgo-framework" {
@@ -99,7 +99,9 @@ declare module "borgo-framework" {
 }
 ```
 
-Topics with no declared events keep the untyped `(event: string, data: unknown)` callback, and `borgo.Push` stays available for dynamic topic or event names — those simply stay out of the map. One naming rule: a topic passed to `PushT` cannot contain `/` — it would make the `"topic/event"` key ambiguous, and borgogen rejects it at generation time.
+Topics with no declared events keep the untyped `(event: string, data: unknown)` callback. `Push` also accepts computed topic and event names — there is nothing to record statically, so those calls stay out of the map and their subscribers keep the untyped callback. That is a choice, not a mistake, and borgogen says nothing about it.
+
+One naming rule: a topic cannot contain `/`, which would make the `"topic/event"` key ambiguous and subscribe the browser to the part before the slash. Such a push still delivers — refusing to generate would break a working app over a typing detail — so borgogen warns, names the file and line, and leaves that event untyped.
 
 ### Typing nuances
 
@@ -116,6 +118,7 @@ The relay itself stays dumb by design: the front server forwards `{event, data}`
 - **Limits are enforced**: 32 topics per client, 128 characters per topic name, 1 MB per message, and a same-origin check on the upgrade. See [security](security.md#realtime-surface).
 - **Reconnection is exponential and capped** at 30 seconds. After a long outage a client can be up to half a minute behind before it even tries; a page that must feel live should refetch on reconnect rather than trusting the gap was empty.
 - **SSE holds a connection per subscriber.** That is cheap in Go, but it is not free at the proxy in front of you: make sure it does not buffer, and does not cut idle connections shorter than your ping interval. [`borgo deploy init nginx`](deploy.md#borgo-deploy-init) writes a config that gets both right.
+- **One of those proxies is borgo's own front server**, and it has a limit worth knowing. Every `/api` request it forwards to Go holds one slot in Bun's outbound fetch pool for its whole life — which for an event stream means hours. That pool defaults to 256, so past roughly 255 concurrent streams new subscribers queue instead of connecting, with nothing logged. `BUN_CONFIG_MAX_HTTP_REQUESTS` sets the pool size; borgo raises it to 16384 in `borgo dev`, in the Dockerfile the templates ship, and in the systemd and compose configs `borgo deploy init` writes. **If you launch the server any other way, set it yourself** — Bun reads it when the process starts, so exporting it later, or assigning `process.env` from inside the app, does nothing.
 
 ## Streams and server timeouts
 
