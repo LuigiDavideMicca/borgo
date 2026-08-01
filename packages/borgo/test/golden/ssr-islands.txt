@@ -1,0 +1,21 @@
+--- headers ---
+status: 200
+cache-control: private, no-store
+content-security-policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; script-src 'self' 'nonce-{{TOKEN1}}'
+content-type: text/html; charset=utf-8
+vary: Accept-Encoding
+set-cookie: borgo_csrf={{TOKEN2}}; Path=/; SameSite=Lax; HttpOnly
+--- document ---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <link rel="stylesheet" href="/assets/style-{{HASH}}.css" />
+  <title>Note 7</title><meta name="description" content="a &quot;quoted&quot; &lt;note&gt;" data-borgo-head></head>
+  <body>
+    <div id="root"><h1>Note 7</h1><!--$?--><template id="B:0"></template><script nonce="{{TOKEN1}}">$RC=function(b,c,e){};$RC("B:0","S:0")</script><link rel="preload" as="script" href="/assets/chunk-{{HASH}}.js"/></div>
+    
+<script type="module" src="/assets/islands-client.js"></script>  </body>
+</html>

@@ -1,0 +1,21 @@
+--- headers ---
+status: 200
+cache-control: private, no-store
+content-type: text/html; charset=utf-8
+vary: Accept-Encoding
+set-cookie: borgo_csrf={{TOKEN1}}; Path=/; SameSite=Lax; HttpOnly
+--- document ---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <link rel="stylesheet" href="/assets/style-{{HASH}}.css" />
+  <title>Note 7</title><meta name="description" content="a &quot;quoted&quot; &lt;note&gt;" data-borgo-head></head>
+  <body>
+    <div id="root"><h1>Note 7</h1><!--$?--><template id="B:0"></template><script>$RC=function(b,c,e){};$RC("B:0","S:0")</script><link rel="preload" as="script" href="/assets/chunk-{{HASH}}.js"/></div>
+    <script>window.__PROPS__={"note":{"id":7,"title":"first","body":null},"injected":"\u003c/script>\u003cscript>alert(1)\u003c/script>","separated":"a\u2028b"};window.__BORGO_TITLE__="borgo golden";window.__BORGO_DEV__=1</script>
+    <script type="module" src="/assets/client.js"></script>
+  </body>
+</html>

@@ -1,0 +1,126 @@
+### hashed chunk, no accept-encoding
+GET /assets/app-{{HASH}}.js
+--> 200
+  cache-control: public, max-age=31536000, immutable
+  content-length: 45
+  content-type: text/javascript;charset=utf-8
+  etag: "19-{{MTIME}}"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### hashed chunk, br and gzip offered
+GET /assets/app-{{HASH}}.js
+  accept-encoding: gzip, br
+--> 200
+  cache-control: public, max-age=31536000, immutable
+  content-encoding: br
+  content-length: 23
+  content-type: text/javascript;charset=utf-8
+  etag: "n-{{MTIME}}-br"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### hashed chunk, gzip only
+GET /assets/app-{{HASH}}.js
+  accept-encoding: gzip
+--> 200
+  cache-control: public, max-age=31536000, immutable
+  content-encoding: gzip
+  content-length: 33
+  content-type: text/javascript;charset=utf-8
+  etag: "x-{{MTIME}}-gzip"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### hashed stylesheet, gzip sibling served
+GET /assets/style-{{HASH}}.css
+  accept-encoding: gzip
+--> 200
+  cache-control: public, max-age=31536000, immutable
+  content-encoding: gzip
+  content-length: 24
+  content-type: text/css;charset=utf-8
+  etag: "o-{{MTIME}}-gzip"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### hashed stylesheet, br negotiated but only a gzip sibling exists
+GET /assets/style-{{HASH}}.css
+  accept-encoding: br, gzip
+--> 200
+  cache-control: public, max-age=31536000, immutable
+  content-length: 25
+  content-type: text/css;charset=utf-8
+  etag: "p-{{MTIME}}"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### unhashed stylesheet, no siblings
+GET /site.css
+  accept-encoding: gzip, br
+--> 200
+  content-length: 18
+  content-type: text/css;charset=utf-8
+  etag: "i-{{MTIME}}"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### service worker
+GET /sw.js
+--> 200
+  cache-control: no-cache
+  content-length: 38
+  content-type: text/javascript;charset=utf-8
+  etag: "12-{{MTIME}}"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### non-compressible file
+GET /logo.png
+  accept-encoding: gzip, br
+--> 200
+  content-length: 21
+  content-type: image/png
+  etag: "l-{{MTIME}}"
+  last-modified: {{HTTP_DATE}}
+
+### revalidation on the identity etag
+GET /assets/app-{{HASH}}.js
+  if-none-match: "19-{{MTIME}}"
+--> 304 (no body)
+  cache-control: public, max-age=31536000, immutable
+  etag: "19-{{MTIME}}"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### revalidation on the br etag while negotiating br
+GET /assets/app-{{HASH}}.js
+  accept-encoding: br
+  if-none-match: "n-{{MTIME}}-br"
+--> 304 (no body)
+  cache-control: public, max-age=31536000, immutable
+  etag: "n-{{MTIME}}-br"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### the identity etag cannot revalidate the br representation
+GET /assets/app-{{HASH}}.js
+  accept-encoding: br
+  if-none-match: "19-{{MTIME}}"
+--> 200
+  cache-control: public, max-age=31536000, immutable
+  content-encoding: br
+  content-length: 23
+  content-type: text/javascript;charset=utf-8
+  etag: "n-{{MTIME}}-br"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### revalidation by date
+GET /assets/app-{{HASH}}.js
+  if-modified-since: {{HTTP_DATE}}
+--> 304 (no body)
+  cache-control: public, max-age=31536000, immutable
+  etag: "19-{{MTIME}}"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
