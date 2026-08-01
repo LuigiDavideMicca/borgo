@@ -143,6 +143,7 @@ func run(root string) (err error) {
 		// use turns into "type is not generic", quietly, since apps typecheck
 		// with skipLibCheck
 		taken:     map[string]bool{"Array": true, "Record": true},
+		expanding: map[string]bool{},
 		apiPkg:    pkg.Types,
 		overrides: collectTypeOverrides(pkg),
 	}
@@ -595,8 +596,15 @@ func funcDecls(pkg *packages.Package) map[*types.Func]*ast.FuncDecl {
 type tsGen struct {
 	// keyed on the instantiated type string, so Page[A] and Page[B] emit
 	// distinct interfaces instead of collapsing on the generic origin
-	names     map[string]string
-	taken     map[string]bool
+	names map[string]string
+	taken map[string]bool
+	// named non-struct types currently being expanded. A struct is safe from
+	// recursion because interfaceFor names it before it walks its fields; a
+	// named map, slice or pointer had no such anchor, so `type Tree
+	// map[string]Tree` expanded forever. That is a stack overflow, which is
+	// fatal rather than a panic - run()'s recover never sees it, so the dev
+	// loop died on every save with no message at all.
+	expanding map[string]bool
 	defs      []string
 	apiPkg    *types.Package
 	overrides map[string]string
@@ -922,7 +930,7 @@ func (g *tsGen) tsType(t types.Type) string {
 		if s, ok := t.Underlying().(*types.Struct); ok {
 			return g.interfaceFor(t, s)
 		}
-		return g.tsType(t.Underlying())
+		return g.namedFor(t)
 	case *types.Alias:
 		return g.tsType(types.Unalias(t))
 	case *types.Basic:
@@ -1013,11 +1021,9 @@ func (g *tsGen) typeArgSuffix(args *types.TypeList) string {
 	return b.String()
 }
 
-func (g *tsGen) interfaceFor(t *types.Named, s *types.Struct) string {
-	key := types.TypeString(t, nil)
-	if name, ok := g.names[key]; ok {
-		return name
-	}
+// reserveName picks the TypeScript identifier for a Go type and claims it, so
+// two Go types that share a short name cannot collide in the generated file.
+func (g *tsGen) reserveName(t *types.Named) string {
 	obj := t.Obj()
 	name := obj.Name() + g.typeArgSuffix(t.TypeArgs())
 	if g.taken[name] && obj.Pkg() != nil {
@@ -1029,6 +1035,42 @@ func (g *tsGen) interfaceFor(t *types.Named, s *types.Struct) string {
 		name = fmt.Sprintf("%s%d", base, i)
 	}
 	g.taken[name] = true
+	return name
+}
+
+// namedFor expands a named type whose underlying is not a struct. It inlines
+// the underlying, as it always did - `type Money int` is still just `number` -
+// unless the expansion re-enters this same type, which means the type is
+// recursive and has to be able to refer to itself. Then it gets a declaration
+// of its own and the inner reference resolves to that name.
+func (g *tsGen) namedFor(t *types.Named) string {
+	key := types.TypeString(t, nil)
+	if name, ok := g.names[key]; ok {
+		return name
+	}
+	if g.expanding[key] {
+		name := g.reserveName(t)
+		g.names[key] = name
+		return name
+	}
+	g.expanding[key] = true
+	body := g.tsType(t.Underlying())
+	delete(g.expanding, key)
+	// a name appeared while we were inside: an inner frame hit the cycle and
+	// reserved one, and this frame owns the declaration that gives it meaning
+	if name, ok := g.names[key]; ok {
+		g.defs = append(g.defs, "export type "+name+" = "+body+";\n")
+		return name
+	}
+	return body
+}
+
+func (g *tsGen) interfaceFor(t *types.Named, s *types.Struct) string {
+	key := types.TypeString(t, nil)
+	if name, ok := g.names[key]; ok {
+		return name
+	}
+	name := g.reserveName(t)
 	g.names[key] = name
 
 	fields := g.fields(s)

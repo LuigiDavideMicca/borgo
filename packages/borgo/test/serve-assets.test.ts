@@ -229,16 +229,35 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
     expect(res.headers.get("Content-Type")).toContain("text/css");
   });
 
-  test("if-range accepts the last-modified date as a validator too", async () => {
+  // A date cannot authorise a range here, however current it is. Last-Modified
+  // is the file's mtime, and every encoding variant of one url reports the same
+  // one, so accepting it lets a client fetch the identity file and then resume
+  // out of the brotli sibling. Measured before this rule: a 206 handing brotli
+  // bytes to a client assembling plain css, and a 416 telling a client holding
+  // 6400 bytes the resource was 35 bytes long.
+  test("if-range refuses a date validator, current or not", async () => {
     const i = info("/style.css");
-    const fresh = await fetch(`${base}/style.css`, {
-      headers: { range: "bytes=0-3", "if-range": i.lastModified, "accept-encoding": "identity" },
+    for (const ifRange of [i.lastModified, new Date(0).toUTCString()]) {
+      const res = await fetch(`${base}/style.css`, {
+        headers: { range: "bytes=0-3", "if-range": ifRange, "accept-encoding": "identity" },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Range")).toBeNull();
+      expect(await res.text()).toBe(RAW_CSS);
+    }
+  });
+
+  test("a resume that changes encoding mid-download is refused, not spliced", async () => {
+    const i = info("/style.css");
+    const gzipEtag = i.variants.find((v) => v.encoding === "gzip")!.etag;
+    // started on identity, resuming with the gzip variant negotiated: the
+    // etag the client holds is the identity one, so the range must be ignored
+    const res = await fetch(`${base}/style.css`, {
+      headers: { range: "bytes=5-9", "if-range": i.identity.etag, "accept-encoding": "gzip" },
     });
-    expect(fresh.status).toBe(206);
-    const stale = await fetch(`${base}/style.css`, {
-      headers: { range: "bytes=0-3", "if-range": new Date(0).toUTCString(), "accept-encoding": "identity" },
-    });
-    expect(stale.status).toBe(200);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("ETag")).toBe(gzipEtag);
+    expect(res.headers.get("Content-Range")).toBeNull();
   });
 
   test("a weak validator never authorises a range", async () => {

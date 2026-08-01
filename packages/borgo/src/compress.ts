@@ -176,11 +176,20 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
 // without the accept-encoding the first request carried is asking for a range
 // of the brotli file to be filled from the identity one.
 // a weak validator (W/"...") can never authorise a range, so it never matches.
-export function isRangeStale(req: Request, etag: string, lastModified: string): boolean {
+//
+// Only the etag is accepted, and the date deliberately is not. Every variant of
+// one url shares a Last-Modified - it is the file's mtime, and the siblings are
+// built from it - so a date would authorise precisely the splice above: fetch
+// the identity file, resume with If-Range set to that date and a different
+// Accept-Encoding, and the range is answered out of the brotli file. Measured
+// before this rule: a 416 declaring a 6400-byte resource to be 35 bytes long,
+// and a 206 handing brotli bytes to a client assembling plain css. rfc 9110
+// §13.1.5 allows a date validator; it does not require one, and here there is
+// no date that identifies a representation rather than a url.
+export function isRangeStale(req: Request, etag: string): boolean {
   const ifRange = req.headers.get("if-range");
   if (ifRange === null || !req.headers.has("range")) return false;
-  const given = ifRange.trim();
-  return given !== etag && given !== lastModified;
+  return ifRange.trim() !== etag;
 }
 
 // the indexed path: no stat, and an etag the browser can revalidate against
@@ -225,7 +234,7 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
   // bun ranges files, not streams, so a validator that no longer matches
   // gets the whole representation as a plain 200 - still off the disk,
   // never through memory.
-  if (isRangeStale(req, variant.etag, info.lastModified)) {
+  if (isRangeStale(req, variant.etag)) {
     // a stream body also loses the content type bun derives from a file, and
     // under the global nosniff a typeless stylesheet is a refused stylesheet;
     // for an encoded variant this re-sets the same value as above

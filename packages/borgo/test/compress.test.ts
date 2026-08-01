@@ -449,32 +449,36 @@ describe("isRangeStale", () => {
   const LM = "Wed, 30 Jul 2026 09:00:00 GMT";
 
   test("no range, or no if-range, is never stale", () => {
-    expect(isRangeStale(req({}), ETAG, LM)).toBe(false);
-    expect(isRangeStale(req({ range: "bytes=0-9" }), ETAG, LM)).toBe(false);
+    expect(isRangeStale(req({}), ETAG)).toBe(false);
+    expect(isRangeStale(req({ range: "bytes=0-9" }), ETAG)).toBe(false);
     // an if-range without a range means nothing at all
-    expect(isRangeStale(req({ "if-range": '"other"' }), ETAG, LM)).toBe(false);
+    expect(isRangeStale(req({ "if-range": '"other"' }), ETAG)).toBe(false);
   });
 
   test("a validator that still matches lets the range through", () => {
-    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": ETAG }), ETAG, LM)).toBe(false);
-    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": LM }), ETAG, LM)).toBe(false);
-    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": ` ${ETAG} ` }), ETAG, LM)).toBe(false);
+    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": ETAG }), ETAG)).toBe(false);
+    // the date is NOT accepted: every encoding variant of one url shares it,
+    // so honouring it authorises a range of the brotli file to be spliced into
+    // an identity download - measured, before this rule, as a 206 of brotli
+    // bytes handed to a client assembling plain css
+    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": LM }), ETAG)).toBe(true);
+    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": ` ${ETAG} ` }), ETAG)).toBe(false);
   });
 
   test("a validator that no longer matches refuses it", () => {
-    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": '"deadbeef-0"' }), ETAG, LM)).toBe(true);
-    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": "Mon, 01 Jan 2001 00:00:00 GMT" }), ETAG, LM)).toBe(true);
+    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": '"deadbeef-0"' }), ETAG)).toBe(true);
+    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": "Mon, 01 Jan 2001 00:00:00 GMT" }), ETAG)).toBe(true);
   });
 
   test("resuming across a change of encoding is a mismatch, not a range", () => {
     // the prefix the client holds is brotli; this request negotiated identity.
     // filling it from the identity file would hand back a spliced file
     const brEtag = '"fc-ms8ppmnf-br"';
-    expect(isRangeStale(req({ range: "bytes=100-", "if-range": brEtag }), ETAG, LM)).toBe(true);
-    expect(isRangeStale(req({ range: "bytes=100-", "if-range": brEtag }), brEtag, LM)).toBe(false);
+    expect(isRangeStale(req({ range: "bytes=100-", "if-range": brEtag }), ETAG)).toBe(true);
+    expect(isRangeStale(req({ range: "bytes=100-", "if-range": brEtag }), brEtag)).toBe(false);
   });
 
   test("a weak validator can never authorise a range", () => {
-    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": `W/${ETAG}` }), ETAG, LM)).toBe(true);
+    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": `W/${ETAG}` }), ETAG)).toBe(true);
   });
 });

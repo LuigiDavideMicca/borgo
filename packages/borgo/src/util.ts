@@ -809,6 +809,14 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
   // hop-by-hop headers belong to the browser -> borgo connection, not to
   // this one; built once, outside the retry loop
   const headers = forwardableHeaders(req.headers);
+  // a GET or HEAD is forwarded with no body at all, so a Content-Length the
+  // client sent with one is a promise we are not keeping: go's net/http reads
+  // the header, runs the handler, then blocks in finishRequest draining bytes
+  // that never arrive - the response never leaves, this side answers 504 after
+  // the deadline, and a goroutine and a connection stay pinned for as long as
+  // it lasted (forever, with BORGO_API_TIMEOUT=0, which the docs offer). One
+  // header on one cheap request wedges one upstream connection.
+  if (!hasBody) headers.delete("content-length");
   // Host is the same kind of thing: it addresses borgo, not go. forwarded
   // verbatim it makes go's r.Host whatever the client typed into the header,
   // and r.Host is the field go reaches for implicitly - http.Redirect's
