@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	deeph3 "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/deeppush/h3"
 	deeph4 "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/deeppush/h4"
 	embedapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/embed/api"
+	nestedapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/nested/api"
 	recursiveapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/recursive/api"
 	textapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/textmarshal/api"
 	wireapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/wire/api"
@@ -77,6 +79,43 @@ func read(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// typechecks compiles the emitted declarations with tsc. Every other assertion
+// in this file is a substring, and a substring is still found when the "<" that
+// opened around it never closed - the whole point of a generated .d.ts is that
+// it parses, because one bad declaration in it costs every route in the project
+// its types at once, not just the field that produced it.
+func typechecks(t *testing.T, types string) {
+	t.Helper()
+	bunx, err := exec.LookPath("bunx")
+	if err != nil {
+		t.Skip("bunx is not on PATH, so the emitted declarations cannot be compiled here")
+	}
+	dir := t.TempDir()
+	writeTemp(t, dir, "api-types.d.ts", types)
+	// the emitted file augments "borgo-framework", and augmenting a module that
+	// does not resolve is TS2664 before a single member of it is looked at
+	writeTemp(t, dir, "borgo-framework.d.ts",
+		"declare module \"borgo-framework\" {\n  export interface ApiRoutes {}\n  export interface WsEvents {}\n}\n")
+	// skipLibCheck is what apps compile with, and it hides everything in a .d.ts
+	// but the syntax; off here, so a declaration that parses and still means
+	// nothing is caught too
+	writeTemp(t, dir, "tsconfig.json",
+		`{"compilerOptions":{"strict":true,"noEmit":true,"skipLibCheck":false,"types":[]},"include":["*.d.ts"]}`)
+
+	cmd := exec.Command(bunx, "tsc", "--noEmit", "-p", "tsconfig.json")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("tsc rejected the generated declarations: %v\n%s\n%s", err, out, types)
+	}
+}
+
+func writeTemp(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestGenerateFixture(t *testing.T) {
@@ -969,6 +1008,74 @@ func TestNullableResponsesShareOneNull(t *testing.T) {
 	if n := strings.Count(entry, "null"); n != 1 {
 		t.Errorf("want one null alternative, got %d in %s", n, entry)
 	}
+}
+
+// Three nullable levels - map[string][]*T, [][]*T, [][][]byte,
+// map[string]map[string][]T, map[string][]map[string]T - used to be rendered
+// and then taken apart again by splitting the rendering on " | ". " | " occurs
+// inside a type-argument list too, so the pieces were fragments and not
+// alternatives: "Record<string, Array<Item | null> | null>" split to
+// ["Record<string, Array<Item", "null>", "null>"], the repeated "null>" was
+// dropped as a duplicate, and the ">" it carried went with it. Two levels
+// survived by luck, which is why this went unseen.
+//
+// Each field below is asserted whole, not merely for balanced brackets: the
+// null now travels beside the text instead of inside it, so the way this fails
+// from here on is the opposite of the old one - a null quietly left off, in a
+// type that parses and typechecks and promises non-null for a field that
+// arrives null.
+func TestNestedNullableTypesAreClosedAndKeepEveryNull(t *testing.T) {
+	full := nestedapi.Nested{
+		Grouped: map[string][]*nestedapi.Item{"g": {{ID: "a"}}},
+		Rows:    [][]*nestedapi.Item{{{ID: "b"}}},
+		Chunks:  [][][]byte{{[]byte("c")}},
+		Deep:    map[string]map[string][]string{"d": {"e": {"f"}}},
+		Mixed:   map[string][]map[string]int{"m": {{"k": 1}}},
+	}
+	marshals(t, full, `{"grouped":{"g":[{"id":"a"}]},"rows":[[{"id":"b"}]],"chunks":[["Yw=="]],"deep":{"d":{"e":["f"]}},"mixed":{"m":[{"k":1}]}}`)
+	// and every one of those levels really can be null on the wire, which is
+	// what each "| null" below is promising
+	marshals(t, nestedapi.Nested{}, `{"grouped":null,"rows":null,"chunks":null,"deep":null,"mixed":null}`)
+	marshals(t, [][]*nestedapi.Item(nil), `null`)
+	marshals(t, []map[string]*nestedapi.Item(nil), `null`)
+
+	types := generate(t, "nested")
+	wants(t, types, "export interface Nested {\n"+
+		"  grouped: Record<string, Array<Item | null> | null> | null;\n"+
+		"  rows: Array<Array<Item | null> | null> | null;\n"+
+		"  chunks: Array<Array<string | null> | null> | null;\n"+
+		"  deep: Record<string, Record<string, Array<string> | null> | null> | null;\n"+
+		"  mixed: Record<string, Array<Record<string, number> | null> | null> | null;\n}")
+	// the same composition reached from a response union and from the push map,
+	// where the members have to stay whole to be deduped and the pair carries
+	// one null between them
+	wants(t, types,
+		`"GET /api/nested/either": { response: Array<Array<Item | null> | null> | Array<Record<string, Item | null> | null> | null };`,
+		`"room/mixed": Array<Array<Item | null> | null> | Array<Record<string, Array<string> | null> | null> | null;`,
+	)
+	typechecks(t, types)
+}
+
+// The direction the fix above fails in, stated as a test rather than as a
+// hope. Nothing splits a rendered type any more, so a union member is opaque -
+// including the one case where a member arrives already carrying a top-level
+// null, a //borgo:type whose replacement text is itself a union. Widening that
+// leaf stacks a second null on it: examples/tasks maps gorm.DeletedAt to
+// "string | null", and a *gorm.DeletedAt would read "string | null | null".
+//
+// That is redundant, not wrong - TypeScript flattens a union and null is
+// idempotent in it - and it is the price of never taking somebody else's text
+// apart. It is pinned here so it stays a choice: if this ever has to go, it
+// goes by carrying the override as structure from the directive, never by
+// splitting the rendering again.
+func TestOverrideTextIsCarriedWholeIntoEveryNullablePosition(t *testing.T) {
+	types := generate(t, "overrideunion")
+	wants(t, types, "export interface Holder {\n"+
+		"  one: string | null;\n"+
+		"  ptr: string | null | null;\n"+
+		"  many: Array<string | null> | null;\n"+
+		"  keyed: Record<string, string | null> | null;\n}")
+	typechecks(t, types)
 }
 
 // `type Loop *Loop` is a cycle that runs through pointers alone: every value is

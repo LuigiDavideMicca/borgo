@@ -585,7 +585,7 @@ func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]s
 	sort.Strings(keys)
 	entries := make(map[string]string, len(keys))
 	for _, k := range keys {
-		entries[k] = tsUnion(unions[k].parts...)
+		entries[k] = unions[k].String()
 	}
 	return keys, entries
 }
@@ -881,53 +881,79 @@ func shortPos(pkg *packages.Package, obj *types.TypeName) string {
 	return fmt.Sprintf("%s:%d", filepath.Base(p.Filename), p.Line)
 }
 
+// tsRef is one rendered TypeScript type with the null it admits carried beside
+// the text instead of inside it. The two are joined once, by String, and
+// nothing ever takes a joined type apart again.
+//
+// Splitting a rendered type on " | " is what this replaces, and it cannot work:
+// " | " occurs inside type-argument lists too, so the pieces of
+// "Record<string, Array<Item | null> | null>" are fragments, not alternatives -
+// dropping the repeated "null>" as a duplicate took its ">" with it and emitted
+// a type that does not parse, which costs every route in the file its types. A
+// rendered string is not a parse tree and counting the angle brackets to make
+// the split smarter would only be the same mistake spelled longer.
+//
+// How this fails if it is wrong, in the direction opposite the old bug: the
+// null now travels apart from the text, so a site that renders ts and forgets
+// null emits a type that parses perfectly and silently promises non-null for a
+// field that arrives null - no compiler anywhere says so, unlike the unclosed
+// "<" that preceded it. Tests assert the exact rendering of each level, not
+// only that the emitted file parses.
+type tsRef struct {
+	ts   string // one whole alternative; "" when the type is null and nothing else
+	null bool
+}
+
+func (r tsRef) orNull() tsRef {
+	r.null = true
+	return r
+}
+
+func (r tsRef) String() string {
+	switch {
+	case r.ts == "" && r.null:
+		return "null"
+	case r.ts == "":
+		return "unknown"
+	case r.null:
+		return r.ts + " | null"
+	}
+	return r.ts
+}
+
+// union collects the alternatives of a TypeScript union as whole members and
+// joins them in the order added, at the end. Repeats are dropped whole -
+// "string" added twice is "string", never "string | string" - and null is
+// composed as a flag so that two nullable answers under one route read
+// "A | B | null" and not "A | null | B | null".
 type union struct {
 	seen  map[string]bool
 	parts []string
+	null  bool
 }
 
-func (u *union) add(ts string) {
+func (u *union) add(r tsRef) {
+	u.null = u.null || r.null
+	if r.ts == "" {
+		return
+	}
 	if u.seen == nil {
 		u.seen = map[string]bool{}
 	}
-	if !u.seen[ts] {
-		u.seen[ts] = true
-		u.parts = append(u.parts, ts)
+	if !u.seen[r.ts] {
+		u.seen[r.ts] = true
+		u.parts = append(u.parts, r.ts)
 	}
 }
+
+func (u *union) empty() bool { return len(u.parts) == 0 && !u.null }
 
 func (u *union) String() string {
+	if u.null {
+		return strings.Join(append(append([]string(nil), u.parts...), "null"), " | ")
+	}
 	return strings.Join(u.parts, " | ")
 }
-
-// tsUnion joins TypeScript alternatives in the order given, flattening the
-// unions among them and dropping the repeats: "string" and "string | null"
-// compose to "string | null", not "string | string | null". null goes last
-// whichever alternative carried it, so two nullable answers under one route
-// read "A | B | null" instead of "A | null | B".
-func tsUnion(parts ...string) string {
-	var u union
-	nullable := false
-	for _, p := range parts {
-		for _, alt := range strings.Split(p, " | ") {
-			if alt == "null" {
-				nullable = true
-				continue
-			}
-			u.add(alt)
-		}
-	}
-	if nullable {
-		u.add("null")
-	}
-	return u.String()
-}
-
-// nullable widens a TypeScript type to admit null, which is what encoding/json
-// writes for every nil it can reach: a nil slice, map or pointer is "null" on
-// the wire, not "[]", "{}" or a missing key. A type that promises an array for
-// a response that can be empty turns data.items.map() into a TypeError.
-func nullable(ts string) string { return tsUnion(ts, "null") }
 
 // maxCrossPkgDepth caps how many package boundaries helper following crosses
 // from one handler. Cycles are already impossible (visited set); the cap
@@ -1123,12 +1149,12 @@ func (g *tsGen) bridgeTypes(pkg *packages.Package, decls map[*types.Func]*ast.Fu
 	}
 	walk(pkg, decls, decl, 0)
 
-	// tsUnion, not String: two responses that are each nullable dedup as whole
-	// strings but not as alternatives, so the union carried a second "| null"
-	if len(resp.parts) == 0 {
-		return "unknown", tsUnion(req.parts...)
+	// a route nothing answered from has no response type to promise; an empty
+	// request union renders "" and drops the request key altogether
+	if resp.empty() {
+		return "unknown", req.String()
 	}
-	return tsUnion(resp.parts...), tsUnion(req.parts...)
+	return resp.String(), req.String()
 }
 
 // isErrorStatus reports whether the status argument is a constant >= 300.
@@ -1199,24 +1225,24 @@ func hasMarshalMethod(t types.Type, name string, addressable bool) bool {
 // pointer is reached with a dereference and so is addressable wherever the
 // outer value sits. Every one of these is pinned to a json.Marshal of the
 // shape it describes in TestAddressableVariantsMatchEncodingJSON.
-func (g *tsGen) tsType(t types.Type, addressable bool) string {
+func (g *tsGen) tsType(t types.Type, addressable bool) tsRef {
 	switch t := t.(type) {
 	case *types.Named:
 		obj := t.Obj()
 		if ts, ok := g.override(obj); ok {
-			return ts
+			return tsRef{ts: ts}
 		}
 		if obj.Pkg() != nil && obj.Pkg().Path() == "time" && obj.Name() == "Time" {
-			return "string"
+			return tsRef{ts: "string"}
 		}
 		// json.Number is typed string and carries a bare number on the wire.
 		// Only this exact type: `type Amount json.Number` is a copy, not it, and
 		// encoding/json quotes a copy like any other string-kinded type
 		if obj.Pkg() != nil && obj.Pkg().Path() == "encoding/json" && obj.Name() == "Number" {
-			return "number"
+			return tsRef{ts: "number"}
 		}
 		if ts, ok := marshalTS(t, addressable); ok {
-			return ts
+			return tsRef{ts: ts}
 		}
 		if s, ok := t.Underlying().(*types.Struct); ok {
 			return g.interfaceFor(t, s, addressable)
@@ -1226,21 +1252,21 @@ func (g *tsGen) tsType(t types.Type, addressable bool) string {
 		// an alias is a name of its own, so a //borgo:type may target it
 		// instead of the type it stands for
 		if ts, ok := g.override(t.Obj()); ok {
-			return ts
+			return tsRef{ts: ts}
 		}
 		return g.tsType(types.Unalias(t), addressable)
 	case *types.Basic:
 		switch {
 		case t.Info()&types.IsBoolean != 0:
-			return "boolean"
+			return tsRef{ts: "boolean"}
 		case t.Info()&types.IsNumeric != 0:
-			return "number"
+			return tsRef{ts: "number"}
 		case t.Info()&types.IsString != 0:
-			return "string"
+			return tsRef{ts: "string"}
 		}
-		return "unknown"
+		return tsRef{ts: "unknown"}
 	case *types.Pointer:
-		return nullable(g.tsType(t.Elem(), true))
+		return g.tsType(t.Elem(), true).orNull()
 	case *types.Slice:
 		// encoding/json base64s a slice of any byte-kinded element, named or
 		// aliased, not just of the predeclared byte - unless that element
@@ -1249,19 +1275,19 @@ func (g *tsGen) tsType(t types.Type, addressable bool) string {
 		// are addressable, so a marshaler on the pointer receiver counts.
 		if b, ok := types.Unalias(t.Elem()).Underlying().(*types.Basic); ok && b.Kind() == types.Uint8 {
 			if _, self := marshalTS(t.Elem(), true); !self {
-				return nullable("string")
+				return tsRef{ts: "string"}.orNull()
 			}
 		}
 		// a nil slice is "null", never "[]": only an array is always there
-		return nullable("Array<" + g.tsType(t.Elem(), true) + ">")
+		return tsRef{ts: "Array<" + g.tsType(t.Elem(), true).String() + ">"}.orNull()
 	case *types.Array:
-		return "Array<" + g.tsType(t.Elem(), addressable) + ">"
+		return tsRef{ts: "Array<" + g.tsType(t.Elem(), addressable).String() + ">"}
 	case *types.Map:
 		// encoding/json keys an object by a string or an integer key, and
 		// rejects the whole value for anything else it cannot name - floats
 		// and complexes included, which IsNumeric would have let through
 		if b, ok := t.Key().Underlying().(*types.Basic); ok && b.Info()&(types.IsString|types.IsInteger) != 0 {
-			return nullable("Record<string, " + g.tsType(t.Elem(), false) + ">")
+			return tsRef{ts: "Record<string, " + g.tsType(t.Elem(), false).String() + ">"}.orNull()
 		}
 		if hasMarshalMethod(t.Key(), "MarshalText", false) {
 			// encoding/json keys the object by MarshalText output, and only by
@@ -1269,19 +1295,19 @@ func (g *tsGen) tsType(t types.Type, addressable bool) string {
 			// carrying both is still a string key and not "unknown". A key is
 			// never addressable either, so a MarshalText on the pointer receiver
 			// does not apply - encoding/json refuses to marshal the map at all
-			return nullable("Record<string, " + g.tsType(t.Elem(), false) + ">")
+			return tsRef{ts: "Record<string, " + g.tsType(t.Elem(), false).String() + ">"}.orNull()
 		}
-		return "unknown"
+		return tsRef{ts: "unknown"}
 	case *types.Struct:
 		// an anonymous struct promotes its embedded methods too, so one
 		// embedding a time.Time reaches the wire as a JSON string and never as
 		// the object its fields describe
 		if ts, ok := marshalTS(t, addressable); ok {
-			return ts
+			return tsRef{ts: ts}
 		}
-		return "{ " + strings.Join(g.fields(t, addressable), "; ") + " }"
+		return tsRef{ts: "{ " + strings.Join(g.fields(t, addressable), "; ") + " }"}
 	}
-	return "unknown"
+	return tsRef{ts: "unknown"}
 }
 
 // addrSensitive reports whether t's shape depends on where the value sits -
@@ -1511,18 +1537,18 @@ func pointerCycle(t types.Type) bool {
 // unless the expansion re-enters this same type, which means the type is
 // recursive and has to be able to refer to itself. Then it gets a declaration
 // of its own and the inner reference resolves to that name.
-func (g *tsGen) namedFor(t *types.Named, addressable bool) string {
+func (g *tsGen) namedFor(t *types.Named, addressable bool) tsRef {
 	if pointerCycle(t) {
-		return "null"
+		return tsRef{null: true}
 	}
 	key, addr := g.variantKey(t, addressable)
 	if name, ok := g.names[key]; ok {
-		return name
+		return tsRef{ts: name}
 	}
 	if g.expanding[key] {
 		name := g.reserveName(t, addr)
 		g.names[key] = name
-		return name
+		return tsRef{ts: name}
 	}
 	g.expanding[key] = true
 	body := g.tsType(t.Underlying(), addr)
@@ -1530,23 +1556,23 @@ func (g *tsGen) namedFor(t *types.Named, addressable bool) string {
 	// a name appeared while we were inside: an inner frame hit the cycle and
 	// reserved one, and this frame owns the declaration that gives it meaning
 	if name, ok := g.names[key]; ok {
-		g.defs = append(g.defs, addrNote(t, addr)+"export type "+name+" = "+body+";\n")
-		return name
+		g.defs = append(g.defs, addrNote(t, addr)+"export type "+name+" = "+body.String()+";\n")
+		return tsRef{ts: name}
 	}
 	return body
 }
 
-func (g *tsGen) interfaceFor(t *types.Named, s *types.Struct, addressable bool) string {
+func (g *tsGen) interfaceFor(t *types.Named, s *types.Struct, addressable bool) tsRef {
 	key, addr := g.variantKey(t, addressable)
 	if name, ok := g.names[key]; ok {
-		return name
+		return tsRef{ts: name}
 	}
 	name := g.reserveName(t, addr)
 	g.names[key] = name
 
 	fields := g.fields(s, addr)
 	g.defs = append(g.defs, addrNote(t, addr)+"export interface "+name+" {\n  "+strings.Join(fields, ";\n  ")+";\n}\n")
-	return name
+	return tsRef{ts: name}
 }
 
 // addrNote heads the addressable variant of a type with the reason it exists:
@@ -1690,15 +1716,14 @@ func (g *tsGen) collectFields(s *types.Struct, depth int, viaPtr, addressable bo
 		ts := g.tsType(f.Type(), addressable)
 		if hasOpt(plan.opts, "string") {
 			// ,string quotes booleans and pointed-to numbers too, not just
-			// plain ones: {"b":"true","p":"5"}
-			switch ts {
+			// plain ones: {"b":"true","p":"5"}. The null a pointer added is
+			// untouched by the quoting and rides along on its own
+			switch ts.ts {
 			case "number", "boolean":
-				ts = "string"
-			case "number | null", "boolean | null":
-				ts = "string | null"
+				ts.ts = "string"
 			}
 		}
-		*out = append(*out, jsonField{name: plan.name, optional: optional, ts: ts, depth: depth, tagged: plan.tagged})
+		*out = append(*out, jsonField{name: plan.name, optional: optional, ts: ts.String(), depth: depth, tagged: plan.tagged})
 	}
 }
 
