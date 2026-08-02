@@ -626,14 +626,14 @@ describe("the process ends", () => {
   };
 
   test("an interactive run exits on its own once every question is answered", async () => {
-    // template, tailwind, linter, git, docker, vscode
-    expect(await interactive("2\ny\n1\ny\ny\ny\n")).toBe(0);
+    // template, tailwind, linter, git, docker, vscode, install+start
+    expect(await interactive("2\ny\n1\ny\ny\ny\nn\n")).toBe(0);
     expect(existsSync(join(cwd, "app"))).toBe(true);
   }, 30_000);
 
   test("the interactive answers are the tree that gets built", async () => {
-    // minimal, tailwind, biome, no git, no docker, no vscode
-    expect(await interactive("2\ny\n1\nn\nn\nn\n")).toBe(0);
+    // minimal, tailwind, biome, no git, no docker, no vscode, no install
+    expect(await interactive("2\ny\n1\nn\nn\nn\nn\n")).toBe(0);
     const app = join(cwd, "app");
     expect(existsSync(join(app, "islands"))).toBe(false); // minimal
     expect(existsSync(join(app, "style.css"))).toBe(true); // tailwind
@@ -644,7 +644,7 @@ describe("the process ends", () => {
   }, 30_000);
 
   test("a bare enter at every question takes the documented defaults", async () => {
-    expect(await interactive("\n\n\n\n\n\n")).toBe(0);
+    expect(await interactive("\n\n\n\n\n\n\n")).toBe(0);
     const app = join(cwd, "app");
     expect(existsSync(join(app, "islands"))).toBe(true); // base
     expect(existsSync(join(app, "style.scss"))).toBe(true); // no tailwind
@@ -652,7 +652,112 @@ describe("the process ends", () => {
     expect(existsSync(join(app, ".git"))).toBe(true); // git
     expect(existsSync(join(app, "Dockerfile"))).toBe(true); // docker
     expect(existsSync(join(app, ".vscode"))).toBe(true); // vscode
+    // enter is the terminal's default, and this is a pipe: nothing was
+    // fetched and nothing was started, which is why the process could exit
+    expect(existsSync(join(app, "node_modules"))).toBe(false);
   }, 30_000);
+});
+
+// INSTALLING AND STARTING.
+//
+// The scaffolder can carry a user all the way to a running dev server, which is
+// the whole point of an entry point - but only when a human is there. A scaffold
+// step in CI that ends with a server that never exits is a hung pipeline, so the
+// default is on in a terminal and off everywhere else, and every test here runs
+// without one.
+//
+// The toolchain cases spawn with a PATH that holds neither bun nor go. That is
+// not a contrived environment: it is what `bunx create-borgo` meets on a machine
+// where go was never installed, and Bun.spawnSync THROWS on a missing binary
+// rather than returning a non-zero code, so an unguarded version probe reaches
+// the user as a stack trace.
+describe("installing and starting", () => {
+  const emptyPath = () => {
+    const dir = join(cwd, ".no-tools");
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+
+  // bun itself has to be launchable to run the cli at all, so it is invoked by
+  // absolute path while the PATH the child searches is emptied
+  const withoutToolchain = (args: string[]) => {
+    const proc = Bun.spawnSync([process.execPath, cli, ...args], {
+      cwd,
+      env: {
+        ...IDENTITY,
+        PATH: emptyPath(),
+        Path: emptyPath(),
+        SystemRoot: process.env.SystemRoot,
+        TEMP: process.env.TEMP,
+        TMP: process.env.TMP,
+      } as Record<string, string>,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return { code: proc.exitCode, out: proc.stdout.toString() + proc.stderr.toString() };
+  };
+
+  test("the help documents both flags and which way they default", () => {
+    const { out } = run(["--help"]);
+    expect(out).toContain("--install");
+    expect(out).toContain("--start");
+    expect(out).toContain("--no-install");
+    expect(out).toContain("--no-start");
+    // the asymmetry is the part a reader has to be told, not guess
+    expect(out).toMatch(/default[^\n]*ON in a terminal and OFF everywhere else/i);
+  });
+
+  test("without a terminal nothing is fetched and nothing is started", () => {
+    const { code, out } = run(["app", NG]);
+    expect(code).toBe(0);
+    expect(existsSync(join(cwd, "app", "node_modules"))).toBe(false);
+    // it has to say what it did not do, or the user waits for a server
+    expect(out).toContain("bun install");
+    expect(out).toContain("go mod tidy");
+    expect(out).toContain("bun run dev");
+  });
+
+  test("--install reports a missing go toolchain instead of throwing", () => {
+    const { code, out } = withoutToolchain(["app", NG, "--install", "--no-start"]);
+    expect(out).toContain("go is not on PATH");
+    expect(out).toContain("go.dev/dl");
+    // the failure is reported as a step, not as an unhandled exception
+    expect(out).not.toContain("error:");
+    expect(out).not.toMatch(/\bat <anonymous>/);
+    // and the scaffold survives: the tree is on disk, only the setup failed
+    expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
+    expect(code).toBe(1);
+  });
+
+  test("a failed setup leaves the exact commands still to run", () => {
+    const { out } = withoutToolchain(["app", NG, "--install", "--no-start"]);
+    const steps = out.slice(out.indexOf("next steps"));
+    expect(steps).toContain("cd app");
+    expect(steps).toContain("bun install");
+    expect(steps).toMatch(/install go 1\.25\+/);
+  });
+
+  test("--start carries its own install rather than starting on an empty tree", () => {
+    // proof it tried: with no toolchain the install step is reached and fails.
+    // a plain run in the same environment exits 0 without touching either.
+    expect(withoutToolchain(["app", NG, "--start"]).code).toBe(1);
+    rmSync(join(cwd, "app"), { recursive: true, force: true });
+    expect(withoutToolchain(["app", NG]).code).toBe(0);
+  });
+
+  test("--no-install cancels a --start in either order", () => {
+    for (const args of [
+      ["--no-install", "--start"],
+      ["--start", "--no-install"],
+    ]) {
+      const { code, out } = withoutToolchain(["app", NG, ...args]);
+      expect(code).toBe(0);
+      expect(out).toContain("bun install");
+      expect(existsSync(join(cwd, "app", "node_modules"))).toBe(false);
+      rmSync(join(cwd, "app"), { recursive: true, force: true });
+    }
+  });
 });
 
 // THE SIGNING KEY, AND THE FILE IT LIVES IN.

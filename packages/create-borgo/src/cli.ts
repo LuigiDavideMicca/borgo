@@ -38,6 +38,8 @@ const unicode = await (async () => {
 const home = unicode ? "⌂" : "^";
 const ok = unicode ? "✓" : "+";
 const dot = unicode ? "·" : "-";
+const arrow = unicode ? "›" : ">";
+const err = unicode ? "✗" : "x";
 
 const version = JSON.parse(
   readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
@@ -64,6 +66,8 @@ let git: boolean | undefined;
 let docker: boolean | undefined;
 let vscode: boolean | undefined;
 let linter: string | undefined;
+let install: boolean | undefined;
+let start: boolean | undefined;
 let yes = false;
 
 const args = process.argv.slice(2);
@@ -82,6 +86,12 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--no-docker") docker = false;
   else if (arg === "--vscode") vscode = true;
   else if (arg === "--no-vscode") vscode = false;
+  else if (arg === "--install") install = true;
+  else if (arg === "--no-install") install = false;
+  // --start is the whole point of the flag, so it carries its own install
+  // rather than failing on a node_modules that was never fetched
+  else if (arg === "--start") (start = true), (install ??= true);
+  else if (arg === "--no-start") start = false;
   else if (arg === "--yes" || arg === "-y") yes = true;
   else if (arg === "--help" || arg === "-h") {
     console.log(`
@@ -98,17 +108,24 @@ ${TEMPLATES.map((t) => `    ${t.name.padEnd(8)} ${t.hint}`).join("\n")}
     --git                   git init plus an initial commit (default: on)
     --docker                keep the Dockerfile and docker-compose.yml (default: on)
     --vscode                write .vscode/extensions.json and settings.json (default: on)
+    --install               run bun install and go mod tidy after scaffolding
+    --start                 install, then hand over to the dev server
     -y, --yes               take every default, ask nothing
     -h, --help              this text
 
   every on/off option has a --no- twin: --no-tailwind, --no-git, --no-docker,
-  --no-vscode, --no-linter.
+  --no-vscode, --no-linter, --no-install, --no-start.
 
   the linter choice wires "lint" and "format" scripts and writes its config:
   biome writes biome.json, eslint writes eslint.config.js and .prettierrc.
 
   without flags, an interactive terminal asks every question; anywhere else
   (CI, piped stdin) the defaults above are taken and nothing blocks.
+
+  install and start default to ON in a terminal and OFF everywhere else, so
+  a scaffold in CI or a pipeline still exits on its own. --start in a script
+  is honoured: it is a request to block on a server, and it will. -y in a
+  terminal takes the terminal's defaults, so it installs and starts too.
 `);
     process.exit(0);
   } else if (!arg.startsWith("-") && !name) name = arg;
@@ -175,9 +192,13 @@ const pending =
   linter === undefined ||
   git === undefined ||
   docker === undefined ||
-  vscode === undefined;
+  vscode === undefined ||
+  install === undefined ||
+  start === undefined;
 
-const banner = `  ${terracotta(home)} ${bold("create-borgo")} ${dim(`v${version}`)}`;
+const banner =
+  `  ${terracotta(home)} ${bold("create-borgo")} ${dim(`v${version}`)}\n` +
+  `    ${dim("the self-hosted react framework " + dot + " react + go + bun")}`;
 const asked = shouldAsk && pending;
 if (asked) console.log(`\n${banner}\n`);
 
@@ -235,6 +256,28 @@ const chosenLinter: LinterName = isLinter(linter) ? linter : "none";
 if (git === undefined) git = shouldAsk ? await askYesNo("git init", true) : true;
 if (docker === undefined) docker = shouldAsk ? await askYesNo("docker files", true) : true;
 if (vscode === undefined) vscode = shouldAsk ? await askYesNo("vscode settings", true) : true;
+
+// installing and starting are one question, because "yes, set it up" is one
+// intent - but two flags, because a script that wants the dependencies
+// without a server that never exits has no other way to say so.
+// The default is off without a terminal: a scaffold step in CI that ends with
+// a dev server would hang the pipeline rather than finish it.
+if (install === undefined || start === undefined) {
+  // the default keys off a real terminal, not off `interactive`, which
+  // BORGO_FORCE_PROMPT also turns on: a test driving the prompts over a pipe
+  // must not inherit "there is a human here, install things"
+  const terminal = process.stdin.isTTY === true && process.stdout.isTTY === true;
+  // the prompt's default is the terminal's default, so the (Y/n) the user
+  // reads is always the answer enter actually gives
+  const both = shouldAsk
+    ? await askYesNo("install dependencies and start the dev server", terminal)
+    : terminal;
+  install ??= both;
+  start ??= both;
+}
+// no `start && !install` guard here: without install the run reports the
+// manual steps and exits before start is ever consulted, so a guard would be
+// a line no test could ever fail on
 
 // every question is answered: let go of the terminal, or the process sits
 // there after printing its summary and the user has to interrupt it
@@ -523,24 +566,118 @@ const included = [
 // the banner is already on screen when the questions were asked: repeating it
 // would push the answers the user just gave off the top of a short terminal
 const stack = tailwind ? `${template} + tailwind` : template;
+const tailwindNote = tailwind
+  ? `\n  ${dim(`tailwind is wired: edit ${bold("style.css")} ${dot} the template's own styles are plain css, replace them freely`)}\n`
+  : "";
+const signature = `  ${dim(`borgo is built by Luigi Micca ${dot}`)} ${terracotta("https://luigimicca.com")}`;
+
 console.log(`${asked ? "" : `\n${banner}\n`}
   ${sage(ok)} created ${bold(name)}/ ${dim(`${dot} ${stack}`)}
 ${layouts[template]}
 
   included
-${included}
+${included}`);
 
-  next steps
-    cd ${name}
-    bun install
-    go mod tidy
-    bun run dev
+// go is not optional for this stack: `borgo dev` regenerates the typed bridge
+// by running borgogen through the go toolchain before it serves anything, so
+// a missing or too-old go is reported here rather than as a failure inside a
+// dev server the user was told to expect. 1.25 is what the template's go.mod
+// asks for - the `tool` directive it uses to pin borgogen needs it.
+const GO_MIN = [1, 25] as const;
+const goCheck = (): { ok: true; version: string } | { ok: false; reason: string } => {
+  // spawnSync throws on a binary that is not there, rather than returning a
+  // code - so the common case, go not installed at all, arrives as an
+  // exception and would otherwise surface as a stack trace
+  let probe;
+  try {
+    probe = Bun.spawnSync(["go", "version"], { stdout: "pipe", stderr: "pipe" });
+  } catch {
+    return { ok: false, reason: "go is not on PATH" };
+  }
+  if (probe.exitCode !== 0) return { ok: false, reason: "go is not on PATH" };
+  const found = probe.stdout.toString().match(/go(\d+)\.(\d+)(?:\.\d+)?/);
+  if (!found) return { ok: false, reason: "could not read the go version" };
+  const [major, minor] = [Number(found[1]), Number(found[2])];
+  const version = `${major}.${minor}`;
+  if (major > GO_MIN[0] || (major === GO_MIN[0] && minor >= GO_MIN[1])) return { ok: true, version };
+  return { ok: false, reason: `go ${version} is older than ${GO_MIN.join(".")}` };
+};
 
-  then open ${bold("http://localhost:3000")}
-${
-  tailwind
-    ? `\n  ${dim(`tailwind is wired: edit ${bold("style.css")} ${dot} the template's own styles are plain css, replace them freely`)}\n`
-    : ""
+const secs = (from: number) => `${((performance.now() - from) / 1000).toFixed(1)}s`;
+
+// output is inherited, never captured: an install that fails has to say why on
+// the user's own terminal. Swallowing it to keep the summary tidy is how a
+// broken scaffold looks like a finished one.
+const runStep = (label: string, argv: string[]): boolean => {
+  console.log(`\n  ${terracotta(arrow)} ${bold(label)} ${dim(argv.join(" "))}\n`);
+  const t0 = performance.now();
+  let proc;
+  try {
+    proc = Bun.spawnSync(argv, {
+      cwd: target,
+      stdout: "inherit",
+      stderr: "inherit",
+      stdin: "inherit",
+    });
+  } catch {
+    console.log(`\n  ${terracotta(err)} ${label} ${dim(`${dot} ${argv[0]} is not on PATH`)}`);
+    return false;
+  }
+  if (proc.exitCode === 0) {
+    console.log(`\n  ${sage(ok)} ${label} ${dim(dot + " " + secs(t0))}`);
+    return true;
+  }
+  console.log(`\n  ${terracotta(err)} ${label} ${dim(`${dot} exited ${proc.exitCode}`)}`);
+  return false;
+};
+
+const manual = (lines: string[]) =>
+  console.log(`\n  next steps\n${lines.map((l) => `    ${l}`).join("\n")}\n`);
+
+if (!install) {
+  manual([`cd ${name}`, "bun install", "go mod tidy", "bun run dev"]);
+  console.log(`  then open ${bold("http://localhost:3000")}\n${tailwindNote}\n${signature}\n`);
+  process.exit(0);
 }
-  ${dim(`borgo is built by Luigi Micca ${dot}`)} ${terracotta("https://luigimicca.com")}
-`);
+
+const go = goCheck();
+if (!go.ok) {
+  console.log(
+    `\n  ${terracotta(err)} ${bold("go")} ${dim(`${dot} ${go.reason}`)}` +
+      `\n  ${dim(`borgo needs go ${GO_MIN.join(".")}+ to generate the typed api and build the server ${dot} https://go.dev/dl/`)}`,
+  );
+}
+
+const installed = runStep("dependencies", ["bun", "install"]);
+const tidied = installed && go.ok ? runStep("go modules", ["go", "mod", "tidy"]) : false;
+const ready = installed && tidied;
+
+if (!ready || !start) {
+  const todo: string[] = [`cd ${name}`];
+  if (!installed) todo.push("bun install");
+  if (!go.ok) todo.push(`install go ${GO_MIN.join(".")}+, then: go mod tidy`);
+  else if (!tidied) todo.push("go mod tidy");
+  todo.push("bun run dev");
+  manual(todo);
+  console.log(`  then open ${bold("http://localhost:3000")}\n${tailwindNote}\n${signature}\n`);
+  process.exit(ready ? 0 : 1);
+}
+
+console.log(
+  `\n  ${terracotta(arrow)} ${bold("dev server")} ${dim(`${dot} http://localhost:3000 ${dot} ctrl-c to stop`)}` +
+    `\n  ${dim(`start it again any time with: cd ${name} ${dot} bun run dev`)}` +
+    `${tailwindNote}\n${signature}\n`,
+);
+
+const dev = Bun.spawn(["bun", "run", "dev"], {
+  cwd: target,
+  stdout: "inherit",
+  stderr: "inherit",
+  stdin: "inherit",
+});
+// ctrl-c belongs to the dev server now; forward it and let the child decide
+// the exit code, so a supervisor sees what actually happened
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => dev.kill(signal));
+}
+process.exit(await dev.exited);
