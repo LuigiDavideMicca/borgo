@@ -196,6 +196,43 @@ func BindError(w http.ResponseWriter, err error) {
 	WriteJSON(w, status, map[string]string{"error": err.Error()})
 }
 
+// Middleware wraps h in the chain borgo.Serve installs around its own routes:
+// panic recovery, gzip, and the Set-Cookie/Cache-Control guard that runs as
+// each response's headers commit. An app mounting borgo handlers on its own
+// server should wrap its mux in it -
+//
+//	srv := &http.Server{Handler: borgo.Middleware(mux)}
+//
+// and gets the same guarantees borgo's own server has. Serve is defined in
+// terms of this function, so the two cannot drift apart.
+//
+// It exists because of what cannot be done from inside the call sites. borgo
+// makes a response carrying a Set-Cookie say `private`, and enforces it
+// wherever it controls the response: borgo.Cache, SetSession and ClearSession
+// each run the guard as they go. On a mux borgo does not own, that is all there
+// is, and it is not enough - not because a case was missed but because there is
+// no last moment on somebody else's mux. Whatever the handler does after the
+// last borgo call escapes: SetSession then a hand-written Header().Set, or
+// SetSession then borgo.SSE or borgo.NoCache, both of which set Cache-Control
+// after the cookie and are therefore exactly the orders that need this. Adding
+// a guard to each new setter only moves the gap to the next one.
+//
+// So the boundary is: served by borgo, or wrapped in this, and the property
+// holds for every handler and every order. Neither, and borgo closes the common
+// orders through the call sites and the app owns the rest.
+//
+// One thing the wrapping does not cover, and it is the reason the rule is "wrap
+// your mux and put nothing that touches Cache-Control outside the wrapper"
+// rather than just "wrap your mux": an outer middleware that writes
+// Cache-Control on the way back out - in its own defer, around this one - wins.
+// borgo has already committed the response and exited by then, so `public,
+// s-maxage=900` from out there reaches the wire beside a session cookie and
+// nothing in here can see it. It is the same silent shape as the bug this guard
+// exists for, which is why it is written down and not left to be discovered.
+func Middleware(h http.Handler) http.Handler {
+	return recoverMiddleware(gzipMiddleware(h))
+}
+
 // recoverMiddleware answers a panicking handler with a 500 instead of letting
 // net/http drop the connection, which reaches the browser as an opaque network
 // error. Nothing has reached the wire while the response is still buffered, so
@@ -207,6 +244,16 @@ func recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rw := &recoverWriter{ResponseWriter: w}
 		defer func() {
+			// the last point every response passes through, taken however the
+			// handler leaves: a return, a panic, or a return that wrote
+			// nothing at all. commit itself only ever ran from Write,
+			// WriteHeader and Flush, so a handler that set a Cache-Control and
+			// a cookie and then simply returned reached no commit hook, and
+			// net/http emitted the staged headers verbatim - `public` on a
+			// response carrying a session. A defer on the outermost middleware
+			// frame cannot be skipped by a handler doing nothing, which is
+			// exactly what the commit hooks could not see.
+			rw.commit()
 			v := recover()
 			if v == nil {
 				return
@@ -232,27 +279,31 @@ func recoverMiddleware(next http.Handler) http.Handler {
 // and Unwrap so streaming handlers and http.ResponseController still reach the
 // real writer.
 //
-// Hijack is deliberately not forwarded, here or on gzipResponseWriter, so a
+// Hijack is not forwarded as a method, here or on gzipResponseWriter, so a
 // `w.(http.Hijacker)` assertion inside a borgo handler fails - gorilla/
-// websocket and anything else that takes the connection over cannot upgrade.
-// It is not an oversight: borgo's own streaming is server-sent events, which
-// needs no hijack, and websockets in a borgo app terminate on the front server
-// (the ws relay), not in the go api. A wrapper that handed the connection out
-// would also hand out one this one has already staged headers for and, past
-// gzipMinBytes, written a gzip stream into. http.ResponseController - the
-// supported route to the deadlines and the flusher - works through both
-// wrappers via Unwrap. If the api ever has to upgrade in-process, the honest
-// change is a Hijack that first refuses on any writer that has buffered or
-// committed bytes, not a blind forward.
+// websocket and anything else that reaches for the connection that way cannot
+// upgrade. That is not the same thing as hijacking being prevented, and an
+// earlier version of this comment implied it was: both wrappers forward Unwrap,
+// and http.ResponseController.Hijack unwraps until it finds a Hijacker, so it
+// succeeds. Verified on the wire, not reasoned about.
+//
+// What the missing method buys is that nothing hijacks by accident: the
+// supported route is explicit, and borgo's own streaming is server-sent events,
+// which needs no hijack, while websockets in a borgo app terminate on the front
+// server (the ws relay), not in the go api. The hazard the missing method was
+// meant to cover is still open through ResponseController - a connection this
+// wrapper has already staged headers for and, past gzipMinBytes, written a gzip
+// stream into. Closing it means a Hijack method that refuses on any writer with
+// buffered or committed bytes, which is the honest change if the api ever has
+// to upgrade in-process; a blind forward is not.
 type recoverWriter struct {
 	http.ResponseWriter
 	wrote bool
 }
 
-// commit is the last point a response passes through before its headers reach
-// the wire - whatever it was written by, and whether or not the handler set a
-// status explicitly. That makes it the one place the Set-Cookie/Cache-Control
-// guard can be order-independent: by now every cookie the handler set is
+// commit runs the Set-Cookie/Cache-Control guard just before a response's
+// headers reach the wire - whatever it was written by, and whether or not the
+// handler set a status explicitly. By now every cookie the handler set is
 // staged, so it no longer matters whether borgo.Cache ran before or after
 // SetSession.
 //
@@ -260,6 +311,19 @@ type recoverWriter struct {
 // installed for clients that accept gzip - a request with no Accept-Encoding
 // goes straight to the handler, which is exactly the request a naive cache
 // probe makes. recoverWriter wraps unconditionally.
+//
+// These three call sites are still not enough on their own: they are reached
+// only when the handler writes something. recoverMiddleware calls commit from
+// its defer as well, which is the call that covers a handler that writes
+// nothing, and SetSession and ClearSession call the guard directly, which is
+// what covers an app mounting borgo handlers on its own server with none of
+// this in the path. The write paths keep their own calls because they commit
+// headers before the handler returns, where a defer would arrive too late.
+//
+// A cookie set after the response is committed is a different matter and not
+// one this can help with: net/http has already serialised the header block, so
+// the cookie never reaches the wire at all. That is stock behaviour, identical
+// without borgo, and it fails closed - no cookie, nothing to protect.
 func (w *recoverWriter) commit() {
 	if w.wrote {
 		return
@@ -405,7 +469,7 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 
 	// build the server before the banner so a bad BORGO_*_TIMEOUT fails
 	// before "api on :port" is printed
-	srv := newServer(port, recoverMiddleware(gzipMiddleware(mux)))
+	srv := newServer(port, Middleware(mux))
 	grace := envDuration("BORGO_SHUTDOWN_TIMEOUT", 10*time.Second)
 	// arm this server's stream-shutdown latch before anything can connect, and
 	// drop it on the way out however this run ends: a run that never binds

@@ -184,6 +184,14 @@ func SetSession(w http.ResponseWriter, v any, maxAge time.Duration) error {
 		return fmt.Errorf("borgo: session cookie is %d bytes, over the %d-byte browser limit; store a smaller principal (see Auth.Principal)", n, sessionCookieMaxLen)
 	}
 	http.SetCookie(w, cookie)
+	// best effort, and only that. recoverMiddleware's exit is the airtight
+	// guard, and it exists only inside the pipeline borgo.Serve builds; on an
+	// embedder's own mux this call is what closes the common order, cache then
+	// session. It cannot close all of them: a handler is always free to set
+	// Cache-Control after this returns, and borgo.SSE and borgo.NoCache both
+	// do. Guarding one more setter would move the gap rather than shut it -
+	// borgo.Middleware is the way an embedder gets the real thing
+	privateIfCookies(w.Header())
 	return nil
 }
 
@@ -265,4 +273,7 @@ func ClearSession(w http.ResponseWriter) {
 	}
 	cookie.MaxAge = -1
 	http.SetCookie(w, cookie)
+	// a logout is as cacheable-looking as a login and just as unshareable; see
+	// SetSession for why this runs at the cookie, and why it is best effort
+	privateIfCookies(w.Header())
 }
