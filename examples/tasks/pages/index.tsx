@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CsrfField, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
+import { CsrfField, apiFetch, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
 import type { Task } from "../.borgo/api-types";
 
 export const head = {
@@ -49,15 +49,17 @@ export default function Home({
     return () => source.close();
   }, []);
 
+  // apiFetch, not fetch: a browser call to /api/* that changes something has
+  // to echo the csrf token in a header, and this is what attaches it
   const remove = async (id: number) => {
-    await fetch(`/api/tasks/${id}`, { method: "DELETE" });
+    await apiFetch(`/api/tasks/${id}`, { method: "DELETE" });
     await refresh();
   };
 
   // the whole-list clear sits behind borgo.Authed: logged out it answers 401
   const [clearError, setClearError] = useState<string | null>(null);
   const clearAll = async () => {
-    const res = await fetch("/api/tasks", { method: "DELETE" });
+    const res = await apiFetch("/api/tasks", { method: "DELETE" });
     if (res.status === 401) {
       setClearError("log in to clear all tasks");
       return;

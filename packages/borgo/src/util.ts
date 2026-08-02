@@ -2,8 +2,8 @@ import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { c, g } from "./colors";
 import { documentStream, gzipStream, pickEncoding } from "./compress";
-import { CSRF_COOKIE, CSRF_FIELD, csrfCookieValue } from "./index";
-import { withCsrf } from "./internal";
+import { CSRF_COOKIE, CSRF_FIELD, CSRF_HEADER, csrfCookieValue } from "./index";
+import { unsafeMethod, withCsrf } from "./internal";
 import { resolveHead, safeHeadAttrs, type ActionContext, type Head, type Route } from "./router";
 
 // constant-time on the value, honest about the length: a comparison that
@@ -208,6 +208,41 @@ export async function csrfRejects(req: Request, { enforced }: CsrfOptions): Prom
     const form = await req.clone().formData();
     given = String(form.get(CSRF_FIELD) ?? "");
   } catch {}
+  return !given || !keysEqual(given, expected);
+}
+
+// the same double-submit token, on the half of the surface a form field cannot
+// reach: /api/* is proxied to go, its bodies are json, and nothing on that path
+// has a hidden input to carry an echo. so the echo rides in a header - and that
+// is not a lesser mechanism here, it is the stronger one. a cross-site *simple*
+// form post is the one shape a browser sends with no preflight, and a form
+// cannot set a custom header at all; a cross-site fetch that sets one is
+// preflighted, and borgo grants no CORS approval for the preflight to win.
+//
+// what this is defending against, precisely: SameSite=Lax already stops the
+// classic cross-*site* post. It does nothing about a same-site cross-origin
+// attacker - a sibling subdomain, a stored xss on another host of the same
+// registrable domain - for whom the browser sends every borgo cookie. That is
+// the attacker this check is for, which is also why the arming below is the
+// presence of the cookie rather than a readable value: cookie tossing is that
+// same attacker's other primitive, and a check they can switch off by planting
+// a duplicate is a check they have already beaten.
+//
+// so: armed by the token cookie's presence, exactly as the form-action check
+// is. a browser that has rendered any borgo page carries it. curl, a mobile
+// app and a server-to-server caller do not, and stay unaffected - the rule the
+// docs already state for page actions, unchanged here. duplicates that
+// disagree are no token, and a request holding no usable token is refused, not
+// waved through. safe methods are never checked, and no body is ever read:
+// this is decided on the request line and the headers alone.
+export function apiCsrfRejects(req: Request, { enforced }: CsrfOptions): boolean {
+  if (!enforced) return false;
+  if (!unsafeMethod(req.method)) return false;
+  const cookies = req.headers.get("cookie");
+  if (!hasCookie(cookies, CSRF_COOKIE)) return false;
+  const expected = csrfCookieValue(cookies);
+  if (!expected) return true;
+  const given = req.headers.get(CSRF_HEADER) ?? "";
   return !given || !keysEqual(given, expected);
 }
 

@@ -25,8 +25,10 @@ const ROOT_VALUES = [
   "ApiError",
   "CSRF_COOKIE",
   "CSRF_FIELD",
+  "CSRF_HEADER",
   "CsrfField",
   "Island",
+  "apiFetch",
   "csrfCookieValue",
   "redirect",
   "registerServiceWorker",
@@ -38,6 +40,7 @@ const INTERNAL_VALUES = [
   "islandRegistry",
   "registerCsrf",
   "registerIslands",
+  "unsafeMethod",
   "withCsrf",
 ].sort();
 
@@ -76,6 +79,14 @@ describe("root entry: borgo-framework", () => {
     expect(root.CSRF_COOKIE).toBe("borgo_csrf");
     expect(root.CSRF_FIELD).toBe("__borgo_csrf");
     expect(root.csrfCookieValue("borgo_csrf=tok")).toBe("tok");
+  });
+
+  // the api half of the double submit. an app writes these by hand - the
+  // header name into a fetch it rolled itself, apiFetch into every browser
+  // mutation of an /api route - so both belong on the stable surface
+  test("the csrf header name is the one the front server demands", () => {
+    expect(root.CSRF_HEADER).toBe("X-CSRF-Token");
+    expect(typeof root.apiFetch).toBe("function");
   });
 });
 

@@ -182,6 +182,8 @@ Forms the runtime cannot re-render in place stay native: a `GET` form, a cross-o
 
 `<CsrfField />` is required inside every `<form method="post">` — see [CSRF protection](security.md#csrf-protection) for what it defends against. Required in *production*, that is: under `borgo dev` the check is off unless you set `BORGO_CSRF=1`, and it is skipped for a request carrying neither a session nor a csrf cookie. So a form that forgot the field works all the way through development and fails on the first real deploy. Add the field as you write the form, not when something 403s.
 
+The same is true one level down of a browser call that mutates through `/api/*`: those echo the token in an `X-CSRF-Token` header rather than a field, and `apiFetch` from `borgo-framework` is the `fetch` that attaches it. Loaders and actions are unaffected — their `api` client reaches Go directly and never crosses the proxy the check sits on.
+
 One limit worth stating: an action that returns its **own HTML document** (rather than props or a redirect) is swapped into the page by the runtime, and because that reuses the current browsing context, inline scripts in that document are blocked by the page's existing Content-Security-Policy — in production, where that policy is strict; under `borgo dev` it carries `'unsafe-inline'` and they run — and the page's hydration does not re-run. It is the right behavior for the error documents this path actually serves; if you need to send a custom HTML page from an action, redirect to a route that renders it instead.
 
 ## Hydration control

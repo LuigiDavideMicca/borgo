@@ -2,7 +2,7 @@
 
 What borgo does for you before you write a line, what it deliberately leaves to you, and how to change either. If you are the person who has to approve this framework for production, this is the page to read.
 
-The short version: borgo ships a locked-down default posture — security headers, a strict Content-Security-Policy, CSRF on form actions, signed HttpOnly session cookies, bounded request bodies and timeouts — and it stays out of policy decisions like rate limiting, account lockout and TLS, which belong to your proxy and your product.
+The short version: borgo ships a locked-down default posture — security headers, a strict Content-Security-Policy, CSRF on form actions *and* on proxied `/api/*` mutations, signed HttpOnly session cookies, bounded request bodies and timeouts — and it stays out of policy decisions like rate limiting, account lockout and TLS, which belong to your proxy and your product.
 
 ## Security headers
 
@@ -48,7 +48,17 @@ BORGO_CSP="default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancesto
 
 ## CSRF protection
 
-Form actions use a double-submit token. The front server issues a `borgo_csrf` cookie with the page, `<CsrfField />` renders the same value into a hidden input, and a `POST` must echo it back:
+One double-submit token, echoed back in two different places — because the two request shapes borgo serves have nothing in common. The front server issues a single `borgo_csrf` cookie with every rendered page, and this is the whole scope of what it then demands back:
+
+| Request | What must echo the token | Who attaches it |
+| --- | --- | --- |
+| `POST` to a page route (a form action) | the `__borgo_csrf` field of the form body | `<CsrfField />` |
+| `POST`, `PUT`, `PATCH` or `DELETE` to a proxied `/api/*` route | the `X-CSRF-Token` request header | `apiFetch` |
+| `GET`, `HEAD`, `OPTIONS` — anywhere | nothing. Safe methods are never checked | — |
+
+Both checks run **before** the request body is read: a rejected form action never pays for a parse, and a rejected `/api` call never reaches Go at all. Both answer `403`.
+
+### Form actions
 
 ```tsx
 import { CsrfField } from "borgo-framework";
@@ -64,16 +74,52 @@ export default function NewPost() {
 }
 ```
 
-A cross-site form cannot read the cookie, so it cannot produce the field. The check runs **before** the request body is parsed, and it arms for any browser holding the token cookie — not only for logged-in sessions. That last detail matters: if the check only applied to authenticated requests, an attacker could cross-post to `/login` with their own credentials and silently log the victim *into the attacker's account*, where everything the victim then types belongs to someone else. Covering anonymous posts closes that.
+A cross-site form cannot read the cookie, so it cannot produce the field.
 
-Clients that carry no cookies at all — `curl`, a mobile app, a server-to-server caller — are unaffected.
+### `/api/*` routes
 
-```bash
-BORGO_CSRF=1    # force the check on in development
-BORGO_CSRF=0    # disable it (do not do this in production)
+A header rather than a body field, and that is not a lesser mechanism — on this path it is the stronger one. An `/api` body is JSON and has no hidden input to carry an echo; meanwhile the one request shape a browser will send cross-origin with no preflight is a *simple* form `POST`, and a form cannot set a custom header **at all**. A cross-site `fetch` that sets one is preflighted, and borgo approves no CORS, so the preflight is where it stops.
+
+Calls you write by hand from a hydrated page go through `apiFetch`, which is `fetch` with the token attached on unsafe methods:
+
+```ts
+import { apiFetch } from "borgo-framework";
+
+async function remove(noteId: number) {
+  await apiFetch(`/api/notes/${noteId}`, { method: "DELETE" });
+}
+
+async function logout() {
+  await apiFetch("/api/logout", { method: "POST" });
+}
 ```
 
-`/api/*` is proxied straight to Go and is not covered by this check. It does not need to be: `borgo.Bind` requires `Content-Type: application/json` and rejects anything else — including a request that sends no `Content-Type` at all, which matters because an empty-type `Blob` is a CORS-safelisted body that earns no preflight. A cross-site HTML form cannot declare JSON, and a cross-site `fetch` that does has already been preflighted, so every request that reaches a handler is same-origin or CORS-approved. See [the typed bridge](typed-bridge.md) for what `Bind` accepts.
+Everything else about it is `fetch`: same arguments, same return, safe methods passed straight through. A plain `fetch("/api/x", { method: "POST" })` from a page in a browser holding the cookie answers `403` — that is the check doing its job, and swapping the call for `apiFetch` is the fix. If you would rather roll it yourself, `csrfCookieValue(document.cookie)` reads the token and `CSRF_HEADER` is the header name.
+
+**Loaders and actions need none of this.** Their `api` client and `apiUrl` address the Go API directly, on its own port; they never cross the front server's `/api/*` proxy, so a server-side `api("POST /api/login", …)` is not checked here and cannot start failing because of it. The form action that called it already passed the field check on the way in.
+
+**What you get for free when you write your own `POST /api/…`:** a Go handler mounted at an `/api` route is covered the moment a browser calls it, with no annotation and no per-route wiring — the check sits on the proxy, not on the handler. The obligation that remains is the browser side: use `apiFetch`.
+
+### What arms the check, and what stays untouched
+
+Both halves arm on **presence of the `borgo_csrf` cookie**, not on a live session. If the check only applied to authenticated requests, an attacker could cross-post to a login route with their own credentials and silently log the victim *into the attacker's account*, where everything the victim then types belongs to someone else. Covering anonymous requests closes that. (The form-action check additionally arms on a `borgo_session` cookie; the `/api` check does not, because an API caller holding a session cookie may perfectly well be a mobile app.)
+
+Clients that carry no `borgo_csrf` cookie at all — `curl`, a mobile app, a server-to-server caller — are **unaffected on both paths**. Nothing arms for them, so nothing 403s. That is deliberate: a check that armed on cookie-less callers would break every non-browser client of your API on the day you turned it on.
+
+Conflicting duplicate `borgo_csrf` cookies read as **no token**, and the request is refused rather than waved through — see [duplicate cookies](#duplicate-cookies-are-treated-as-no-cookie). The check still *runs*: an attacker who can plant a duplicate must not be able to switch the check off by making the browser look token-less.
+
+```bash
+BORGO_CSRF=1    # force both checks on in development
+BORGO_CSRF=0    # disable both (do not do this in production)
+```
+
+### What this is actually defending against
+
+Worth being precise, because the token is not the only thing holding this line. `SameSite=Lax` on both cookies already stops the classic cross-*site* `POST`: a form on `evil.com` aimed at your app is sent without your cookies, so it is anonymous, and the token cookie is not there to arm anything.
+
+The token is for the attacker `SameSite` says nothing about: a **same-site, cross-origin** one — a sibling subdomain you do not control, a stored XSS on another host of the same registrable domain, anything at `blog.example.com` shooting at `example.com`. The browser sends every cookie to that attacker's requests. They still cannot read the host-only `borgo_csrf` cookie, and they still cannot set a custom header cross-origin without a CORS approval borgo does not grant. That is the gap the double-submit closes, on both paths.
+
+A second layer sits behind the `/api` one and is worth knowing about: `borgo.Bind` requires `Content-Type: application/json` and rejects anything else — including a request with no `Content-Type` at all, which matters because an empty-type `Blob` is a CORS-safelisted body that earns no preflight. So a handler that calls `Bind` was never reachable by a cross-site simple form post in the first place. A handler that does *not* call `Bind` — a body-less `POST /api/logout`, say — had nothing, which is exactly why the check above is on the proxy and not in `Bind`. See [the typed bridge](typed-bridge.md) for what `Bind` accepts.
 
 ## Cookies and sessions
 
@@ -157,7 +203,7 @@ Deliberate omissions. Each is a policy decision that belongs to your app or your
 - `SESSION_SECRET` set, 32+ random bytes, out of version control — confirmed by the *absence* of the startup warning, since nothing else stops a secretless boot.
 - `SESSION_SECURE=1`, and TLS terminating in front of the app.
 - `BORGO_PUSH_KEY` set on both processes if they are not on the same loopback.
-- CSRF left on (`BORGO_CSRF` unset in production) and `<CsrfField />` in every `<form method="post">`.
+- CSRF left on (`BORGO_CSRF` unset in production), `<CsrfField />` in every `<form method="post">`, and `apiFetch` — not bare `fetch` — behind every browser `POST`/`PUT`/`PATCH`/`DELETE` to `/api/*`.
 - The default CSP kept, or a custom one that still nonces or allows your own scripts — load a page and check the browser console for violations.
 - Rate limiting configured in the proxy for `/login`, `/register` and anything expensive.
 - `/healthz` wired to your supervisor; `/metrics` exposed only on a private network if you enable it.

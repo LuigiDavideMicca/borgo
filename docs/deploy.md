@@ -227,7 +227,7 @@ Route labels are the matched route *pattern*, not each concrete URL — and the 
 | `BORGO_PUSH_KEY` | unset | shared secret for `borgo.Push` across hosts — once set it *replaces* the loopback check, so set it on both halves or neither |
 | `SESSION_SECRET` | unset | HMAC key for signed-cookie sessions, **32 bytes minimum**. Unset warns and boots anyway — session routes then fail per request, closed in both directions. Set but shorter than 32 is fatal at startup: `borgo.Serve` refuses to bind |
 | `SESSION_SECURE` | unset | `1`/`true` adds `Secure` to the session and csrf cookies; `0`/`false` and unset do not. A value that is neither is refused at startup by both halves, rather than read as "not secure" |
-| `BORGO_CSRF` | unset | `0` disables csrf checks on form actions, `1` forces them in dev |
+| `BORGO_CSRF` | unset | `0` disables both csrf checks (form actions, and unsafe requests to proxied `/api/*` routes), `1` forces them in dev |
 | `BORGO_METRICS` | unset | `1` exposes `/metrics` (Prometheus text) on the front server |
 | `BORGO_SECURITY_HEADERS` | unset | `0` drops the security headers *and* the CSP — see [security](security.md#changing-the-policy) |
 | `BORGO_CSP` | unset | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request |

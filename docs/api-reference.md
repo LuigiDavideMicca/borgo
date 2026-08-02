@@ -117,8 +117,10 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `CsrfField()` | Renders the hidden CSRF input a `<form method="post">` needs. | stable |
 | `registerServiceWorker(path = "/sw.js")` | Registers a service worker in production only; no-ops in dev, on the server and where unsupported. | stable |
 | `ApiError` | Thrown by the api client for a non-2xx response. Carries `status`, `body` (first 2 KB) and a route-naming message. | stable |
+| `apiFetch(input, init?)` | `fetch` for browser calls to `/api/*`, attaching the `X-CSRF-Token` header on unsafe methods. Identical to `fetch` otherwise. Loaders and actions do not need it — their `api` client bypasses the proxy. | stable |
 | `CSRF_COOKIE` (`"borgo_csrf"`) | The double-submit cookie name. | provisional |
-| `CSRF_FIELD` (`"__borgo_csrf"`) | The hidden form field name. | provisional |
+| `CSRF_FIELD` (`"__borgo_csrf"`) | The hidden form field name, for a page form action. | provisional |
+| `CSRF_HEADER` (`"X-CSRF-Token"`) | The header name, for an unsafe `/api/*` request. | provisional |
 | `csrfCookieValue(header)` | Reads the CSRF token from a cookie header, treating conflicting duplicates as absent. Promoted from provisional in 0.21 — see [finding 4](#duplicated-apis). | stable |
 
 ### `borgo-framework` — types
@@ -179,6 +181,7 @@ Everything the generated client entries need and nothing an application should w
 | `registerIslands(components, createElement)` | Registers the island components a `hydrate=false` page mounts, plus the app's own `createElement` — React is injected rather than imported so the framework never bundles a second copy. | internal |
 | `withCsrf(element, token)` | Wraps a tree in the CSRF context `CsrfField` reads. | internal |
 | `csrfRuntime()`, `islandRegistry()` | The registries themselves, read by the server and the runtime across module boundaries. | internal |
+| `unsafeMethod(method)` | Whether a method is state-changing, and so subject to the CSRF checks. One list, read by `apiFetch` on the browser side and by the front server on the other. | internal |
 | `CsrfReact` | Type of the React functions `registerCsrf` takes. | internal |
 
 ### `borgo-framework/refresh-runtime`
@@ -222,7 +225,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `BORGO_API_TIMEOUT` (`30000`) | Milliseconds to wait for api response headers before answering 504; `0` disables. | stable |
 | `BORGO_MAX_BODY` (`33554432`) | Largest request body the front server accepts and buffers, in bytes. | stable |
 | `BORGO_FRONT_READ_TIMEOUT` (`30`) | Socket read deadline in **seconds** — how long bun waits for an inbound request's headers and body. `0` disables it; bun caps it at `255` and borgo clamps to that. The deadline is lifted per *request* the moment nothing is left to dribble at us (a request with no body at all, at the top of `fetch()`; a proxied one, once its body is buffered in full), so raising this is not what keeps SSE alive. **`FRONT` is load-bearing** — see the note below. | stable |
-| `BORGO_CSRF` | `0` disables CSRF checks on form actions, `1` forces them in dev. | stable |
+| `BORGO_CSRF` | `0` disables both CSRF checks (form actions and unsafe `/api/*` requests), `1` forces them in dev. | stable |
 | `BORGO_SECURITY_HEADERS` | `0` drops the security headers and the CSP. | stable |
 | `BORGO_CSP` | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request. | stable |
 | `BORGO_METRICS` | `1` exposes `/metrics` in Prometheus text format. | stable |
@@ -380,6 +383,7 @@ Failing is the point: a directive that is well formed and still does nothing rea
 | `?__borgo=props` | URL | Asks a page for its loader props as JSON. | internal |
 | `X-Borgo-Action`, `X-Borgo` | HTTP | Action request marker, and the response discriminator (`action` / `raw`). | internal |
 | `X-Borgo-Key` | HTTP | `BORGO_PUSH_KEY` on a cross-host push. | internal |
+| `X-CSRF-Token` | HTTP | The double-submit token on an unsafe `/api/*` request. `apiFetch` attaches it. | stable |
 | `borgo_session`, `borgo_csrf` | Cookies | The two cookies borgo owns. | stable |
 | `/healthz`, `/metrics`, `/ws`, `/api/*`, `/assets/*`, `/__borgo/*` | URL | Reserved paths. An app route must not claim them (except `/healthz`, which an app may override on the Go side). | stable |
 
@@ -438,6 +442,7 @@ The Go surface is clean: every exported Go symbol has an application-facing reas
 | `withCsrf` | root | Used by `runtime.ts` and `util.ts` across module boundaries | **moved in 0.21** | zero — cross-module only |
 | `CSRF_COOKIE` | root | Internal constant | **hide** | zero |
 | `CSRF_FIELD` | root | Internal constant, but arguably useful to an app building a form by hand | **keep, document** | zero |
+| `CSRF_HEADER` | root | Same, for an app rolling its own `/api` fetch instead of using `apiFetch` | **keep, document** | zero |
 | `filePathToPattern`, `matchRoute`, `resolveHead` | root + `/router` | Shared between build, server and runtime | **dropped from root in 0.21** | low |
 | `safeDecode` | `/router` | Shared between router and server | **leave; mark the subpath internal** | zero |
 | `mount`, `mountIslands`, `redirectUrl`, `asProps` | `/runtime` | Generated entries and unit tests | **leave; mark the subpath internal** | zero |

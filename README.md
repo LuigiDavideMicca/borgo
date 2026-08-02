@@ -118,7 +118,7 @@ Deep dive: [realtime](docs/realtime.md).
 
 ### Sessions and auth
 
-Mechanics, not policy: signed-cookie sessions (`borgo.SetSession`/`GetSession`/`ClearSession`, HMAC with `SESSION_SECRET`, expiry signed in), stdlib PBKDF2 password hashing behind a swappable interface, and `borgo.Auth[U]` — you supply a `Lookup` (and optionally `Register`) over *your* user store, it provides the login/logout/register handlers. `borgo.Authed` guards api routes with a JSON 401; loaders guard pages by returning `redirect()`; form actions are CSRF-protected with a double-submit token (`<CsrfField />`) for any browser that has been issued one — login forms included. Deep dive: [auth and sessions](docs/auth-and-sessions.md).
+Mechanics, not policy: signed-cookie sessions (`borgo.SetSession`/`GetSession`/`ClearSession`, HMAC with `SESSION_SECRET`, expiry signed in), stdlib PBKDF2 password hashing behind a swappable interface, and `borgo.Auth[U]` — you supply a `Lookup` (and optionally `Register`) over *your* user store, it provides the login/logout/register handlers. `borgo.Authed` guards api routes with a JSON 401; loaders guard pages by returning `redirect()`; one double-submit token covers both unsafe paths for any browser that has been issued it — a hidden field on form actions (`<CsrfField />`), an `X-CSRF-Token` header on browser `POST`/`PUT`/`PATCH`/`DELETE` to `/api/*` (`apiFetch`) — login included. Deep dive: [auth and sessions](docs/auth-and-sessions.md).
 
 ```go
 var auth = borgo.Auth[User]{Lookup: lookupUser, Register: createUser}
@@ -139,7 +139,7 @@ func init() {
 
 ### Security
 
-A locked-down default posture, not a checklist you assemble: security headers and a strict Content-Security-Policy on every document — with the server-rendered props script nonced, so no `'unsafe-inline'` is needed in production — CSRF on form actions, signed `HttpOnly` session cookies, bounded request bodies, a slowloris-resistant timeout matrix, an `Origin` check on WebSocket upgrades, and duplicate cookies treated as no cookie at all. Everything is overridable by environment variable, and [the security page](docs/security.md) is equally explicit about what borgo deliberately leaves to you.
+A locked-down default posture, not a checklist you assemble: security headers and a strict Content-Security-Policy on every document — with the server-rendered props script nonced, so no `'unsafe-inline'` is needed in production — CSRF on form actions and on proxied `/api/*` mutations, signed `HttpOnly` session cookies, bounded request bodies, a slowloris-resistant timeout matrix, an `Origin` check on WebSocket upgrades, and duplicate cookies treated as no cookie at all. Everything is overridable by environment variable, and [the security page](docs/security.md) is equally explicit about what borgo deliberately leaves to you.
 
 ### Health checks and metrics
 

@@ -139,14 +139,20 @@ export function subscribe(
 // hydrate=false page can still have interactive parts. the registries the two
 // components below read live on borgo-framework/internal, because the only
 // things that *fill* them are generated code and the ssr server.
-import { csrfRuntime, islandRegistry } from "./internal";
+import { csrfRuntime, islandRegistry, unsafeMethod } from "./internal";
 
-// csrf double-submit: the front server issues a borgo_csrf cookie and, in
-// production, requires form actions of session-carrying requests to echo it
-// in a hidden field. CsrfField renders that field; the token flows through a
-// react context provided by the server render and the client runtime.
+// csrf double-submit, in two halves because the two request shapes differ.
+// the front server issues one borgo_csrf cookie and, in production, requires
+// it echoed back by any request that carries it:
+//   - a page form action echoes it in a hidden field (CSRF_FIELD), which
+//     CsrfField renders from a react context the server render provides;
+//   - a proxied /api/* route echoes it in a header (CSRF_HEADER), because an
+//     api body is json and has no field to carry it - and a cross-site
+//     *simple* form post, the one shape that needs no preflight, cannot set a
+//     custom header at all.
 export const CSRF_COOKIE = "borgo_csrf";
 export const CSRF_FIELD = "__borgo_csrf";
+export const CSRF_HEADER = "X-CSRF-Token";
 
 /**
  * Reads borgo's CSRF token out of a cookie header (or `document.cookie`).
@@ -187,6 +193,40 @@ export function csrfCookieValue(header: string | null): string {
     value = found;
   }
   return value ?? "";
+}
+
+/**
+ * `fetch`, with borgo's CSRF token attached on state-changing methods.
+ *
+ * Use it for every hand-written browser call to `/api/*` that is not a `GET`
+ * or a `HEAD`. The front server requires the `X-CSRF-Token` header from any
+ * request that carries a `borgo_csrf` cookie, so a plain `fetch("/api/x", {
+ * method: "POST" })` from a hydrated page answers `403`. Loaders and actions
+ * need none of this: their `api` client talks to the Go api directly and never
+ * crosses the proxy.
+ *
+ * ```ts
+ * await apiFetch("/api/logout", { method: "POST" });
+ * ```
+ *
+ * Safe methods pass straight through, and so does a browser with no token
+ * cookie - `fetch` semantics are otherwise untouched, `input` and `init` mean
+ * exactly what they mean to `fetch`. An `X-CSRF-Token` the caller set
+ * themselves is left alone.
+ *
+ * Browser-only, like every hand-rolled `fetch` in a page: it reads
+ * `document.cookie`, which SSR has none of.
+ */
+export function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  // built through Request rather than by merging init: the spec's own merge
+  // is the only one that gets `apiFetch(new Request(...))` right, where the
+  // method and the headers live on the input and not in init at all
+  const request = new Request(input as RequestInfo, init);
+  if (unsafeMethod(request.method) && !request.headers.has(CSRF_HEADER)) {
+    const token = typeof document === "undefined" ? "" : csrfCookieValue(document.cookie);
+    if (token) request.headers.set(CSRF_HEADER, token);
+  }
+  return fetch(request);
 }
 
 // <CsrfField /> inside any <form method="post"> - server-rendered with the

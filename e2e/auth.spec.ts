@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { csrfHeader } from "./csrf";
 
 // register -> account -> logout -> login exercises the full auth loop:
 // go handlers set and clear the session, the front server forwards the
@@ -73,7 +74,11 @@ test("clearing the whole list is 401 for visitors, api and ui alike", async ({ p
   await page.goto("/");
   await hydrated;
 
-  const anon = await page.request.delete("/api/tasks");
+  // with the token: the request reaches go, which refuses it for want of a
+  // session. this used to be a bare delete, which now never gets that far -
+  // the csrf check answers first, and the 401 it was asserting would silently
+  // have become a 403 that proves nothing about Authed
+  const anon = await page.request.delete("/api/tasks", { headers: await csrfHeader(page) });
   expect(anon.status()).toBe(401);
 
   await page.click(".clear-all");
@@ -106,5 +111,39 @@ test("a forged post without the csrf token is rejected", async ({ page }) => {
 
   const { tasks } = await (await page.request.get("/api/tasks")).json();
   const created = tasks.find((t: { title: string }) => t.title === title);
-  await page.request.delete(`/api/tasks/${created.ID}`);
+  await page.request.delete(`/api/tasks/${created.ID}`, { headers: await csrfHeader(page) });
+});
+
+test("an /api mutation without the csrf header is rejected", async ({ page }) => {
+  await login(page, `apicsrf${Date.now()}`);
+  const title = `api csrf ${Date.now()}`;
+
+  // same jar, same cookies, no header: the shape a same-site attacker's
+  // request has, and the front server answers before go ever hears about it
+  const forged = await page.request.post("/api/tasks", {
+    data: { title, body: "" },
+  });
+  expect(forged.status()).toBe(403);
+
+  const wrongToken = await page.request.post("/api/tasks", {
+    data: { title, body: "" },
+    headers: { "X-CSRF-Token": "0000feed" },
+  });
+  expect(wrongToken.status()).toBe(403);
+
+  // nothing was created by either
+  const { tasks } = await (await page.request.get("/api/tasks")).json();
+  expect(tasks.some((t: { title: string }) => t.title === title)).toBe(false);
+
+  // and a get is never checked, header or no header
+  expect((await page.request.get("/api/me")).status()).toBe(200);
+
+  // the same post with the token goes through, and cleans up after itself
+  const allowed = await page.request.post("/api/tasks", {
+    data: { title, body: "" },
+    headers: await csrfHeader(page),
+  });
+  expect(allowed.status()).toBe(201);
+  const { task } = await allowed.json();
+  await page.request.delete(`/api/tasks/${task.ID}`, { headers: await csrfHeader(page) });
 });

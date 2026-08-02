@@ -15,6 +15,16 @@ import type {
   useContext as UseContext,
 } from "react";
 
+// which methods the /api csrf check covers, in one place: the browser helper
+// that attaches the token and the front server that demands it have to name
+// the same set, and a second copy of a security-relevant list is a second copy
+// that can drift. rfc 9110 §9.2.1 - safe methods change no state, so they are
+// never checked. anything not listed here (an OPTIONS, a WebDAV verb) is
+// checked too: unknown is not the same as safe.
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
+
+export const unsafeMethod = (method: string): boolean => !SAFE_METHODS.has(method.toUpperCase());
+
 export type CsrfReact = {
   createElement: typeof CreateElement;
   createContext: typeof CreateContext;

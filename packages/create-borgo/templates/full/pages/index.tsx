@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { CsrfField, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
+import { CsrfField, apiFetch, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
 import type { Note } from "../.borgo/api-types";
 
 export const head = {
@@ -49,8 +49,10 @@ export default function Home({
     return () => source.close();
   }, [refresh]);
 
+  // apiFetch, not fetch: a browser call to /api/* that changes something has
+  // to echo the csrf token in a header, and this is what attaches it
   const remove = async (id: number) => {
-    await fetch(`/api/notes/${id}`, { method: "DELETE" });
+    await apiFetch(`/api/notes/${id}`, { method: "DELETE" });
     await refresh();
   };
 

@@ -18,6 +18,7 @@ import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
 import { matchRoute, safeDecode, type Route } from "./router";
 import {
+  apiCsrfRejects,
   createSecurity,
   csrfRejects,
   decodeChanged,
@@ -123,10 +124,12 @@ export async function serve({ dev = false } = {}) {
   });
   const secure = (res: Response) => (security ? security.apply(res) : res);
 
-  // csrf: a double-submit token, issued as a cookie on rendered pages and
-  // required from form actions of requests carrying a session - a cross-site
-  // post cannot read the cookie to echo it in the form. on by default in
-  // production; BORGO_CSRF=1 forces the check in dev, BORGO_CSRF=0 disables.
+  // csrf: one double-submit token, issued as a cookie on rendered pages and
+  // required back on both unsafe paths - echoed in a hidden field by a page
+  // form action, in the X-CSRF-Token header by a proxied /api/* call. a
+  // cross-site post can read neither the cookie nor set the header. one flag
+  // governs both: on by default in production, BORGO_CSRF=1 forces the check
+  // in dev, BORGO_CSRF=0 disables it.
   const csrfEnforced =
     process.env.BORGO_CSRF === "0" ? false : dev ? process.env.BORGO_CSRF === "1" : true;
   const csrfCookieAttrs = `Path=/; SameSite=Lax${sessionSecure(process.env) ? "; Secure" : ""}`;
@@ -178,6 +181,11 @@ export async function serve({ dev = false } = {}) {
   async function handle(req: Request, url: URL, label: Label): Promise<Response> {
     if (url.pathname.startsWith("/api/")) {
       label.route = "/api/*";
+      // before the body is read and before anything is proxied: a refused
+      // request must cost go nothing and must not have been half-delivered
+      if (apiCsrfRejects(req, { enforced: csrfEnforced })) {
+        return new Response("invalid csrf token", { status: 403 });
+      }
       return proxyRequest(req, {
         target: api + url.pathname + url.search,
         deadlineMs: apiTimeout,

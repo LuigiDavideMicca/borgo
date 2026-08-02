@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { csrfHeader } from "./csrf";
 
 // wipes the whole task list, so it runs in its own project after the
 // parallel app specs instead of racing them
@@ -16,7 +17,9 @@ test("a logged-in user clears all tasks, over the api and from the button", asyn
   await page.click("form button");
   await expect(page.locator("li", { hasText: title })).toBeVisible();
 
-  const res = await page.request.delete("/api/tasks");
+  // the header is what the page's own apiFetch attaches; page.request carries
+  // the same cookie jar, so it has to attach it too
+  const res = await page.request.delete("/api/tasks", { headers: await csrfHeader(page) });
   expect(res.status()).toBe(200);
   const { cleared } = await res.json();
   expect(cleared).toBeGreaterThan(0);

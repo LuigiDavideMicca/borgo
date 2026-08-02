@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { apiFetch } from "borgo-framework";
 import type { Me } from "../.borgo/api-types";
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -12,8 +13,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  // apiFetch, not fetch: a browser call to /api/* that changes something has
+  // to echo the csrf token in a header, and this is what attaches it
   const logout = async () => {
-    await fetch("/api/logout", { method: "POST" });
+    await apiFetch("/api/logout", { method: "POST" });
     location.assign("/");
   };
 

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { csrfRejects, keysEqual } from "../src/util";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { CSRF_HEADER } from "../src/index";
+import { apiCsrfRejects, csrfRejects, keysEqual } from "../src/util";
 
 const TOKEN = "deadbeefcafe4444aaaa000011112222";
 
@@ -189,6 +192,126 @@ describe("csrfRejects: bodies that are not forms", () => {
     const req = post({ cookie, ...form({ __borgo_csrf: TOKEN, payload: big }) });
     expect(await csrfRejects(req, enforced)).toBe(false);
     expect(((await req.formData()).get("payload") as string).length).toBe(big.length);
+  });
+});
+
+// the /api half of the same token: the echo rides in a header because an api
+// body is json and has no field to put it in
+describe("apiCsrfRejects", () => {
+  const call = (
+    method: string,
+    init: { cookie?: string; token?: string; body?: BodyInit } = {},
+  ) => {
+    const headers: Record<string, string> = {};
+    if (init.cookie) headers.cookie = init.cookie;
+    if (init.token !== undefined) headers[CSRF_HEADER] = init.token;
+    if (init.body !== undefined) headers["content-type"] = "application/json";
+    return new Request("http://app.test/api/login", {
+      method,
+      headers,
+      ...(init.body === undefined ? {} : { body: init.body }),
+    });
+  };
+  const armed = `borgo_csrf=${TOKEN}`;
+
+  test("disabled: nothing rejects", () => {
+    expect(apiCsrfRejects(call("POST", { cookie: armed }), { enforced: false })).toBe(false);
+  });
+
+  describe("an unsafe method with the cookie", () => {
+    test("a matching header passes", () => {
+      expect(apiCsrfRejects(call("POST", { cookie: armed, token: TOKEN }), enforced)).toBe(false);
+    });
+
+    test("a wrong header rejects", () => {
+      const req = call("POST", { cookie: armed, token: "beefdeadfaceb000000011112222aaaa" });
+      expect(apiCsrfRejects(req, enforced)).toBe(true);
+    });
+
+    test("a missing header rejects", () => {
+      expect(apiCsrfRejects(call("POST", { cookie: armed }), enforced)).toBe(true);
+    });
+
+    test("an empty header rejects", () => {
+      expect(apiCsrfRejects(call("POST", { cookie: armed, token: "" }), enforced)).toBe(true);
+    });
+
+    test("a token prefix is not a token: length must match too", () => {
+      expect(apiCsrfRejects(call("POST", { cookie: armed, token: TOKEN.slice(0, -1) }), enforced)).toBe(true);
+      expect(apiCsrfRejects(call("POST", { cookie: armed, token: TOKEN + "0" }), enforced)).toBe(true);
+    });
+
+    test("PUT, PATCH and DELETE are checked exactly as POST is", () => {
+      for (const method of ["PUT", "PATCH", "DELETE"]) {
+        expect(apiCsrfRejects(call(method, { cookie: armed }), enforced)).toBe(true);
+        expect(apiCsrfRejects(call(method, { cookie: armed, token: TOKEN }), enforced)).toBe(false);
+      }
+    });
+
+    test("the verdict is reached without reading the body", () => {
+      // the proxy buffers or streams this body to go straight after; a check
+      // that consumed it would leave the request with nothing to forward
+      const req = call("POST", { cookie: armed, body: JSON.stringify({ x: 1 }) });
+      expect(apiCsrfRejects(req, enforced)).toBe(true);
+      expect(req.bodyUsed).toBe(false);
+    });
+  });
+
+  describe("who the check does not run for", () => {
+    test("safe methods are untouched, token or no token", () => {
+      for (const method of ["GET", "HEAD", "OPTIONS"]) {
+        expect(apiCsrfRejects(call(method, { cookie: armed }), enforced)).toBe(false);
+      }
+    });
+
+    test("a cookie-less client - curl, a mobile app, server-to-server", () => {
+      expect(apiCsrfRejects(call("POST"), enforced)).toBe(false);
+      expect(apiCsrfRejects(call("DELETE"), enforced)).toBe(false);
+    });
+
+    test("cookies that are not the token do not arm it", () => {
+      // a session cookie alone is deliberately not enough: unlike a form post,
+      // an api caller holding a session may well be a mobile app
+      expect(apiCsrfRejects(call("POST", { cookie: "borgo_session=s; theme=dark" }), enforced)).toBe(false);
+    });
+  });
+
+  // the check is a pure function and the wiring is one line: a pure function
+  // nobody calls is the shape this whole defect had in the first place, and
+  // `serve()` cannot be booted without a scaffolded app to boot it against
+  test("the front server runs it on /api/*, before anything is proxied", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    const branch = src.slice(src.indexOf('url.pathname.startsWith("/api/")'));
+    const gate = branch.indexOf("apiCsrfRejects(req");
+    const proxy = branch.indexOf("proxyRequest(req");
+    expect(gate).toBeGreaterThan(-1);
+    expect(proxy).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(proxy);
+    // and the verdict is answered, not computed and dropped
+    expect(branch.slice(gate, proxy)).toContain("status: 403");
+  });
+
+  describe("ambiguous cookies", () => {
+    test("duplicates that disagree are no token, and the check still runs", () => {
+      // the value reads as absent, exactly as everywhere else - but the cookie
+      // is present, so an attacker who can toss a duplicate cannot switch the
+      // check off by making the browser look token-less. that attacker is the
+      // same sibling-subdomain one this check exists for.
+      const cookie = `borgo_csrf=${TOKEN}; borgo_csrf=beefdeadfaceb000000011112222aaaa`;
+      for (const echoed of [TOKEN, "beefdeadfaceb000000011112222aaaa", undefined]) {
+        expect(apiCsrfRejects(call("POST", { cookie, token: echoed }), enforced)).toBe(true);
+      }
+    });
+
+    test("a tossed empty duplicate poisons the token, not the check", () => {
+      const req = call("POST", { cookie: `borgo_csrf=; borgo_csrf=${TOKEN}`, token: TOKEN });
+      expect(apiCsrfRejects(req, enforced)).toBe(true);
+    });
+
+    test("identical duplicates are one token and still pass", () => {
+      const req = call("POST", { cookie: `borgo_csrf=${TOKEN}; a=1; borgo_csrf=${TOKEN}`, token: TOKEN });
+      expect(apiCsrfRejects(req, enforced)).toBe(false);
+    });
   });
 });
 
