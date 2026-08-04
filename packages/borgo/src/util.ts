@@ -290,40 +290,139 @@ export const decodeChanged = (value: string | undefined): string[] =>
  *
  * bun has one knob for both: `idleTimeout` is per connection and covers the
  * request read and the response write alike. So the knob is clock 1, and clock
- * 2 is expressed by lifting the deadline - `server.timeout(req, 0)` - at the
- * moment the request body can no longer be dribbled at us. That moment is
- * knowable in exactly two places, and borgo lifts in both:
+ * 2 is not expressed by touching the knob at all. borgo KEEPS THE SOCKET WARM:
+ * while a response is still in flight it re-arms a SHORT deadline every couple
+ * of seconds, and it never disarms, never raises, and never touches a request
+ * that finished before the first sweep. `createKeepWarm` below is the
+ * mechanism, `keepWarmSeconds` the value, `requestFullyRead` and the proxy's
+ * `onBodyRead` the two moments a request is known to be in hand.
  *
- *   - at the top of `fetch()` when the request carries no body at all, which
- *     is every GET and HEAD. bun calls `fetch` only once the request line and
- *     headers are in, so slowloris on the headers is still clock 1's;
- *   - in the proxy, the instant a buffered request body has been read in full.
+ * Two designs were tried against real sockets before this one and both were
+ * falsified, in the same direction each time - they bought clock 2 by weakening
+ * clock 1 for the whole connection.
  *
- * What the design costs, measured on bun 1.3.14: a request whose body borgo
- * never finished reading keeps the deadline for its whole life. So a form
- * action whose render idles past it is still cut, and so is a proxied upload
- * too large to buffer. The obvious alternative - lift once the handler has
- * returned a response - is not available: a POST to a path with no action is
- * answered 405 without the body ever being read, which would hand a slowloris
- * exactly the free hold this deadline exists to deny (verified: an unguarded
- * lift at `fetch` entry held a dribbling POST for the full 9s budget under
- * `idleTimeout: 3`).
+ *   - `server.timeout(req, 0)`, removing the deadline, under a comment claiming
+ *     the next request on the same keep-alive connection would bring it back.
+ *     Measured on bun 1.3.14: true of a next request that is not ITSELF lifted
+ *     (idleTimeout 8, lift the first only: closed at 8.0s) - and every request
+ *     borgo lifted qualified, so the mitigation never applied to borgo's own
+ *     traffic (lift both of two: still open at 26s). An attacker simply never
+ *     sends a next request: one 40-byte GET per file descriptor, held until the
+ *     process restarts.
+ *   - raising it to a finite ceiling instead. The connection carries the raised
+ *     value into whatever follows, and bun re-arms on request COMPLETION, not
+ *     on first byte - so an attacker who sends one complete GET and then
+ *     dribbles an unfinished request inherits the ceiling. Measured with a 255s
+ *     ceiling at BORGO_FRONT_READ_TIMEOUT=8: a fresh connection dribbling
+ *     headers died at 12.0s, the same dribble after one `GET /healthz` survived
+ *     to 256.4s. A ceiling trades the size of the hole for its shape.
+ *
+ * Six properties of the knob, all measured, none reasoned about:
+ *
+ *   1. it is a real IDLE timer - socket activity re-arms it. Under
+ *      `idleTimeout: 8`, with no exemption of any kind, a response writing every
+ *      2s ran a 24s stream to completion and closed at 30.1s, one sweep after
+ *      the last write; a client sending a request every 1s stayed connected past
+ *      26s. So an actively writing response never needed an exemption. The only
+ *      thing that ever did is a response that has STARTED writing and then goes
+ *      quiet longer than the deadline.
+ *   2. THE DEAD ZONE BELONGS TO THE NUMBER BEING ARMED, NOT TO THE CONNECTION.
+ *      Any arming of 4 seconds or less does nothing at all and the connection
+ *      dies at the next 4s boundary; any arming of 5 or more takes. It does not
+ *      matter who arms it or what `idleTimeout` the server was built with - a
+ *      socket write re-arms to `idleTimeout`, a `server.timeout(n)` call re-arms
+ *      to `n`, and each is judged on its own number. Measured against a 20s
+ *      silent stream: at `idleTimeout: 30` a keep-warm arming 3 or 4 was cut,
+ *      arming 5 or 12 survived; at `idleTimeout` 1, 2, 3, 4 and 5 a keep-warm
+ *      arming 12 survived, 5 for 5. And with no keep-warm at all, a stream
+ *      writing every 2s delivered 1 of 8 events at `idleTimeout` 3 and 4 and all
+ *      8 at 5, 6 and 8 - the same boundary, applied to the value a write re-arms.
+ *
+ *      This note has been wrong twice, in the same direction both times, and the
+ *      corrections are the reason the design looks as it does. It first said a
+ *      value rounding to a single 4s sweep "can never be re-armed", blaming the
+ *      wheel's granularity; that conflated the two mechanisms and put the
+ *      boundary at 5 instead of 4, which switched the keep-warm off at exactly 5
+ *      and handed back the silent truncation it exists to prevent. The fix for
+ *      THAT then read the boundary as a property of `idleTimeout` and clamped
+ *      the operator's knob up to 5 - which was unnecessary, since the keep-warm
+ *      arms its own number, and harmful, since it funnelled every tight setting
+ *      onto the one with the least margin. Every early measurement in this file
+ *      was taken at `idleTimeout: 3`, inside the dead zone, where the knob looks
+ *      like a hard cap on the whole exchange. State the env value AND the armed
+ *      value with every number.
+ *   3. silence BEFORE the first response byte is not cut at all: at
+ *      BORGO_FRONT_READ_TIMEOUT=30 an upstream that stalled 38s was still
+ *      answered, at 38.06s. The slow-upstream case this exemption was originally
+ *      built for does not exist above the degenerate values.
+ *   4. `server.timeout(req, n)` lands while the exchange is live - from `fetch`
+ *      or from a timer during the response - and re-arms from the moment of the
+ *      call. Once the exchange is over it does not land at all: lifted to 0 and
+ *      re-armed 200ms later, a connection was still open at 26s. Nothing can be
+ *      restored afterwards, so any design that needs to restore is already dead.
+ *   5. an incomplete request on a FRESH connection is bun's own, bounded at 12.0s
+ *      and invariant - 12.01s / 12.00s / 12.01s at idleTimeout 1, 5 and 30. On a
+ *      connection that has already completed a request it is the knob's: 8.0s at
+ *      T=8, 32.06s at T=30, untouched. That 12s invariant is where
+ *      KEEP_WARM_SECONDS comes from.
+ *   6. `server.requestIP(req)` returns null the moment bun is done with the
+ *      exchange, and keeps returning an address for as long as the response is
+ *      in flight. It is the end-of-exchange signal bun otherwise does not offer -
+ *      `req.signal` never fires on a clean finish.
+ *
+ * (1) and (3) shrink clock 2 to one case; (4) says it cannot be handled after
+ * the fact; (5) says any value left on the connection is inherited by the next
+ * unfinished request; (6) says when to stop. Keeping the socket warm is what is
+ * left: re-arm a short deadline while the response is live, stop when it is
+ * over, and leave behind bun's own 12s and never more. A request that
+ * ended before its first sweep is never touched, so ordinary traffic is
+ * byte-for-byte bun's untouched behaviour - measured, an idle connection after
+ * one fast GET closed at 8.01s under T=8 and 32.03s under T=30, against 8.02s
+ * and 32.06s for a server that calls nothing.
+ *
+ * What the design costs. A response that stops writing is held for as long as
+ * the application keeps its stream open: the keep-warm cannot tell a live
+ * subscriber from a client that stopped reading without closing, and
+ * deliberately does not try, because the alternative is truncating live feeds.
+ * An ordinary disconnect is still handled, since (6) evicts the moment bun sees
+ * the socket end.
+ *
+ * Every value of BORGO_FRONT_READ_TIMEOUT is honoured verbatim except one below
+ * a whole second, and P2 HAS NO CONFIG EXEMPTION - no setting of the operator's
+ * knob switches the keep-warm off or narrows its margin, because the keep-warm
+ * no longer reads that knob for anything but "is there a deadline at all". Two
+ * revisions got that wrong in the same direction: one left the keep-warm inert
+ * below a floor, so any value in that range silently gave the truncation back
+ * (measured at 5: `GET /api/sse` with a 20s gap answered `HTTP/1.1 200 OK` and
+ * then nothing, no events, no terminator, indistinguishable from an empty feed);
+ * the next clamped the knob up to that floor instead, which routed every tight
+ * setting onto the configuration with the least margin against a stalled event
+ * loop. A control whose safety depends on the operator not choosing a particular
+ * number is not a control. See KEEP_WARM_SECONDS.
+ *
+ * A form action's own render is not kept warm: its body is read by
+ * `runAction`, not by the proxy, so nothing tells this side the request landed.
+ * That is the pre-existing cost and it is unchanged.
  *
  * Content-Type was tried as the discriminator and was wrong in kind. An
  * allowlist of `text/event-stream` and `multipart/x-mixed-replace` truncates
  * every other long-lived response at the deadline - measured with
  * `idleTimeout: 3` and a stream idle 8s mid-body, `application/x-ndjson` was
  * cancelled server-side at ~3s and the connection closed at 4.0s, and the
- * client saw a *truncated 200*, not an error. And the exemption was granted
- * only after the handler resolved, which is already too late for anything
- * slower than the deadline: an upstream taking 6s to produce headers had the
- * connection closed at 4.0s with zero bytes delivered, which also defeated the
- * documented `BORGO_API_TIMEOUT=0`.
+ * client saw a *truncated 200*, not an error.
  *
  * bun caps idleTimeout at 255 seconds and rejects anything larger.
  */
 export const READ_TIMEOUT_SECONDS = 30;
 export const READ_TIMEOUT_MAX = 255;
+// The smallest arming bun acts on, measured (property 2 above). It is NOT a
+// floor on this knob: the operator's value bounds a client that has not finished
+// sending, and the keep-warm arms its own number, so a 1s slowloris bound is
+// honoured exactly and its streams are still kept alive at KEEP_WARM_SECONDS.
+// What it does bound is anything that arms the operator's number directly - a
+// socket write - which is why a response NOT covered by the keep-warm is cut
+// below 5. Named so the tests can say which boundary they are standing on.
+export const WHEEL_MIN_ARMED_SECONDS = 5;
 
 /**
  * BORGO_FRONT_READ_TIMEOUT: this side's own name, in seconds.
@@ -349,13 +448,249 @@ export const READ_TIMEOUT_MAX = 255;
  * for compatibility is an alias that keeps the collision alive.
  */
 export function readTimeout(env: Record<string, string | undefined>): number {
-  return Math.min(envInt(env.BORGO_FRONT_READ_TIMEOUT, READ_TIMEOUT_SECONDS), READ_TIMEOUT_MAX);
+  const raw = env.BORGO_FRONT_READ_TIMEOUT;
+  const n = Number(raw);
+  // A TIGHTENING MUST NEVER BECOME A DISABLING. envInt floors, so `=0.5` asked
+  // for half a second, floored to 0, and 0 is the documented "no deadline at
+  // all" - the operator who reached for the strictest setting turned the control
+  // off (measured at 0.5: a dribbled body still connected at 45s, against 8.0s
+  // at 8). A second below one second is the smallest thing this side can say.
+  //
+  // Nothing else is moved. An earlier revision raised everything under five
+  // here, on the theory that bun cannot re-arm below that - which was measured
+  // on the wrong variable. The dead zone belongs to the NUMBER BEING ARMED, not
+  // to the connection's configured timeout (property 2), and the keep-warm arms
+  // its own number. So 1 through 4 are honoured exactly as written, and the
+  // operator who asks for a 3s slowloris bound gets one.
+  if (raw !== undefined && raw !== "" && Number.isFinite(n) && n > 0 && n < 1) return 1;
+  // the name is spelled out again rather than passed as `raw`: envNamesDoNotCollide
+  // in util.test.ts reads this file for `envInt(env.NAME` to prove no variable is
+  // parsed as a go duration on one side and a plain number on this one, and a
+  // name hidden behind a local is a name that guard cannot see
+  const seconds = Math.min(envInt(env.BORGO_FRONT_READ_TIMEOUT, READ_TIMEOUT_SECONDS), READ_TIMEOUT_MAX);
+  // NEGATIVE ZERO REACHES Bun.serve AND KILLS THE BOOT. `-0` passes every guard
+  // above and below: `-0 > 0` is false so the raise declines, `-0 >= 0` is true
+  // so envInt keeps it, `Math.floor(-0)` is `-0`, `Math.min(-0, 255)` is `-0`,
+  // and `-0 === 0` and `Number.isInteger(-0)` are both true - so no unit
+  // assertion written with `===` can see it. Bun.serve can: it answers
+  // `TypeError: Bun.serve expects idleTimeout to be an integer` and the server
+  // never starts. Five spellings reach it (`-0`, `-0.0`, `-.0`, `-0e5`, ` -0 `).
+  // Object.is is the only operator that tells the two zeroes apart, here and in
+  // the test that guards it.
+  return Object.is(seconds, -0) ? 0 : seconds;
 }
 
-// nothing is left for a client to dribble at us: the request is entirely in
-// hand, so whatever the response does from here is not the read deadline's
-// business. bun reports a body-less request as a null body.
-export const requestFullyRead = (req: Request): boolean => req.body === null;
+// A value borgo moved is a value the operator has to hear about, or the next
+// person reads the unit file and believes it. Returned rather than printed:
+// readTimeout is called from several places and on every request path, and a
+// warning that fires per call is a warning nobody reads.
+export function readTimeoutNotice(env: Record<string, string | undefined>): string | null {
+  const raw = env.BORGO_FRONT_READ_TIMEOUT;
+  const n = Number(raw);
+  if (raw === undefined || raw === "" || !Number.isFinite(n) || n <= 0 || n >= 1) return null;
+  return (
+    `BORGO_FRONT_READ_TIMEOUT=${raw} raised to 1s ` +
+    `(the read deadline is whole seconds, and rounding it down would have reached 0, ` +
+    `which is the documented "no deadline at all" - the opposite of what was asked for)`
+  );
+}
+
+export const KEEP_WARM_INTERVAL_MS = 2_000;
+
+/**
+ * WHAT THE KEEP-WARM RE-ARMS TO, AND WHY IT IS NOT THE OPERATOR'S NUMBER.
+ *
+ * These are two clocks and they answer two different questions. The operator's
+ * BORGO_FRONT_READ_TIMEOUT bounds A CLIENT THAT HAS NOT FINISHED SENDING - it is
+ * the slowloris control. This one only ever applies to a request that is already
+ * FULLY RECEIVED, which by definition is not a slowloris; it bounds how long the
+ * server may be quiet while answering. An earlier revision computed this as
+ * `min(readTimeout, 12)` and so fused them back together, which had two costs,
+ * one of them the same mistake as the original lift, one level down:
+ *
+ *   - it made the margin equal to whatever the operator set. The sweep is a JS
+ *     timer, so it runs late when the event loop is busy, and a connection
+ *     survives a stall only on the armed time it is already carrying. At T=5
+ *     that is 5 seconds against a 4-second wheel - the least margin of any
+ *     setting. A verifier measured a live stream truncated 2/2 at T=5 under a
+ *     17.5s and a 24.2s loop stall from twelve concurrent renders, against 0/3
+ *     at T=30 (re-arm 12) with comparable and larger stalls. The client had
+ *     already had `200 OK` and `: open`, so EventSource just reconnects.
+ *   - it then funnelled every value below the old floor ONTO that worst setting.
+ *
+ * So the keep-warm gets its own constant. 12 is not a taste: it is exactly bun's
+ * own bound on an incomplete request on a fresh connection, measured invariant
+ * at idleTimeout 1, 5 and 30 (12.01s / 12.00s / 12.01s). That is the ceiling
+ * because whatever the keep-warm leaves on a connection is inherited by the next
+ * unfinished request on it (property 5), and at 12 that leftover never grants an
+ * attacker anything a second socket would not have given them for free. It is
+ * also the floor worth having, being the largest such value - the margin
+ * argument wants as much as the ceiling allows.
+ *
+ * Decoupling is what makes the tight settings safe rather than merely allowed:
+ * arming 12 keeps a 30s silent stream alive at idleTimeout 1, 2, 3, 4 and 5
+ * alike (measured, 5/5), because the dead zone belongs to the armed number.
+ *
+ * WHAT IT DOES NOT REACH, and this one is a decision rather than an accident:
+ *
+ *   - A SILENT STREAM CAN STILL BE TRUNCATED BY A STARVED EVENT LOOP, RARELY.
+ *     Measured: 24 concurrent SSR renders of a 600,000-row loader payload,
+ *     against one SSE stream held silent 45s, at BORGO_FRONT_READ_TIMEOUT=5 -
+ *     one truncation in the TWO runs at that load, a 19,878ms event-loop stall,
+ *     connection closed at 23.71s with no terminating chunk, after the client
+ *     had already received `200 OK` and `: open`. The lighter attack that broke
+ *     the previous design - twelve concurrent renders of a 400,000-row payload -
+ *     did not truncate in seven runs across T=3, T=5 and T=30 (stalls
+ *     14,994-17,375ms), where the previous design truncated 2/2 at 17,494ms and
+ *     24,216ms. Quote the denominator with the load it belongs to: the two are
+ *     different experiments and averaging them reads as ~8% when the number at
+ *     the heavy load is one in two and at the lighter one is none in seven.
+ *
+ *     IT IS NOT MONOTONIC IN STALL LENGTH, which is the part that misleads. A
+ *     57,680ms stall at the same setting did NOT truncate. That much is
+ *     measured; the explanation that fits it - nobody has instrumented bun's
+ *     timer wheel - is that a fully blocked loop freezes the wheel alongside the
+ *     sweep, and a frozen wheel expires nothing, so the total block protects the
+ *     connection. What would then kill is the PARTIALLY STARVED regime in
+ *     between, where the wheel still fires but the sweep has not been given a
+ *     turn to re-arm. Either way the observation stands: this is a stochastic
+ *     interleaving and not a threshold, there is no stall length above which it
+ *     happens, and looking for one will waste the time it wasted here.
+ *
+ *     There is no setting that avoids it. After the first sweep the armed number
+ *     is KEEP_WARM_SECONDS at every setting of the operator's knob, so there is
+ *     nothing to tune and raising the read timeout does not help - though under
+ *     the PREVIOUS design it did, because the armed value was min(read, 12) and
+ *     so derived from theirs; removing that coupling is what this change was.
+ *     Configuration-independence here is what the mechanism predicts rather than
+ *     something demonstrated: no matched control at T=30 could be produced,
+ *     because both runs at that load landed in the fully-blocked regime.
+ *
+ *     NO VERSION OF THIS DESIGN CAN CLOSE IT, which is why it is written down
+ *     instead of chased. The keep-warm is a JavaScript timer, so a loop with no
+ *     turn to give cannot run it, and the one alternative - arm high, come back
+ *     down afterwards - is dead on property 4: a `server.timeout` applied once
+ *     the exchange is over does not land at all. Closing this would take a bound
+ *     bun applies from outside the loop, which bun does not expose. Raising
+ *     KEEP_WARM_SECONDS is not that bound and costs the leftover guarantee.
+ *
+ *     HOW IT PRESENTS: a truncated 200 that `EventSource` silently reconnects
+ *     from, indistinguishable from a complete response to anyone not counting
+ *     bytes. That is also how the class of bug this whole file is about
+ *     presented, which is the reason for saying so out loud. docs/realtime.md
+ *     carries the same entry for the reader running the stream.
+ */
+export const KEEP_WARM_SECONDS = 12;
+
+export function keepWarmSeconds(env: Record<string, string | undefined>): number {
+  // 0 is the only thing the operator's knob still decides here: they turned the
+  // deadline off outright, so there is nothing to keep warm against. Every other
+  // value gets the same constant, and `theTwoClocksAreNotTheSameNumber` in
+  // util.test.ts fails the build if a later edit couples them again.
+  return readTimeout(env) === 0 ? 0 : KEEP_WARM_SECONDS;
+}
+
+// only what the keep-warm needs of a Bun.Server, so a test can hand it a fake
+// and count the calls
+export type DeadlineHost = {
+  timeout(req: Request, seconds: number): void;
+  requestIP(req: Request): unknown;
+};
+
+/**
+ * Keeps in-flight responses warm without ever disarming the deadline.
+ *
+ * A request is HELD only once it is known to be in hand. Every sweep, a held
+ * request is either evicted - `requestIP` has gone null, so bun is done with
+ * the exchange and nothing could be set on it anyway (property 4) - or re-armed
+ * at `seconds`. A request that ends before its first sweep is evicted having
+ * never been touched, which is why ordinary traffic behaves exactly as it does
+ * on a server that calls nothing.
+ *
+ * HOW THIS FAILS IF IT IS WRONG, in the three directions that matter:
+ *
+ *   - if `requestIP` ever stops going null at end of exchange, nothing is ever
+ *     evicted: the set grows without bound and every connection that served one
+ *     request is re-armed forever. That is P3 broken again, and worse than the
+ *     ceiling was. The test for it watches an idle connection AFTER a
+ *     kept-warm exchange, not after a fast one.
+ *   - if a sweep ever falls further apart than the wheel tolerates for
+ *     `seconds`, a live stream is cut and the client sees a truncated 200 - the
+ *     invisible failure. The test for it runs a stream silent far longer than
+ *     the deadline and asserts the terminator arrived.
+ *   - if `hold` is ever reached by a request still arriving, a slowloris is
+ *     kept warm by the very thing meant to bound it. The test for it dribbles a
+ *     body and asserts the cut.
+ *
+ * And the one that produced the original bug - the event that simply never
+ * happens: a response that never ends. It is held for as long as the
+ * application keeps its stream open, on purpose. Nothing here tries to
+ * distinguish a live subscriber from a client that stopped reading without
+ * closing, because the only way to do that is to truncate feeds.
+ */
+export function createKeepWarm(
+  // a thunk, not the server: this is built before Bun.serve returns, so that a
+  // request arriving the instant bun starts listening cannot reach a binding
+  // still in its temporal dead zone. It also leaves `server.timeout` named in
+  // exactly one file, which is what the structural guard in util.test.ts
+  // checks - the front server must not be able to weaken a deadline directly.
+  getHost: () => DeadlineHost,
+  seconds: number,
+  intervalMs: number = KEEP_WARM_INTERVAL_MS,
+): { hold(req: Request): void; held(): number; stop(): void } {
+  if (seconds <= 0) return { hold: () => {}, held: () => 0, stop: () => {} };
+  const inFlight = new Set<Request>();
+  const timer = setInterval(() => {
+    if (!inFlight.size) return;
+    const host = getHost();
+    for (const req of inFlight) {
+      if (host.requestIP(req) === null) inFlight.delete(req);
+      else host.timeout(req, seconds);
+    }
+  }, intervalMs);
+  // the sweep must not be a reason for the process to stay up
+  timer.unref?.();
+  return {
+    hold: (req) => void inFlight.add(req),
+    held: () => inFlight.size,
+    stop: () => clearInterval(timer),
+  };
+}
+
+/**
+ * Whether nothing is left for a client to dribble at us.
+ *
+ * Two things have to hold and only one of them is bun's. This used to be just
+ * `req.body === null`, on the reasoning that bun hands a body-less request a
+ * null body - which it does, and also hands one to a request that is still
+ * arriving. bun discards bodies on GET and HEAD, so a `GET` carrying
+ * `Content-Length: 100` with one byte sent arrives at the handler as
+ * `body === null`, and so does a GET with an unterminated
+ * `Transfer-Encoding: chunked` stream (both measured on bun 1.3.14). The
+ * predicate reported "entirely in hand" while the client still held 99 bytes:
+ * against the real server, `GET /healthz` + `Content-Length: 100` dribbling a
+ * byte every 2.5s was answered 200 and held past 12s, where the same dribble on
+ * `DELETE /api/echo` was cut at 4.0s.
+ *
+ * So the request also has to have declared nothing more: no Transfer-Encoding
+ * at all, and a Content-Length that is absent or exactly zero. That second half
+ * reads a client-supplied header, which is safe here for one reason only - it
+ * can only ever WITHHOLD the exemption. A forged length keeps the deadline; it
+ * cannot remove it. Every shape that is not plainly "no body" is therefore read
+ * as a body still coming: absent is in hand, `0` is in hand, and empty,
+ * non-numeric, signed, or the `"100, 100"` bun passes through when the header
+ * arrives twice with the same value are all out (a conflicting pair, and a
+ * single header holding a comma, bun rejects itself before `fetch` is called).
+ * Transfer-Encoding is refused on presence, whatever it says and however it is
+ * cased, since every value of it means a body framed by something other than a
+ * length we can check.
+ */
+export function requestFullyRead(req: Request): boolean {
+  if (req.body !== null) return false;
+  if (req.headers.get("transfer-encoding") !== null) return false;
+  const declared = req.headers.get("content-length");
+  return declared === null || /^0+$/.test(declared.trim());
+}
 
 /**
  * Whether /metrics is exposed.
@@ -1036,9 +1371,11 @@ export type ProxyOptions = {
   // X-Forwarded-For chain. undefined means "no peer to vouch for", and then no
   // chain travels at all
   clientIp?: string;
-  // called once the request body is entirely in hand, so the caller can lift
-  // the read deadline: from here on the connection is the server's to hold,
-  // not the client's. see readTimeout above for why that is a second clock.
+  // called once the request body is entirely in hand - buffered or streamed,
+  // both - so the caller can start keeping the socket warm: from here on the
+  // connection is the server's to hold, not the client's. it fires at the last
+  // byte of the body and never on a declaration, since a declaration is the
+  // client's. see readTimeout above for why that is a second clock.
   onBodyRead?: () => void;
   // injectable for tests; production passes none of these
   fetchImpl?: ProxyFetch;
@@ -1072,12 +1409,36 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
   const buffered = shouldBufferBody(req.method, req.headers.get("content-length"));
   // may throw when the client hangs up mid-upload; the caller owns that (it
   // is the one holding the request that would answer 499)
-  const body = hasBody ? (buffered ? await req.arrayBuffer() : req.body) : undefined;
-  // the whole body is here, so the read deadline has nothing left to protect
-  // and everything left to break: an upstream slower than it would otherwise
-  // close the connection before a single byte of the answer shipped. an
-  // unbuffered body is still arriving and keeps the deadline.
-  if (buffered) onBodyRead?.();
+  let body: ArrayBuffer | ReadableStream<Uint8Array> | undefined;
+  if (!hasBody) {
+    body = undefined;
+  } else if (buffered) {
+    body = await req.arrayBuffer();
+    // the whole body is here, so the request is in hand and the response is
+    // the server's work from now on
+    onBodyRead?.();
+  } else if (req.body) {
+    // A STREAMED BODY IS IN HAND TOO, JUST LATER. `onBodyRead` used to fire for
+    // the buffered case only, so a chunked POST - or any Content-Length over
+    // PROXY_RETRY_MAX_BODY - carried clock 1 for the entire life of its
+    // response, and `requestFullyRead` rightly refuses it at `fetch` entry
+    // because the framing headers are there. An SSE or NDJSON reply to such a
+    // request was silently truncated: measured at BORGO_FRONT_READ_TIMEOUT=30,
+    // a chunked POST whose body was complete, answered by a stream with a 36s
+    // gap, got `: open` and then FIN at 32.04s with no terminating chunk (8.00s
+    // at =8), where the same stream behind a small buffered body ran to
+    // completion at 72.11s. EventSource reconnects, so nobody sees it.
+    //
+    // The last byte of the body is the server's own knowledge of the moment, so
+    // it is read off the stream rather than declared. An upstream that answers
+    // before draining the body leaves this unfired - it is the body ending that
+    // is the claim, and nothing else may stand in for it.
+    body = req.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({ flush: () => onBodyRead?.() }),
+    );
+  } else {
+    body = undefined;
+  }
   // hop-by-hop headers belong to the browser -> borgo connection, not to
   // this one; built once, outside the retry loop
   const headers = forwardableHeaders(req.headers);

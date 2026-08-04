@@ -19,16 +19,19 @@ import { overlayHtml } from "./overlay";
 import { matchRoute, safeDecode, type Route } from "./router";
 import {
   apiCsrfRejects,
+  createKeepWarm,
   createSecurity,
   csrfRejects,
   decodeChanged,
   envInt,
   headResponse,
+  keepWarmSeconds,
   metricsEnabled,
   prepareShell,
   proxyRequest,
   pushAuthorized,
   readTimeout,
+  readTimeoutNotice,
   renderPage as renderDocument,
   requestFullyRead,
   runAction,
@@ -192,9 +195,10 @@ export async function serve({ dev = false } = {}) {
         retries: apiRetries,
         // the one hop borgo can vouch for, appended to X-Forwarded-For
         clientIp: server.requestIP(req)?.address,
-        // a buffered body is entirely in hand by then, so the read deadline
-        // stops applying and the upstream gets as long as it needs
-        onBodyRead: () => server.timeout(req, 0),
+        // the body is entirely in hand by then - streamed or buffered - so
+        // the socket is the server's to keep warm and the upstream gets as
+        // long as it needs. nothing is disarmed and nothing is raised
+        onBodyRead: () => keepWarm.hold(req),
       });
     }
 
@@ -332,13 +336,27 @@ export async function serve({ dev = false } = {}) {
     }
   };
 
+  // BEFORE Bun.serve, not after: bun is listening the instant it returns, and a
+  // request that arrived in the gap would reach a `keepWarm` still in its
+  // temporal dead zone and answer 500. The host reaches `server` through
+  // closures instead, which only run once there is a request to run them for.
+  // keepWarmSeconds returns 0 - and this whole thing goes inert - when there is
+  // no deadline to keep warm against, or when the operator asked for one too
+  // tight for bun's 4s wheel to re-arm.
+  const keepWarm = createKeepWarm(() => server, keepWarmSeconds(process.env));
+  // before the banner and before the first request, because it is about a value
+  // the operator set and borgo did not honour verbatim
+  const timeoutNotice = readTimeoutNotice(process.env);
+  if (timeoutNotice) console.error(`  ${c.red(g.err)} ${timeoutNotice}`);
+
   const server = await bindRetry(() => Bun.serve<SocketData, never>({
     port,
     maxRequestBodySize,
     // the inbound read deadline, and nothing else - how long bun waits for a
     // *request* to arrive. How long a *response* may live is a different clock
-    // with no honest bound, and it is expressed by lifting this one per
-    // request; readTimeout in util.ts owns both halves of that argument.
+    // that this one is never disarmed for: an in-flight response is kept warm
+    // by re-arming it, not by removing it. readTimeout in util.ts owns both
+    // halves of that argument.
     // BORGO_FRONT_READ_TIMEOUT is in seconds, 0 disables it - and it is the
     // front server's alone, because go reads every other timeout name as a
     // duration and panics on what this side takes.
@@ -412,16 +430,24 @@ export async function serve({ dev = false } = {}) {
     async fetch(req) {
       const t0 = performance.now();
       const url = new URL(req.url);
-      // a request with no body is entirely in hand - bun calls fetch only once
-      // the request line and headers are in - so from here on nothing is left
-      // for a client to dribble at us and the read deadline has only harm to
-      // do: it would cut a stream idle between writes, or close the connection
-      // before an upstream slower than the deadline produced its first byte.
-      // Lifted before any handler runs, because the deadline can fire while a
-      // handler is still deciding what the response even is. It is scoped to
-      // this request: the next one on the same keep-alive connection gets the
-      // server default back (measured on bun 1.3.14).
-      if (requestFullyRead(req)) server.timeout(req, 0);
+      // a request that carries no body and declared none is entirely in hand -
+      // bun calls fetch only once the request line and headers are in - so from
+      // here on nothing is left for a client to dribble at us, and whatever the
+      // response does is the server working rather than a client holding a
+      // socket. Held before any handler runs, because a handler slower than the
+      // deadline is one of the things being protected.
+      //
+      // HELD, not lifted and not raised. The deadline is never disarmed: the
+      // keep-warm re-arms a short one while the response is in flight and stops
+      // when it is over. Both earlier designs bought this by weakening clock 1
+      // for the whole connection - `server.timeout(req, 0)` left it with no
+      // deadline at all for the rest of its life, and a finite ceiling was
+      // inherited by the next unfinished request on the same socket (measured
+      // at BORGO_FRONT_READ_TIMEOUT=8: a dribble after one complete GET
+      // survived to 256.4s against bun's own 12.0s). readTimeout in util.ts
+      // owns the argument; nothing here is touched for a request that ends
+      // before the first sweep.
+      if (requestFullyRead(req)) keepWarm.hold(req);
       // heads render for real (status and headers must be honest), only the
       // body is dropped - and cancelled, or the ssr/gzip pipeline keeps
       // rendering into a stream nobody reads
