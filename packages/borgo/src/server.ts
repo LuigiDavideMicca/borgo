@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
-import { buildAssets, compileCss } from "./build";
+import { buildAssets, compileCss, readBuildOutputs } from "./build";
 import { banner, c, fmtMs, g, statusColor } from "./colors";
 import {
   buildAssetIndex,
@@ -159,7 +159,17 @@ export async function serve({ dev = false } = {}) {
   // static files: hashed build outputs cache forever, compressible types are
   // served from the .gz/.br siblings that `borgo build` emitted. dev has no
   // siblings (precompression is skipped) and serves identity.
-  const assetIndex: Map<string, AssetInfo> = dev ? new Map() : buildAssetIndex("public");
+  //
+  // which of those names the build hashed is read once, here, and handed to
+  // both serving paths - the boot index and the live lookup - so one url
+  // cannot be pinned by one and revalidated by the other. Read in dev too: the
+  // policy belongs to the url, not to the environment. A dev rebuild that
+  // emits a chunk name this set has never seen simply revalidates it, which is
+  // the harmless direction.
+  const buildOutputs = readBuildOutputs();
+  const assetIndex: Map<string, AssetInfo> = dev
+    ? new Map()
+    : buildAssetIndex("public", undefined, buildOutputs);
 
   const sendJson = (req: Request, value: unknown, init?: ResponseInit) =>
     dev ? Response.json(value, init) : jsonResponse(req, value, init);
@@ -220,7 +230,9 @@ export async function serve({ dev = false } = {}) {
         if (indexed) return serveIndexed(req, indexed);
         const path = "public" + assetPath;
         const asset = Bun.file(path);
-        if (await asset.exists()) return serveAsset(req, path, asset, { dev });
+        if (await asset.exists()) {
+          return serveAsset(req, path, asset, { dev, outputs: buildOutputs });
+        }
       }
     }
 

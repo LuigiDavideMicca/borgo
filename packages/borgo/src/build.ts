@@ -1,8 +1,16 @@
 import { Glob } from "bun";
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join, sep } from "node:path";
 import { c, g } from "./colors";
-import { precompressAssets } from "./compress";
+import { NO_BUILD_OUTPUTS, precompressAssets, type BuildOutputs } from "./compress";
 import { stampWorkerFile } from "./pwa";
 import { filePathToPattern } from "./router";
 import { metricsEnabled } from "./util";
@@ -556,9 +564,109 @@ export function readBuildInventory(path = inventoryPath): string[] | null {
   }
 }
 
-export async function writeBuildInventory(files: string[], path = inventoryPath) {
-  await Bun.write(path, JSON.stringify({ files: [...new Set(files)].sort() }) + "\n");
+/**
+ * The emitted names whose url is a promise about their bytes.
+ *
+ * The same lesson as the sweep above, arrived at from the other side. Cache
+ * policy used to read a *shape* - `-[a-z0-9]{8}\.(js|css)` under `assets/` -
+ * and any eight-letter word satisfies it, so `stripe-checkout.js` and
+ * `hero-carousel.js` were served `immutable` for a year while
+ * `google-analytics.js` escaped only because "analytics" is nine characters.
+ * The bundler is the only thing that knows which names it hashed, so it says
+ * so here instead of leaving the server to guess.
+ *
+ * Absent, malformed, or written by a borgo that recorded no hashes: the empty
+ * set, which spends a conditional request per asset and pins nothing. Nothing
+ * may be pinned on the strength of a file we cannot prove the origin of.
+ */
+export function readBuildOutputs(path = inventoryPath): BuildOutputs {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { dir?: unknown; hashed?: unknown };
+    // the directory travels with the list: without it the server would be back
+    // to recognising an output by the shape of its path
+    if (typeof parsed.dir !== "string" || !parsed.dir) return NO_BUILD_OUTPUTS;
+    const entries = parsed.hashed;
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) return NO_BUILD_OUTPUTS;
+    const sizes = new Map<string, number>();
+    for (const [name, size] of Object.entries(entries as Record<string, unknown>)) {
+      // keys are filenames inside dir. anything carrying a separator describes
+      // some other file, and is dropped rather than reasoned about
+      if (!name || name.includes("/") || name.includes("\\")) continue;
+      // zero is dropped, not stored. A recorded length of 0 would pin *any*
+      // empty file at that name, because every empty file matches it - the
+      // length check would carry no information for exactly the case where a
+      // truncated or half-written file is what is on disk. An empty output
+      // that revalidates forever costs a 304 on nothing.
+      if (typeof size !== "number" || !Number.isSafeInteger(size) || size <= 0) continue;
+      sizes.set(name, size);
+    }
+    return sizes.size ? { dir: parsed.dir, sizes } : NO_BUILD_OUTPUTS;
+  } catch {
+    return NO_BUILD_OUTPUTS;
+  }
 }
+
+/**
+ * The byte length of each name, measured off the disk the build just wrote.
+ *
+ * Measured rather than taken from `BuildArtifact.size`, because
+ * renameUnsafeChunks rewrites the import strings inside a chunk after the
+ * bundler reported it - so the artifact's size is the size of a file that no
+ * longer exists. A name that cannot be stat'd is simply left out and is
+ * therefore never pinned.
+ */
+export function recordedOutputSizes(dir: string, names: readonly string[]): Record<string, number> {
+  const sizes: Record<string, number> = {};
+  for (const name of names) {
+    try {
+      // an empty output is not vouched for: see readBuildOutputs
+      const { size } = statSync(`${dir}/${name}`);
+      if (size > 0) sizes[name] = size;
+    } catch {}
+  }
+  return sizes;
+}
+
+export async function writeBuildInventory(
+  files: string[],
+  vouched: { dir: string; sizes: Record<string, number> } | null = null,
+  path = inventoryPath,
+) {
+  const hashed: Record<string, number> = {};
+  for (const name of Object.keys(vouched?.sizes ?? {}).sort()) hashed[name] = vouched!.sizes[name];
+  const body = { files: [...new Set(files)].sort(), dir: vouched?.dir ?? "", hashed };
+  await Bun.write(path, JSON.stringify(body) + "\n");
+}
+
+/**
+ * Whether the bundler put this artifact's own content hash into its name.
+ *
+ * Not "does the name look hashed". `Bun.build` reports a content hash for
+ * every artifact, including the entry points - borgo names those `[name].[ext]`
+ * on purpose, so `client.js` carries a hash that is nowhere in its filename and
+ * is emphatically not cacheable forever. The name is a promise only when it
+ * actually contains the hash of the bytes behind it, which is a thing a word
+ * cannot accidentally be.
+ */
+export const nameCarriesHash = (file: string, hash: string | null): boolean =>
+  hash !== null && hash !== "" && basename(file).includes(hash);
+
+/**
+ * Which of a bundle's outputs may be cached forever, by name.
+ *
+ * `renamedTo` maps an artifact's path to where it actually landed:
+ * renameUnsafeChunks moves the files bun could not name, and the name that
+ * ends up in a url is the one a cache will ask about. The hash survives that
+ * rename, so a renamed chunk stays cacheable.
+ */
+export const hashedOutputNames = (
+  outputs: readonly { path: string; hash: string | null }[],
+  renamedTo: (path: string) => string = (p) => p,
+): string[] =>
+  outputs
+    .map((o) => ({ file: basename(renamedTo(o.path).replaceAll("\\", "/")), hash: o.hash }))
+    .filter((o) => nameCarriesHash(o.file, o.hash))
+    .map((o) => o.file);
 
 /**
  * Whether the sweep may delete `file`.
@@ -713,9 +821,12 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
 
   // now that the new output is on disk, the previous build's is stale: sweep
   // by inventory, never by shape, and never a name this build just wrote
-  const emitted = assets.map((a) => a.path.replaceAll("\\", "/").split("/").pop()!);
+  const named = (p: string) => p.replaceAll("\\", "/").split("/").pop()!;
+  const emitted = assets.map((a) => named(a.path));
+  // recorded here because this is the only place that knows what the bundler
+  // hashed; every consumer downstream reads the list instead of guessing
+  const hashed = hashedOutputNames(result.outputs, outPath);
   sweepBuildOutput(outDir, previous, emitted);
-  await writeBuildInventory(emitted);
 
   // prod only: the hashed asset list a service worker can precache; the
   // stamp changes whenever any listed content does
@@ -738,6 +849,24 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   // prod only: emit .gz/.br siblings once here instead of compressing on
   // every request; dev skips the cost and serves identity
   if (!dev) await precompressAssets(outDir);
+
+  // After precompression, because a sibling's length does not exist until it
+  // has been written and the server verifies whichever representation it is
+  // about to send - the .br and .gz go out under the same url and are pinned
+  // by the same directive, so they have to be vouched for the same way. Names
+  // that were not written (dev, or a file compression did not shrink) are not
+  // stat'able and are simply left out, which makes them unpinnable.
+  //
+  // A failure between the sweep above and this write leaves the previous
+  // build's inventory in place: it names files that are gone, which pins
+  // nothing and sweeps nothing that still exists, and the next successful
+  // build replaces it. The directory travels with the sizes so the server
+  // matches the whole path, never a folder that happens to be spelled "assets".
+  const vouchable = hashed.flatMap((name) => [name, `${name}.gz`, `${name}.br`]);
+  await writeBuildInventory(emitted, {
+    dir: outDir,
+    sizes: recordedOutputSizes(outDir, vouchable),
+  });
   await Bun.write(buildModePath, buildModeFor(dev));
 
   // dev: page chunks carry an injected marker, so the fast-refresh channel

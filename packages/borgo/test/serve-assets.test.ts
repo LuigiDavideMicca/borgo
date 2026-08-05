@@ -1,15 +1,26 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { brotliCompressSync, gunzipSync, gzipSync } from "node:zlib";
-import { buildAssetIndex, serveAsset, serveIndexed, type AssetInfo } from "../src/compress";
+import {
+  buildAssetIndex,
+  serveAsset,
+  serveIndexed,
+  type AssetInfo,
+  type BuildOutputs,
+} from "../src/compress";
 
 // a real public/ tree: a hashed bundle with both siblings, a css with only a
 // gzip sibling, an image, a service worker. the contents of each sibling are
 // distinct on purpose, so the body always names the file that produced it.
 let dir: string;
 let index: Map<string, AssetInfo>;
+
+// what `borgo build` recorded: the directory it wrote and the byte length of
+// each output it hashed. the server is never asked to infer either from a
+// name, so the fixture states them the same way the build does.
+let outputs: BuildOutputs;
 
 const RAW_JS = "console.log('identity javascript payload');";
 const RAW_CSS = "body { color: rebeccapurple; }";
@@ -27,7 +38,11 @@ beforeAll(() => {
   writeFileSync(join(dir, "public", "style.css.gz"), gzipSync(RAW_CSS));
   writeFileSync(join(dir, "public", "logo.png"), RAW_PNG);
   writeFileSync(join(dir, "public", "sw.js"), RAW_SW);
-  index = buildAssetIndex(join(dir, "public"));
+  outputs = {
+    dir: join(dir, "public", "assets").replaceAll("\\", "/"),
+    sizes: new Map([["client-abcd1234.js", RAW_JS.length]]),
+  };
+  index = buildAssetIndex(join(dir, "public"), undefined, outputs);
 });
 
 afterAll(() => {
@@ -393,20 +408,25 @@ describe("serveAsset: the unindexed path", () => {
     const sw = p("public", "sw.js");
     const plain = p("public", "style.css");
     const cc = async (p: string) =>
-      (await serveAsset(new Request("http://app.test/x"), p, Bun.file(p), { dev: true })).headers.get(
-        "Cache-Control",
-      );
+      (
+        await serveAsset(new Request("http://app.test/x"), p, Bun.file(p), {
+          dev: true,
+          outputs,
+        })
+      ).headers.get("Cache-Control");
     expect(await cc(hashed)).toBe("public, max-age=31536000, immutable");
     expect(await cc(sw)).toBe("no-cache");
-    // an asset with no policy of its own now carries a Last-Modified, and a
+    // an asset with no policy of its own still carries a Last-Modified, and a
     // browser is free to heuristically cache anything dated for a tenth of its
-    // age. In dev that is the rebuilt-in-place bundle pinned for the afternoon,
-    // so dev states no-cache: revalidate, and take the 304 when nothing moved.
+    // age: yesterday's bundle pinned against today's document. dev and prod
+    // state the same no-cache - the policy belongs to the url, not to the
+    // environment, and this used to be the one place they disagreed.
     expect(await cc(plain)).toBe("no-cache");
     const prod = await serveAsset(new Request("http://app.test/x"), plain, Bun.file(plain), {
       dev: false,
+      outputs,
     });
-    expect(prod.headers.get("Cache-Control")).toBeNull();
+    expect(prod.headers.get("Cache-Control")).toBe("no-cache");
   });
 
   // This path used to emit no ETag, no Last-Modified and never consult
@@ -557,4 +577,361 @@ test("a precompressed sibling deleted after boot degrades to identity, not a 500
   expect(res.headers.get("content-encoding")).toBe(null);
   expect(await res.text()).toBe("console.log('hello')");
   rmSync(dir, { recursive: true, force: true });
+});
+
+// Measured on the wire against a production build: /assets/client.js,
+// /assets/style.css and /logo.svg all came back 200 with an ETag, a
+// Last-Modified and no Cache-Control, while /assets/client-50dbnr0a.js beside
+// them carried the year. The document referencing those unhashed names is
+// private, no-store and therefore always fresh, so a returning browser fetched
+// today's html and ran a heuristically-cached yesterday's bundle against it.
+//
+// These go over a socket on purpose. The defect was two serving paths
+// disagreeing about one url - the indexed snapshot said nothing, the live path
+// said nothing in production and no-cache in dev - and a function's return
+// value cannot say which of them answered.
+describe("cache-control on the wire: every serving path, every encoding", () => {
+  let root: string;
+  let servers: { name: string; base: string; stop: () => void }[];
+
+  // exactly what a build would have recorded for this tree: the one directory
+  // it wrote, and a byte length per output it hashed. Note what is NOT here:
+  // the entry bundle it emitted, and every app file in the same folder.
+  let MANIFEST: BuildOutputs;
+
+  const HASHED_BODIES: Record<string, string> = {
+    "client-50dbnr0a.js": "console.log('hashed chunk');",
+    "style-9f3a1c07.css": "main{padding:1rem}",
+    "logo-6nnjve26.png": "hashed PNG bytes",
+    "inter-6nnjve26.woff2": "hashed WOFF2 bytes",
+  };
+
+  // Same basenames, byte-for-byte identical bodies, in another folder that
+  // happens to be called "assets" - which is what every Vite/CRA/Astro bundle
+  // copied into public/ ships. Identical bytes on purpose: the length check
+  // cannot save these, so only matching the whole directory can. Measured on
+  // the wire before that: pinned for a year on bytes the bundler never saw.
+  const IMPOSTORS = [
+    "/copy/assets/client-50dbnr0a.js",
+    "/deep/nested/assets/client-50dbnr0a.js",
+    "/copy/assets/logo-6nnjve26.png",
+    // a folder whose name merely starts the same, and a level below the real one
+    "/assetsx/client-50dbnr0a.js",
+    "/assets/sub/client-50dbnr0a.js",
+  ];
+
+  const HASHED = [
+    "/assets/client-50dbnr0a.js",
+    "/assets/style-9f3a1c07.css",
+    // bun hashes these too, and the old js/css rule refused them: every image
+    // and font paid a conditional round trip per load, forever
+    "/assets/logo-6nnjve26.png",
+    "/assets/inter-6nnjve26.woff2",
+  ];
+
+  const REVALIDATED = [
+    "/assets/client.js", // unhashed entry bundle
+    "/assets/style.css", // unhashed stylesheet
+    "/logo.svg", // unhashed static file, compressible
+    "/photo.png", // unhashed static file, not compressible
+    "/sw.js", // its own rule, and it must keep it
+    // app files the old shape rule pinned for a year off a real build. Every
+    // one of these is an eight-letter word where a hash was assumed to be.
+    "/assets/stripe-checkout.js",
+    "/assets/hero-carousel.js",
+    "/assets/vendor-database.css",
+    // nine letters, so it escaped the old rule by luck rather than by design
+    "/assets/google-analytics.js",
+    ...IMPOSTORS,
+  ];
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), "borgo-cache-control-"));
+    const pub = join(root, "public");
+    mkdirSync(join(pub, "assets"), { recursive: true });
+    const write = (rel: string, body: string, siblings: ("gz" | "br")[] = []) => {
+      const path = join(pub, rel);
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, body);
+      if (siblings.includes("gz")) writeFileSync(path + ".gz", gzipSync(body));
+      if (siblings.includes("br")) writeFileSync(path + ".br", brotliCompressSync(body));
+    };
+    write("assets/client.js", "console.log('unhashed entry bundle');", ["gz", "br"]);
+    write("assets/client-50dbnr0a.js", HASHED_BODIES["client-50dbnr0a.js"], ["gz", "br"]);
+    write("assets/style.css", "body{color:rebeccapurple}", ["gz"]);
+    write("assets/style-9f3a1c07.css", HASHED_BODIES["style-9f3a1c07.css"], ["gz"]);
+    write("assets/logo-6nnjve26.png", HASHED_BODIES["logo-6nnjve26.png"]);
+    write("assets/inter-6nnjve26.woff2", HASHED_BODIES["inter-6nnjve26.woff2"]);
+    for (const url of IMPOSTORS) write(url.slice(1), HASHED_BODIES[url.split("/").pop()!]);
+    write("logo.svg", "<svg xmlns='http://www.w3.org/2000/svg'/>");
+    write("photo.png", "PNG bytes, not really");
+    write("sw.js", "self.addEventListener('fetch',()=>{});");
+    // the app's own files, dropped into the build's output directory exactly
+    // as build.ts:583 says apps do
+    write("assets/stripe-checkout.js", "window.Stripe && Stripe('pk_live');", ["gz"]);
+    write("assets/hero-carousel.js", "export const carousel = () => {};", ["gz"]);
+    write("assets/vendor-database.css", ".db-grid{display:grid}", ["gz"]);
+    write("assets/google-analytics.js", "window.dataLayer = window.dataLayer || [];", ["gz"]);
+
+    // the build measures every representation it wrote, identity and siblings
+    // alike, because each of them goes out under the same directive
+    const sizes = new Map<string, number>();
+    for (const [name, body] of Object.entries(HASHED_BODIES)) {
+      sizes.set(name, body.length);
+      for (const [ext, bytes] of [
+        [".gz", gzipSync(body)],
+        [".br", brotliCompressSync(body)],
+      ] as const) {
+        if (existsSync(join(pub, "assets", name + ext))) sizes.set(name + ext, bytes.length);
+      }
+    }
+    MANIFEST = { dir: join(pub, "assets").replaceAll("\\", "/"), sizes };
+
+    const live = (dev: boolean) => (r: Request) => {
+      // the same path the server builds: "public" + the url, forward slashes,
+      // which is what the sw.js rule and the manifest lookup both read
+      const path = join(pub, new URL(r.url).pathname).replaceAll("\\", "/");
+      return serveAsset(r, path, Bun.file(path), { dev, outputs: MANIFEST });
+    };
+    const indexed = buildAssetIndex(pub.replaceAll("\\", "/"), undefined, MANIFEST);
+    const routes: [string, (r: Request) => Response][] = [
+      // production, boot-time snapshot: the path that shipped no header at all
+      [
+        "indexed",
+        (r) => {
+          const i = indexed.get(new URL(r.url).pathname);
+          return i ? serveIndexed(r, i) : new Response("not indexed", { status: 500 });
+        },
+      ],
+      // production, anything written into public/ after boot
+      ["live-prod", live(false)],
+      // dev, where the index is deliberately empty
+      ["live-dev", live(true)],
+    ];
+    servers = routes.map(([name, fetchOne]) => {
+      const server = Bun.serve({ port: 0, fetch: fetchOne });
+      return { name, base: `http://localhost:${server.port}`, stop: () => server.stop(true) };
+    });
+  });
+
+  afterAll(() => {
+    for (const s of servers) s.stop();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  // "identity" rather than an absent header: fetch supplies its own
+  // accept-encoding, and the precompressed variants are a different branch
+  const ENCODINGS = ["identity", "gzip"] as const;
+
+  const get = (base: string, url: string, encoding: string, extra: Record<string, string> = {}) =>
+    fetch(`${base}${url}`, {
+      headers: { "accept-encoding": encoding, ...extra },
+      decompress: false,
+    } as RequestInit);
+
+  test("an asset whose url does not identify its content always revalidates", async () => {
+    for (const { name, base } of servers) {
+      for (const url of REVALIDATED) {
+        for (const encoding of ENCODINGS) {
+          const res = await get(base, url, encoding);
+          expect(res.status).toBe(200);
+          expect(`${name} ${url} ${encoding}: ${res.headers.get("Cache-Control")}`).toBe(
+            `${name} ${url} ${encoding}: no-cache`,
+          );
+          // no-cache is not no-store: the body may be kept, it just may not be
+          // reused without asking, which is what the validator below is for
+          expect(res.headers.get("Cache-Control")).not.toContain("no-store");
+          expect(res.headers.get("ETag")).toMatch(/^"[0-9a-z]+-[0-9a-z]+(-br|-gzip)?"$/);
+        }
+      }
+    }
+  });
+
+  // The dangerous direction, and the one that was actually shipping. An app
+  // file living in the build's output directory is not the build's, and no
+  // amount of it looking like a chunk makes its url a promise. Measured on the
+  // wire before this: stripe-checkout.js pinned for a year, so updating the
+  // vendored file in place left every browser that had seen it holding the old
+  // copy with no revalidation.
+  test("an app file in assets/ is never pinned, however hash-shaped its name", async () => {
+    const traps = REVALIDATED.filter((u) => /^\/assets\/[^/]+-[^/]+$/.test(u));
+    expect(traps.length).toBeGreaterThan(0);
+    for (const { name, base } of servers) {
+      for (const url of traps) {
+        for (const encoding of ENCODINGS) {
+          const res = await get(base, url, encoding);
+          expect(`${name} ${url} ${encoding}: ${res.headers.get("Cache-Control")}`).toBe(
+            `${name} ${url} ${encoding}: no-cache`,
+          );
+        }
+      }
+    }
+  });
+
+  // A folder called "assets" is not the build's output directory. These hold
+  // bytes identical to the recorded ones, so the length check passes and only
+  // matching the whole directory can refuse them.
+  test("another folder spelled assets is not the build's output directory", async () => {
+    for (const { name, base } of servers) {
+      for (const url of IMPOSTORS) {
+        for (const encoding of ENCODINGS) {
+          const res = await get(base, url, encoding);
+          expect(res.status).toBe(200);
+          expect(`${name} ${url} ${encoding}: ${res.headers.get("Cache-Control")}`).toBe(
+            `${name} ${url} ${encoding}: no-cache`,
+          );
+        }
+      }
+    }
+  });
+
+  // The representation on the wire is the one that has to be vouched for.
+  // Measured before this: identity untouched at its recorded length, the .gz
+  // replaced 749 -> 75 bytes, and the 75 stale bytes went out `immutable`
+  // because the check was pointed at the identity file. Nearly every client
+  // sends Accept-Encoding, so that was the common case, not a corner of it.
+  test("a replaced sibling is not pinned, even though the identity file is", async () => {
+    const url = "/assets/client-50dbnr0a.js";
+    const name = "client-50dbnr0a.js";
+    const gz = join(root, "public", "assets", `${name}.gz`);
+    const original = gzipSync(HASHED_BODIES[name]);
+    try {
+      writeFileSync(gz, "unrelated bytes, nothing like the recorded sibling");
+      for (const { name: server, base } of servers) {
+        for (const encoding of ["identity", "gzip", "br"]) {
+          const res = await get(base, url, encoding);
+          // keyed off what actually came back, not off what was asked for:
+          // dev negotiates no siblings and answers identity to all three
+          const sent = res.headers.get("Content-Encoding") ?? "identity";
+          const expected = sent === "gzip" ? "no-cache" : "public, max-age=31536000, immutable";
+          expect(`${server} sent=${sent}: ${res.headers.get("Cache-Control")}`).toBe(
+            `${server} sent=${sent}: ${expected}`,
+          );
+        }
+      }
+    } finally {
+      writeFileSync(gz, original);
+    }
+  });
+
+  // a sibling on disk that no build measured cannot be pinned either, however
+  // intact the identity file beside it is
+  test("a sibling the build never measured is never pinned", async () => {
+    // this css was built with a .gz the manifest recorded and no .br at all;
+    // a .br appearing later is a file no build ever vouched for
+    const name = "style-9f3a1c07.css";
+    const br = join(root, "public", "assets", `${name}.br`);
+    try {
+      writeFileSync(br, brotliCompressSync(HASHED_BODIES[name]));
+      const fresh = buildAssetIndex(join(root, "public").replaceAll("\\", "/"), undefined, MANIFEST);
+      const info = fresh.get(`/assets/${name}`)!;
+      expect(info.identity.pinnedSize).toBe(HASHED_BODIES[name].length);
+      const pinned = Object.fromEntries(info.variants.map((v) => [v.encoding, v.pinnedSize]));
+      expect(pinned.br).toBeNull();
+      expect(pinned.gzip).toBe(gzipSync(HASHED_BODIES[name]).length);
+
+      const serve = (accept: string) =>
+        serveIndexed(
+          new Request(`http://app.test/assets/${name}`, { headers: { "accept-encoding": accept } }),
+          info,
+        );
+      const brRes = serve("br");
+      expect(brRes.headers.get("Content-Encoding")).toBe("br");
+      expect(brRes.headers.get("Cache-Control")).toBe("no-cache");
+      // and the measured sibling beside it is unaffected
+      const gzRes = serve("gzip");
+      expect(gzRes.headers.get("Content-Encoding")).toBe("gzip");
+      expect(gzRes.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
+    } finally {
+      rmSync(br, { force: true });
+    }
+  });
+
+  // The manifest vouches for bytes, not for a name. A recorded chunk deleted
+  // and recreated after boot keeps its name and its manifest entry, and used
+  // to inherit the year with them - on the live path measured directly.
+  test("a recorded name whose bytes changed after boot loses its year", async () => {
+    const url = "/assets/client-50dbnr0a.js";
+    const path = join(root, "public", "assets", "client-50dbnr0a.js");
+    const original = HASHED_BODIES["client-50dbnr0a.js"];
+    try {
+      // pinned while it is still the file the build measured
+      for (const { base } of servers) {
+        expect((await get(base, url, "identity")).headers.get("Cache-Control")).toContain(
+          "immutable",
+        );
+      }
+      writeFileSync(path, "console.log('someone rewrote this after boot');");
+      for (const { name, base } of servers) {
+        for (const encoding of ENCODINGS) {
+          const res = await get(base, url, encoding);
+          expect(`${name} ${encoding}: ${res.headers.get("Cache-Control")}`).toBe(
+            `${name} ${encoding}: no-cache`,
+          );
+        }
+      }
+      // and it is pinned again once the recorded bytes are back
+      writeFileSync(path, original);
+      expect(
+        (await get(servers[0].base, url, "identity")).headers.get("Cache-Control"),
+      ).toContain("immutable");
+    } finally {
+      writeFileSync(path, original);
+    }
+  });
+
+  // The other direction, and the cost of getting cautious wrong. Too strict and
+  // every content-addressed asset loses its year - a regression nobody notices
+  // until they measure. The old rule matched js and css alone, so bun's hashed
+  // images and fonts paid a conditional request per load forever; they are in
+  // this list on purpose.
+  test("a content-hashed asset keeps its year on every path and every encoding", async () => {
+    for (const { name, base } of servers) {
+      for (const url of HASHED) {
+        for (const encoding of [...ENCODINGS, "br", "br, gzip"]) {
+          const res = await get(base, url, encoding);
+          expect(res.status).toBe(200);
+          expect(`${name} ${url} ${encoding}: ${res.headers.get("Cache-Control")}`).toBe(
+            `${name} ${url} ${encoding}: public, max-age=31536000, immutable`,
+          );
+        }
+      }
+    }
+  });
+
+  // the invariant that actually broke: not "the wrong policy" but "no policy",
+  // which is the one answer a browser is free to replace with a guess
+  test("no asset is ever served without a policy", async () => {
+    for (const { name, base } of servers) {
+      for (const url of [...REVALIDATED, ...HASHED]) {
+        const res = await get(base, url, "gzip");
+        expect(`${name} ${url} set: ${res.headers.has("Cache-Control")}`).toBe(
+          `${name} ${url} set: true`,
+        );
+      }
+    }
+  });
+
+  // no-cache is only cheap because the revalidation it forces is answered
+  // without a body: if the etag did not round-trip, this would be a full
+  // re-download of every unhashed asset on every navigation
+  test("the forced revalidation is a bodyless 304, per path and per encoding", async () => {
+    for (const { name, base } of servers) {
+      for (const url of [...REVALIDATED, ...HASHED]) {
+        for (const encoding of ENCODINGS) {
+          const first = await get(base, url, encoding);
+          const etag = first.headers.get("ETag")!;
+          const second = await get(base, url, encoding, { "if-none-match": etag });
+          expect(`${name} ${url} ${encoding}: ${second.status}`).toBe(
+            `${name} ${url} ${encoding}: 304`,
+          );
+          expect(await second.text()).toBe("");
+          // the validators and the policy survive the 304, or the cache
+          // updates its entry with nothing and asks again next time
+          expect(second.headers.get("ETag")).toBe(etag);
+          expect(second.headers.get("Cache-Control")).toBe(first.headers.get("Cache-Control"));
+        }
+      }
+    }
+  });
 });

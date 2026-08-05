@@ -60,8 +60,19 @@ GET /assets/style-{{HASH}}.css
 GET /site.css
   accept-encoding: gzip, br
 --> 200
+  cache-control: no-cache
   content-length: 18
   content-type: text/css;charset=utf-8
+  etag: "i-{{MTIME}}"
+  last-modified: {{HTTP_DATE}}
+  vary: Accept-Encoding
+
+### app file in assets/, hash-shaped name
+GET /assets/hero-carousel.js
+--> 200
+  cache-control: no-cache
+  content-length: 18
+  content-type: text/javascript;charset=utf-8
   etag: "i-{{MTIME}}"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
@@ -80,6 +91,7 @@ GET /sw.js
 GET /logo.png
   accept-encoding: gzip, br
 --> 200
+  cache-control: no-cache
   content-length: 21
   content-type: image/png
   etag: "l-{{MTIME}}"

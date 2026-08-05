@@ -309,6 +309,7 @@ describe("golden: asset headers", () => {
   const SITE_CSS = "main{padding:1rem}"; // 18
   const SW = "self.addEventListener('fetch',()=>{});"; // 38
   const PNG = "PNG bytes, not really"; // 21
+  const VENDORED = "window.carousel=1;"; // 18
 
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), "borgo-golden-assets-"));
@@ -322,7 +323,23 @@ describe("golden: asset headers", () => {
     w("site.css", SITE_CSS);
     w("sw.js", SW);
     w("logo.png", PNG);
-    index = buildAssetIndex(join(dir, "public"));
+    // an app file dropped into the build's output directory, whose name is the
+    // exact shape the old rule mistook for a content hash
+    w("assets/hero-carousel.js", VENDORED);
+    // what the build recorded: the two names it actually hashed, and nothing
+    // else that happens to sit beside them
+    index = buildAssetIndex(join(dir, "public"), undefined, {
+      dir: join(dir, "public", "assets").replaceAll("\\", "/"),
+      // every representation the build wrote, siblings included: each goes out
+      // under the same directive, so each has to be vouched for separately
+      sizes: new Map([
+        ["app-a1b2c3d4.js", JS.length],
+        ["app-a1b2c3d4.js.gz", JS_GZ.length],
+        ["app-a1b2c3d4.js.br", JS_BR.length],
+        ["style-9f3a1c07.css", CSS.length],
+        ["style-9f3a1c07.css.gz", CSS_GZ.length],
+      ]),
+    });
   });
 
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -370,6 +387,9 @@ describe("golden: asset headers", () => {
         "accept-encoding": "br, gzip",
       }),
       shot("unhashed stylesheet, no siblings", "/site.css", { "accept-encoding": "gzip, br" }),
+      // an eight-letter word where a content hash was assumed to be: the build
+      // never emitted this file, so its url promises nothing
+      shot("app file in assets/, hash-shaped name", "/assets/hero-carousel.js"),
       shot("service worker", "/sw.js"),
       shot("non-compressible file", "/logo.png", { "accept-encoding": "gzip, br" }),
       shot("revalidation on the identity etag", "/assets/app-a1b2c3d4.js", {

@@ -1,7 +1,19 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { buildAssetIndex } from "../src/compress";
+
+// an app with react installed, so a real bundle can resolve its imports
+const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
 import {
   assetsBuildMode,
   buildAssets,
@@ -10,10 +22,14 @@ import {
   compileCss,
   cssSource,
   generateManifest,
+  hashedOutputNames,
   isSweepable,
+  nameCarriesHash,
   parseHydrate,
   precacheStamp,
   readBuildInventory,
+  readBuildOutputs,
+  recordedOutputSizes,
   refreshTransform,
   renameUnsafeChunks,
   reservedRoutes,
@@ -565,7 +581,7 @@ describe("build inventory", () => {
     const path = join(dir, "build-output.json");
     try {
       expect(readBuildInventory(path)).toBeNull();
-      await writeBuildInventory(["b.js", "a.js", "b.js"], path);
+      await writeBuildInventory(["b.js", "a.js", "b.js"], null, path);
       expect(readBuildInventory(path)).toEqual(["a.js", "b.js"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -584,6 +600,290 @@ describe("build inventory", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("the vouched-for outputs round-trip with their directory and their sizes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-inventory-"));
+    const path = join(dir, "build-output.json");
+    try {
+      await writeBuildInventory(
+        ["client.js", "page-a1b2c3d4.js"],
+        { dir: "public/assets", sizes: { "page-a1b2c3d4.js": 512 } },
+        path,
+      );
+      expect(readBuildInventory(path)).toEqual(["client.js", "page-a1b2c3d4.js"]);
+      const outputs = readBuildOutputs(path);
+      // the directory travels with the list, or the server is back to
+      // recognising an output by the shape of its path
+      expect(outputs.dir).toBe("public/assets");
+      expect([...outputs.sizes]).toEqual([["page-a1b2c3d4.js", 512]]);
+      // the entry point is emitted by the same build and is emphatically not
+      // content-addressed: being in `files` must never imply being vouched for
+      expect(outputs.sizes.has("client.js")).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("recordedOutputSizes measures the disk, and skips what is not there", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-sizes-"));
+    try {
+      writeFileSync(join(dir, "a-a1b2c3d4.js"), "12345");
+      writeFileSync(join(dir, "a-a1b2c3d4.js.gz"), "123");
+      // a precompressed sibling is measured under its own name, because it is
+      // served under the same url and pinned by the same directive
+      expect(
+        recordedOutputSizes(dir.replaceAll("\\", "/"), [
+          "a-a1b2c3d4.js",
+          "a-a1b2c3d4.js.gz",
+          "gone.js",
+        ]),
+      ).toEqual({ "a-a1b2c3d4.js": 5, "a-a1b2c3d4.js.gz": 3 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A recorded length of 0 would pin any empty file at that name - every empty
+  // file matches it - so the length check would carry no information for
+  // exactly the case where a truncated or half-written file is on disk. An
+  // empty output that revalidates forever costs a 304 on nothing.
+  test("an empty output is never vouched for, on the way in or the way out", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-empty-"));
+    const path = join(dir, "build-output.json");
+    try {
+      writeFileSync(join(dir, "empty-a1b2c3d4.js"), "");
+      expect(recordedOutputSizes(dir.replaceAll("\\", "/"), ["empty-a1b2c3d4.js"])).toEqual({});
+      // and a manifest that names one anyway is not believed
+      writeFileSync(path, JSON.stringify({ dir: "public/assets", hashed: { "e-a1b2c3d4.js": 0 } }));
+      expect(readBuildOutputs(path).sizes.size).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // every one of these pins an asset for a year if it reads as "hashed", so
+  // each degradation has to land on the empty set rather than on a guess
+  test("a missing, old or malformed inventory vouches for nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-inventory-"));
+    const path = join(dir, "build-output.json");
+    const empty = () => {
+      const out = readBuildOutputs(path);
+      return out.dir === "" && out.sizes.size === 0;
+    };
+    try {
+      expect(empty()).toBe(true); // no file at all
+      for (const body of [
+        "{not json",
+        "",
+        JSON.stringify({ files: ["page-a1b2c3d4.js"] }), // an older borgo
+        JSON.stringify({ hashed: { "a.js": 1 } }), // no directory recorded
+        JSON.stringify({ dir: "", hashed: { "a.js": 1 } }),
+        JSON.stringify({ dir: "public/assets" }), // nothing vouched for
+        JSON.stringify({ dir: "public/assets", hashed: ["a.js"] }), // wrong shape
+        JSON.stringify({ dir: "public/assets", hashed: "a.js" }),
+        JSON.stringify({ dir: 7, hashed: { "a.js": 1 } }),
+        // sizes that are not sizes
+        JSON.stringify({ dir: "public/assets", hashed: { "a.js": "1" } }),
+        JSON.stringify({ dir: "public/assets", hashed: { "a.js": -1 } }),
+        JSON.stringify({ dir: "public/assets", hashed: { "a.js": 1.5 } }),
+        JSON.stringify({ dir: "public/assets", hashed: { "a.js": null } }),
+        // names that are not names in that directory
+        JSON.stringify({ dir: "public/assets", hashed: { "../../etc/passwd": 1 } }),
+        JSON.stringify({ dir: "public/assets", hashed: { "sub/a.js": 1 } }),
+        JSON.stringify({ dir: "public/assets", hashed: { "sub\\a.js": 1 } }),
+        JSON.stringify({ dir: "public/assets", hashed: { "": 1 } }),
+      ]) {
+        writeFileSync(path, body);
+        expect(`${body.slice(0, 60)} -> vouches for nothing`).toBe(
+          `${body.slice(0, 60)} -> ${empty() ? "vouches for nothing" : "PINNED SOMETHING"}`,
+        );
+      }
+      // a partly-junk map keeps only the entries that are actually usable
+      writeFileSync(
+        path,
+        JSON.stringify({ dir: "public/assets", hashed: { "ok-a1b2c3d4.js": 9, "sub/x.js": 1, "b.js": "x" } }),
+      );
+      expect([...readBuildOutputs(path).sizes]).toEqual([["ok-a1b2c3d4.js", 9]]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The distinction the old rule could not make. Bun reports a content hash for
+// every artifact including the entry points, and borgo names those
+// "[name].[ext]" on purpose - so "has a hash" and "says its hash in its name"
+// are different questions, and only the second one is a promise to a cache.
+describe("nameCarriesHash", () => {
+  test("a name is a promise only when it contains that file's own hash", () => {
+    expect(nameCarriesHash("page-a1b2c3d4.js", "a1b2c3d4")).toBe(true);
+    expect(nameCarriesHash("out/assets/logo-6nnjve26.png", "6nnjve26")).toBe(true);
+    // the entry: bun computed a hash, borgo's naming block kept it out of the
+    // filename, and the url therefore promises nothing
+    expect(nameCarriesHash("client.js", "7js0fvsn")).toBe(false);
+    // a different build's hash is not this file's hash
+    expect(nameCarriesHash("page-a1b2c3d4.js", "ffffffff")).toBe(false);
+    expect(nameCarriesHash("client.js", null)).toBe(false);
+    expect(nameCarriesHash("client.js", "")).toBe(false);
+  });
+
+  test("an eight-letter word is not a hash, however much it looks like one", () => {
+    // the exact names measured on the wire under the old shape rule
+    for (const word of ["stripe-checkout.js", "vendor-database.css", "hero-carousel.js"]) {
+      expect(nameCarriesHash(word, null)).toBe(false);
+    }
+  });
+
+  test("hashedOutputNames keeps only the names that carry their hash", () => {
+    const outputs = [
+      { path: "out/assets/client.js", hash: "7js0fvsn" }, // entry: hash not in name
+      { path: "out/assets/page-a1b2c3d4.js", hash: "a1b2c3d4" },
+      { path: "out/assets/logo-6nnjve26.png", hash: "6nnjve26" },
+      { path: "out/assets/vendored.js", hash: null }, // not the bundler's
+    ];
+    expect(hashedOutputNames(outputs)).toEqual(["page-a1b2c3d4.js", "logo-6nnjve26.png"]);
+  });
+
+  // renameUnsafeChunks moves the files bun could not name, and the url a cache
+  // asks about is the name on disk - so the rename has to be followed, or the
+  // manifest names a file nobody can request
+  test("hashedOutputNames follows a renamed chunk to where it landed", () => {
+    const outputs = [{ path: "out/assets/[name]-p5d0n9ga.js", hash: "p5d0n9ga" }];
+    const renamed = new Map([["out/assets/[name]-p5d0n9ga.js", "out/assets/chunk-p5d0n9ga.js"]]);
+    expect(hashedOutputNames(outputs, (p) => renamed.get(p) ?? p)).toEqual(["chunk-p5d0n9ga.js"]);
+  });
+
+  // The wiring, end to end: a real build, and the file a running server will
+  // actually read. Everything either side of this line is unit-tested, but the
+  // line itself is what decides whether the entry bundle gets pinned for a
+  // year - which is the exact defect this whole change exists to remove.
+  //
+  // It runs inside examples/tasks because a real bundle has to resolve react,
+  // and skips where that app has no node_modules rather than failing there.
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "a real build records its chunks as hashed and its entry as not",
+    async () => {
+      const dir = mkdtempSync(join(APP_HOST, "borgo-build-inventory-"));
+      const cwd = process.cwd();
+      try {
+        mkdirSync(join(dir, "pages"), { recursive: true });
+        writeFileSync(join(dir, "pages/index.tsx"), "export default () => <h1>hi</h1>;\n");
+        writeFileSync(join(dir, "pages/about.tsx"), "export default () => <p>about</p>;\n");
+        process.chdir(dir);
+        // a production build, because dev writes no precompressed siblings and
+        // the siblings are half of what the manifest has to vouch for
+        await buildAssets(false);
+
+        const files = readBuildInventory()!;
+        const outputs = readBuildOutputs();
+        expect(files).toContain("client.js");
+        // the entry is emitted by this very build and is still not cacheable:
+        // `on the inventory` and `content-addressed` are different questions
+        expect(outputs.sizes.has("client.js")).toBe(false);
+        expect(outputs.sizes.size).toBeGreaterThan(0);
+        // the directory the server will match against, recorded by the build
+        expect(outputs.dir).toBe("public/assets");
+        // nothing is vouched for that the build did not emit, every recorded
+        // length is the length actually on disk - measured after
+        // renameUnsafeChunks rewrites imports, which changes byte counts - and
+        // nothing empty is recorded at all
+        for (const [name, size] of outputs.sizes) {
+          // a precompressed sibling is vouched for under its own name; the file
+          // it derives from is the one the build emitted
+          expect(files).toContain(name.replace(/\.(gz|br)$/, ""));
+          expect(statSync(join("public/assets", name)).size).toBe(size);
+          expect(size).toBeGreaterThan(0);
+        }
+
+        // the precompressed siblings are measured too: they go out under the
+        // same url and the same directive, so each is vouched for by name
+        const siblings = [...outputs.sizes.keys()].filter((n) => /\.(gz|br)$/.test(n));
+        expect(siblings.length).toBeGreaterThan(0);
+        for (const sibling of siblings) {
+          expect(outputs.sizes.has(sibling.replace(/\.(gz|br)$/, ""))).toBe(true);
+        }
+
+        // the payoff, stated where a server would ask it
+        const index = buildAssetIndex("public", undefined, outputs);
+        expect(index.get("/assets/client.js")!.identity.pinnedSize).toBeNull();
+        const chunk = [...index].find(([url]) => outputs.sizes.has(url.split("/").pop()!))!;
+        expect(chunk[1].identity.pinnedSize).toBe(
+          outputs.sizes.get(chunk[0].split("/").pop()!) ?? null,
+        );
+      } finally {
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+
+  // Against the real bundler, under borgo's own naming block. This is the seam
+  // the whole policy rests on: if bun changes how it names chunks or stops
+  // hashing imported assets, the manifest silently narrows and every asset
+  // quietly loses its year - the failure direction assetCacheControl documents.
+  // No react here on purpose, so it runs anywhere a tmpdir does.
+  test("bun's own output classifies the way the manifest assumes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-naming-"));
+    try {
+      writeFileSync(join(dir, "logo.png"), "PNG bytes, not really");
+      writeFileSync(join(dir, "inter.woff2"), "WOFF2 bytes, not really");
+      writeFileSync(join(dir, "lazy.ts"), "export const lazy = () => 'split out';\n");
+      writeFileSync(
+        join(dir, "client.ts"),
+        [
+          "import logo from './logo.png';",
+          "import font from './inter.woff2';",
+          "export const boot = async () => [logo, font, (await import('./lazy')).lazy()];",
+        ].join("\n"),
+      );
+
+      const result = await Bun.build({
+        entrypoints: [join(dir, "client.ts")],
+        outdir: join(dir, "out"),
+        splitting: true,
+        // the same block buildAssets uses: entries keep a stable name, and
+        // everything else is named by content
+        naming: { entry: "[name].[ext]", chunk: "[name]-[hash].[ext]" },
+        throw: false,
+      });
+      expect(result.success).toBe(true);
+
+      const classified = result.outputs.map((o) => ({
+        file: basename(o.path),
+        kind: o.kind,
+        hashed: nameCarriesHash(o.path, o.hash),
+      }));
+      const of = (kind: string) => classified.filter((c) => c.kind === kind);
+
+      // the exact list buildAssets records, against real bundler output: every
+      // artifact except the entry, and the entry emphatically not among them
+      const recorded = hashedOutputNames(result.outputs);
+      expect(recorded.sort()).toEqual(classified.filter((c) => c.hashed).map((c) => c.file).sort());
+      expect(recorded).not.toContain("client.js");
+      expect(recorded.length).toBe(result.outputs.length - 1);
+
+      // the entry: bun computes a hash for it, borgo keeps it out of the name,
+      // and it must therefore never be pinned
+      const entry = of("entry-point");
+      expect(entry.map((e) => e.file)).toEqual(["client.js"]);
+      expect(entry.every((e) => e.hashed)).toBe(false);
+      expect(result.outputs.find((o) => o.kind === "entry-point")!.hash).toBeTruthy();
+
+      // the split chunk, and the imported image and font - the last two are
+      // exactly what the old js/css rule refused to cache
+      expect(of("chunk").length).toBeGreaterThan(0);
+      expect(of("chunk").every((c) => c.hashed)).toBe(true);
+      const assets = of("asset");
+      expect(assets.map((a) => a.file.replace(/-[^.]+\./, ".")).sort()).toEqual([
+        "inter.woff2",
+        "logo.png",
+      ]);
+      expect(assets.every((a) => a.hashed)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe("sweepBuildOutput", () => {

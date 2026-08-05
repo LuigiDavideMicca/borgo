@@ -7,11 +7,113 @@ const compressibleRe = /\.(js|mjs|css|html|htm|svg|json|map|txt|xml|webmanifest)
 
 export const isCompressiblePath = (path: string) => compressibleRe.test(path);
 
-// bun's chunk naming is [name]-[hash].[ext]: a new hash on every content
-// change makes these safe to cache forever. scoped to the build-owned
-// assets dir so a user file that happens to match stays out
-export const isHashedAsset = (path: string) =>
-  /(^|\/)assets\/[^/]+-[a-z0-9]{8}\.(js|css)$/i.test(path.replaceAll("\\", "/"));
+// What a build vouched for: where it wrote, and the byte length of each output
+// whose name carries its own content hash. A list rather than a pattern - see
+// readBuildOutputs in build.ts for the measurement that killed the pattern -
+// and a length rather than a bare name, because `immutable` is a claim about
+// bytes and a name alone cannot keep it.
+export type BuildOutputs = { dir: string; sizes: ReadonlyMap<string, number> };
+
+// no build has vouched for anything, so nothing is pinned. every default in
+// this file points here on purpose.
+export const NO_BUILD_OUTPUTS: BuildOutputs = { dir: "", sizes: new Map() };
+
+const IMMUTABLE = "public, max-age=31536000, immutable";
+
+const asUrl = (path: string) => path.replaceAll("\\", "/");
+
+const isServiceWorker = (url: string) => url === "public/sw.js" || url.endsWith("/public/sw.js");
+
+/**
+ * The byte length the build recorded for this exact path, or null if no build
+ * vouched for it.
+ *
+ * The directory is compared whole, not by segment name. Gating on
+ * `/(^|\/)assets\//` accepted *any* folder called assets: measured on the wire,
+ * /copy/assets/index-n12gjnyv.js and /deep/nested/assets/index-n12gjnyv.js were
+ * pinned for a year on bytes the bundler never saw, because their basename was
+ * in the manifest and an ancestor happened to be spelled "assets". Every
+ * bundle an app copies into public/ ships such a folder. The build knows the
+ * one directory it wrote, so it records it and this compares against that.
+ */
+export function recordedSize(path: string, outputs: BuildOutputs): number | null {
+  const dir = asUrl(outputs.dir).replace(/\/+$/, "");
+  if (!dir) return null;
+  const url = asUrl(path);
+  if (!url.startsWith(dir + "/")) return null;
+  const name = url.slice(dir.length + 1);
+  // directly in the output directory: the manifest keys are filenames, and a
+  // deeper path is a different file whatever it is called
+  if (!name || name.includes("/")) return null;
+  return outputs.sizes.get(name) ?? null;
+}
+
+// null when the build never vouched for this path. a service worker is named
+// explicitly and never pinned: it controls every url in its scope, so it must
+// keep revalidating even if the rules around it are ever loosened.
+export const pinnedSizeFor = (path: string, outputs: BuildOutputs): number | null =>
+  isServiceWorker(asUrl(path)) ? null : recordedSize(path, outputs);
+
+/**
+ * The one place a year is granted, and it is granted against the disk - twice.
+ *
+ * The manifest vouches for a *name*; whatever occupies that name would
+ * otherwise inherit the year. Measured: a recorded chunk deleted and recreated
+ * with different bytes after boot was still served `immutable`. Comparing the
+ * recorded length turns "this name was once hashed" into "this file is still
+ * the file that was hashed", which is the claim `immutable` actually makes.
+ *
+ * Two lengths, not one, and neither alone is enough. Checking only the identity
+ * file pinned a replaced sibling: 749 -> 75 bytes, and the stale 75 shipped
+ * `immutable` to every client that sent Accept-Encoding, which is nearly all of
+ * them. Checking only the representation sent would let a partial deploy that
+ * rewrote the identity file and left the .gz behind keep pinning that .gz - and
+ * `immutable` is a promise about the *url*, which no longer holds one content
+ * once its representations disagree. So a sibling is pinned only when it is
+ * itself vouched for and the identity beside it still is too.
+ *
+ * Length, not a per-request digest, and not mtime. A digest would read every
+ * asset on every hit. mtime moves whenever a deploy copies a file that did not
+ * change, so it would unpin the entire bundle on every release - the strict
+ * failure, permanently on. Length survives a copy and moves with almost any
+ * edit. What it does not catch is a replacement of exactly the same byte
+ * length under a name that already carried a matching content hash, which is
+ * the residual hole and is documented as such.
+ *
+ * DECLARED LIMITATION - the length is compared, and then the bytes are sent;
+ * the two are not atomic. A file rewritten in the window between them goes out
+ * under a directive granted for its previous contents. Measured under a loop
+ * rewriting public/assets in place beneath a running server: 22 responses in
+ * 10,628 on the indexed path and 7 in 11,230 on the live path, the latter 204s
+ * with an empty body pinned for a year.
+ *
+ * It is not closed here because it cannot be closed by the handle. Holding the
+ * file open does not help: an in-place rewrite truncates the same inode, and a
+ * descriptor opened before it reports the new length afterwards (measured:
+ * 1000 -> 20 bytes through one fd). Closing it means reading every asset into
+ * memory to measure the bytes actually sent - a per-request cost this path
+ * exists to avoid, since `new Response(Bun.file(...))` streams off the disk and
+ * never through the process.
+ *
+ * The trigger is a deploy that rewrites public/assets in place. For a
+ * content-addressed name that is already the hash lying about its bytes - the
+ * residual above - so the exposure a correct build adds is the transient one:
+ * during the rewrite a client may cache a truncated or oversized body for a
+ * year. Deploying into a new directory and swapping, which is what the
+ * Dockerfile does, does not reach this window at all.
+ */
+const vouched = (pinnedSize: number | null, sizeOnDisk: number | null): boolean =>
+  pinnedSize !== null && pinnedSize === sizeOnDisk;
+
+export const pinPolicy = (
+  sent: number | null,
+  sentSize: number | null,
+  // defaults collapse to one check when the representation being sent *is* the
+  // identity, which is the only case where the two questions are the same one
+  identity: number | null = sent,
+  identitySize: number | null = sentSize,
+): string =>
+  vouched(sent, sentSize) && vouched(identity, identitySize) ? IMMUTABLE : "no-cache";
 
 // picks the first server-preferred encoding the client accepts (q > 0).
 //
@@ -80,13 +182,21 @@ export async function precompressAssets(dir: string) {
 export const assetEtag = (size: number, mtimeMs: number, suffix: string): string =>
   `"${size.toString(36)}-${Math.floor(mtimeMs).toString(36)}${suffix}"`;
 
-export type AssetVariant = { path: string; encoding?: "br" | "gzip"; etag: string; size: number };
+// pinnedSize is the byte length the build recorded for *this representation's*
+// file, or null if no build vouched for it. Per variant, not per url: the
+// directive travels on the response, and the response carries these bytes.
+export type AssetVariant = {
+  path: string;
+  encoding?: "br" | "gzip";
+  etag: string;
+  size: number;
+  pinnedSize: number | null;
+};
 
 export type AssetInfo = {
   identity: AssetVariant;
   // precompressed siblings in server preference order
   variants: AssetVariant[];
-  cacheControl: string;
   compressible: boolean;
   mtimeMs: number;
   lastModified: string;
@@ -102,6 +212,7 @@ export type AssetInfo = {
 export function buildAssetIndex(
   dir: string,
   caseInsensitive: boolean = CASE_INSENSITIVE_FS,
+  outputs: BuildOutputs = NO_BUILD_OUTPUTS,
 ): Map<string, AssetInfo> {
   const files = new Map<string, { size: number; mtimeMs: number }>();
   let entries: Dirent[];
@@ -142,14 +253,19 @@ export function buildAssetIndex(
             encoding,
             etag: tag(path + ext, `-${encoding}`),
             size: sibling.size,
+            pinnedSize: pinnedSizeFor(path + ext, outputs),
           });
         }
       }
     }
     const info: AssetInfo = {
-      identity: { path, etag: tag(path, ""), size: file.size },
+      identity: {
+        path,
+        etag: tag(path, ""),
+        size: file.size,
+        pinnedSize: pinnedSizeFor(path, outputs),
+      },
       variants,
-      cacheControl: assetCacheControl(path),
       compressible,
       mtimeMs: file.mtimeMs,
       lastModified: new Date(file.mtimeMs).toUTCString(),
@@ -166,12 +282,73 @@ export function buildAssetIndex(
   return index;
 }
 
-// hashed build outputs cache forever; a service worker must never be
-// heuristically cached, or updates to it (and to everything it controls) lag
-// behind deploys
-export function assetCacheControl(path: string): string {
-  if (path === "public/sw.js" || path.endsWith("/public/sw.js")) return "no-cache";
-  return isHashedAsset(path) ? "public, max-age=31536000, immutable" : "";
+// An asset may be reused without asking only when its url is a promise about
+// its bytes; everything else must be revalidated first. rfc 9111 §4.2.2 lets a
+// cache invent a freshness lifetime when none is given, and browsers commonly
+// take ~10% of (now - Last-Modified), so an asset untouched for 100 days is
+// heuristically fresh for ~10. The document is private, no-store and therefore
+// always fresh, so a returning browser fetches today's html after a deploy and
+// runs yesterday's /assets/client.js against today's ssr markup and today's
+// props shape, without ever asking. no-cache is "revalidate before reuse", not
+// no-store: the etag beside it turns each revalidation into a bodyless 304.
+//
+// What counts as that promise is decided by three facts, none of which a name
+// can supply on its own, because every previous version of this rule accepted a
+// name as proof and every one of them was wrong on the wire:
+//
+//   1. the bundler put this file's own content hash into its name
+//      (build.ts nameCarriesHash). The rule before that was
+//      `-[a-z0-9]{8}\.(js|css)` under assets/, which any eight-letter word
+//      satisfies - /assets/stripe-checkout.js and /assets/hero-carousel.js
+//      were pinned for a year, and google-analytics.js escaped only because
+//      "analytics" is nine characters;
+//   2. it sits in the one directory the build wrote, compared whole. Gating on
+//      a path segment called "assets" pinned /copy/assets/… and
+//      /deep/nested/assets/… - bytes the bundler never saw - and every bundle
+//      an app copies into public/ ships such a folder;
+//   3. the file *about to be sent* still has the byte length the build
+//      recorded for it. The manifest vouches for a name, and whatever occupies
+//      that name would otherwise inherit the year: a recorded chunk deleted and
+//      recreated after boot was served `immutable` on bytes nobody had ever
+//      hashed. The representation matters as much as the url - checking the
+//      identity file while shipping a replaced .gz pinned 75 stale bytes where
+//      749 had been vouched for, and since nearly every client sends
+//      Accept-Encoding that was the common case, not a corner of it. Each
+//      encoding is therefore vouched for separately, on AssetVariant.
+//
+// The comment that once defended (1) claimed assets/ was build-owned;
+// build.ts says the opposite in its own words - it is "also where an app drops
+// an analytics snippet or a vendored widget" - and the inventory exists at all
+// because the sweep had already been burned by the identical assumption.
+//
+// how this fails if it is wrong: an asset that really is content-addressed
+// loses its year - `.borgo/` not copied into an image, an app upgrading from a
+// borgo that recorded no sizes, public/assets holding a different build than
+// the manifest describes, or a file legitimately rewritten to a new length -
+// and pays one conditional request per asset per load. That is a performance
+// regression and it surfaces only in a measurement. The other direction now
+// needs all three facts at once, for the exact file being sent. What survives
+// it is a replacement of exactly the recorded byte length under a name that
+// already carried a matching content hash inside the build's own directory,
+// and the rewrite window declared on pinPolicy. Doubt resolves toward
+// revalidating: every degradation of the manifest pins nothing, a sibling the
+// build did not measure is never pinned even when its identity file is, a
+// recorded length of zero is dropped rather than stored, and an asset nobody
+// can vouch for is never cached.
+export function assetCacheControl(
+  sentPath: string,
+  outputs: BuildOutputs = NO_BUILD_OUTPUTS,
+  sentSize: number | null = null,
+  // the identity file behind the representation being sent. Defaults to the
+  // representation itself, which is what it is whenever no sibling was chosen.
+  identity: { path: string; size: number | null } = { path: sentPath, size: sentSize },
+): string {
+  return pinPolicy(
+    pinnedSizeFor(sentPath, outputs),
+    sentSize,
+    pinnedSizeFor(identity.path, outputs),
+    identity.size,
+  );
 }
 
 // rfc 9110: if-none-match decides on its own when present, if-modified-since
@@ -285,7 +462,28 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
   }
   if (!live) return new Response("not found", { status: 404 });
   const headers = new Headers();
-  if (info.cacheControl) headers.set("Cache-Control", info.cacheControl);
+  // Settled against the disk, and against the representation about to go out.
+  // The index remembers which names the build vouched for; whether the file on
+  // disk is still that file is a question only this stat can answer, and a
+  // chunk deleted and rewritten after boot used to inherit the year along with
+  // the name.
+  //
+  // `variant` first, because the directive travels on the response and the
+  // response carries these bytes: with the identity untouched at its recorded
+  // length and index-n12gjnyv.js.gz replaced 749 -> 75 bytes, the 75 stale
+  // bytes went out `immutable`. `live` is already this variant's stat, so that
+  // half is free. The identity is checked too, and only when a sibling was
+  // chosen - one stat, for an asset that is a pin candidate at all - because a
+  // url whose identity file moved out from under its siblings no longer has
+  // one content to promise.
+  //
+  // Unconditional set: the `if` that used to guard this line is how production
+  // shipped its unhashed assets with no policy whatsoever.
+  const identityNow = variant.encoding ? (statOf(info.identity.path)?.size ?? null) : live.size;
+  headers.set(
+    "Cache-Control",
+    pinPolicy(variant.pinnedSize, live.size, info.identity.pinnedSize, identityNow),
+  );
   if (info.compressible) headers.set("Vary", "Accept-Encoding");
   headers.set("ETag", variant.etag);
   headers.set("Last-Modified", info.lastModified);
@@ -336,7 +534,7 @@ export function serveAsset(
   req: Request,
   path: string,
   asset: ReturnType<typeof Bun.file>,
-  { dev }: { dev: boolean },
+  { dev, outputs = NO_BUILD_OUTPUTS }: { dev: boolean; outputs?: BuildOutputs },
 ): Response {
   let base: { size: number; mtimeMs: number };
   try {
@@ -347,14 +545,8 @@ export function serveAsset(
   }
 
   const headers = new Headers();
-  // an asset with no explicit policy and a Last-Modified is an asset the
-  // browser may heuristically cache for a tenth of its age - in dev, where
-  // these are rebuilt in place under stable names, that is yesterday's bundle
-  // pinned for the afternoon. no-cache still allows the 304 below.
-  const cacheControl = assetCacheControl(path) || (dev ? "no-cache" : "");
-  if (cacheControl) headers.set("Cache-Control", cacheControl);
-
   let file = asset;
+  let sentPath = path;
   let size = base.size;
   let etag = assetEtag(base.size, base.mtimeMs, "");
   if (isCompressiblePath(path)) {
@@ -366,6 +558,7 @@ export function serveAsset(
       try {
         const sibling = statSync(siblingPath);
         file = Bun.file(siblingPath);
+        sentPath = siblingPath;
         size = sibling.size;
         etag = assetEtag(sibling.size, sibling.mtimeMs, `-${encoding}`);
         headers.set("Content-Encoding", encoding);
@@ -375,6 +568,19 @@ export function serveAsset(
       }
     }
   }
+
+  // Set after negotiation, because what is vouched for is the representation
+  // that goes out: `sentPath`/`size` are the sibling's once one is chosen, and
+  // checking the identity file instead pinned whatever bytes a replaced .gz
+  // happened to hold. Both lengths are stats this function already took, so
+  // the whole rule is free here. The same function and manifest the index path
+  // uses, so the two cannot answer one url two ways. The fallback that used to
+  // live here was `dev ? ... : ""`, armed only where a stale asset costs an
+  // afternoon and disarmed where it survives a deploy.
+  headers.set(
+    "Cache-Control",
+    assetCacheControl(sentPath, outputs, size, { path, size: base.size }),
+  );
 
   headers.set("ETag", etag);
   // one date for every variant of the url, like serveIndexed - which is

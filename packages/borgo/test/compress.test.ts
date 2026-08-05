@@ -10,11 +10,12 @@ import {
   documentStream,
   gzipStream,
   isCompressiblePath,
-  isHashedAsset,
   isNotModified,
   jsonResponse,
+  NO_BUILD_OUTPUTS,
   pickEncoding,
   precompressAssets,
+  type BuildOutputs,
 } from "../src/compress";
 
 describe("pickEncoding", () => {
@@ -62,13 +63,137 @@ describe("asset classification", () => {
     }
   });
 
-  test("hashed build outputs are detected, plain files are not", () => {
-    expect(isHashedAsset("public/assets/client-6f5e37fs.js")).toBe(true);
-    expect(isHashedAsset("public/assets/[id]-p5d0n9ga.js")).toBe(true);
-    expect(isHashedAsset("public/assets/client.js")).toBe(false);
-    expect(isHashedAsset("public/assets/islands-client.js")).toBe(false);
-    expect(isHashedAsset("public/assets/style.css")).toBe(false);
-    expect(isHashedAsset("public/my-download.js")).toBe(false);
+  // The old rule read the *shape* of a name: `-[a-z0-9]{8}\.(js|css)` under
+  // assets/. Any eight-letter word satisfies that, so these three were served
+  // `immutable` for a year off a real production build, and updating one in
+  // place left every browser that had seen it holding the old copy with no
+  // revalidation. Nothing about a name can settle this; only the build knows.
+  const OUT: BuildOutputs = {
+    dir: "public/assets",
+    sizes: new Map([
+      ["client-50dbnr0a.js", 100],
+      ["logo-6nnjve26.png", 200],
+      ["inter-6nnjve26.woff2", 300],
+    ]),
+  };
+  const IMMUTABLE = "public, max-age=31536000, immutable";
+
+  test("an eight-letter word does not buy a year", () => {
+    for (const name of [
+      "stripe-checkout.js",
+      "vendor-database.css",
+      "hero-carousel.js",
+      "google-analytics.js", // escaped the old rule only by being nine letters
+    ]) {
+      expect(`${name}: ${assetCacheControl(`public/assets/${name}`, OUT, 100)}`).toBe(
+        `${name}: no-cache`,
+      );
+    }
+  });
+
+  test("only a name the build recorded, at the length it recorded, is pinned", () => {
+    expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, 100)).toBe(IMMUTABLE);
+    // the extensions the old js/css rule refused, which bun hashes all the same
+    expect(assetCacheControl("public/assets/logo-6nnjve26.png", OUT, 200)).toBe(IMMUTABLE);
+    expect(assetCacheControl("public/assets/inter-6nnjve26.woff2", OUT, 300)).toBe(IMMUTABLE);
+    // emitted by the same build, deliberately not hashed
+    expect(assetCacheControl("public/assets/client.js", OUT, 100)).toBe("no-cache");
+    expect(assetCacheControl("public/assets/style.css", OUT, 100)).toBe("no-cache");
+  });
+
+  // the manifest vouches for bytes, not for a name. a recorded chunk deleted
+  // and recreated after boot keeps the name and the entry, and used to inherit
+  // the year with them
+  test("a recorded name at the wrong length is not the file that was hashed", () => {
+    expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, 101)).toBe("no-cache");
+    expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, 0)).toBe("no-cache");
+    // an unstattable file settles the same way: unknown is not a promise
+    expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, null)).toBe("no-cache");
+  });
+
+  // The directory is matched whole. Gating on a path *segment* called "assets"
+  // pinned /copy/assets/… and /deep/nested/assets/… on the wire - bytes the
+  // bundler never saw - because the basename was recorded and some ancestor
+  // happened to be spelled the same. Every bundle copied into public/ ships one.
+  test("only the build's own output directory, not any folder spelled assets", () => {
+    for (const path of [
+      "public/copy/assets/client-50dbnr0a.js",
+      "public/deep/nested/assets/client-50dbnr0a.js",
+      "public/vendor/client-50dbnr0a.js",
+      "public/client-50dbnr0a.js",
+      "public/assetsx/client-50dbnr0a.js",
+      // inside the right directory but a level down: a different file
+      "public/assets/sub/client-50dbnr0a.js",
+    ]) {
+      expect(`${path}: ${assetCacheControl(path, OUT, 100)}`).toBe(`${path}: no-cache`);
+    }
+  });
+
+  // readBuildOutputs drops manifest keys carrying a separator, so this can only
+  // arrive from a BuildOutputs built in code - which the type permits. "Only
+  // files directly in the output directory" has to hold either way, or the
+  // reader's filter is the single thing standing between a crafted manifest
+  // and a pinned path somewhere else in the tree.
+  test("a manifest key with a separator still cannot reach below the directory", () => {
+    const sneaky: BuildOutputs = {
+      dir: "public/assets",
+      sizes: new Map([["sub/client-50dbnr0a.js", 100]]),
+    };
+    expect(assetCacheControl("public/assets/sub/client-50dbnr0a.js", sneaky, 100)).toBe("no-cache");
+  });
+
+  // Both lengths, and neither alone. Checking only the identity pinned a
+  // replaced .gz (749 -> 75 bytes, shipped `immutable`); checking only the
+  // representation would keep pinning a .gz whose identity file a partial
+  // deploy had already rewritten, and `immutable` is a promise about the url.
+  test("a sibling is pinned only when it and its identity are both vouched for", () => {
+    const out: BuildOutputs = {
+      dir: "public/assets",
+      sizes: new Map([
+        ["client-50dbnr0a.js", 100],
+        ["client-50dbnr0a.js.gz", 40],
+      ]),
+    };
+    const cc = (sentSize: number, identitySize: number) =>
+      assetCacheControl("public/assets/client-50dbnr0a.js.gz", out, sentSize, {
+        path: "public/assets/client-50dbnr0a.js",
+        size: identitySize,
+      });
+    expect(cc(40, 100)).toBe(IMMUTABLE);
+    // the sibling was replaced: the bytes going out are not the vouched bytes
+    expect(cc(75, 100)).toBe("no-cache");
+    // the identity moved out from under it: the url no longer has one content
+    expect(cc(40, 101)).toBe("no-cache");
+    expect(cc(75, 101)).toBe("no-cache");
+    // a sibling the build never measured, beside a perfectly good identity
+    expect(
+      assetCacheControl("public/assets/client-50dbnr0a.js.br", out, 40, {
+        path: "public/assets/client-50dbnr0a.js",
+        size: 100,
+      }),
+    ).toBe("no-cache");
+  });
+
+  test("with no manifest nothing is pinned, and everything still gets a header", () => {
+    for (const p of ["public/assets/client-50dbnr0a.js", "public/assets/client.js", "public/a.png"]) {
+      expect(assetCacheControl(p)).toBe("no-cache");
+      expect(assetCacheControl(p, NO_BUILD_OUTPUTS, 100)).toBe("no-cache");
+    }
+  });
+
+  test("windows separators resolve to the same policy as forward slashes", () => {
+    expect(assetCacheControl("public\\assets\\client-50dbnr0a.js", OUT, 100)).toBe(IMMUTABLE);
+    expect(assetCacheControl("public\\sw.js", OUT, 100)).toBe("no-cache");
+    // and a manifest whose dir was recorded with backslashes still matches
+    const win = { dir: "public\\assets", sizes: OUT.sizes };
+    expect(assetCacheControl("public/assets/client-50dbnr0a.js", win, 100)).toBe(IMMUTABLE);
+  });
+
+  // sw.js is not in the output directory, so it could only be pinned by a
+  // manifest that named it - and it must not be, whatever a manifest says
+  test("the service worker is never pinned, even by a manifest that names it", () => {
+    const rogue: BuildOutputs = { dir: "public", sizes: new Map([["sw.js", 42]]) };
+    expect(assetCacheControl("public/sw.js", rogue, 42)).toBe("no-cache");
   });
 });
 
@@ -119,12 +244,15 @@ describe("buildAssetIndex", () => {
       await Bun.write(join(dir, "assets/client-6f5e37fs.js"), "console.log(1)");
       await Bun.write(join(dir, "logo.png"), "png");
 
-      const index = buildAssetIndex(dir);
+      const index = buildAssetIndex(dir, undefined, {
+        dir: `${dir.replaceAll("\\", "/")}/assets`,
+        sizes: new Map([["client-6f5e37fs.js", "console.log(1)".length]]),
+      });
       const css = index.get("/assets/style.css")!;
       expect(css.identity.path.endsWith("/assets/style.css")).toBe(true);
       expect(css.variants.map((v) => v.encoding)).toEqual(["br", "gzip"]);
       expect(css.compressible).toBe(true);
-      expect(css.cacheControl).toBe("");
+      expect(css.identity.pinnedSize).toBeNull();
       expect(css.type).toContain("text/css");
       expect(new Date(css.lastModified).getTime()).toBeGreaterThan(0);
 
@@ -133,9 +261,14 @@ describe("buildAssetIndex", () => {
       const tags = new Set([css.identity.etag, ...css.variants.map((v) => v.etag)]);
       expect(tags.size).toBe(3);
 
-      expect(index.get("/assets/client-6f5e37fs.js")!.cacheControl).toBe(
-        "public, max-age=31536000, immutable",
+      // the index records what the build vouched for, per representation;
+      // whether the file still has that length is settled per request, on the
+      // wire. the css has siblings the manifest never measured, so neither
+      // encoding of it is pinnable even though the file itself is present
+      expect(index.get("/assets/client-6f5e37fs.js")!.identity.pinnedSize).toBe(
+        "console.log(1)".length,
       );
+      expect(css.variants.map((v) => v.pinnedSize)).toEqual([null, null]);
       const png = index.get("/logo.png")!;
       expect(png.compressible).toBe(false);
       expect(png.variants).toEqual([]);
@@ -159,12 +292,18 @@ describe("buildAssetIndex", () => {
     expect(buildAssetIndex(join(tmpdir(), "borgo-does-not-exist-" + Date.now())).size).toBe(0);
   });
 
-  test("cache-control: hashed forever, service worker never", () => {
-    expect(assetCacheControl("public/assets/client-6f5e37fs.js")).toBe(
+  test("cache-control: vouched-for files forever, everything else revalidates", () => {
+    const out: BuildOutputs = {
+      dir: "public/assets",
+      sizes: new Map([["client-6f5e37fs.js", 14]]),
+    };
+    expect(assetCacheControl("public/assets/client-6f5e37fs.js", out, 14)).toBe(
       "public, max-age=31536000, immutable",
     );
-    expect(assetCacheControl("public/sw.js")).toBe("no-cache");
-    expect(assetCacheControl("public/assets/style.css")).toBe("");
+    // a url that does not identify its content never answers with the empty
+    // string: no policy is not a weaker policy, it is a heuristic one
+    expect(assetCacheControl("public/assets/style.css", out, 14)).toBe("no-cache");
+    expect(assetCacheControl("public/logo.svg", out, 14)).toBe("no-cache");
   });
 });
 
