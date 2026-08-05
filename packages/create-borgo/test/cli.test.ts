@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,6 +79,70 @@ const readJson = (app: string, rel: string) =>
 // most cases have nothing to do with git, and skipping it keeps the suite
 // quick and the scratch directory free of read-only pack files
 const NG = "--no-git";
+
+// the same run a user gets, with a PATH that genuinely holds no git, no go and
+// no bun. That is not a contrived environment: it is what `bunx create-borgo`
+// meets on a machine where those were never installed, and Bun.spawnSync THROWS
+// on a missing binary rather than returning a non-zero code, so an unguarded
+// probe reaches the user as a stack trace.
+//
+// It deliberately does not pass --no-git, and no caller may add it back: every
+// call used to, which is exactly what kept the unguarded `git init` - the
+// default path on such a machine - out of reach of the whole suite.
+// bun itself has to be launchable to run the cli at all, so it is invoked by
+// absolute path while the PATH the child searches is emptied.
+const withoutToolchain = (args: string[], extraEnv: Record<string, string> = {}) => {
+  const empty = join(cwd, ".no-tools");
+  mkdirSync(empty, { recursive: true });
+  const proc = Bun.spawnSync([process.execPath, cli, ...args], {
+    cwd,
+    env: {
+      ...IDENTITY,
+      PATH: empty,
+      Path: empty,
+      SystemRoot: process.env.SystemRoot,
+      TEMP: process.env.TEMP,
+      TMP: process.env.TMP,
+      ...extraEnv,
+    } as Record<string, string>,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return { code: proc.exitCode, out: proc.stdout.toString() + proc.stderr.toString() };
+};
+
+// a global gitconfig this test owns. The interesting git failures are all
+// ordinary configuration - safecrlf, a signing key, a hooksPath, a ref backend
+// - so they have to be arranged rather than mocked, without depending on or
+// disturbing whatever the machine running the suite has configured.
+const gitConfig = (label: string, body: string) => {
+  const path = join(cwd, `gitconfig-${label}`);
+  writeFileSync(path, body);
+  return { GIT_CONFIG_GLOBAL: path, GIT_CONFIG_SYSTEM: join(cwd, "no-system-gitconfig") };
+};
+
+// git's own answer, so a test that claims "the identity is set" has proof of
+// it rather than an assumption about the environment
+const gitConfigValue = (env: Record<string, string | undefined>, key: string) => {
+  const proc = Bun.spawnSync(["git", "config", "--global", key], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, ...env } as Record<string, string>,
+  });
+  return proc.stdout.toString().trim();
+};
+
+const IDENTITY_CONFIG = "[user]\n\tname = A Real Person\n\temail = real@example.com\n";
+
+// a hook that blocks forever, installed globally the way a commit policy or a
+// notifier would be
+const blockingHook = (label: string, which: string, body = "sleep 15\n") => {
+  const hooks = join(cwd, `hooks-${label}`);
+  mkdirSync(hooks, { recursive: true });
+  writeFileSync(join(hooks, which), `#!/bin/sh\n${body}`);
+  return `[core]\n\thooksPath = ${hooks.replaceAll("\\", "/")}\n`;
+};
 
 describe("template selection", () => {
   test("defaults to base when nothing is passed and stdin is not a tty", () => {
@@ -195,11 +267,69 @@ describe("tailwind", () => {
 });
 
 describe("git", () => {
+  // THE PROPERTY: the summary tells the truth about what happened to git.
+  //
+  // Every outcome is a different sentence, and the whole test is whether the
+  // sentence printed matches the filesystem. It can be wrong in two directions
+  // and both are equally wrong:
+  //
+  //   - claiming no repository, or no commit, when one is on disk. "git is not
+  //     available here" tells a user version control is impossible, so they
+  //     never run `git init`; "no commit was made" tells them their work is
+  //     gone. Both are read and believed.
+  //   - claiming a repository, or a reason for one, that is not there. "set
+  //     user.name/user.email" when the identity is set and gpg or a hook
+  //     refused is worse than silence: following it changes nothing.
+  //
+  // So no test here asserts on output alone. Each arranges a real git failure
+  // with real git and default flags, then checks the disk - repository usable
+  // or not, tree staged or not, commit there or not - against the sentence.
+  const GIT_LINES = {
+    created: "repository initialised",
+    nested: "already inside a repository",
+    "git-env": "unset it for a repository in the scaffold itself",
+    "no-identity": "set user.name/user.email",
+    unavailable: "git is not available here",
+    unrunnable: "git could not be run",
+    unresponsive: "git did not finish in",
+    "init-failed": "not initialised",
+    "stage-failed": "initialised, nothing staged",
+    "commit-failed": "not committed",
+  };
+
+  // this program's own sentence. Everything git said lives on its own line,
+  // labelled, because a hook picks that text and can pick words that read
+  // exactly like one of these lines - so matching the whole output would let a
+  // hook decide which outcome the test believes.
+  const ourSentence = (out: string) => {
+    const line = out.match(/^\s+\S+ git {2,}(.*)$/m)?.[1] ?? "";
+    return line;
+  };
+  const onlyGitLine = (out: string, expected: keyof typeof GIT_LINES) => {
+    const sentence = ourSentence(out);
+    expect(sentence.length).toBeGreaterThan(0);
+    for (const [key, line] of Object.entries(GIT_LINES)) {
+      expect(`${key}: ${sentence.includes(line)}`).toBe(`${key}: ${key === expected}`);
+    }
+  };
+
+  // the disk, asked in a clean environment - never the summary being tested,
+  // and never by reading git's files, which is the mistake this suite exists
+  // to catch. The test process has none of the redirecting variables set.
+  const onDisk = (app: string) => ({
+    repo: existsSync(join(cwd, app, ".git")),
+    usable: git(app, "rev-parse", "--is-inside-work-tree").out === "true",
+    staged: git(app, "diff", "--cached", "--name-only").out.split("\n").filter(Boolean).length,
+    commits: git(app, "log", "--oneline").out.split("\n").filter(Boolean).length,
+  });
+
   test("a scaffold is a repository with an initial commit by default", () => {
-    expect(run(["app"]).code).toBe(0);
+    const { code, out } = run(["app"]);
+    expect(code).toBe(0);
     expect(existsSync(join(cwd, "app", ".git"))).toBe(true);
     expect(git("app", "rev-list", "--count", "HEAD").out).toBe("1");
     expect(git("app", "log", "-1", "--pretty=%s").out).toBe("initial commit");
+    onlyGitLine(out, "created");
   });
 
   test("the initial commit contains the scaffold, working tree clean", () => {
@@ -218,14 +348,55 @@ describe("git", () => {
     expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
   });
 
+  // git defaults ON, so on a machine without it this is the default path: the
+  // scaffold is complete on disk before git is ever reached, and the run has to
+  // finish reporting it rather than dying at its last step
+  test("no git on PATH is reported, not thrown, and the scaffold still lands", () => {
+    const { code, out } = withoutToolchain(["app", "--no-install"]);
+    // the exit code answers "did the scaffold succeed", not "is git installed"
+    expect(code).toBe(0);
+    onlyGitLine(out, "unavailable");
+    expect(out).not.toContain("Executable not found");
+    expect(out).not.toContain("error:");
+    expect(out).not.toMatch(/\bat <anonymous>/);
+    // the run finishes: summary, next steps and signature all present
+    expect(out).toContain("created app/");
+    expect(out).toContain("next steps");
+    expect(out).toContain("luigimicca.com");
+    // and the tree really is there, without a half-made repository beside it
+    expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
+    expect(existsSync(join(cwd, "app", "main.go"))).toBe(true);
+    expect(existsSync(join(cwd, "app", ".git"))).toBe(false);
+  });
+
+  // a git that is present and cannot be launched is not a git that is absent,
+  // and "install git" is the wrong instruction for it. libuv reports EUNKNOWN
+  // for a file it cannot start and EFTYPE for one that is empty or is a
+  // library - never ENOENT, which an earlier comment in the cli claimed.
+  test.if(process.platform === "win32")(
+    "a git that exists but cannot be launched is not reported as a missing git",
+    () => {
+      const dir = join(cwd, ".broken-git");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "git.exe"), "MZ this is not a real executable\n");
+      const { code, out } = withoutToolchain(["app", "--no-install"], { PATH: dir, Path: dir });
+      expect(code).toBe(0);
+      onlyGitLine(out, "unrunnable");
+      expect(out).not.toMatch(/\bat <anonymous>/);
+      expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
+      expect(existsSync(join(cwd, "app", ".git"))).toBe(false);
+    },
+  );
+
   test("a scaffold inside an existing repository is not nested in a second one", () => {
     Bun.spawnSync(["git", "-C", cwd, "init", "-q"], { stdout: "pipe", stderr: "pipe" });
     const { code, out } = run(["app"]);
     expect(code).toBe(0);
     expect(existsSync(join(cwd, "app", ".git"))).toBe(false);
-    expect(out).toContain("already inside a repository");
+    onlyGitLine(out, "nested");
   });
 
+  // git is there and answers; it is the commit that refuses
   test("a missing git identity does not fail the scaffold", () => {
     const { code, out } = run(["app"], {
       // no global/system config and no identity in the environment
@@ -235,11 +406,558 @@ describe("git", () => {
       GIT_AUTHOR_EMAIL: undefined,
       GIT_COMMITTER_NAME: undefined,
       GIT_COMMITTER_EMAIL: undefined,
+      EMAIL: undefined,
     });
     expect(code).toBe(0);
     // the repository and the staged tree survive; only the commit is missing
     expect(existsSync(join(cwd, "app", ".git"))).toBe(true);
-    expect(out).toContain("user.name");
+    expect(git("app", "diff", "--cached", "--name-only").out).toContain("package.json");
+    onlyGitLine(out, "no-identity");
+  });
+
+  // DIRECTION ONE: no repository claimed, a repository on disk.
+
+  // core.autocrlf + core.safecrlf is a very ordinary windows ~/.gitconfig, and
+  // it makes `add -A` refuse the template's LF files outright. The repository
+  // is real and empty, and a user told git is unavailable will never find it.
+  test("a stage git refuses is a repository with nothing staged, not a missing git", () => {
+    const env = gitConfig(
+      "safecrlf",
+      `[core]\n\tautocrlf = true\n\tsafecrlf = true\n${IDENTITY_CONFIG}`,
+    );
+    const { code, out } = run(["app"], env);
+    expect(code).toBe(0);
+    const disk = onDisk("app");
+    expect(disk.repo).toBe(true);
+    expect(disk.staged).toBe(0);
+    onlyGitLine(out, "stage-failed");
+    // git's own words, on their own line, not a guess at them
+    expect(out).toContain("git said:");
+    expect(out).toContain("LF would be replaced by CRLF");
+  });
+
+  // an invalid init.defaultBranch makes `git init` fail 128 *after* creating a
+  // half-written .git, which then breaks the user's next `git init` and
+  // `git status`.
+  test("an init git refuses names the partial .git it left behind", () => {
+    const env = gitConfig("badbranch", `[init]\n\tdefaultBranch = "bad name"\n${IDENTITY_CONFIG}`);
+    const { code, out } = run(["app"], env);
+    expect(code).toBe(0);
+    expect(existsSync(join(cwd, "app", ".git"))).toBe(true);
+    onlyGitLine(out, "init-failed");
+    expect(out).toContain("invalid branch name");
+    expect(out).toContain("remove the partial .git");
+    expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
+  });
+
+  // `subst` is ordinary practice for shortening source paths and needs no
+  // unusual configuration at all. rev-parse --show-toplevel answers with the
+  // physical path while the target keeps the virtual drive letter, so a string
+  // comparison of the two never matched and a repository with a real initial
+  // commit was reported as no git at all.
+  test.if(process.platform === "win32")(
+    "a subst drive still reports the repository it actually created",
+    () => {
+      const free = ["Y", "X", "W", "V", "U"].find((l) => !existsSync(`${l}:\\`));
+      if (!free) return;
+      const drive = `${free}:`;
+      const substituted = Bun.spawnSync(["subst", drive, cwd], { stdout: "pipe", stderr: "pipe" });
+      if (substituted.exitCode !== 0) return;
+      try {
+        const proc = Bun.spawnSync(["bun", cli, "app"], {
+          // the virtual drive is the cwd, exactly as a user working on one has
+          cwd: `${drive}\\`,
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, ...IDENTITY } as Record<string, string>,
+        });
+        const out = proc.stdout.toString() + proc.stderr.toString();
+        expect(proc.exitCode).toBe(0);
+        // the disk, reached through the real path rather than the virtual one
+        expect(existsSync(join(cwd, "app", ".git"))).toBe(true);
+        expect(git("app", "rev-list", "--count", "HEAD").out).toBe("1");
+        onlyGitLine(out, "created");
+      } finally {
+        Bun.spawnSync(["subst", drive, "/d"], { stdout: "pipe", stderr: "pipe" });
+      }
+    },
+  );
+
+  // DIRECTION TWO: a repository claimed, or a reason for one, that is not there.
+
+  // the identity is set and git can read it back. The commit fails because it
+  // cannot run the signing program, and "set user.name/user.email" is not
+  // merely imprecise here, it is an instruction that changes nothing.
+  test("a commit refused by a missing signing program is not blamed on the identity", () => {
+    const env = gitConfig(
+      "gpg",
+      `[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = ${join(cwd, "no-such-gpg.exe").replaceAll("\\", "/")}\n${IDENTITY_CONFIG}`,
+    );
+    // proof, not assumption: this is what git itself reports as the identity
+    expect(gitConfigValue(env, "user.email")).toBe("real@example.com");
+    const { code, out } = run(["app"], env);
+    expect(code).toBe(0);
+    const disk = onDisk("app");
+    expect(disk.repo).toBe(true);
+    expect(disk.staged).toBeGreaterThan(0);
+    expect(disk.commits).toBe(0);
+    onlyGitLine(out, "commit-failed");
+    expect(out).toContain("gpg");
+  });
+
+  // a global core.hooksPath is how a company ships a commit policy to every
+  // repository on the machine.
+  test("a commit refused by a hook quotes the hook instead of guessing", () => {
+    const env = gitConfig(
+      "hooks",
+      blockingHook("policy", "pre-commit", 'echo "policy: sign your commits" >&2\nexit 1\n') +
+        IDENTITY_CONFIG,
+    );
+    expect(gitConfigValue(env, "user.name")).toBe("A Real Person");
+    const { code, out } = run(["app"], env);
+    expect(code).toBe(0);
+    const disk = onDisk("app");
+    expect(disk.repo).toBe(true);
+    expect(disk.staged).toBeGreaterThan(0);
+    onlyGitLine(out, "commit-failed");
+    expect(out).toContain("policy: sign your commits");
+  });
+
+  // a regex over stderr cannot tell git's words from a hook's: hooks write to
+  // the same stream. A pre-commit printing "please tell me who you are" made
+  // the summary print the fixed identity sentence - advice that does not apply,
+  // with git's real message discarded.
+  test("a hook that impersonates the identity error does not steal the classification", () => {
+    const env = gitConfig(
+      "impersonate",
+      blockingHook(
+        "impersonate",
+        "pre-commit",
+        'echo "policy: please tell me who you are - commits need your @corp.com address" >&2\nexit 1\n',
+      ) + IDENTITY_CONFIG,
+    );
+    expect(gitConfigValue(env, "user.email")).toBe("real@example.com");
+    const { code, out } = run(["app"], env);
+    expect(code).toBe(0);
+    onlyGitLine(out, "commit-failed");
+    expect(out).toContain("@corp.com");
+    const disk = onDisk("app");
+    expect(disk.staged).toBeGreaterThan(0);
+    expect(disk.commits).toBe(0);
+  });
+
+  // A .git IS NOT THE SAME CLAIM AS A REPOSITORY.
+  //
+  // These decide where git keeps its state, or what goes into a new
+  // repository, so a `git init` here does not produce a repository *here*.
+  // GIT_OBJECT_DIRECTORY used to report "repository initialised - initial
+  // commit" while every object landed elsewhere and the new project answered
+  // `fatal: not a git repository`.
+  for (const key of [
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_TEMPLATE_DIR",
+  ]) {
+    test(`${key} in the environment is skipped, never reported as a repository`, () => {
+      const elsewhere = join(cwd, "elsewhere");
+      mkdirSync(elsewhere, { recursive: true });
+      const { code, out } = run(["app"], { [key]: elsewhere });
+      expect(code).toBe(0);
+      onlyGitLine(out, "git-env");
+      // the variable is named, because that is the thing the user has to undo
+      expect(out).toContain(key);
+      // and nothing anywhere claims a repository that a user cannot use
+      const disk = onDisk("app");
+      expect(disk.usable).toBe(false);
+      expect(disk.commits).toBe(0);
+      // the scaffold itself still landed in full
+      expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
+    });
+  }
+
+  // THE CONFIG TWIN OF A GUARDED VARIABLE.
+  //
+  // GIT_TEMPLATE_DIR was guarded, with the reason that a template decides what
+  // `git init` puts into the new .git, refs included. init.templateDir is that
+  // same power spelled as a config key, and it was open - so a template
+  // pointing at a repository that already holds a commit produced a scaffold
+  // whose HEAD named a commit this run never made, and the summary reported
+  // "the commit was made" over someone else's history. Guarding one of a pair
+  // is guarding neither.
+  const donorRepo = () => {
+    const donor = join(cwd, "donor");
+    mkdirSync(donor, { recursive: true });
+    const run1 = (...argv: string[]) =>
+      Bun.spawnSync(["git", "-C", donor, ...argv], {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, ...IDENTITY } as Record<string, string>,
+      });
+    run1("init", "-q");
+    writeFileSync(join(donor, "donor-only.txt"), "not this scaffold\n");
+    run1("add", "-A");
+    run1("commit", "-q", "-m", "DONOR COMMIT");
+    // the donor really does hold a commit, or the test proves nothing
+    expect(
+      Bun.spawnSync(["git", "-C", donor, "log", "--oneline"], { stdout: "pipe", stderr: "pipe" })
+        .stdout.toString()
+        .trim(),
+    ).toContain("DONOR COMMIT");
+    return join(donor, ".git").replaceAll("\\", "/");
+  };
+
+  test("init.templateDir carrying someone else's commit is never reported as ours", () => {
+    const template = donorRepo();
+    // plus a hook that blocks, which is what turned this into a confident
+    // "the commit was made" rather than a merely wrong repository
+    const env = gitConfig(
+      "templatedir",
+      `[init]\n\ttemplateDir = ${template}\n` +
+        blockingHook("templatedir", "pre-commit") +
+        IDENTITY_CONFIG,
+    );
+    const { code, out } = run(["app"], { ...env, BORGO_SPAWN_TIMEOUT_MS: "4000" });
+    expect(code).toBe(0);
+    onlyGitLine(out, "git-env");
+    expect(out).toContain("init.templateDir");
+    // the sentence that was the lie, and the disk that contradicted it
+    expect(out).not.toContain("the commit was made");
+    const disk = onDisk("app");
+    expect(disk.usable).toBe(false);
+    expect(disk.commits).toBe(0);
+    // no trace of the donor anywhere in the scaffold
+    expect(existsSync(join(cwd, "app", "donor-only.txt"))).toBe(false);
+    expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
+  }, 60_000);
+
+  // asked of git rather than parsed out of config files, so every route to the
+  // same key is covered by one check: scopes, include.path, includeIf, and the
+  // environment's own config injection
+  test("init.templateDir is caught however it was set", () => {
+    const template = donorRepo();
+    const viaInclude = join(cwd, "gitconfig-included");
+    writeFileSync(viaInclude, `[init]\n\ttemplateDir = ${template}\n`);
+    const env = gitConfig(
+      "include",
+      `[include]\n\tpath = ${viaInclude.replaceAll("\\", "/")}\n${IDENTITY_CONFIG}`,
+    );
+    const included = run(["app"], env);
+    expect(included.code).toBe(0);
+    onlyGitLine(included.out, "git-env");
+
+    const injected = run(["other"], {
+      GIT_CONFIG_GLOBAL: join(cwd, "no-such-gitconfig"),
+      GIT_CONFIG_SYSTEM: join(cwd, "no-such-gitconfig"),
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "init.templateDir",
+      GIT_CONFIG_VALUE_0: template,
+    });
+    expect(injected.code).toBe(0);
+    onlyGitLine(injected.out, "git-env");
+    expect(onDisk("other").commits).toBe(0);
+  }, 60_000);
+
+  // the guard sits after the reachability checks, and the ordering is not
+  // cosmetic: inside an enclosing repository `git init` never runs, so
+  // init.templateDir cannot affect anything and telling the user to unset it
+  // would be advice about the wrong thing. The true reason is the enclosing
+  // repository, and that is what has to be printed.
+  test("inside an enclosing repository, the reason is the repository, not the template", () => {
+    Bun.spawnSync(["git", "-C", cwd, "init", "-q"], { stdout: "pipe", stderr: "pipe" });
+    const env = gitConfig(
+      "nested-template",
+      `[init]\n\ttemplateDir = ${donorRepo()}\n${IDENTITY_CONFIG}`,
+    );
+    const { code, out } = run(["app"], env);
+    expect(code).toBe(0);
+    onlyGitLine(out, "nested");
+    expect(out).not.toContain("init.templateDir");
+    expect(existsSync(join(cwd, "app", ".git"))).toBe(false);
+  });
+
+  // the other half of the sweep, and the direction that costs a user a
+  // perfectly good repository: core.worktree is GIT_WORK_TREE's config twin and
+  // is deliberately NOT guarded, because from global config it does not
+  // relocate a fresh init at all. Guarding by name rather than by demonstrated
+  // effect would refuse this scaffold its repository for nothing.
+  test("core.worktree is not over-guarded: the scaffold still gets its repository", () => {
+    const elsewhere = join(cwd, "elsewhere");
+    mkdirSync(elsewhere, { recursive: true });
+    const env = gitConfig(
+      "worktree",
+      `[core]\n\tworktree = ${elsewhere.replaceAll("\\", "/")}\n${IDENTITY_CONFIG}`,
+    );
+    const { code, out } = run(["app"], env);
+    expect(code).toBe(0);
+    onlyGitLine(out, "created");
+    const disk = onDisk("app");
+    expect(disk.commits).toBe(1);
+    expect(disk.usable).toBe(true);
+    // and it staged the scaffold's own files, not something in `elsewhere`
+    expect(git("app", "ls-files").out.split("\n")).toContain("package.json");
+  });
+
+  // the skip is right; the old sentence was not. There is no repository at the
+  // end of this path, so "points this run at another repository" described one
+  // that does not exist.
+  test("GIT_DIR pointing nowhere is skipped without inventing a repository", () => {
+    const { code, out } = run(["app"], { GIT_DIR: join(cwd, "nope", "no", "repo", "here", ".git") });
+    expect(code).toBe(0);
+    onlyGitLine(out, "git-env");
+    expect(out).toContain("GIT_DIR");
+    expect(out).not.toContain("another repository");
+    expect(onDisk("app").usable).toBe(false);
+  });
+
+  // WHAT AN INTERRUPTED GIT LEFT, ASKED OF GIT.
+  //
+  // A kill at the bound says nothing about how far git got, and the detail
+  // used to be hard-coded. Reading .git by hand replaced one wrong answer with
+  // another three times over - packed-refs, then reftable, then a zero-byte
+  // ref - so the detail now comes from git under a much shorter bound, and
+  // from "we do not know" when git will not answer either.
+  test("a git that never answers is bounded, and reported as a timeout not as absence", () => {
+    const env = gitConfig("slow", blockingHook("slow", "pre-commit") + IDENTITY_CONFIG);
+    const started = Date.now();
+    const { code, out } = run(["app"], { ...env, BORGO_SPAWN_TIMEOUT_MS: "2000" });
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(code).toBe(0);
+    onlyGitLine(out, "unresponsive");
+    // the run still finishes: summary, next steps, signature
+    expect(out).toContain("created app/");
+    expect(out).toContain("next steps");
+    expect(out).toContain("luigimicca.com");
+    // and the detail matches the disk
+    const disk = onDisk("app");
+    expect(disk.repo).toBe(true);
+    expect(disk.staged).toBeGreaterThan(0);
+    expect(disk.commits).toBe(0);
+    expect(out).toContain("no commit yet");
+    expect(out).toContain(`${disk.staged} files staged`);
+  }, 60_000);
+
+  // THE ONE THAT KEPT COMING BACK.
+  //
+  // A blocking post-commit hook - an indexer, a notifier, both ordinary - is
+  // killed with the commit already written and the index already clean, so
+  // "the tree is staged" was wrong in both halves at once. A user who reads it
+  // runs `git commit`, is told "nothing to commit", and concludes the scaffold
+  // is unversioned. Run here under BOTH ref backends, because the files
+  // backend and reftable disagree about everything a hand-reader would look
+  // at: under reftable HEAD is the stub `ref: refs/heads/.invalid` and the
+  // refs live in .git/reftable/, so nothing under .git/refs ever appears.
+  for (const [label, config] of [
+    ["the default ref backend", ""],
+    ["reftable", "[init]\n\tdefaultRefFormat = reftable\n"],
+  ] as const) {
+    test(`a timeout after the commit says the commit was made, under ${label}`, () => {
+      const env = gitConfig(
+        `post-${label.replaceAll(" ", "-")}`,
+        config + blockingHook(`post-${label.replaceAll(" ", "-")}`, "post-commit") + IDENTITY_CONFIG,
+      );
+      const { code, out } = run(["app"], { ...env, BORGO_SPAWN_TIMEOUT_MS: "2000" });
+      expect(code).toBe(0);
+      onlyGitLine(out, "unresponsive");
+      // the disk is the only thing that decides which detail is true
+      const disk = onDisk("app");
+      expect(disk.commits).toBe(1);
+      expect(disk.staged).toBe(0);
+      expect(out).toContain("the commit was made");
+      // the two sentences that would have been lies here
+      expect(out).not.toContain("no commit yet");
+      expect(out).not.toContain("files staged");
+    }, 60_000);
+  }
+
+  // and the same backend on the ordinary path, so the whole run is exercised
+  // under it rather than only its timeout branch
+  test("reftable is an ordinary successful scaffold", () => {
+    const env = gitConfig("reftable-ok", `[init]\n\tdefaultRefFormat = reftable\n${IDENTITY_CONFIG}`);
+    const { code, out } = run(["app"], env);
+    expect(code).toBe(0);
+    onlyGitLine(out, "created");
+    const disk = onDisk("app");
+    expect(disk.commits).toBe(1);
+    expect(disk.usable).toBe(true);
+  });
+
+  // when git will not answer the follow-up either, the honest sentence is that
+  // we do not know - not a guess in the direction that costs the user work.
+  // The hook breaks HEAD and then blocks, so the commit times out and every
+  // probe afterwards fails too.
+  test("a repository git will not describe is reported as unknown, not as empty", () => {
+    const env = gitConfig(
+      "broken",
+      blockingHook(
+        "broken",
+        "post-commit",
+        'printf "garbage\\n" > "$(git rev-parse --git-dir)/HEAD"\nsleep 15\n',
+      ) + IDENTITY_CONFIG,
+    );
+    const { code, out } = run(["app"], { ...env, BORGO_SPAWN_TIMEOUT_MS: "2000" });
+    expect(code).toBe(0);
+    onlyGitLine(out, "unresponsive");
+    // it says where to look and what to run, and claims nothing else
+    expect(out).toContain("the repository is at app/");
+    expect(out).toContain("git log");
+    expect(out).toContain("git status");
+    expect(out).not.toContain("no commit yet");
+    expect(out).not.toContain("the commit was made");
+    // the scaffold survives regardless
+    expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
+  }, 60_000);
+
+  // AND WHEN THE FOLLOW-UP HANGS TOO.
+  //
+  // The first bound already established that this repository is slow, which is
+  // exactly why the follow-up may not answer either - so it gets a tenth of the
+  // bound, not another full one. A blocking core.fsmonitor is the shape that
+  // proves it: git consults it on every index refresh, so `diff --cached` hangs
+  // while `rev-parse HEAD` does not, and the run has to give up on the second
+  // probe quickly and say plainly that it does not know.
+  //
+  // The assertion is the clock, because that is the only place the difference
+  // shows: with the probe inheriting the full bound this run takes twice as
+  // long and still prints the same words.
+  test("a follow-up probe that hangs is bounded far shorter than the first", () => {
+    const fsmonitor = join(cwd, "slow-fsmonitor.sh");
+    writeFileSync(fsmonitor, "#!/bin/sh\nsleep 15\n");
+    const env = gitConfig(
+      "fsmonitor",
+      `[core]\n\tfsmonitor = ${fsmonitor.replaceAll("\\", "/")}\n${IDENTITY_CONFIG}`,
+    );
+    const started = Date.now();
+    const { code, out } = run(["app"], { ...env, BORGO_SPAWN_TIMEOUT_MS: "5000" });
+    const elapsed = Date.now() - started;
+    expect(code).toBe(0);
+    onlyGitLine(out, "unresponsive");
+    // one full bound for the command, a tenth of it for the probe - not two
+    expect(elapsed).toBeLessThan(8_500);
+    // and with nothing confirmed, nothing is claimed
+    expect(out).toContain("the repository is at app/");
+    expect(out).toContain("git log");
+    expect(out).not.toContain("no commit yet");
+    expect(out).not.toContain("the commit was made");
+    expect(out).toContain("created app/");
+    expect(out).toContain("luigimicca.com");
+  }, 60_000);
+
+  // the other half of the same fault: a stall during `add` leaves no index and
+  // a lock that will block the user's own next `git add` until it is removed.
+  test("a timeout during the staging names the lock it left", () => {
+    const attrs = join(cwd, "attributes");
+    writeFileSync(attrs, "* filter=slow\n");
+    const filter = join(cwd, "slow-filter.sh");
+    writeFileSync(filter, "#!/bin/sh\nsleep 15\n");
+    const env = gitConfig(
+      "slowfilter",
+      `[core]\n\tattributesFile = ${attrs.replaceAll("\\", "/")}\n` +
+        `[filter "slow"]\n\tclean = ${filter.replaceAll("\\", "/")}\n${IDENTITY_CONFIG}`,
+    );
+    const { code, out } = run(["app"], { ...env, BORGO_SPAWN_TIMEOUT_MS: "2500" });
+    expect(code).toBe(0);
+    onlyGitLine(out, "unresponsive");
+    expect(existsSync(join(cwd, "app", ".git"))).toBe(true);
+    expect(existsSync(join(cwd, "app", ".git", "index"))).toBe(false);
+    expect(existsSync(join(cwd, "app", ".git", "index.lock"))).toBe(true);
+    expect(onDisk("app").commits).toBe(0);
+    expect(out).toContain("nothing staged");
+    expect(out).toContain("remove .git/index.lock");
+    expect(out).not.toContain("the commit was made");
+  }, 60_000);
+
+  // THE TEST SEAM IS AN INPUT LIKE ANY OTHER.
+  //
+  // Number("Infinity") is a number and spawnSync reads it as "no timeout", so
+  // the one variable that exists to make the bound testable could remove it -
+  // and with a git that never answers the run printed nothing at all.
+  test("BORGO_SPAWN_TIMEOUT_MS=Infinity does not disable the bound", () => {
+    // this one must outlast the SHIPPED 20s bound, not a test override
+    const env = gitConfig(
+      "forever",
+      blockingHook("forever", "pre-commit", "sleep 30\n") + IDENTITY_CONFIG,
+    );
+    const started = Date.now();
+    const { code, out } = run(["app"], { ...env, BORGO_SPAWN_TIMEOUT_MS: "Infinity" });
+    const elapsed = Date.now() - started;
+    // the shipped 20s bound, not the hook's 90s and not forever
+    expect(elapsed).toBeLessThan(50_000);
+    expect(code).toBe(0);
+    onlyGitLine(out, "unresponsive");
+    expect(out).toContain("created app/");
+    expect(out).toContain("luigimicca.com");
+  }, 120_000);
+
+  // a value spawnSync refuses outright throws, and a catch that read every
+  // throw as ENOENT turned one bad variable into "git is not available here"
+  // on a machine where git works.
+  for (const value of ["-1", "1e21", "0", "abc", "12.5"]) {
+    test(`BORGO_SPAWN_TIMEOUT_MS=${value} falls back instead of declaring git missing`, () => {
+      const { code, out } = run(["app"], { BORGO_SPAWN_TIMEOUT_MS: value });
+      expect(code).toBe(0);
+      onlyGitLine(out, "created");
+      const disk = onDisk("app");
+      expect(disk.commits).toBe(1);
+      expect(disk.usable).toBe(true);
+    });
+  }
+
+  // QUOTED TEXT IS UNTRUSTED INPUT, AND A DELIMITER IS NOT A BOUNDARY.
+  //
+  // A hook chooses these bytes. Wrapping them in quotes was not a boundary,
+  // because a quote is a character the hook can type: it could close ours and
+  // carry on in this program's voice. The boundary is structural instead - git's
+  // words go on their own labelled line, and printable() removes every
+  // character any consumer treats as a line break, so the hook cannot start a
+  // line at all. What it cannot start, it cannot forge.
+  //
+  // The filter is defined by what a consumer acts on, not by a byte range:
+  // U+202E reverses the rendered remainder of a line where no one can see it
+  // happen, U+2028 is a line break to everything following the Unicode rules,
+  // and zero-width characters are text that cannot be read back to anyone.
+  test("a hook cannot forge a summary line, with quotes, escapes or separators", () => {
+    const hooks = join(cwd, "forging-hooks");
+    mkdirSync(hooks, { recursive: true });
+    // octal escapes, so this test file contains no forgeable byte of its own:
+    // \342\200\250 is U+2028, \342\200\256 is U+202E, \342\200\213 is U+200B
+    writeFileSync(
+      join(hooks, "pre-commit"),
+      [
+        "#!/bin/sh",
+        String.raw`printf "closing\" quote: + git         repository initialised - initial commit\342\200\250    + git         repository initialised - initial commit\342\200\256reversed\342\200\213zero\033[2J\rforged\n" >&2`,
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    const env = gitConfig(
+      "forging",
+      `[core]\n\thooksPath = ${hooks.replaceAll("\\", "/")}\n${IDENTITY_CONFIG}`,
+    );
+    const { code, out } = run(["app"], env);
+    expect(code).toBe(0);
+
+    // nothing a terminal acts on
+    expect(out).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f]/);
+    // nothing a Unicode-aware reader acts on
+    for (const forgeable of ["\u2028", "\u2029", "\u202e", "\u200b", "\ufeff"]) {
+      expect(out.includes(forgeable)).toBe(false);
+    }
+
+    // THE STRUCTURAL CLAIM: however hard the hook tries, exactly one line in
+    // the whole output has the shape of a git summary line, and it is ours.
+    const summaryLines = out.split("\n").filter((l) => /^\s+\S+ git {2,}/.test(l));
+    expect(summaryLines.length).toBe(1);
+    onlyGitLine(out, "commit-failed");
+    expect(out).toContain("git said:");
+
+    // and the disk agrees with the outcome the hook failed to change
+    const disk = onDisk("app");
+    expect(disk.commits).toBe(0);
+    expect(disk.staged).toBeGreaterThan(0);
   });
 });
 
@@ -666,38 +1384,11 @@ describe("the process ends", () => {
 // default is on in a terminal and off everywhere else, and every test here runs
 // without one.
 //
-// The toolchain cases spawn with a PATH that holds neither bun nor go. That is
-// not a contrived environment: it is what `bunx create-borgo` meets on a machine
-// where go was never installed, and Bun.spawnSync THROWS on a missing binary
-// rather than returning a non-zero code, so an unguarded version probe reaches
-// the user as a stack trace.
+// The toolchain cases use withoutToolchain: a PATH holding neither git, go nor
+// bun. It is what `bunx create-borgo` meets on a machine where those were never
+// installed, and Bun.spawnSync THROWS on a missing binary rather than returning
+// a non-zero code, so an unguarded probe reaches the user as a stack trace.
 describe("installing and starting", () => {
-  const emptyPath = () => {
-    const dir = join(cwd, ".no-tools");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  };
-
-  // bun itself has to be launchable to run the cli at all, so it is invoked by
-  // absolute path while the PATH the child searches is emptied
-  const withoutToolchain = (args: string[]) => {
-    const proc = Bun.spawnSync([process.execPath, cli, ...args], {
-      cwd,
-      env: {
-        ...IDENTITY,
-        PATH: emptyPath(),
-        Path: emptyPath(),
-        SystemRoot: process.env.SystemRoot,
-        TEMP: process.env.TEMP,
-        TMP: process.env.TMP,
-      } as Record<string, string>,
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    return { code: proc.exitCode, out: proc.stdout.toString() + proc.stderr.toString() };
-  };
-
   test("the help documents both flags and which way they default", () => {
     const { out } = run(["--help"]);
     expect(out).toContain("--install");
@@ -718,8 +1409,37 @@ describe("installing and starting", () => {
     expect(out).toContain("bun run dev");
   });
 
+
+  // "go is not on PATH" is a fix a user can act on: install go. It is the wrong
+  // fix for a go that is installed and exits non-zero - a broken toolchain, a
+  // wrapper that refuses, a GOROOT that moved - and sends them to a download
+  // page that will not help. The probe here is a real executable that really
+  // runs and really fails, not a missing one.
+  test.if(process.platform === "win32")(
+    "a go that runs and fails is not reported as a go that is missing",
+    () => {
+      const dir = join(cwd, ".broken-go");
+      mkdirSync(dir, { recursive: true });
+      // where.exe exits 1 when it finds nothing, so `go version` here is an
+      // installed binary that answers with a failure
+      cpSync(
+        join(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe"),
+        join(dir, "go.exe"),
+      );
+      const { code, out } = withoutToolchain(["app", "--install", "--no-start"], {
+        PATH: dir,
+        Path: dir,
+      });
+      expect(out).toContain("go version exited 1");
+      expect(out).not.toContain("go is not on PATH");
+      // the scaffold is still on disk and the run still ended
+      expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
+      expect(code).toBe(1);
+    },
+  );
+
   test("--install reports a missing go toolchain instead of throwing", () => {
-    const { code, out } = withoutToolchain(["app", NG, "--install", "--no-start"]);
+    const { code, out } = withoutToolchain(["app", "--install", "--no-start"]);
     expect(out).toContain("go is not on PATH");
     expect(out).toContain("go.dev/dl");
     // the failure is reported as a step, not as an unhandled exception
@@ -731,7 +1451,7 @@ describe("installing and starting", () => {
   });
 
   test("a failed setup leaves the exact commands still to run", () => {
-    const { out } = withoutToolchain(["app", NG, "--install", "--no-start"]);
+    const { out } = withoutToolchain(["app", "--install", "--no-start"]);
     const steps = out.slice(out.indexOf("next steps"));
     expect(steps).toContain("cd app");
     expect(steps).toContain("bun install");
@@ -741,9 +1461,9 @@ describe("installing and starting", () => {
   test("--start carries its own install rather than starting on an empty tree", () => {
     // proof it tried: with no toolchain the install step is reached and fails.
     // a plain run in the same environment exits 0 without touching either.
-    expect(withoutToolchain(["app", NG, "--start"]).code).toBe(1);
+    expect(withoutToolchain(["app", "--start"]).code).toBe(1);
     rmSync(join(cwd, "app"), { recursive: true, force: true });
-    expect(withoutToolchain(["app", NG]).code).toBe(0);
+    expect(withoutToolchain(["app"]).code).toBe(0);
   });
 
   test("--no-install cancels a --start in either order", () => {
@@ -751,7 +1471,7 @@ describe("installing and starting", () => {
       ["--no-install", "--start"],
       ["--start", "--no-install"],
     ]) {
-      const { code, out } = withoutToolchain(["app", NG, ...args]);
+      const { code, out } = withoutToolchain(["app", ...args]);
       expect(code).toBe(0);
       expect(out).toContain("bun install");
       expect(existsSync(join(cwd, "app", "node_modules"))).toBe(false);
