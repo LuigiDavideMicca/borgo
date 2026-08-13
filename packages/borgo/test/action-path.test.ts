@@ -296,7 +296,7 @@ describe("runAction: what is not an action", () => {
   test("a non-function action export names the file it came from", async () => {
     const target = match({});
     (target.route.module as { action?: unknown }).action = "nope";
-    expect(runAction(post(), target, opts())).rejects.toThrow("pages/x.tsx must be a function");
+    await expect(runAction(post(), target, opts())).rejects.toThrow("pages/x.tsx must be a function");
   });
 
   test("the header must be exactly 1 to mean enhanced", async () => {
@@ -447,7 +447,7 @@ describe("runAction: the cookies the api issued", () => {
     test("with no cookies to save, the error is still the server's to render", async () => {
       // nothing is lost by letting it out, and the server's handler is where
       // the dev overlay, the _500 page and the abort -> 499 rule all live
-      expect(
+      await expect(
         runAction(post(), match({ action: async () => ({}) }), opts(boom)),
       ).rejects.toThrow("render exploded");
     });
@@ -455,9 +455,20 @@ describe("runAction: the cookies the api issued", () => {
     test("a client that hung up mid-action is still the server's 499 to make", async () => {
       const controller = new AbortController();
       const req = new Request("http://app.test/x", { method: "POST", signal: controller.signal });
-      controller.abort();
-      expect(
-        runAction(req, match({ action: async () => ({}) }), opts({ ...login, ...boom })),
+      // the hangup lands while the action is in flight, which is when it really
+      // happens: aborting before the call cannot tell a live read of the signal
+      // from one hoisted to entry
+      await expect(
+        runAction(
+          req,
+          match({
+            action: async () => {
+              controller.abort();
+              return {};
+            },
+          }),
+          opts({ ...login, ...boom }),
+        ),
       ).rejects.toThrow("render exploded");
     });
 
@@ -470,37 +481,44 @@ describe("runAction: the cookies the api issued", () => {
     // immediately for a cookie-less client, so anyone able to open a connection
     // and hang up could buy one render per request.
     test("the enhanced path hands the abort back too, instead of rendering for nobody", async () => {
-      const controller = new AbortController();
-      const req = new Request("http://app.test/x", {
-        method: "POST",
-        headers: { "X-Borgo-Action": "1" },
-        signal: controller.signal,
-      });
-      controller.abort();
+      // two axes. cookie-less is the DoS the comment above names; mid-action is
+      // the hangup that actually happens, and the only timing that tells a live
+      // read of the signal from one hoisted to entry
+      for (const [who, credentials] of [["cookies", login], ["none", {}]] as const) {
+        for (const when of ["before entry", "mid-action"] as const) {
+          const controller = new AbortController();
+          const req = new Request("http://app.test/x", {
+            method: "POST",
+            headers: { "X-Borgo-Action": "1" },
+            signal: controller.signal,
+          });
+          if (when === "before entry") controller.abort();
 
-      let rendered = 0;
-      const errorPage = route({ default: () => null }, { file: "_500.tsx" });
-      expect(
-        runAction(
-          req,
-          match({
-            action: async () => {
-              throw new Error("action exploded");
-            },
-          }),
-          opts({
-            ...login,
-            serverError: errorPage,
-            renderPage: async () => {
-              rendered++;
-              return new Response(DOC, { status: 500 });
-            },
-          }),
-        ),
-      ).rejects.toThrow("action exploded");
-      // nothing was rendered for a client that is already gone: no _500 page,
-      // no loader, no go round trip
-      expect(rendered).toBe(0);
+          let rendered = 0;
+          const errorPage = route({ default: () => null }, { file: "_500.tsx" });
+          await expect(
+            runAction(
+              req,
+              match({
+                action: async () => {
+                  if (when === "mid-action") controller.abort();
+                  throw new Error("action exploded");
+                },
+              }),
+              opts({
+                ...credentials,
+                serverError: errorPage,
+                renderPage: async () => {
+                  rendered++;
+                  return new Response(DOC, { status: 500 });
+                },
+              }),
+            ),
+          ).rejects.toThrow("action exploded");
+          // no _500 page, no loader, no go round trip
+          expect(`${who}/${when}: ${rendered}`).toBe(`${who}/${when}: 0`);
+        }
+      }
     });
 
     // the guard is the abort, not the marker: an enhanced submit from a live
@@ -723,7 +741,7 @@ describe("runAction: an action that throws", () => {
   const boom = { action: async () => { throw new Error("action exploded"); } };
 
   test("classic: the throw propagates, the caller owns the 500", async () => {
-    expect(runAction(post(), match(boom), opts())).rejects.toThrow("action exploded");
+    await expect(runAction(post(), match(boom), opts())).rejects.toThrow("action exploded");
   });
 
   test("enhanced in dev: the overlay, wrapped as raw", async () => {

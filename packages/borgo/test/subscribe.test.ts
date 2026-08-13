@@ -8,10 +8,16 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
   host: "app.test",
 };
 
+// close() leaves CLOSING, not CLOSED: the handshake is asynchronous, and a
+// guard that reads readyState instead of the channel's own flag misses that
+// window and parks the message forever
 class FakeWS {
   static instances: FakeWS[] = [];
+  static readonly CONNECTING = 0;
   static readonly OPEN = 1;
-  readyState = 0;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  readyState = FakeWS.CONNECTING;
   sent: string[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: string }) => void) | null = null;
@@ -23,13 +29,42 @@ class FakeWS {
     this.sent.push(m);
   }
   close() {
-    this.readyState = 3;
+    this.readyState = FakeWS.CLOSING;
+  }
+  /** the server went away, or the close handshake finished */
+  drop() {
+    this.readyState = FakeWS.CLOSED;
     this.onclose?.();
   }
   open() {
-    this.readyState = 1;
+    this.readyState = FakeWS.OPEN;
     this.onopen?.();
   }
+}
+
+// captured with its delay: a stub that drops it asserts nothing about backoff
+function withFakeTimers(id = 42) {
+  const pending: Array<{ fn: () => void; delay: number }> = [];
+  const cleared: unknown[] = [];
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  globalThis.setTimeout = ((fn: () => void, delay: number) => {
+    pending.push({ fn, delay });
+    return id;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((handle: unknown) => {
+    cleared.push(handle);
+  }) as unknown as typeof clearTimeout;
+  return {
+    pending,
+    cleared,
+    id,
+    delays: () => pending.map((t) => t.delay),
+    restore: () => {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    },
+  };
 }
 
 const realWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket;
@@ -70,56 +105,78 @@ describe("subscribe", () => {
   });
 
   test("a dropped connection reconnects with backoff", () => {
-    const captured: Array<() => void> = [];
-    const realSetTimeout = globalThis.setTimeout;
-    globalThis.setTimeout = ((fn: () => void) => {
-      captured.push(fn);
-      return 0;
-    }) as unknown as typeof setTimeout;
+    const dial = withFakeTimers();
     try {
       const channel = subscribe("chat", () => {});
-      FakeWS.instances[0].close();
-      expect(captured.length).toBe(1);
-      captured[0]();
-      expect(FakeWS.instances.length).toBe(2);
+      for (let i = 0; i < 6; i++) {
+        FakeWS.instances.at(-1)!.drop();
+        expect(dial.pending.length).toBe(i + 1);
+        dial.pending.at(-1)!.fn();
+      }
+      expect(FakeWS.instances.length).toBe(7);
+      expect(dial.delays()).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000]);
       channel.close();
     } finally {
-      globalThis.setTimeout = realSetTimeout;
+      dial.restore();
+    }
+  });
+
+  test("a successful open puts the backoff back on the floor", () => {
+    const dial = withFakeTimers();
+    try {
+      const channel = subscribe("chat", () => {});
+      // two opens, and the second from a deeper run of failures than the first.
+      // one open cannot tell "reset on every success" from "reset on the first
+      // ever"; one depth cannot tell a reset from a decrement that happens to
+      // land on zero, and this one is 8 then 10 deep
+      for (const round of [1, 2]) {
+        for (let i = 0; i < 8; i++) {
+          FakeWS.instances.at(-1)!.drop();
+          dial.pending.at(-1)!.fn();
+        }
+        expect(dial.delays().at(-1)).toBe(30_000);
+        FakeWS.instances.at(-1)!.open();
+        // two drops, not one: only a zeroed counter restarts the doubling
+        const afterOpen = dial.delays().length;
+        for (let i = 0; i < 2; i++) {
+          FakeWS.instances.at(-1)!.drop();
+          dial.pending.at(-1)!.fn();
+        }
+        expect(`round ${round}: ${dial.delays().slice(afterOpen)}`).toBe(`round ${round}: 1000,2000`);
+      }
+      channel.close();
+    } finally {
+      dial.restore();
     }
   });
 
   test("close during the reconnect backoff cancels the redial for good", () => {
-    const captured: Array<() => void> = [];
-    const cleared: unknown[] = [];
-    const realSetTimeout = globalThis.setTimeout;
-    const realClearTimeout = globalThis.clearTimeout;
-    globalThis.setTimeout = ((fn: () => void) => {
-      captured.push(fn);
-      return 42;
-    }) as unknown as typeof setTimeout;
-    globalThis.clearTimeout = ((id: unknown) => {
-      cleared.push(id);
-    }) as unknown as typeof clearTimeout;
+    const dial = withFakeTimers();
     try {
       const channel = subscribe("chat", () => {});
-      FakeWS.instances[0].close(); // server drops: a reconnect is now pending
-      expect(captured.length).toBe(1);
+      FakeWS.instances[0].drop(); // server drops: a reconnect is now pending
+      expect(dial.pending.length).toBe(1);
       channel.close();
-      expect(cleared).toContain(42);
+      expect(dial.cleared).toContain(dial.id);
       // even if the timer had already fired, connect must refuse to dial
-      for (const fn of captured) fn();
+      for (const timer of dial.pending) timer.fn();
       expect(FakeWS.instances.length).toBe(1);
     } finally {
-      globalThis.setTimeout = realSetTimeout;
-      globalThis.clearTimeout = realClearTimeout;
+      dial.restore();
     }
   });
 
   test("publish after close is dropped, not queued forever", () => {
     const channel = subscribe("chat", () => {});
     const ws = FakeWS.instances[0];
+    ws.open();
     channel.close();
     channel.publish("late", 1);
     expect(ws.sent).toEqual([]);
+    // dropped and queued both leave `sent` empty, so drive the flush: a
+    // parked message comes out here
+    ws.open();
+    expect(ws.sent).toEqual([]);
+    expect(FakeWS.instances.length).toBe(1);
   });
 });

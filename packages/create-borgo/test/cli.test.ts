@@ -221,9 +221,11 @@ describe("tailwind", () => {
       expect(css.length).toBeGreaterThan(200);
 
       const p = pkg("app");
-      expect(p.scripts.dev).toContain("--tailwind");
-      expect(p.scripts.build).toContain("--tailwind");
-      expect(p.scripts.start).toContain("--tailwind");
+      // export compiles css too: without the flag it deletes the app's only
+      // stylesheet out of a gitignored directory
+      for (const script of ["dev", "build", "start", "export"] as const) {
+        expect(`${script}: ${p.scripts[script]}`).toContain("--tailwind");
+      }
       expect(p.devDependencies.tailwindcss).toBeTruthy();
       expect(p.devDependencies["@tailwindcss/postcss"]).toBeTruthy();
       expect(p.devDependencies.postcss).toBeTruthy();
@@ -1184,7 +1186,9 @@ describe("the scaffolded tree", () => {
     expect(existsSync(join(cwd, "app", "_borgo"))).toBe(false);
   });
 
-  test("the app name is stamped everywhere it appears", () => {
+  // "everywhere" is the scan below; this one names the files worth reading in a
+  // failure
+  test("the app name reaches package.json, go.mod, main.go and a nested layout", () => {
     run(["my-notes", "--template", "full", NG]);
     expect(pkg("my-notes").name).toBe("my-notes");
     expect(readFileSync(join(cwd, "my-notes", "go.mod"), "utf8")).toContain("module my-notes");
@@ -1195,17 +1199,37 @@ describe("the scaffolded tree", () => {
     expect(layout).not.toContain("{{name}}");
   });
 
+  // dot: true, or the scan skips .gitignore, .dockerignore, .env, .vscode/
+  // and all of .borgo/
   test("no placeholder survives anywhere in the tree", async () => {
-    run(["app", "--template", "full", "--tailwind", "--linter", "biome", NG]);
-    const glob = new Bun.Glob("**/*");
-    for await (const rel of glob.scan({ cwd: join(cwd, "app"), onlyFiles: true })) {
-      if (rel.endsWith(".svg")) continue;
-      const text = readFileSync(join(cwd, "app", rel), "utf8");
-      expect(`${rel}: ${text.includes("{{name}}") || text.includes("{{version}}")}`).toBe(
-        `${rel}: false`,
+    let deepest = 0;
+    for (const template of ["minimal", "base", "full"] as const) {
+      const app = `ph-${template}`;
+      run([app, "--template", template, "--tailwind", "--linter", "biome", NG]);
+      const seen: string[] = [];
+      const glob = new Bun.Glob("**/*");
+      for await (const entry of glob.scan({ cwd: join(cwd, app), dot: true, onlyFiles: true })) {
+        if (entry.endsWith(".svg")) continue;
+        // scan yields backslashes on windows: unnormalized, the depth count
+        // reads 1 everywhere, and a dot entry nested under a plain directory is
+        // caught on linux and missed here
+        const rel = entry.replaceAll("\\", "/");
+        seen.push(rel);
+        deepest = Math.max(deepest, rel.split("/").length);
+        const text = readFileSync(join(cwd, app, entry), "utf8");
+        expect(`${rel}: ${text.includes("{{name}}") || text.includes("{{version}}")}`).toBe(
+          `${rel}: false`,
+        );
+      }
+      // a scan that stopped seeing dot paths would go green over them in silence
+      expect(seen.filter((rel) => rel.split("/").some((part) => part.startsWith(".")))).not.toEqual(
+        [],
       );
     }
-  });
+    // base, the default, is the only template with a depth-3 file: stamping
+    // that stops short of it passes on the other two
+    expect(deepest).toBeGreaterThanOrEqual(3);
+  }, 60_000);
 
   test("the framework dependency is pinned to this scaffolder's version", () => {
     run(["app", NG]);

@@ -15,6 +15,7 @@ import {
   checkPort,
   checkWritable,
   isFailure,
+  isOwnProcess,
   parseNetstatPid,
   parseVersion,
   portHolder,
@@ -24,7 +25,7 @@ import {
   type DoctorEnv,
 } from "../src/doctor";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 
 function fakeEnv(overrides: Partial<DoctorEnv> = {}): DoctorEnv {
@@ -101,11 +102,30 @@ describe("checkBun", () => {
     expect(r.fix).toBe("bun upgrade");
   });
 
+  // windows reaches the node_modules branch only past the shim branch above
+  // it, so a linux-only fake never exercises that order
   test("an npm-installed shim under node_modules is refused on any platform", () => {
-    const r = checkBun(fakeEnv({ which: () => "/app/node_modules/.bin/bun" }));
-    expect(r.ok).toBe(false);
-    expect(r.detail).toContain("shadows the real bun");
-    expect(r.fix).toContain("bun.sh/install");
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      const found =
+        platform === "win32" ? "C:\\app\\node_modules\\.bin\\bun.exe" : "/app/node_modules/.bin/bun";
+      const r = checkBun(fakeEnv({ platform, which: () => found }));
+      expect(`${platform}: ${isFailure(r)}`).toBe(`${platform}: true`);
+      expect(`${platform}: ${r.detail}`).toContain("shadows the real bun");
+      expect(r.fix).toContain("bun.sh/install");
+    }
+  });
+
+  // the shape npm leaves on windows: a .cmd with no bun.exe behind it, caught
+  // by the shim branch first - a different message, never a pass
+  test("the .cmd an npm install leaves on windows is refused too", () => {
+    const r = checkBun(
+      fakeEnv({
+        platform: "win32",
+        which: (cmd) => (cmd === "bun" ? "C:\\app\\node_modules\\.bin\\bun.CMD" : null),
+      }),
+    );
+    expect(isFailure(r)).toBe(true);
+    expect(r.detail).toContain("shim");
   });
 
   describe("minimum version", () => {
@@ -478,6 +498,34 @@ describe("ports", () => {
     // the holder is borgo's own api binary, so the advice is not "move your
     // port" - it is "that is probably you, left over from a killed run"
     expect(r.fix).toContain("your own borgo");
+    // without info the wording is identical and borgo doctor exits 1 while
+    // borgo dev is up
+    expect(r.info).toBe(true);
+    expect(isFailure(r)).toBe(false);
+  });
+
+  // a neighbouring project's binary, sharing a substring with ours on purpose:
+  // misclassified as a note, doctor reads healthy while nothing can start
+  test("a port held by a stranger is a failure, not a note", async () => {
+    const r = await checkPort(
+      fakeEnv({
+        platform: "win32",
+        isPortFree: async () => false,
+        exec: (cmd) =>
+          cmd[0] === "netstat"
+            ? { code: 0, out: netstat }
+            : { code: 0, out: '"myapi.exe","4321","Console","1","10,000 K"' },
+      }),
+      3000,
+      "front",
+      "PORT",
+    );
+    expect(isFailure(r)).toBe(true);
+    expect(r.info).toBeUndefined();
+    expect(r.detail).toContain("in use by myapi.exe (pid 4321)");
+    expect(r.detail).not.toContain("borgo itself");
+    expect(r.fix).toContain("taskkill /F /PID 4321");
+    expect(r.fix).toContain("PORT");
   });
 
   test("busy port without a known holder still suggests the env var", async () => {
@@ -494,9 +542,26 @@ describe("ports", () => {
   // the real probe, not the injected one: a holder bound to the wildcard
   // address without SO_EXCLUSIVEADDRUSE (go's net.Listen, and so borgo's own
   // api on windows) still leaves 127.0.0.1 bindable, so a loopback-pinned
-  // probe would call an answering port free
+  // probe would call an answering port free.
+  // NOTE: this case separates the two probes only on windows - on linux a
+  // wildcard holder already blocks a loopback bind. The test below does both.
   test("the real probe sees a wildcard holder that leaves loopback bindable", async () => {
     const held = Bun.serve({ port: 0, hostname: "0.0.0.0", reusePort: true, fetch: () => new Response("x") });
+    try {
+      expect(await realEnv().isPortFree(held.port!)).toBe(false);
+    } finally {
+      held.stop(true);
+    }
+  });
+
+  // a non-loopback holder overlaps the wildcard the probe binds and nothing a
+  // 127.0.0.1-pinned probe would try: the case that separates them on linux too
+  const external = Object.values(networkInterfaces())
+    .flat()
+    .find((i) => i && i.family === "IPv4" && !i.internal)?.address;
+  const hostBound = external ? test : test.skip;
+  hostBound("the real probe sees a holder pinned to a non-loopback address", async () => {
+    const held = Bun.serve({ port: 0, hostname: external!, fetch: () => new Response("x") });
     try {
       expect(await realEnv().isPortFree(held.port!)).toBe(false);
     } finally {
@@ -509,6 +574,17 @@ describe("ports", () => {
     const port = probe.port!;
     probe.stop(true);
     expect(await realEnv().isPortFree(port)).toBe(true);
+  });
+
+  // the short image names lsof leaves after truncation, matched exactly: on a
+  // substring the neighbours below read as ours and doctor exits 0
+  test("isOwnProcess knows borgo's processes from the ones that resemble them", () => {
+    for (const own of ["bun", "api", "borgo", "api.exe", "BUN.EXE", "/usr/local/bin/bun", "C:\\app\\.borgo\\api.exe"]) {
+      expect(`${own}: ${isOwnProcess(own)}`).toBe(`${own}: true`);
+    }
+    for (const other of ["myapi.exe", "chat-api", "apiserver", "rapid.exe", "bunny.exe", "borgo-proxy", "nginx.exe"]) {
+      expect(`${other}: ${isOwnProcess(other)}`).toBe(`${other}: false`);
+    }
   });
 
   test("portHolder parses lsof output", () => {
@@ -538,9 +614,20 @@ describe("checkApiBinary", () => {
     expect(r.fix).toBe("taskkill /F /IM api.exe");
   });
 
-  test("swappable binary passes", () => {
-    const r = checkApiBinary(fakeEnv({ exists: (p) => p === ".borgo/api" }));
+  // off windows the check returns before consulting openForWrite, so a linux
+  // fake here tests the early return and leaves this branch uncovered
+  test("an unlocked binary on windows passes", () => {
+    const probed: string[] = [];
+    const r = checkApiBinary(
+      fakeEnv({
+        platform: "win32",
+        exists: (p) => p === ".borgo/api.exe",
+        openForWrite: (p) => (probed.push(p), "ok"),
+      }),
+    );
+    expect(probed).toEqual([".borgo/api.exe"]);
     expect(r.ok).toBe(true);
+    expect(r.detail).toContain("swappable");
   });
 
   test("a running binary off windows still passes (ETXTBSY is not a lock)", () => {

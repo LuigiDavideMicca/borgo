@@ -87,12 +87,23 @@ describe("templates", () => {
     expect(out).toContain("ExecStart=/usr/local/bin/bun run start");
   });
 
-  test("compose maps the templated port and the data volume", () => {
-    const out = composeYml({ ...ctx, port: "8080" });
-    expect(out).toContain('- "8080:8080"');
-    expect(out).toContain('PORT: "8080"');
-    expect(out).toContain("- data:/data");
-    expect(out).toContain("restart: unless-stopped");
+  // through the parser, not toContain: the file's commented half mentions
+  // ports and volumes too
+  test("compose maps the templated port, on both sides and in the environment", () => {
+    const parsed = Bun.YAML.parse(composeYml({ ...ctx, port: "8080" })) as {
+      services: { app: { ports: string[]; environment: Record<string, string>; restart: string } };
+    };
+    expect(parsed.services.app.ports).toEqual(["8080:8080"]);
+    expect(parsed.services.app.environment.PORT).toBe("8080");
+    expect(parsed.services.app.restart).toBe("unless-stopped");
+  });
+
+  // a YAML 1.1 resolver reads 22:22 as base-60; Bun's parser is 1.2 and returns
+  // the same string quoted or not, so the quotes have to be asserted as text
+  test("the port mapping is quoted, whatever the port", () => {
+    for (const port of ["22", "8080"]) {
+      expect(composeYml({ ...ctx, port })).toContain(`      - "${port}:${port}"`);
+    }
   });
 
   // the scaffolded app persists nothing, so the compose file mounts nothing:

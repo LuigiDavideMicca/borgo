@@ -166,7 +166,8 @@ describe("a commented-out hydrate export reaches the client manifest", () => {
       process.chdir(cwd);
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+    // generateManifest is 20ms idle and 5.9s at 1.5x oversubscription
+  }, 30_000);
 });
 
 describe("refreshTransform", () => {
@@ -178,10 +179,19 @@ describe("refreshTransform", () => {
     ].join("\n");
     const out = await refreshTransform(js, "pages/index.tsx");
     expect(out).toContain("$RefreshReg$");
-    expect(out).toContain('"pages/index.tsx"');
-    expect(out).toContain('"Home"');
-    expect(out).toContain("$borgoPrevReg");
-  });
+    // the key the wrapper composes, not the "Home" babel emits on its own: with
+    // the name half dropped every component in a module registers under one key
+    expect(out.match(/register\(type, ([^)]+)\)/)?.[1]).toBe('"pages/index.tsx" + "#" + name');
+    // and babel did register the component, so there is a name to scope
+    expect(out).toContain('$RefreshReg$(_c, "Home")');
+    // save and restore, asserted apart: the declaration alone satisfies a
+    // "$borgoPrevReg" substring, and it is the restore that stops the next
+    // module registering under this module's id
+    expect(out).toContain("var $borgoPrevReg = globalThis.$RefreshReg$");
+    expect(out).toContain("globalThis.$RefreshReg$ = $borgoPrevReg;");
+    // first call in the file, so it pays the lazy @babel/core and
+    // react-refresh/babel imports: ~210ms warm
+  }, 30_000);
 
   test("emits hook signatures so hook edits remount instead of corrupting state", async () => {
     const withState = await refreshTransform(
@@ -216,6 +226,8 @@ describe("refreshTransform", () => {
 });
 
 describe("precacheStamp", () => {
+  // ~5ms of file reads idle, 5.5s at 1.5x oversubscription: the budgets below
+  // are scheduling headroom, not work
   const listed = ["/assets/client.js", "/assets/page-abc123.js", "/assets/style.css"];
 
   const fixture = () => {
@@ -237,7 +249,7 @@ describe("precacheStamp", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("moves when the stylesheet or the chunk list changes", async () => {
     const dir = fixture();
@@ -251,7 +263,7 @@ describe("precacheStamp", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 describe("assetsBuildMode", () => {
@@ -309,7 +321,9 @@ describe("generateManifest", () => {
     await write("islands/Counter.tsx", "export default function Counter() { return null; }");
     process.chdir(dir);
     await generateManifest();
-  });
+    // 20ms idle, 5.9s at 1.5x oversubscription; a hook that times out skips
+    // this whole describe, which reads as a shorter green run
+  }, 30_000);
 
   afterAll(() => {
     process.chdir(originalCwd);
@@ -374,7 +388,7 @@ describe("generateManifest", () => {
     const dynamicIdx = manifest.indexOf('pattern: "/deep/:id"');
     expect(staticIdx).toBeGreaterThan(-1);
     expect(dynamicIdx).toBeGreaterThan(staticIdx);
-  });
+  }, 30_000);
 });
 
 // `_layout.tsx` used to be matched with endsWith, which is also true of every
@@ -403,7 +417,8 @@ describe("a page named like a layout is a page", () => {
     await write("pages/blog/_layout.tsx", "export default function L({ children }) { return children; }");
     process.chdir(dir);
     await generateManifest();
-  });
+    // same exposure as the manifest fixture above, same silent skip
+  }, 30_000);
 
   afterAll(() => {
     process.chdir(originalCwd);
@@ -1027,14 +1042,21 @@ describe("compileCss", () => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-css-live-"));
     process.chdir(dir);
     try {
-      writeFileSync(join(dir, "style.scss"), "body { color: red; }");
+      // scss a copy would not survive: a variable to substitute and a nested
+      // rule to flatten, neither of which is valid css
+      writeFileSync(join(dir, "style.scss"), "$brand: #cc3333;\nbody { color: $brand; a { color: $brand; } }\n");
       await compileCss(true);
-      expect(readFileSync(join(dir, "public/assets/style.css"), "utf8")).toContain("color");
+      const css = readFileSync(join(dir, "public/assets/style.css"), "utf8");
+      expect(css).toContain("body a");
+      expect(css).toContain("#cc3333");
+      expect(css).not.toContain("$brand");
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+    // the only test that reaches sass: importing sass-embedded and spawning
+    // its dart compiler measured 6.9s cold, ~310ms warm
+  }, 60_000);
 });
 
 describe("renameUnsafeChunks", () => {
