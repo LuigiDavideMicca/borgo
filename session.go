@@ -45,8 +45,8 @@ func newSessionCookie() (*http.Cookie, error) {
 }
 
 // sessionSecure reads SESSION_SECURE, which adds the Secure attribute to the
-// session cookie. Like BORGO_HASH_SLOTS and the BORGO_*_TIMEOUT family, a
-// value that is not understood is a refusal rather than a silent fallback:
+// session cookie. Like the BORGO_*_TIMEOUT family, a value that is not
+// understood is a refusal rather than a silent fallback:
 // this was an == "1" test, so SESSION_SECURE=true - the spelling every other
 // boolean env in the ecosystem takes - read as "not 1" and quietly issued a
 // session cookie the browser would send back over plain http. The failure

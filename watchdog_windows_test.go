@@ -4,6 +4,8 @@ package borgo
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"syscall"
 	"testing"
 	"time"
@@ -160,5 +162,49 @@ func TestWaitProcessExitReleasesTheHandleWhenStopped(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("waitProcessExit stayed in its wait: the goroutine and the process handle it holds are pinned for the life of the process")
+	}
+}
+
+// A signaled process object stays openable for as long as anybody holds a
+// handle on it, so "OpenProcess succeeded" is not "the process is alive". The
+// probe was waitParentExit with an already-closed stop, and waitHandle honours
+// the stop before it ever asks the handle: every openable pid, corpse or not,
+// came back alive. serveContext then mounted, latched the registry, tripped the
+// watch on the parent it had just cleared, served nothing and returned nil.
+func TestProcessExitedSeesACorpseSomebodyStillHolds(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("could not start a child: %v", err)
+	}
+	pid := cmd.Process.Pid
+	// this handle is what keeps the dead child's process object addressable,
+	// standing in for the launcher that has not reaped its own child yet
+	h, err := syscall.OpenProcess(syscall.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		cmd.Wait()
+		t.Skipf("cannot open the child: %v", err)
+	}
+	defer syscall.CloseHandle(h)
+	if err := cmd.Wait(); err != nil {
+		t.Skipf("the child exited with %v", err)
+	}
+
+	if !processExited(pid) {
+		t.Fatal("a corpse whose handle is still open read as alive: the boot goes on to mount, latch the registry and shut down having served nothing")
+	}
+}
+
+// and the live process this one is running in is not a corpse
+func TestProcessExitedSaysNoForALiveProcess(t *testing.T) {
+	if processExited(syscall.Getpid()) {
+		t.Fatal("this process reported itself as exited")
+	}
+}
+
+// alive and out of reach is alive: a supervisor at another elevation must not
+// refuse the boot
+func TestProcessExitedSaysNoForAnUnreachableProcess(t *testing.T) {
+	if processExited(deniedPID(t)) {
+		t.Fatal("a live process this one may not open read as exited: a supervisor at another elevation would refuse every boot")
 	}
 }

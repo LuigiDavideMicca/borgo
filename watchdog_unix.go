@@ -12,6 +12,15 @@ import (
 // matches the windows sibling's poll.
 const parentPollInterval = 2 * time.Second
 
+// processExited reports whether the process is already gone, asked and answered
+// now: a cancellable wait reused as a synchronous probe answers the
+// cancellation, not the question. EPERM is a live process this one may not
+// signal, exactly as the poll reads it.
+func processExited(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err != nil && err != syscall.EPERM
+}
+
 // waitParentExit polls until the process named by pid is gone or stop closes,
 // reporting whether the process really exited - a cancelled watch learned
 // nothing about it, and every ServeContext run ends its own watcher rather

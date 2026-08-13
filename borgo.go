@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,7 +49,9 @@ var (
 	routesMu sync.Mutex
 	routes   = map[string]http.HandlerFunc{}
 	// Serve snapshots the registry into its mux once; a Handle call after that
-	// would silently register a route that is never mounted, so it panics
+	// would silently register a route that is never mounted, so it panics. It
+	// is latched when the mux is built, which is after the last refusal has
+	// been returned: a run that would not start leaves Handle working
 	served    bool
 	patternRe = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /\S*$`)
 	// the mux is the authority on pattern syntax and conflicts (e.g.
@@ -373,17 +376,56 @@ func healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // envDuration reads a timeout override, e.g. BORGO_READ_HEADER_TIMEOUT=10s;
-// "0" disables the timeout.
-func envDuration(name string, def time.Duration) time.Duration {
+// "0" disables the timeout. A malformed value is refused rather than defaulted:
+// too strict costs a boot the operator can fix from the message, too lax runs
+// the server on a timeout nobody chose and nothing prints.
+func envDuration(name string, def time.Duration) (time.Duration, error) {
 	v := os.Getenv(name)
 	if v == "" {
-		return def
+		return def, nil
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil || d < 0 {
-		panic(`borgo: ` + name + `: invalid duration "` + v + `" (want e.g. "5s"; "0" disables)`)
+		return def, fmt.Errorf(`borgo: %s: invalid duration %q (want e.g. "5s"; "0" disables)`, name, v)
 	}
-	return d
+	return d, nil
+}
+
+// envPort reads API_PORT. It is the one variable net would otherwise settle,
+// from inside ListenAndServe, long after the registry is mounted: "nope" came
+// back as "lookup tcp/nope: unknown port" from a run that had already closed
+// the registry behind it. A value that is not a port number is refused rather
+// than defaulted - too strict costs a boot the message names the fix for, too
+// lax serves a typo on 3501 and the deployment is reachable at the wrong place.
+func envPort() (string, error) {
+	v := os.Getenv("API_PORT")
+	if v == "" {
+		return "3501", nil
+	}
+	n, err := strconv.Atoi(v)
+	// digits only: net takes ":0080" but not ":+80", and neither takes the
+	// shapes a typo actually produces (":3501", "3501 ", "8080;ls")
+	if err != nil || n < 0 || n > 65535 || strings.Trim(v, "0123456789") != "" {
+		return "", fmt.Errorf(`borgo: API_PORT: invalid port %q (want 0-65535; unset uses 3501)`, v)
+	}
+	return v, nil
+}
+
+// envParentPID reads BORGO_PARENT_PID, the supervisor whose exit ends this run;
+// 0 means nobody is watching. A value that is not a pid was silently no watch
+// at all, which is the failure this variable exists to prevent: on windows a
+// force-killed borgo dev leaves the api holding the port until someone finds it
+// in the task manager. Refusing costs a boot for a variable no human sets.
+func envParentPID() (int, error) {
+	v := os.Getenv("BORGO_PARENT_PID")
+	if v == "" {
+		return 0, nil
+	}
+	pid, err := strconv.Atoi(v)
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf(`borgo: BORGO_PARENT_PID: invalid pid %q (want a positive integer; unset means no parent watch)`, v)
+	}
+	return pid, nil
 }
 
 // newServer configures the http server borgo.Serve runs. ReadHeaderTimeout
@@ -393,15 +435,36 @@ func envDuration(name string, def time.Duration) time.Duration {
 // long-lived response - body abuse is capped by Bind's 1 MB reader instead,
 // and borgo.SSE clears the deadlines on its own connection in case an app
 // sets BORGO_READ_TIMEOUT / BORGO_WRITE_TIMEOUT anyway.
-func newServer(port string, handler http.Handler) *http.Server {
+// Each variable is named in a literal envDuration call: envNamesDoNotCollide
+// scrapes these four names out of this file to prove no variable is read as a
+// duration here and as a plain number by the front server. Hiding them behind a
+// local alias reads as an empty set, and the collision guard has nothing left
+// to compare.
+func newServer(port string, handler http.Handler) (*http.Server, error) {
+	readHeaderTimeout, err := envDuration("BORGO_READ_HEADER_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	readTimeout, err := envDuration("BORGO_READ_TIMEOUT", 0)
+	if err != nil {
+		return nil, err
+	}
+	writeTimeout, err := envDuration("BORGO_WRITE_TIMEOUT", 0)
+	if err != nil {
+		return nil, err
+	}
+	idleTimeout, err := envDuration("BORGO_IDLE_TIMEOUT", 2*time.Minute)
+	if err != nil {
+		return nil, err
+	}
 	return &http.Server{
 		Addr:              ":" + port,
 		Handler:           handler,
-		ReadHeaderTimeout: envDuration("BORGO_READ_HEADER_TIMEOUT", 5*time.Second),
-		ReadTimeout:       envDuration("BORGO_READ_TIMEOUT", 0),
-		WriteTimeout:      envDuration("BORGO_WRITE_TIMEOUT", 0),
-		IdleTimeout:       envDuration("BORGO_IDLE_TIMEOUT", 2*time.Minute),
-	}
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}, nil
 }
 
 // Serve mounts every registered route and listens on API_PORT (default 3501).
@@ -426,10 +489,12 @@ func Serve() {
 // the parent process named by BORGO_PARENT_PID exits, then shuts the server
 // down gracefully within BORGO_SHUTDOWN_TIMEOUT and returns nil. It returns
 // the listener's error - a port already in use, most often - if the server
-// cannot start or stops on its own, and CheckEnv's if the session environment
-// is unusable. It never exits the process: every refusal comes back as a
-// value, so an embedder's own cleanup, and any other server it is running,
-// survive a borgo that will not start.
+// cannot start or stops on its own, CheckEnv's if the session environment is
+// unusable, and a malformed BORGO_*_TIMEOUT as an error too. It never exits the
+// process and never panics its way out: every refusal comes back as a value, so
+// an embedder's own cleanup, and any other server it is running, survive a
+// borgo that will not start - and so does the route registry, which is only
+// closed once the mux is built, after the last refusal.
 //
 // Cancelling ctx is the way to stop the server: when it returns, the port is
 // released and every event stream this run was serving has ended.
@@ -441,6 +506,79 @@ func ServeContext(ctx context.Context) error {
 // the moment shutdown begins, before waiting for in-flight requests: Serve
 // uses it to release its hold on the interrupt signal.
 func serveContext(ctx context.Context, onShutdown func()) error {
+	// everything that can refuse this run happens before the registry is
+	// mounted, the bind included, and the handler goes on afterwards: a run
+	// that will not start must leave Handle working, or the caller it handed
+	// the refusal to cannot retry. Exiting from in here would take an
+	// embedder's process with it, deferred cleanup unrun, which is the one
+	// thing ServeContext exists not to do
+	port, err := envPort()
+	if err != nil {
+		return err
+	}
+	if err := CheckEnv(); err != nil {
+		return err
+	}
+	srv, err := newServer(port, nil)
+	if err != nil {
+		return err
+	}
+	grace, err := envDuration("BORGO_SHUTDOWN_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return err
+	}
+	parentPID, err := envParentPID()
+	if err != nil {
+		return err
+	}
+	if parentPID > 0 && processExited(parentPID) {
+		// otherwise this run mounts, shuts down before serving a request, and
+		// reports the abort to its caller as a clean nil
+		return fmt.Errorf("borgo: parent process %d has already exited; not starting", parentPID)
+	}
+	// bind before mounting rather than inside ListenAndServe: a port already in
+	// use is then a refusal like the others, with the registry untouched and no
+	// banner printed for a server that never came up
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return err
+	}
+
+	mux, patterns := mountRoutes()
+	srv.Handler = Middleware(mux)
+	// arm this server's stream-shutdown latch before anything can connect, and
+	// drop it on the way out however this run ends: a run that never binds
+	// must leave no latch behind it
+	defer armStreamShutdown(srv)()
+	printStartup(patterns, port)
+
+	parentExited, stopWatchingParent := watchParent(parentPID)
+	defer stopWatchingParent()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ln) }()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		onShutdown()
+		shutdown(srv, grace)
+	case <-parentExited:
+		// on windows a force-killed supervisor delivers no signal: without
+		// this the api outlives borgo dev/start, holding the port and the
+		// binary until someone finds it in the task manager
+		log.Print("borgo: parent process exited; shutting down")
+		onShutdown()
+		shutdown(srv, grace)
+	}
+	return nil
+}
+
+// mountRoutes snapshots the registry into a mux, adds /healthz unless a route
+// claims it, and returns the patterns sorted for the banner. It closes the
+// registry as it reads it, in one hold of the lock: a Handle that landed
+// between the snapshot and the latch would be accepted and never mounted.
+func mountRoutes() (*http.ServeMux, []string) {
 	mux := http.NewServeMux()
 	routesMu.Lock()
 	patterns := make([]string, 0, len(routes))
@@ -461,67 +599,20 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 		}
 		return a[0] < b[0]
 	})
-
-	port := os.Getenv("API_PORT")
-	if port == "" {
-		port = "3501"
-	}
-
-	// build the server before the banner so a bad BORGO_*_TIMEOUT fails
-	// before "api on :port" is printed
-	srv := newServer(port, Middleware(mux))
-	grace := envDuration("BORGO_SHUTDOWN_TIMEOUT", 10*time.Second)
-	// arm this server's stream-shutdown latch before anything can connect, and
-	// drop it on the way out however this run ends: a run that never binds
-	// must leave no latch behind it
-	defer armStreamShutdown(srv)()
-	// settle the session environment before binding: a refusal here is the
-	// caller's to act on, and Serve turns it into the log.Fatal it always was.
-	// Exiting from in here would take an embedder's process with it, deferred
-	// cleanup unrun, which is the one thing ServeContext exists not to do
-	if err := CheckEnv(); err != nil {
-		return err
-	}
-	printStartup(patterns, port)
-
-	parentExited, stopWatchingParent := watchParent()
-	defer stopWatchingParent()
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		onShutdown()
-		shutdown(srv, grace)
-	case <-parentExited:
-		// on windows a force-killed supervisor delivers no signal: without
-		// this the api outlives borgo dev/start, holding the port and the
-		// binary until someone finds it in the task manager
-		log.Print("borgo: parent process exited; shutting down")
-		onShutdown()
-		shutdown(srv, grace)
-	}
-	return nil
+	return mux, patterns
 }
 
-// watchParent returns a channel that closes when the process named by
-// BORGO_PARENT_PID exits, and the func that ends the watch. Without the env
-// the channel is nil (blocks forever) and the stop is a no-op.
+// watchParent returns a channel that closes when the process named by pid
+// exits, and the func that ends the watch. For pid 0 - nobody to watch - the
+// channel is nil (blocks forever) and the stop is a no-op.
 //
 // The stop is not optional. The watcher blocks in a wait nothing else ends -
 // on windows inside WaitForSingleObject, holding a kernel handle on the parent
 // - so without it every ServeContext run left a goroutine parked for the life
 // of the process, and ServeContext exists to be called more than once. Each
 // run ends its own watcher on the way out.
-func watchParent() (<-chan struct{}, func()) {
-	v := os.Getenv("BORGO_PARENT_PID")
-	if v == "" {
-		return nil, func() {}
-	}
-	pid, err := strconv.Atoi(v)
-	if err != nil || pid <= 0 {
+func watchParent(pid int) (<-chan struct{}, func()) {
+	if pid <= 0 {
 		return nil, func() {}
 	}
 	stop := make(chan struct{})
@@ -581,7 +672,25 @@ func shutdown(srv *http.Server, grace time.Duration) {
 // binary or a program that embeds the api: exiting from inside ServeContext
 // killed the process mid-run, skipped its deferred cleanup and took any
 // sibling server with it. Serve, which owns its process, still exits.
+//
+// It also refuses BORGO_HASH_SLOTS, which package init can only log: init runs
+// before main, where the only way to refuse is to kill a process that has not
+// run a line of its own yet. This is the first moment that refusal can be a
+// value. It re-reads the variable rather than replaying what init found - a
+// refusal frozen at init outlives the correction and leaves ServeContext dead
+// for the life of the process - and says so when a corrected value arrives too
+// late to size a semaphore that exists before main does.
 func CheckEnv() error {
+	slots, err := hashSlotCount()
+	if err != nil {
+		return err
+	}
+	// compared, not guarded on the variable being set: unsetting it after init
+	// asks for the default while the process keeps the cap it was given, which
+	// is the same silent difference the other way round
+	if slots != cap(hashSlots) {
+		log.Printf("borgo: the hash-slot cap is fixed at %d for the life of this process; the environment now asks for %d (BORGO_HASH_SLOTS is read once, at package init)", cap(hashSlots), slots)
+	}
 	if _, err := sessionSecure(); err != nil {
 		return err
 	}

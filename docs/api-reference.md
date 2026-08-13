@@ -211,7 +211,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | Variable | Read by | What it does | Stability |
 | --- | --- | --- | --- |
 | `PORT` (`3000`) | front server; Go, to find the front server for `Push` | Front server port. | stable |
-| `API_PORT` (`3501`) | Go server; front server, to build the proxy target | Go API port. | stable |
+| `API_PORT` (`3501`) | Go server; front server, to build the proxy target | Go API port. A value that is not a port number (0-65535, digits only) is refused before the Go server binds. | stable |
 | `SESSION_SECRET` | Go | HMAC key for signed-cookie sessions. At least 32 bytes. Missing is logged at startup and fails session routes per request; **shorter than 32 bytes is fatal at startup** — see [sessions](auth-and-sessions.md#sessions). | stable |
 | `SESSION_SECURE` | Go and front server | `1`/`true` adds `Secure` to the session and CSRF cookies; `0`/`false` and unset do not. Both halves parse it with the same grammar and **refuse a value that is neither** at startup, rather than reading it as "not secure". | stable |
 | `BORGO_PUSH_KEY` | Go and front server | Shared secret for `Push` across hosts. Once set it *replaces* the loopback check. | stable |
@@ -245,18 +245,18 @@ Read at runtime unless noted. Defaults in parentheses.
 | `BORGO_READ_TIMEOUT` (`0`, off) | Whole-request read deadline. Go only — the front server's own read deadline is `BORGO_FRONT_READ_TIMEOUT`. | stable |
 | `BORGO_WRITE_TIMEOUT` (`0`, off) | Whole-response write deadline; `SSE` exempts its own connection. | stable |
 | `BORGO_SHUTDOWN_TIMEOUT` (`10s`) | Grace period for in-flight requests; `0` waits indefinitely. | stable |
-| `BORGO_HASH_SLOTS` (`max(1, GOMAXPROCS/2)`) | Password hashes that may run at once. A value that is not a positive integer is refused at startup. | stable |
+| `BORGO_HASH_SLOTS` (`max(1, GOMAXPROCS/2)`) | Password hashes that may run at once. A value that is not a positive integer is refused by `CheckEnv`, and so by `Serve` and `ServeContext`. | stable |
 
-The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` is a positive integer and `FRONT_URL` a URL. A malformed duration or a non-positive slot count panics at boot, before the startup banner.
+The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` is a positive integer and `FRONT_URL` a URL. A malformed duration or a non-positive slot count stops the boot before the startup banner, as an error `ServeContext` returns and `Serve` exits on — never a panic, so a program that embeds the api keeps its process and can act on the refusal. The slot count is read while the package initialises, before `main`: there it can only fall back to the default cap and log, and `CheckEnv` is where it becomes a value.
 
-> **Why the front server's read deadline is called `BORGO_FRONT_READ_TIMEOUT`.** `borgo start` hands both children one environment, so a name both halves read is a name that cannot mean one thing. This knob was `BORGO_IDLE_TIMEOUT` once — which Go parses as a duration and **panics at boot** on anything it cannot read, while the front server parses whole **seconds** and **silently falls back to 30**. So `=2m` gave Go two minutes and left the front server quietly on its default, and `=120` gave the front server two minutes and stopped the Go binary from starting. Renaming it to `BORGO_READ_TIMEOUT` reproduced the defect exactly, because `newServer` in `borgo.go` reads *that* name too, with the same duration grammar and the same panic. A rename moves a collision; it does not close one. `FRONT` is the part that closes it, and a test fails the build if either grammar is ever pointed back at the other half's variable. Neither older name is honoured as an alias — an alias kept for compatibility keeps the collision alive.
+> **Why the front server's read deadline is called `BORGO_FRONT_READ_TIMEOUT`.** `borgo start` hands both children one environment, so a name both halves read is a name that cannot mean one thing. This knob was `BORGO_IDLE_TIMEOUT` once — which Go parses as a duration and **refuses to boot** on anything it cannot read, while the front server parses whole **seconds** and **silently falls back to 30**. So `=2m` gave Go two minutes and left the front server quietly on its default, and `=120` gave the front server two minutes and stopped the Go binary from starting. Renaming it to `BORGO_READ_TIMEOUT` reproduced the defect exactly, because `newServer` in `borgo.go` reads *that* name too, with the same duration grammar and the same refusal. A rename moves a collision; it does not close one. `FRONT` is the part that closes it, and a test fails the build if either grammar is ever pointed back at the other half's variable. Neither older name is honoured as an alias — an alias kept for compatibility keeps the collision alive.
 
 ### Build, dev loop and internal
 
 | Variable | What it does | Stability |
 | --- | --- | --- |
 | `BORGO_TAILWIND` | Set to `1` by `--tailwind` for child processes. Use the flag, not the variable. | internal |
-| `BORGO_PARENT_PID` | How the CLI tells a child process whose death to exit with. | internal |
+| `BORGO_PARENT_PID` | How the CLI tells a child process whose death to exit with. The Go server refuses a value that is not a positive integer, and refuses to start at all if that process is already gone — silently running unwatched is the orphaned api this variable exists to prevent. | internal |
 | `BORGO_SUPERVISOR_PID` | Set by `borgo start` on the copy of itself it re-execs to raise `BUN_CONFIG_MAX_HTTP_REQUESTS`; the child polls it and exits when the supervisor does. | internal |
 | `BORGO_RELOAD` | Marks a restart so the banner prints the short form. | internal |
 | `BORGO_CHANGED` | Carries the changed file **set** into the dev fallback server — newline-separated, because a path may contain a comma or a space but not a newline. Two saves inside one debounce window announce both; carrying only the first meant the browser, which ignores an update naming a page other than the one on screen, could apply nothing at all. | internal |
@@ -490,7 +490,7 @@ Not duplication or naming, but things a 1.0 API should have and did not. Every o
 
 - **No way to read borgo's version from Go.** → `borgo.Version`, kept honest by a test that reads `.release-please-manifest.json`.
 - **`SSEHub` had no subscriber count and no `Close`.** → `(*SSEHub).Subscribers() int` and `(*SSEHub).Close()`, the latter idempotent.
-- **The hash-slot semaphore was not configurable.** → `BORGO_HASH_SLOTS`, read once at package init; a value that is not a positive integer panics at boot rather than silently reinstating the default.
+- **The hash-slot semaphore was not configurable.** → `BORGO_HASH_SLOTS`, read once at package init; a value that is not a positive integer is logged there and refused by `CheckEnv`, rather than silently reinstating the default.
 - **`Serve()` could not be composed or tested.** → `ServeContext(ctx) error` beside it, rather than changing `Serve`'s shape.
 
 No gap of this kind is currently open. What remains before 1.0 is the open half of [finding 1](#duplicated-apis) — deprecating `WriteJSON` as public surface.

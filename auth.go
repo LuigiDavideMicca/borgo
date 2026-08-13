@@ -167,7 +167,21 @@ func (a *Auth[U]) dummyHash() string {
 // unauthenticated login traffic is a cpu exhaustion vector: a handful of
 // parallel attempts is enough to starve every other route. Half the cores
 // keeps the rest of the api answering while logins queue.
-var hashSlots = make(chan struct{}, hashSlotCount())
+var hashSlots = newHashSlots()
+
+// newHashSlots sizes the semaphore at package init, where a malformed
+// BORGO_HASH_SLOTS cannot be refused to anybody: init runs before main, so a
+// panic here kills a binary whose only tie to borgo is an import. It falls back
+// to the default cap instead - too lax on its own, since a typo would silently
+// reinstate the exhaustion vector the cap exists to close, which is why the
+// refusal is logged from here and re-read by CheckEnv.
+func newHashSlots() chan struct{} {
+	n, err := hashSlotCount()
+	if err != nil {
+		log.Print(err)
+	}
+	return make(chan struct{}, n)
+}
 
 // defaultHashSlots is the cap when BORGO_HASH_SLOTS is unset.
 func defaultHashSlots() int { return max(1, runtime.GOMAXPROCS(0)/2) }
@@ -176,19 +190,21 @@ func defaultHashSlots() int { return max(1, runtime.GOMAXPROCS(0)/2) }
 // run at once. It is read once, when the package is initialised, because the
 // semaphore it sizes is created there. A box tuned for login throughput raises
 // it; a box that must keep every other route responsive under a login flood
-// lowers it. Like the BORGO_*_TIMEOUT reads, a value that is not a positive
-// integer is a panic rather than a silent fallback: a typo here would quietly
-// reinstate the cpu exhaustion vector the cap exists to close.
-func hashSlotCount() int {
+// lowers it. A value that is not a positive integer is returned as a refusal
+// alongside the default cap.
+func hashSlotCount() (int, error) {
 	v := os.Getenv("BORGO_HASH_SLOTS")
 	if v == "" {
-		return defaultHashSlots()
+		return defaultHashSlots(), nil
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 1 {
-		panic(`borgo: BORGO_HASH_SLOTS: invalid value "` + v + `" (want a positive integer; unset uses max(1, GOMAXPROCS/2) = ` + strconv.Itoa(defaultHashSlots()) + `)`)
+		return defaultHashSlots(), fmt.Errorf(
+			"borgo: BORGO_HASH_SLOTS: invalid value %q (want a positive integer; unset uses max(1, GOMAXPROCS/2) = %d)",
+			v, defaultHashSlots(),
+		)
 	}
-	return n
+	return n, nil
 }
 
 // hashWait is how long a request queues for a slot before being shed; a var

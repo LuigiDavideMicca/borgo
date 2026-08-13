@@ -221,7 +221,7 @@ Route labels are the matched route *pattern*, not each concrete URL — and the 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `3000` | front server port |
-| `API_PORT` | `3501` | go api port |
+| `API_PORT` | `3501` | go api port; a value that is not 0-65535 is refused before the server binds |
 | `API_URL` | `http://localhost:$API_PORT` | where the front server reaches the api (split deployments) |
 | `FRONT_URL` | `http://localhost:$PORT` | where `borgo.Push` reaches the front server |
 | `BORGO_PUSH_KEY` | unset | shared secret for `borgo.Push` across hosts — once set it *replaces* the loopback check, so set it on both halves or neither |
@@ -245,7 +245,7 @@ Route labels are the matched route *pattern*, not each concrete URL — and the 
 
 The Go timeouts are duration strings (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot rather than silently defaulting; the front server's three — `BORGO_MAX_BODY` in bytes, `BORGO_API_TIMEOUT` in milliseconds, `BORGO_FRONT_READ_TIMEOUT` in seconds — are plain numbers, and a malformed one is silently replaced by the default. `DB_PATH` in the samples above is the app's own variable, not the framework's.
 
-> **Why `BORGO_FRONT_READ_TIMEOUT` spells out `FRONT`.** `borgo start` hands both children one environment, so a variable both halves read cannot mean one thing. That knob was `BORGO_IDLE_TIMEOUT` once, and Go still reads that name as a duration: `=2m` gave Go two minutes and left the front server silently on 30 seconds, while `=120` gave the front server two minutes and panicked the Go binary at boot. Renaming it to `BORGO_READ_TIMEOUT` reproduced the defect exactly, since the Go server reads that name too, same grammar, same panic. A rename moves a collision; `FRONT` is what closes it, and a test now fails the build if either half is ever pointed back at the other's variable. Neither old name is honoured as an alias.
+> **Why `BORGO_FRONT_READ_TIMEOUT` spells out `FRONT`.** `borgo start` hands both children one environment, so a variable both halves read cannot mean one thing. That knob was `BORGO_IDLE_TIMEOUT` once, and Go still reads that name as a duration: `=2m` gave Go two minutes and left the front server silently on 30 seconds, while `=120` gave the front server two minutes and stopped the Go binary from starting. Renaming it to `BORGO_READ_TIMEOUT` reproduced the defect exactly, since the Go server reads that name too, same grammar, same refusal. A rename moves a collision; `FRONT` is what closes it, and a test now fails the build if either half is ever pointed back at the other's variable. Neither old name is honoured as an alias.
 >
 > Note also that raising the front server's deadline is *not* how you keep event streams alive: it is lifted per request the moment nothing is left for a client to dribble at us — at the top of `fetch()` for a request with no body at all (every GET and HEAD), and in the proxy the instant a buffered request body has been read in full. A response that outlives the deadline is unaffected either way.
 

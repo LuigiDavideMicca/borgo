@@ -68,6 +68,30 @@ func waitProcessExit(pid int, poll time.Duration, stop <-chan struct{}) bool {
 	}
 }
 
+// processExited reports whether the process is already gone, asked and answered
+// now. It cannot be waitParentExit with a closed stop: a cancellable wait
+// reused as a synchronous probe answers the cancellation, not the question -
+// waitHandle honours the closed stop before it ever calls WaitForSingleObject,
+// so every openable process reads as alive. Windows keeps a signaled process
+// object openable for as long as anybody holds a handle on it, so that "alive"
+// covers the ordinary corpse: an api whose supervisor died while its own
+// launcher still held it booted, mounted, tripped the watch and shut down
+// having served nothing.
+//
+// A zero timeout asks the handle instead. A wait that fails is read as alive:
+// refusing a boot needs certainty the parent is gone, and the watch is still
+// behind this to catch what the probe missed.
+func processExited(pid int) bool {
+	h, err := syscall.OpenProcess(syscall.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		// denied is a live process out of reach, exactly as the wait reads it
+		return !errors.Is(err, syscall.ERROR_ACCESS_DENIED)
+	}
+	defer syscall.CloseHandle(h)
+	event, err := syscall.WaitForSingleObject(h, 0)
+	return err == nil && event != uint32(syscall.WAIT_TIMEOUT)
+}
+
 // waitHandle blocks until the process behind h exits or stop closes, reporting
 // which. A failed wait is treated as an exit: the handle is no longer telling
 // this process anything, and the watchdog's job is to not outlive its parent.

@@ -165,8 +165,8 @@ func TestSessionSecureAcceptsTheUsualSpellings(t *testing.T) {
 	}
 }
 
-// like BORGO_HASH_SLOTS and the BORGO_*_TIMEOUT family: a value the package
-// does not understand is a refusal, not a fallback to the insecure default
+// like the BORGO_*_TIMEOUT family: a value the package does not understand is
+// a refusal, not a fallback to the insecure default
 func TestSessionSecureRejectsGarbage(t *testing.T) {
 	for _, v := range []string{"yes", "on", "secure", "2", "-1", " 1", "true ", "https"} {
 		t.Run(v, func(t *testing.T) {

@@ -9,9 +9,13 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -169,7 +173,11 @@ func TestNoExportedPasswordHasherVariable(t *testing.T) {
 
 func TestHashSlotsDefault(t *testing.T) {
 	t.Setenv("BORGO_HASH_SLOTS", "")
-	if got, want := hashSlotCount(), defaultHashSlots(); got != want {
+	got, err := hashSlotCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := defaultHashSlots(); got != want {
 		t.Fatalf("unset BORGO_HASH_SLOTS gives %d slots, want the previous default %d", got, want)
 	}
 	if want := max(1, runtime.GOMAXPROCS(0)/2); defaultHashSlots() != want {
@@ -181,7 +189,11 @@ func TestHashSlotsOverride(t *testing.T) {
 	for _, v := range []string{"1", "3", "64"} {
 		t.Setenv("BORGO_HASH_SLOTS", v)
 		want, _ := strconv.Atoi(v)
-		if got := hashSlotCount(); got != want {
+		got, err := hashSlotCount()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
 			t.Errorf("BORGO_HASH_SLOTS=%s gives %d slots, want %d", v, got, want)
 		}
 	}
@@ -189,29 +201,143 @@ func TestHashSlotsOverride(t *testing.T) {
 
 // a typo that silently fell back to the default would quietly reinstate the
 // cpu exhaustion vector the cap exists to close, exactly like a malformed
-// BORGO_*_TIMEOUT
+// BORGO_*_TIMEOUT. It is refused as a value, not as a panic: this is read
+// during package init, where a panic kills the importing binary outright
 func TestHashSlotsRejectsGarbage(t *testing.T) {
 	for _, v := range []string{"lots", "0", "-4", "2.5", "8 ", "1e3", "99999999999999999999"} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv("BORGO_HASH_SLOTS", v)
-			defer func() {
-				r := recover()
-				if r == nil {
-					t.Fatalf("BORGO_HASH_SLOTS=%q was accepted", v)
-				}
-				if !strings.Contains(fmt.Sprint(r), "BORGO_HASH_SLOTS") {
-					t.Fatalf("panic does not name the variable: %v", r)
-				}
-			}()
-			hashSlotCount()
+			n, err := hashSlotCount()
+			if err == nil {
+				t.Fatalf("BORGO_HASH_SLOTS=%q was accepted as %d slots", v, n)
+			}
+			if !strings.Contains(err.Error(), "BORGO_HASH_SLOTS") {
+				t.Fatalf("error does not name the variable: %v", err)
+			}
+			if n != defaultHashSlots() {
+				t.Fatalf("refused value left the cap at %d, want the default %d", n, defaultHashSlots())
+			}
 		})
+	}
+}
+
+// the refused value falls back to a cap the operator did not choose, so it has
+// to reach somebody who can act on it: CheckEnv is where a program that has
+// started can still be told. It re-reads rather than replaying what init found,
+// or the refusal outlives the correction and every later boot is dead for a
+// variable that is no longer wrong.
+func TestCheckEnvRefusesAndThenForgivesTheHashSlotCount(t *testing.T) {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	t.Setenv("BORGO_HASH_SLOTS", "lots")
+	err := CheckEnv()
+	if err == nil || !strings.Contains(err.Error(), "BORGO_HASH_SLOTS") {
+		t.Fatalf("CheckEnv returned %v, want the BORGO_HASH_SLOTS refusal", err)
+	}
+
+	t.Setenv("BORGO_HASH_SLOTS", strconv.Itoa(cap(hashSlots)))
+	if err := CheckEnv(); err != nil {
+		t.Fatalf("CheckEnv still refuses a corrected value: %v", err)
+	}
+}
+
+// and a corrected value that arrives too late to size the semaphore is said out
+// loud: silently serving a cap the operator did not ask for is the same shape
+// as silently serving a default
+func TestCheckEnvSaysACorrectedSlotCountArrivedTooLate(t *testing.T) {
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	t.Setenv("BORGO_HASH_SLOTS", strconv.Itoa(cap(hashSlots)+7))
+	if err := CheckEnv(); err != nil {
+		t.Fatalf("a valid value was refused: %v", err)
+	}
+	if !strings.Contains(logs.String(), "BORGO_HASH_SLOTS") {
+		t.Fatalf("nothing said the cap is not the one asked for: %q", logs.String())
 	}
 }
 
 // the semaphore the package actually uses must be the configured size
 func TestHashSlotsSizeTheSemaphore(t *testing.T) {
-	if got, want := cap(hashSlots), hashSlotCount(); got != want {
+	want, err := hashSlotCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cap(hashSlots); got != want {
 		t.Fatalf("hashSlots has %d slots, want %d", got, want)
+	}
+}
+
+// go test cannot see this one: the panic it replaces happened while the package
+// under test was initialising, which is before any test binary reaches a test.
+// So the assertion is a binary of its own - it imports borgo, never serves, and
+// is run with a value borgo refuses. It must start, reach main, and report;
+// dying at init with exit 2 is a library killing the process that hosts it,
+// and every tool that only imports borgo dies with it.
+func TestARefusedHashSlotCountDoesNotKillAnImporter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a second binary")
+	}
+	exe := buildImporter(t)
+	cmd := exec.Command(exe)
+	cmd.Env = append(os.Environ(), "BORGO_HASH_SLOTS=lots")
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	out := stdout.String() + stderr.String()
+	if err != nil {
+		t.Fatalf("a binary that only imports borgo died on BORGO_HASH_SLOTS=lots: %v\n%s", err, out)
+	}
+	if !strings.Contains(stdout.String(), "reached main") {
+		t.Fatalf("the importer never reached main: %s", out)
+	}
+	// it survived - now it must not be left guessing why its cap is not the one
+	// it asked for. The log is all a binary that only imports borgo ever sees
+	if !strings.Contains(stderr.String(), "BORGO_HASH_SLOTS") {
+		t.Fatalf("package init did not report the refused value: %s", out)
+	}
+	if !strings.Contains(stdout.String(), "CheckEnv: ") || !strings.Contains(stdout.String(), "BORGO_HASH_SLOTS") {
+		t.Fatalf("CheckEnv did not return the refusal: %s", out)
+	}
+}
+
+// buildImporter builds the binary under testdata that imports borgo and never
+// serves, and returns its path.
+func buildImporter(t *testing.T) string {
+	t.Helper()
+	exe := filepath.Join(t.TempDir(), "importer.exe")
+	build := exec.Command("go", "build", "-o", exe, "./testdata/importer")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building the importer: %v\n%s", err, out)
+	}
+	return exe
+}
+
+// the cap is taken at init and cannot be resized, so every later disagreement
+// with the environment has to be said out loud - including the one an in-process
+// unset creates, which a notice guarded on the variable being set cannot see:
+// the environment then asks for the default while the process runs at whatever
+// init gave it. Needs a cap that is not the default, so it needs its own process.
+func TestCheckEnvSaysTheCapNoLongerMatchesAnUnsetVariable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a second binary")
+	}
+	slots := defaultHashSlots() + 7
+	cmd := exec.Command(buildImporter(t))
+	cmd.Env = append(os.Environ(),
+		"BORGO_HASH_SLOTS="+strconv.Itoa(slots),
+		"IMPORTER_UNSETS_HASH_SLOTS=1",
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("the importer died: %v\n%s%s", err, stdout.String(), stderr.String())
+	}
+	want := fmt.Sprintf("fixed at %d", slots)
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("unsetting BORGO_HASH_SLOTS under a cap of %d said nothing: %q", slots, stderr.String())
 	}
 }
 

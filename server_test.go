@@ -14,6 +14,7 @@ import (
 	"net/http/httptrace"
 	"net/textproto"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,7 +23,10 @@ import (
 )
 
 func TestServerConfigDefaults(t *testing.T) {
-	srv := newServer("3501", http.NewServeMux())
+	srv, err := newServer("3501", http.NewServeMux())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if srv.Addr != ":3501" {
 		t.Errorf("addr: %s", srv.Addr)
 	}
@@ -43,21 +47,31 @@ func TestServerConfigEnvOverrides(t *testing.T) {
 	t.Setenv("BORGO_READ_TIMEOUT", "30s")
 	t.Setenv("BORGO_WRITE_TIMEOUT", "45s")
 	t.Setenv("BORGO_IDLE_TIMEOUT", "0")
-	srv := newServer("3501", nil)
+	srv, err := newServer("3501", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if srv.ReadHeaderTimeout != 11*time.Second || srv.ReadTimeout != 30*time.Second ||
 		srv.WriteTimeout != 45*time.Second || srv.IdleTimeout != 0 {
 		t.Errorf("overrides not applied: %+v", srv)
 	}
 }
 
+// a malformed timeout is a value the caller can act on. It used to panic, and a
+// panic in here is a panic out of ServeContext: the library taking down the
+// process that hosts it, which is the one thing it promises never to do
 func TestServerConfigRejectsGarbage(t *testing.T) {
 	t.Setenv("BORGO_READ_HEADER_TIMEOUT", "fast")
-	defer func() {
-		if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "BORGO_READ_HEADER_TIMEOUT") {
-			t.Fatalf("want actionable panic, got %v", r)
-		}
-	}()
-	newServer("3501", nil)
+	srv, err := newServer("3501", nil)
+	if err == nil {
+		t.Fatalf("BORGO_READ_HEADER_TIMEOUT=fast was accepted: %+v", srv)
+	}
+	if !strings.Contains(err.Error(), "BORGO_READ_HEADER_TIMEOUT") {
+		t.Fatalf("error does not name the variable: %v", err)
+	}
+	if srv != nil {
+		t.Fatalf("a refused configuration still returned a server: %+v", srv)
+	}
 }
 
 func TestSlowHeadersAreCutOff(t *testing.T) {
@@ -447,6 +461,52 @@ func restoreRegistry(t *testing.T) {
 	})
 }
 
+// refusal runs ServeContext and returns the error it refused to start with,
+// failing unless that error names want. The run gets a context this can cancel
+// because a refusal that regresses does not return at all: ServeContext blocks
+// on a server that came up, and the test then hangs until the package timeout
+// ten minutes away and reports it as a timeout rather than as the guard that
+// went missing. Found by mutation - the harness spent ten minutes on it.
+func refusal(t *testing.T, want string) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- ServeContext(ctx) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("ServeContext returned %v, want a refusal naming %s", err, want)
+		}
+		return err
+	case <-time.After(15 * time.Second):
+		cancel()
+		<-done
+		t.Fatalf("ServeContext served instead of refusing %s", want)
+		return nil
+	}
+}
+
+// assertRegistryUsable registers a route and fails if Handle refuses it. A run
+// that came back as a refusal never mounted anything, so the caller it handed
+// that refusal to must still be able to build the app it was refused for -
+// otherwise "fix the env and retry" only half works, and the half that does not
+// is a panic. The pattern carries the test name because patternCheck, the mux
+// borgo validates against, has no way to unregister.
+func assertRegistryUsable(t *testing.T) {
+	t.Helper()
+	pattern := "GET /" + t.Name()
+	defer func() {
+		routesMu.Lock()
+		delete(routes, pattern)
+		routesMu.Unlock()
+		if r := recover(); r != nil {
+			t.Errorf("Handle refused after a run that never served: %v", r)
+		}
+	}()
+	Handle(pattern, func(http.ResponseWriter, *http.Request) {})
+}
+
 // Serve calls log.Fatal and never returns, so nothing could start the api from
 // a test or embed it in a larger program. ServeContext has to actually come
 // back, and leave the port behind it.
@@ -540,20 +600,174 @@ func TestServeContextReturnsListenerErrors(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("ServeContext blocked on a listener that could not start")
 	}
+	// the bind happens before the registry is mounted, so this refusal costs
+	// the caller nothing either
+	assertRegistryUsable(t)
 }
 
-// the timeout matrix is still read - and still read before the banner, so a
-// typo fails the boot rather than half-configuring the server
+// API_PORT was the one variable nobody parsed: it went into the server's Addr
+// as it stood and net refused it from inside ListenAndServe, which is after the
+// registry has been closed. Every one of these came back as a value and bricked
+// Handle on the way.
+func TestServeContextRefusesAMalformedPort(t *testing.T) {
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	for _, v := range []string{"nope", "65536", "-1", "1.5", "0x10", ":38503", " ", "38503 ", "8080;ls", "+80", strings.Repeat("9", 5000)} {
+		t.Setenv("API_PORT", v)
+		refusal(t, "API_PORT")
+	}
+	assertRegistryUsable(t)
+}
+
+// the whole contract in one run: the refusal comes back as a value, the caller
+// fixes the environment, registers the route it was building, retries - and the
+// route is served. Every piece of this was measured broken: the retry latched
+// the registry, so Handle panicked, and the route that survived a recover() was
+// never mounted.
+func TestARefusedRunCanBeFixedAndRetried(t *testing.T) {
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	t.Setenv("API_PORT", "nope")
+	refusal(t, "API_PORT")
+
+	pattern := "GET /" + t.Name()
+	defer func() {
+		routesMu.Lock()
+		delete(routes, pattern)
+		routesMu.Unlock()
+	}()
+	Handle(pattern, func(w http.ResponseWriter, r *http.Request) {
+		WriteJSON(w, http.StatusOK, map[string]string{"retried": "yes"})
+	})
+
+	port := freePort(t)
+	t.Setenv("API_PORT", port)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ServeContext(ctx) }()
+	waitListening(t, port)
+
+	res, err := http.Get("http://127.0.0.1:" + port + "/" + t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("the route registered between the refusal and the retry answered %d", res.StatusCode)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("the retry returned %v", err)
+	}
+}
+
+// and a port it can serve is still served, leading zeros and all
+func TestServeContextTakesEveryPortNetTakes(t *testing.T) {
+	for _, v := range []string{"0", "3501", "08080", "65535"} {
+		t.Setenv("API_PORT", v)
+		port, err := envPort()
+		if err != nil {
+			t.Fatalf("API_PORT=%q was refused: %v", v, err)
+		}
+		if port != v {
+			t.Fatalf("API_PORT=%q came back as %q", v, port)
+		}
+	}
+}
+
+// BORGO_PARENT_PID was silently no watch at all for anything that is not a pid,
+// and the default nobody chose is the orphaned api this variable exists to
+// prevent - on windows, holding the port until someone finds it in the task
+// manager
+func TestServeContextRefusesAMalformedParentPID(t *testing.T) {
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	for _, v := range []string{"notapid", " ", "0", "-1", "1.5", "0x10", "99999999999999999999"} {
+		t.Setenv("API_PORT", freePort(t))
+		t.Setenv("BORGO_PARENT_PID", v)
+		refusal(t, "BORGO_PARENT_PID")
+	}
+	assertRegistryUsable(t)
+}
+
+// a supervisor that is already gone used to be found by the watch instead: the
+// run mounted, shut down before serving one request, and returned nil - an
+// abort reported to its caller as a clean start
+func TestServeContextRefusesAnAlreadyDeadParent(t *testing.T) {
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	port := freePort(t)
+	t.Setenv("API_PORT", port)
+	t.Setenv("BORGO_PARENT_PID", strconv.Itoa(exitedChildPID(t)))
+
+	refusal(t, "has already exited")
+	ln, lnErr := net.Listen("tcp", ":"+port)
+	if lnErr != nil {
+		t.Fatalf("port %s left bound by a run that refused to start: %v", port, lnErr)
+	}
+	ln.Close()
+	assertRegistryUsable(t)
+}
+
+// exitedChildPID runs this test binary with a filter that matches no test and
+// reaps it, so the pid names a process that is certainly gone: on unix an
+// unreaped child is a zombie the probe still reads as alive.
+func exitedChildPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("could not start a child to kill: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Skipf("the child exited with %v", err)
+	}
+	return pid
+}
+
+// the timeout matrix is still read before the banner, so a typo fails the boot
+// rather than half-configuring the server - but it comes back as a value. This
+// test asserted the panic once, which is the opposite of what ServeContext
+// documents: a panic here unwinds through the embedder, past its deferred
+// cleanup, and kills whatever else that process was running.
 func TestServeContextStillValidatesTimeouts(t *testing.T) {
 	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	port := freePort(t)
 	t.Setenv("BORGO_IDLE_TIMEOUT", "soon")
+	t.Setenv("API_PORT", port)
+
+	refusal(t, "BORGO_IDLE_TIMEOUT")
+	ln, lnErr := net.Listen("tcp", ":"+port)
+	if lnErr != nil {
+		t.Fatalf("port %s left bound by a run that refused to start: %v", port, lnErr)
+	}
+	ln.Close()
+	assertRegistryUsable(t)
+}
+
+// the grace period is read on the same path and refused the same way
+func TestServeContextRefusesAMalformedGrace(t *testing.T) {
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	t.Setenv("BORGO_SHUTDOWN_TIMEOUT", "-1s")
 	t.Setenv("API_PORT", freePort(t))
-	defer func() {
-		if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "BORGO_IDLE_TIMEOUT") {
-			t.Fatalf("want a panic naming the variable, got %v", r)
-		}
-	}()
-	ServeContext(context.Background())
+
+	refusal(t, "BORGO_SHUTDOWN_TIMEOUT")
+	assertRegistryUsable(t)
 }
 
 func TestShutdownEndsEventStreams(t *testing.T) {
@@ -757,16 +971,17 @@ func TestServeContextRefusesAShortSecretWithoutExiting(t *testing.T) {
 	t.Setenv("API_PORT", port)
 	t.Setenv("SESSION_SECRET", "too-short-to-sign-with")
 
-	err := ServeContext(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "SESSION_SECRET") {
-		t.Fatalf("ServeContext returned %v, want a refusal naming SESSION_SECRET", err)
-	}
+	refusal(t, "SESSION_SECRET")
 	// and it refused before binding, so the caller can fix the env and retry
 	ln, lnErr := net.Listen("tcp", ":"+port)
 	if lnErr != nil {
 		t.Fatalf("port %s left bound by a run that refused to start: %v", port, lnErr)
 	}
 	ln.Close()
+	// retrying ServeContext was only half of "the caller can retry": the run
+	// latched the registry on its way to the refusal, so the next Handle
+	// panicked with "registered after borgo.Serve" for a server that never was
+	assertRegistryUsable(t)
 }
 
 // waitParentExit has no timeout of its own: on windows it blocks inside
@@ -882,7 +1097,11 @@ func TestShutdownCutsRequestsPastTheGrace(t *testing.T) {
 
 func TestShutdownGraceIsConfigurable(t *testing.T) {
 	t.Setenv("BORGO_SHUTDOWN_TIMEOUT", "3s")
-	if got := envDuration("BORGO_SHUTDOWN_TIMEOUT", 10*time.Second); got != 3*time.Second {
+	got, err := envDuration("BORGO_SHUTDOWN_TIMEOUT", 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 3*time.Second {
 		t.Fatalf("grace = %v, want 3s", got)
 	}
 }
