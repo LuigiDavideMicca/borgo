@@ -176,15 +176,17 @@ export async function precompressAssets(dir: string) {
   }
 }
 
-// size and mtime, base36. the suffix distinguishes the encoded variants of one
-// url: they are separate representations, and a conditional request answered
-// for one of them must never be answered out of another.
+// size and mtime, base36. the suffix keeps one url's encodings from
+// revalidating each other.
 export const assetEtag = (size: number, mtimeMs: number, suffix: string): string =>
   `"${size.toString(36)}-${Math.floor(mtimeMs).toString(36)}${suffix}"`;
 
 // pinnedSize is the byte length the build recorded for *this representation's*
 // file, or null if no build vouched for it. Per variant, not per url: the
 // directive travels on the response, and the response carries these bytes.
+//
+// `etag`, `size`, `mtimeMs` and `lastModified` on these two types are what boot
+// saw. Nothing is served from them - see serveIndexed.
 export type AssetVariant = {
   path: string;
   encoding?: "br" | "gzip";
@@ -233,6 +235,8 @@ export function buildAssetIndex(
   const base = dir.replaceAll("\\", "/").replace(/\/+$/, "");
   const tag = (path: string, suffix: string) => {
     const file = files.get(path)!;
+    // same formula the request path uses, or the snapshot etag and the
+    // served one disagree for a file nobody touched
     return assetEtag(file.size, file.mtimeMs, suffix);
   };
 
@@ -365,7 +369,14 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
   const ifModifiedSince = req.headers.get("if-modified-since");
   if (!ifModifiedSince) return false;
   const since = Date.parse(ifModifiedSince);
-  // http dates have a one second resolution: compare truncated
+  // http dates resolve to one second: compare truncated.
+  //
+  // DECLARED LIMITATION - a rewrite inside the second of the date we sent 304s
+  // over changed bytes (measured: 500 -> 9999 bytes at +997ms). Reachable only
+  // by a client that sent no etag, bounded to that one second, and self-healing
+  // on the next revalidation no-cache forces. rfc 9110 §8.8.2.2's mitigation -
+  // refuse a date 304 while mtime is in the current second - is declined
+  // because it makes the answer depend on the wall clock at request time.
   return !Number.isNaN(since) && Math.floor(mtimeMs / 1000) * 1000 <= since;
 }
 
@@ -379,15 +390,14 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
 // of the brotli file to be filled from the identity one.
 // a weak validator (W/"...") can never authorise a range, so it never matches.
 //
-// Only the etag is accepted, and the date deliberately is not. Every variant of
-// one url shares a Last-Modified - it is the file's mtime, and the siblings are
-// built from it - so a date would authorise precisely the splice above: fetch
-// the identity file, resume with If-Range set to that date and a different
-// Accept-Encoding, and the range is answered out of the brotli file. Measured
-// before this rule: a 416 declaring a 6400-byte resource to be 35 bytes long,
-// and a 206 handing brotli bytes to a client assembling plain css. rfc 9110
-// §13.1.5 allows a date validator; it does not require one, and here there is
-// no date that identifies a representation rather than a url.
+// Only the etag is accepted, and the date deliberately is not. Each
+// representation reports its own mtime now, but an http date resolves to one
+// second and a url's representations routinely land inside the same one, so a
+// date cannot be relied on to name which - and a date that names the wrong one
+// authorises exactly the splice above. Measured before this rule: a 416
+// declaring a 6400-byte resource to be 35 bytes long, and a 206 handing brotli
+// bytes to a client assembling plain css. rfc 9110 §13.1.5 allows a date
+// validator; it does not require one.
 export function isRangeStale(req: Request, etag: string): boolean {
   const ifRange = req.headers.get("if-range");
   if (ifRange === null || !req.headers.has("range")) return false;
@@ -422,8 +432,9 @@ export function findAsset(
   return index.get(url.toLowerCase());
 }
 
-// the indexed path: an etag the browser can revalidate against, the variants
-// already chosen, and one stat to confirm the snapshot still describes a file
+// the indexed path: the variants already chosen from the snapshot, and the
+// stats that say what those files are right now - which is where the etag,
+// the date and the length all come from
 export function serveIndexed(req: Request, info: AssetInfo): Response {
   let variant = info.identity;
   if (info.variants.length) {
@@ -461,38 +472,43 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
     live = statOf(variant.path);
   }
   if (!live) return new Response("not found", { status: 404 });
+  // the identity behind the sent representation: its recorded length for the
+  // pin, and its absence for the 404. A sibling whose identity file is gone is
+  // refused, because serveAsset refuses it and a restart would too - serving
+  // it made one url answer 200 or 404 by Accept-Encoding alone.
+  const identityLive = variant.encoding ? statOf(info.identity.path) : live;
+  if (!identityLive) return new Response("not found", { status: 404 });
+
   const headers = new Headers();
-  // Settled against the disk, and against the representation about to go out.
-  // The index remembers which names the build vouched for; whether the file on
-  // disk is still that file is a question only this stat can answer, and a
-  // chunk deleted and rewritten after boot used to inherit the year along with
-  // the name.
+  // the recorded length is the build's claim; whether the file on disk is
+  // still that file only this stat can say. Both halves: with the identity
+  // untouched at its recorded length and index-n12gjnyv.js.gz replaced
+  // 749 -> 75 bytes, the 75 stale bytes went out `immutable`.
   //
-  // `variant` first, because the directive travels on the response and the
-  // response carries these bytes: with the identity untouched at its recorded
-  // length and index-n12gjnyv.js.gz replaced 749 -> 75 bytes, the 75 stale
-  // bytes went out `immutable`. `live` is already this variant's stat, so that
-  // half is free. The identity is checked too, and only when a sibling was
-  // chosen - one stat, for an asset that is a pin candidate at all - because a
-  // url whose identity file moved out from under its siblings no longer has
-  // one content to promise.
-  //
-  // Unconditional set: the `if` that used to guard this line is how production
-  // shipped its unhashed assets with no policy whatsoever.
-  const identityNow = variant.encoding ? (statOf(info.identity.path)?.size ?? null) : live.size;
+  // unconditional - the `if` that used to guard it shipped production's
+  // unhashed assets with no policy at all.
   headers.set(
     "Cache-Control",
-    pinPolicy(variant.pinnedSize, live.size, info.identity.pinnedSize, identityNow),
+    pinPolicy(variant.pinnedSize, live.size, info.identity.pinnedSize, identityLive.size),
   );
   if (info.compressible) headers.set("Vary", "Accept-Encoding");
-  headers.set("ETag", variant.etag);
-  headers.set("Last-Modified", info.lastModified);
-  if (isNotModified(req, variant.etag, info.mtimeMs)) {
-    return new Response(null, { status: 304, headers });
-  }
+  // set before the 304 return: a 304 updates a cache's stored headers, and
+  // serveAsset states them there, so the two paths must not differ on it
   if (variant.encoding) {
     headers.set("Content-Encoding", variant.encoding);
     headers.set("Content-Type", info.type);
+  }
+  // Both validators off `live` - the file whose bytes are going out - never off
+  // the index, and never off the identity when a sibling was chosen. Wrong in
+  // this direction it is silent: stale bytes 304 forever. Measured on the wire,
+  // once per mistake: ETag "gf-msf40zn3" (gf = 591) on a 557-byte body; and a
+  // .gz replaced 323 -> 95 with the identity untouched, answering 304 to
+  // If-Modified-Since at +0s, +2s and +5s.
+  const etag = assetEtag(live.size, live.mtimeMs, variant.encoding ? `-${variant.encoding}` : "");
+  headers.set("ETag", etag);
+  headers.set("Last-Modified", new Date(live.mtimeMs).toUTCString());
+  if (isNotModified(req, etag, live.mtimeMs)) {
+    return new Response(null, { status: 304, headers });
   }
   // a HEAD is answered from the headers alone, and dropping the body drops
   // the length bun would have computed from the file: without this every
@@ -504,7 +520,7 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
   // bun ranges files, not streams, so a validator that no longer matches
   // gets the whole representation as a plain 200 - still off the disk,
   // never through memory.
-  if (isRangeStale(req, variant.etag)) {
+  if (isRangeStale(req, etag)) {
     // a stream body also loses the content type bun derives from a file, and
     // under the global nosniff a typeless stylesheet is a refused stylesheet;
     // for an encoded variant this re-sets the same value as above.
@@ -548,6 +564,7 @@ export function serveAsset(
   let file = asset;
   let sentPath = path;
   let size = base.size;
+  let mtimeMs = base.mtimeMs;
   let etag = assetEtag(base.size, base.mtimeMs, "");
   if (isCompressiblePath(path)) {
     headers.set("Vary", "Accept-Encoding");
@@ -560,6 +577,7 @@ export function serveAsset(
         file = Bun.file(siblingPath);
         sentPath = siblingPath;
         size = sibling.size;
+        mtimeMs = sibling.mtimeMs;
         etag = assetEtag(sibling.size, sibling.mtimeMs, `-${encoding}`);
         headers.set("Content-Encoding", encoding);
         headers.set("Content-Type", asset.type);
@@ -569,24 +587,21 @@ export function serveAsset(
     }
   }
 
-  // Set after negotiation, because what is vouched for is the representation
-  // that goes out: `sentPath`/`size` are the sibling's once one is chosen, and
-  // checking the identity file instead pinned whatever bytes a replaced .gz
-  // happened to hold. Both lengths are stats this function already took, so
-  // the whole rule is free here. The same function and manifest the index path
-  // uses, so the two cannot answer one url two ways. The fallback that used to
-  // live here was `dev ? ... : ""`, armed only where a stale asset costs an
-  // afternoon and disarmed where it survives a deploy.
+  // after negotiation: what is vouched for is the representation going out.
+  // Checking the identity instead pinned whatever bytes a replaced .gz held.
+  // The fallback here used to be `dev ? ... : ""` - armed where a stale asset
+  // costs an afternoon, disarmed where it survives a deploy.
   headers.set(
     "Cache-Control",
     assetCacheControl(sentPath, outputs, size, { path, size: base.size }),
   );
 
+  // `mtimeMs` is the sent representation's, like the etag: the identity's date
+  // on a sibling's bytes 304s a replaced .gz until someone touches the
+  // identity, which a sibling-only deploy never does
   headers.set("ETag", etag);
-  // one date for every variant of the url, like serveIndexed - which is
-  // precisely why isRangeStale below refuses to accept a date as an If-Range
-  headers.set("Last-Modified", new Date(base.mtimeMs).toUTCString());
-  if (isNotModified(req, etag, base.mtimeMs)) {
+  headers.set("Last-Modified", new Date(mtimeMs).toUTCString());
+  if (isNotModified(req, etag, mtimeMs)) {
     return new Response(null, { status: 304, headers });
   }
   // same reason as in serveIndexed: a HEAD keeps the headers and loses the

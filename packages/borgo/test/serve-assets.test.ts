@@ -244,12 +244,10 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
     expect(res.headers.get("Content-Type")).toContain("text/css");
   });
 
-  // A date cannot authorise a range here, however current it is. Last-Modified
-  // is the file's mtime, and every encoding variant of one url reports the same
-  // one, so accepting it lets a client fetch the identity file and then resume
-  // out of the brotli sibling. Measured before this rule: a 206 handing brotli
-  // bytes to a client assembling plain css, and a 416 telling a client holding
-  // 6400 bytes the resource was 35 bytes long.
+  // An HTTP date resolves to one second, so it cannot name which representation
+  // it describes. Measured before this rule: a 206 handing brotli bytes to a
+  // client assembling plain css, and a 416 telling a client holding 6400 bytes
+  // the resource was 35 bytes long.
   test("if-range refuses a date validator, current or not", async () => {
     const i = info("/style.css");
     for (const ifRange of [i.lastModified, new Date(0).toUTCString()]) {
@@ -934,4 +932,319 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
       }
     }
   });
+});
+
+// A deploy that replaces files in place under a running `borgo start`. The
+// index is a boot snapshot, and serving its ETag and its Last-Modified meant
+// new bytes went out labelled with the old validator: measured on the wire,
+// ETag "gf-msf40zn3" - gf is 591 in base36 - on a response whose
+// Content-Length was 557, the etag contradicting the length beside it, and
+// every conditional request that quoted it came back 304 forever. The
+// no-cache the previous fix added is precisely what sends a browser down this
+// path, so it made the defect more reachable rather than less.
+//
+// Over a socket, on both serving paths, with the files replaced under the
+// running servers rather than only at boot: a snapshot defect is invisible to
+// a request made at boot, and a return value cannot say which path answered.
+describe("validators on the wire: an in-place deploy under a running server", () => {
+  let root: string;
+  let servers: { name: string; base: string; stop: () => void }[];
+  let MANIFEST: BuildOutputs;
+
+  const HASHED = "assets/app-a1b2c3d4.js";
+  const V1: Record<string, string> = {
+    "assets/app.js": "console.log('v1 of the unhashed entry bundle');",
+    [HASHED]: "console.log('v1 of the hashed chunk');",
+    "sw.js": "self.addEventListener('fetch', () => { /* v1 */ });",
+  };
+  // shorter on purpose: a stale etag's own size field then contradicts the
+  // Content-Length in the very same response, which is how this was spotted
+  const V2: Record<string, string> = {
+    "assets/app.js": "console.log('v2');",
+    [HASHED]: "console.log('v2 chunk');",
+    "sw.js": "self.addEventListener('fetch',()=>{});",
+  };
+  const URLS = ["/assets/app.js", `/${HASHED}`, "/sw.js"];
+  // the precompressed sibling is a separate representation with its own file
+  // and its own validator, so it has to be asked for separately
+  const ENCODINGS = ["identity", "gzip"] as const;
+
+  // backdated at boot so the deploy below moves the mtime across a whole
+  // second: http dates have a one second resolution, and a rewrite inside the
+  // same second is indistinguishable to If-Modified-Since on any correct
+  // implementation. Ten seconds is a deploy, not a fixture trick.
+  const AGE_MS = 10_000;
+
+  const write = (rel: string, body: string) => {
+    const path = join(root, "public", rel);
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, body);
+    writeFileSync(path + ".gz", gzipSync(body));
+  };
+
+  const backdate = () => {
+    const when = new Date(Date.now() - AGE_MS);
+    for (const rel of Object.keys(V1)) {
+      for (const path of [join(root, "public", rel), join(root, "public", rel + ".gz")]) {
+        utimesSync(path, when, when);
+      }
+    }
+  };
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), "borgo-deploy-in-place-"));
+    for (const [rel, body] of Object.entries(V1)) write(rel, body);
+    backdate();
+
+    const pub = join(root, "public").replaceAll("\\", "/");
+    // the build vouched for the hashed chunk and both of its representations
+    MANIFEST = {
+      dir: join(root, "public", "assets").replaceAll("\\", "/"),
+      sizes: new Map([
+        ["app-a1b2c3d4.js", V1[HASHED].length],
+        ["app-a1b2c3d4.js.gz", gzipSync(V1[HASHED]).length],
+      ]),
+    };
+    const indexed = buildAssetIndex(pub, undefined, MANIFEST);
+    const routes: [string, (r: Request) => Response][] = [
+      [
+        "indexed",
+        (r) => {
+          const i = indexed.get(new URL(r.url).pathname);
+          return i ? serveIndexed(r, i) : new Response("not indexed", { status: 500 });
+        },
+      ],
+      [
+        "live-prod",
+        (r) => {
+          const path = join(pub, new URL(r.url).pathname).replaceAll("\\", "/");
+          return serveAsset(r, path, Bun.file(path), { dev: false, outputs: MANIFEST });
+        },
+      ],
+    ];
+    servers = routes.map(([name, fetchOne]) => {
+      const server = Bun.serve({ port: 0, fetch: fetchOne });
+      return { name, base: `http://localhost:${server.port}`, stop: () => server.stop(true) };
+    });
+  });
+
+  afterAll(() => {
+    for (const s of servers) s.stop();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const get = (base: string, url: string, encoding: string, extra: Record<string, string> = {}) =>
+    fetch(`${base}${url}`, {
+      headers: { "accept-encoding": encoding, ...extra },
+      decompress: false,
+    } as RequestInit);
+
+  // the leading field of an etag is the byte length of the representation it
+  // labels, in base36. A response whose etag and Content-Length disagree is
+  // carrying a validator for bytes it is not sending, and that mismatch is
+  // readable off a single response with nothing to compare it to.
+  const etagSize = (etag: string) => parseInt(etag.slice(1).split("-")[0], 36);
+
+  // The strict direction, and it costs too: a validator that moves while the
+  // bytes did not turns every revalidation into a full re-download of an asset
+  // the client already holds. Asserted first, on an untouched tree, so the
+  // fresh-validator tests below cannot be satisfied by simply never repeating
+  // an etag.
+  test("an unchanged file still answers 304, on both validators", async () => {
+    for (const { name, base } of servers) {
+      for (const url of URLS) {
+        for (const encoding of ENCODINGS) {
+          const key = `${name} ${url} ${encoding}`;
+          const first = await get(base, url, encoding);
+          expect(`${key}: ${first.status}`).toBe(`${key}: 200`);
+          const etag = first.headers.get("ETag")!;
+          const date = first.headers.get("Last-Modified")!;
+          // repeated with nothing touched in between: still the same file
+          const again = await get(base, url, encoding);
+          expect(`${key} stable: ${again.headers.get("ETag")}`).toBe(`${key} stable: ${etag}`);
+          expect(`${key} stable: ${again.headers.get("Last-Modified")}`).toBe(`${key} stable: ${date}`);
+
+          const byEtag = await get(base, url, encoding, { "if-none-match": etag });
+          expect(`${key} etag: ${byEtag.status}`).toBe(`${key} etag: 304`);
+          expect(await byEtag.text()).toBe("");
+          const byDate = await get(base, url, encoding, { "if-modified-since": date });
+          expect(`${key} date: ${byDate.status}`).toBe(`${key} date: 304`);
+        }
+      }
+    }
+  });
+
+  // Boot and the socket must compute one url's validator the same way, or an
+  // untouched file appears to change between the snapshot and the wire. When
+  // the two formulas drifted apart, the tests comparing them passed alone and
+  // failed only in a full run.
+  test("the boot snapshot's etag is the one that goes on the wire", async () => {
+    const { base } = servers.find((s) => s.name === "indexed")!;
+    const fresh = buildAssetIndex(join(root, "public").replaceAll("\\", "/"), undefined, MANIFEST);
+    for (const rel of Object.keys(V1)) {
+      const i = fresh.get(`/${rel}`)!;
+      expect(`${rel} identity: ${(await get(base, `/${rel}`, "identity")).headers.get("ETag")}`).toBe(
+        `${rel} identity: ${i.identity.etag}`,
+      );
+      expect(`${rel} gzip: ${(await get(base, `/${rel}`, "gzip")).headers.get("ETag")}`).toBe(
+        `${rel} gzip: ${i.variants.find((v) => v.encoding === "gzip")!.etag}`,
+      );
+      expect(`${rel} date: ${(await get(base, `/${rel}`, "identity")).headers.get("Last-Modified")}`).toBe(
+        `${rel} date: ${i.lastModified}`,
+      );
+    }
+  });
+
+  // The bug. Every assertion here is a header off a real socket, taken after
+  // the bytes on disk moved under the running server.
+  test("a file replaced under the running server never 304s the old copy", async () => {
+    const before: Record<string, { etag: string; date: string }> = {};
+    for (const { name, base } of servers) {
+      for (const url of URLS) {
+        for (const encoding of ENCODINGS) {
+          const res = await get(base, url, encoding);
+          before[`${name} ${url} ${encoding}`] = {
+            etag: res.headers.get("ETag")!,
+            date: res.headers.get("Last-Modified")!,
+          };
+        }
+      }
+    }
+    // the hashed chunk is still the one the build measured, so it is pinned:
+    // the fresh validator must not have cost the pin its recorded lengths
+    for (const { base } of servers) {
+      for (const encoding of ENCODINGS) {
+        const res = await get(base, `/${HASHED}`, encoding);
+        expect(res.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
+      }
+    }
+
+    try {
+      for (const [rel, body] of Object.entries(V2)) write(rel, body);
+
+      for (const { name, base } of servers) {
+        for (const url of URLS) {
+          for (const encoding of ENCODINGS) {
+            const key = `${name} ${url} ${encoding}`;
+            const was = before[key];
+            const res = await get(base, url, encoding);
+            expect(`${key}: ${res.status}`).toBe(`${key}: 200`);
+
+            const etag = res.headers.get("ETag")!;
+            const length = Number(res.headers.get("Content-Length"));
+            // the length actually sent, and the length the etag claims
+            const expected = encoding === "gzip" ? gzipSync(V2[url.slice(1)]).length : V2[url.slice(1)].length;
+            expect(`${key} length: ${length}`).toBe(`${key} length: ${expected}`);
+            expect(`${key} etag describes: ${etagSize(etag)}`).toBe(`${key} etag describes: ${length}`);
+            expect(`${key} etag moved: ${etag !== was.etag}`).toBe(`${key} etag moved: true`);
+            expect(`${key} date moved: ${res.headers.get("Last-Modified") !== was.date}`).toBe(
+              `${key} date moved: true`,
+            );
+            // the previous fix stands: a policy on every response
+            expect(`${key} policy: ${res.headers.has("Cache-Control")}`).toBe(`${key} policy: true`);
+
+            // the revalidation that no-cache sends every browser back to make.
+            // A 304 here is the whole defect: the client keeps v1 forever.
+            const byEtag = await get(base, url, encoding, { "if-none-match": was.etag });
+            expect(`${key} old etag: ${byEtag.status}`).toBe(`${key} old etag: 200`);
+            expect(`${key} old etag body: ${(await byEtag.arrayBuffer()).byteLength}`).toBe(
+              `${key} old etag body: ${expected}`,
+            );
+            const byDate = await get(base, url, encoding, { "if-modified-since": was.date });
+            expect(`${key} old date: ${byDate.status}`).toBe(`${key} old date: 200`);
+
+            // and the new validator revalidates, or no-cache would mean a full
+            // re-download on every navigation from here on
+            const fresh = await get(base, url, encoding, { "if-none-match": etag });
+            expect(`${key} new etag: ${fresh.status}`).toBe(`${key} new etag: 304`);
+          }
+        }
+      }
+
+      // the pin reads the disk too: v2 is not the length the build recorded
+      for (const { name, base } of servers) {
+        for (const encoding of ENCODINGS) {
+          const res = await get(base, `/${HASHED}`, encoding);
+          expect(`${name} ${encoding}: ${res.headers.get("Cache-Control")}`).toBe(
+            `${name} ${encoding}: no-cache`,
+          );
+        }
+      }
+    } finally {
+      for (const [rel, body] of Object.entries(V1)) write(rel, body);
+      backdate();
+    }
+  });
+
+  // A sibling replaced on its own. The identity file is untouched at its
+  // recorded length, so only the sibling's own stat can tell that the bytes
+  // going out are not the ones the last etag described.
+  test("a precompressed sibling replaced alone gets its own new etag", async () => {
+    const gz = join(root, "public", HASHED + ".gz");
+    const original = gzipSync(V1[HASHED]);
+    const url = `/${HASHED}`;
+    const before: Record<string, string> = {};
+    for (const { name, base } of servers) {
+      before[name] = (await get(base, url, "gzip")).headers.get("ETag")!;
+    }
+    try {
+      writeFileSync(gz, gzipSync("console.log('a different sibling entirely');"));
+      for (const { name, base } of servers) {
+        const res = await get(base, url, "gzip");
+        expect(`${name}: ${res.headers.get("Content-Encoding")}`).toBe(`${name}: gzip`);
+        const etag = res.headers.get("ETag")!;
+        expect(`${name} moved: ${etag !== before[name]}`).toBe(`${name} moved: true`);
+        expect(`${name} describes: ${etagSize(etag)}`).toBe(
+          `${name} describes: ${Number(res.headers.get("Content-Length"))}`,
+        );
+        expect(`${name} stale 304: ${(await get(base, url, "gzip", { "if-none-match": before[name] })).status}`).toBe(
+          `${name} stale 304: 200`,
+        );
+        // the identity beside it never moved, and must not have been dragged
+        const identity = await get(base, url, "identity");
+        expect(`${name} identity: ${etagSize(identity.headers.get("ETag")!)}`).toBe(
+          `${name} identity: ${V1[HASHED].length}`,
+        );
+
+        // The date is the sibling's own, not the url's. Sharing one meant a
+        // date-only revalidation 304'd a replaced .gz until somebody happened
+        // to touch the identity file - and a deploy that only refreshes
+        // precompressed siblings never does, so it was permanent, not a race.
+        // Measured: 304 returning ETag "2n-..." (95 bytes) to a client holding
+        // 323, repeated at +2s and +5s.
+        expect(`${name} own date: ${res.headers.get("Last-Modified") !== identity.headers.get("Last-Modified")}`).toBe(
+          `${name} own date: true`,
+        );
+        const dated = await get(base, url, "gzip", {
+          "if-modified-since": identity.headers.get("Last-Modified")!,
+        });
+        expect(`${name} date 304: ${dated.status}`).toBe(`${name} date 304: 200`);
+      }
+    } finally {
+      writeFileSync(gz, original);
+      backdate();
+    }
+  });
+
+  // One url, one answer. The indexed path used to serve an orphaned sibling
+  // 200 while the live path 404'd it - so the same server answered the same
+  // url two ways depending on Accept-Encoding, and a restart flipped it again.
+  test("a representation whose identity file is gone is refused on both paths", async () => {
+    const rel = HASHED;
+    const identityPath = join(root, "public", rel);
+    const body = V1[rel];
+    try {
+      rmSync(identityPath, { force: true });
+      for (const { name, base } of servers) {
+        for (const encoding of ENCODINGS) {
+          const res = await get(base, `/${rel}`, encoding);
+          expect(`${name} ${encoding}: ${res.status}`).toBe(`${name} ${encoding}: 404`);
+        }
+      }
+    } finally {
+      writeFileSync(identityPath, body);
+      backdate();
+    }
+  });
+
 });

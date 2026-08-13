@@ -112,6 +112,8 @@ GET /assets/app-{{HASH}}.js
   if-none-match: "n-{{MTIME}}-br"
 --> 304 (no body)
   cache-control: public, max-age=31536000, immutable
+  content-encoding: br
+  content-type: text/javascript;charset=utf-8
   etag: "n-{{MTIME}}-br"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
