@@ -3,9 +3,11 @@ import { expect, test } from "@playwright/test";
 test("islands hydrate independently on a hydrate=false page", async ({ page }) => {
   await page.goto("/islands");
 
+  // both entries are named after their content, so the assertion is on which
+  // entry the page loads, not on a spelling
   const scripts = await page.$$eval("script[src]", (els) => els.map((e) => e.getAttribute("src")));
-  expect(scripts).not.toContain("/assets/client.js");
-  expect(scripts).toContain("/assets/islands-client.js");
+  expect(scripts.filter((s) => /^\/assets\/client-.*\.js$/.test(s ?? ""))).toEqual([]);
+  expect(scripts.filter((s) => /^\/assets\/islands-client-.*\.js$/.test(s ?? ""))).toHaveLength(1);
 
   // the page itself never hydrates: no props script
   expect(await page.evaluate(() => "__PROPS__" in window)).toBe(false);

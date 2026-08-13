@@ -154,9 +154,17 @@ test("export writes the exportable pages and explains the skips", () => {
 
   expect(existsSync(join(siteDir, "exp-static", "index.html"))).toBe(true);
   expect(existsSync(join(siteDir, "exp-dyn", "2", "index.html"))).toBe(true);
-  expect(existsSync(join(siteDir, "assets", "client.js"))).toBe(true);
+  // an exported page names content-hashed assets, and a static host has
+  // nothing to resolve a name with: whatever the html says must be on disk
+  const html = readFileSync(join(siteDir, "exp-data", "index.html"), "utf8");
+  const urls = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((m) => m[1]);
+  expect(urls.some((u) => /\/assets\/client-.*\.js$/.test(u))).toBe(true);
+  for (const url of urls) {
+    expect(existsSync(join(siteDir, url.slice(1))), url).toBe(true);
+  }
   // the compressed siblings ride along
-  expect(existsSync(join(siteDir, "assets", "client.js.gz"))).toBe(true);
+  const entry = urls.find((u) => /\/assets\/client-.*\.js$/.test(u))!;
+  expect(existsSync(join(siteDir, entry.slice(1) + ".gz"))).toBe(true);
 });
 
 test("a _404 page exports as 404.html for static hosts", () => {

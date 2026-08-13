@@ -13,7 +13,7 @@ import { c, g } from "./colors";
 import { NO_BUILD_OUTPUTS, precompressAssets, type BuildOutputs } from "./compress";
 import { stampWorkerFile } from "./pwa";
 import { filePathToPattern } from "./router";
-import { metricsEnabled } from "./util";
+import { metricsEnabled, type AssetNames } from "./util";
 
 const outDir = "public/assets";
 const genDir = ".borgo";
@@ -415,14 +415,13 @@ export async function generateManifest(dev = false) {
 }
 
 export type Asset = { path: string; kind: "entry-point" | "chunk" | string; size: number };
-export type BuildResult = { assets: Asset[]; chunkMap: Record<string, string> };
+export type BuildResult = { assets: Asset[]; chunkMap: Record<string, string>; names: AssetNames };
 
 // the cache key a service worker hangs its precache on, so it must move
-// whenever any listed byte does. names alone are not enough: chunks are
-// content-hashed but the entry points (client.js, islands-client.js) and
-// style.css keep stable names, and a change confined to one of them - a layout
-// edit lands in client.js - would leave the stamp, and every cache keyed on
-// it, pinned to yesterday's bundle
+// whenever any listed byte does. names alone are not enough: a dev build names
+// its entry points client.js and islands-client.js whatever they contain, and
+// a change confined to one of them - a layout edit lands in client.js - would
+// leave the stamp, and every cache keyed on it, pinned to yesterday's bundle
 export async function precacheStamp(dir: string, files: string[]): Promise<string> {
   let payload = "";
   for (const file of files) {
@@ -515,8 +514,12 @@ export function cssSource(dir = "."): "scss" | "css" | null {
 // only stylesheet there is not recoverable. Returns whether it deleted.
 function dropStylesheet(): boolean {
   if (cssSource() !== null) return false;
-  for (const suffix of ["", ".gz", ".br"]) {
-    rmSync(`${outDir}/style.css${suffix}`, { force: true });
+  // the name the last build emitted it under as well as the plain one: a
+  // production build renames the stylesheet after its content, so style.css
+  // alone would leave the orphan on disk under the name still being served
+  const emitted = readAssetNames()["style.css"];
+  for (const name of new Set(["style.css", ...(emitted ? [emitted] : [])])) {
+    for (const suffix of ["", ".gz", ".br"]) rmSync(`${outDir}/${name}${suffix}`, { force: true });
   }
   return true;
 }
@@ -544,8 +547,15 @@ export async function compileCss(dev = false) {
 
 // the names borgo writes on every build, whatever the app looks like. the
 // hashed chunks are NOT guessable and are not guessed: they come from the
-// inventory below.
+// inventory below. client.js and islands-client.js are here for the tree a
+// dev build left, and for the upgrade from a borgo whose entries were never
+// content-named - a production build now emits neither name.
 const FIXED_OUTPUT = ["client.js", "islands-client.js", "precache.json"];
+
+// the urls an app's index.html is written against, and which this build turned
+// each of them into. an app author never types a hash: the document keeps
+// naming /assets/client.js and the server resolves it at boot.
+export const LOGICAL_ASSETS = ["client.js", "islands-client.js", "style.css"] as const;
 
 // what the last build emitted, recorded rather than inferred. the sweep used
 // to match a *shape* - `[^/\\]+-[a-z0-9]{8}\.js` - which is also the shape of
@@ -595,8 +605,10 @@ export function readBuildOutputs(path = inventoryPath): BuildOutputs {
       // zero is dropped, not stored. A recorded length of 0 would pin *any*
       // empty file at that name, because every empty file matches it - the
       // length check would carry no information for exactly the case where a
-      // truncated or half-written file is what is on disk. An empty output
-      // that revalidates forever costs a 304 on nothing.
+      // truncated or half-written file is what is on disk. The cost is a real
+      // output losing its year: a style.scss holding only a comment compiles
+      // to 0 bytes and its hashed url revalidates forever, spending a
+      // bodyless 304 on nothing rather than being cached.
       if (typeof size !== "number" || !Number.isSafeInteger(size) || size <= 0) continue;
       sizes.set(name, size);
     }
@@ -604,6 +616,108 @@ export function readBuildOutputs(path = inventoryPath): BuildOutputs {
   } catch {
     return NO_BUILD_OUTPUTS;
   }
+}
+
+/**
+ * What this build called each of the names a document is written against.
+ *
+ * Read from the build's own record for the same reason the sizes above are:
+ * the emitted name is `client-6j5pq722.js` and no rule over the directory
+ * listing can tell that apart from an app's own `client-widget.js`. A name
+ * that is absent, or that describes some other directory, falls back to the
+ * literal the document already carries - the pre-hash behaviour, which
+ * revalidates and works, rather than a guess that might 404.
+ */
+export function readAssetNames(path = inventoryPath): AssetNames {
+  const names: AssetNames = {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { entries?: unknown };
+    const entries = parsed.entries;
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) return names;
+    for (const logical of LOGICAL_ASSETS) {
+      const name = (entries as Record<string, unknown>)[logical];
+      if (typeof name !== "string" || !name) continue;
+      if (name.includes("/") || name.includes("\\")) continue;
+      names[logical] = name;
+    }
+  } catch {}
+  return names;
+}
+
+/**
+ * The recorded names that are not on disk, which is what `borgo start` asks
+ * before serving a tree it did not build.
+ *
+ * Every name the record hands the document, not just the entry: `.borgo/` from
+ * one build beside a `public/assets/` from another - a partial deploy, or a
+ * COPY that missed the css - leaves a record naming files that are not there,
+ * and the server would boot healthy and serve a dead url until someone
+ * rebuilt by hand. A missing entry is a blank page, a missing stylesheet an
+ * unstyled one; both are permanent, and rebuilding only costs the build.
+ *
+ * With no record at all, the plain entry name stands in: an app upgrading from
+ * a borgo that hashed nothing still has its build recognised.
+ */
+export function missingBuiltAssets(names: AssetNames = readAssetNames()): string[] {
+  const wanted = { "client.js": "client.js", ...names };
+  return [...new Set(Object.values(wanted))]
+    .filter((name) => !existsSync(`${outDir}/${name}`))
+    .sort();
+}
+
+// what `borgo start` asks before serving a tree it did not build. Doubt
+// resolves toward rebuilding: the cost is one build, and the alternative is a
+// document naming files that are not there, permanently and with no error.
+export const needsBuild = (dev: boolean, names: AssetNames = readAssetNames()): boolean =>
+  dev || !existsSync(`${genDir}/routes.gen.tsx`) || missingBuiltAssets(names).length > 0;
+
+/**
+ * Which emitted file each logical name became, read off the emitted names.
+ *
+ * The bundler reports artifacts, not which entrypoint produced them, so the
+ * two entries are recognised by the only thing that is borgo's own: the stem
+ * it asked bun to name them after.
+ */
+export function entryOutputNames(files: readonly string[]): AssetNames {
+  const names: AssetNames = {};
+  for (const file of files) {
+    const match = file.match(/^(islands-client|client)(?:-[^.]+)?\.js$/);
+    if (match) names[`${match[1]}.js`] = file;
+  }
+  return names;
+}
+
+// 64-bit wyhash, base36, last eight characters - the same shape bun gives a
+// chunk, so a stylesheet's url reads like everything else in the directory
+const contentHash = (bytes: ArrayBuffer): string =>
+  Bun.hash(bytes).toString(36).padStart(8, "0").slice(-8);
+
+/**
+ * The stylesheet's emitted name: content-hashed in production, plain in dev.
+ *
+ * The stylesheet is not a bundler artifact, so nothing else names it by
+ * content - and the entry bundle's year would be a poor trade if the
+ * stylesheet beside it still spent a round trip per navigation.
+ *
+ * A build that compiled no css at all (a tailwind app built without
+ * `--tailwind`) keeps the name the last one emitted, which is the file still
+ * sitting in the output directory. Renaming rather than copying: two files
+ * with the same bytes under different names is the state where the sweep
+ * deletes the one the document is using.
+ */
+export async function emittedStylesheet(
+  dev: boolean,
+  previous: string | undefined,
+  dir = outDir,
+): Promise<string | null> {
+  const plain = `${dir}/style.css`;
+  if (existsSync(plain)) {
+    if (dev) return "style.css";
+    const name = `style-${contentHash(await Bun.file(plain).arrayBuffer())}.css`;
+    if (name !== "style.css") renameSync(plain, `${dir}/${name}`);
+    return name;
+  }
+  return previous && existsSync(`${dir}/${previous}`) ? previous : null;
 }
 
 /**
@@ -631,10 +745,11 @@ export async function writeBuildInventory(
   files: string[],
   vouched: { dir: string; sizes: Record<string, number> } | null = null,
   path = inventoryPath,
+  entries: AssetNames = {},
 ) {
   const hashed: Record<string, number> = {};
   for (const name of Object.keys(vouched?.sizes ?? {}).sort()) hashed[name] = vouched!.sizes[name];
-  const body = { files: [...new Set(files)].sort(), dir: vouched?.dir ?? "", hashed };
+  const body = { files: [...new Set(files)].sort(), dir: vouched?.dir ?? "", hashed, entries };
   await Bun.write(path, JSON.stringify(body) + "\n");
 }
 
@@ -642,9 +757,9 @@ export async function writeBuildInventory(
  * Whether the bundler put this artifact's own content hash into its name.
  *
  * Not "does the name look hashed". `Bun.build` reports a content hash for
- * every artifact, including the entry points - borgo names those `[name].[ext]`
- * on purpose, so `client.js` carries a hash that is nowhere in its filename and
- * is emphatically not cacheable forever. The name is a promise only when it
+ * every artifact, and a dev build names its entry points `[name].[ext]` - so
+ * `client.js` carries a hash that is nowhere in its filename and is
+ * emphatically not cacheable forever. The name is a promise only when it
  * actually contains the hash of the bytes behind it, which is a thing a word
  * cannot accidentally be.
  */
@@ -789,7 +904,9 @@ export class BundleFailed extends Error {
 export async function buildAssets(dev = false): Promise<BuildResult> {
   if (dev) void loadBabelRefresh();
   const { hasIslands } = await generateManifest(dev);
+  const lastNames = readAssetNames();
   await compileCss(dev);
+  const stylesheet = await emittedStylesheet(dev, lastNames["style.css"]);
 
   // read before the bundle runs, swept after it succeeds: the sweep used to go
   // first, so one parse error left public/assets holding nothing but style.css
@@ -806,7 +923,10 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
     outdir: outDir,
     splitting: true,
     minify: !dev,
-    naming: { entry: "[name].[ext]", chunk: "[name]-[hash].[ext]" },
+    // dev keeps the entry name fixed: the shell is resolved once when the dev
+    // server boots, and a rebuild that moved the name would leave every open
+    // document asking for a bundle that is gone
+    naming: { entry: dev ? "[name].[ext]" : "[name]-[hash].[ext]", chunk: "[name]-[hash].[ext]" },
     define,
     plugins: [appTranspile(define, dev)],
     // borgo frames the failure itself: bun's own throw is an AggregateError
@@ -823,10 +943,25 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   // by inventory, never by shape, and never a name this build just wrote
   const named = (p: string) => p.replaceAll("\\", "/").split("/").pop()!;
   const emitted = assets.map((a) => named(a.path));
+  // the stylesheet comes from compileCss, not from the bundler, so it is named
+  // here and swept, recorded and vouched for alongside the bundler's own
+  const written = stylesheet ? [...emitted, stylesheet] : emitted;
   // recorded here because this is the only place that knows what the bundler
   // hashed; every consumer downstream reads the list instead of guessing
   const hashed = hashedOutputNames(result.outputs, outPath);
-  sweepBuildOutput(outDir, previous, emitted);
+  if (stylesheet && stylesheet !== "style.css") hashed.push(stylesheet);
+  // which name each url in the app's index.html became. Both directions cost:
+  // a document naming what the build no longer emits is a blank page, and a
+  // name that does not move when the bytes do hands a year of cache to stale
+  // ones.
+  //
+  // entry-point artifacts only: splitting also emits a shared chunk named
+  // client-<hash>.js, and a document sent to that one hydrates nothing
+  const names = entryOutputNames(
+    assets.filter((a) => a.kind === "entry-point").map((a) => named(a.path)),
+  );
+  if (stylesheet) names["style.css"] = stylesheet;
+  sweepBuildOutput(outDir, previous, written);
 
   // prod only: the hashed asset list a service worker can precache; the
   // stamp changes whenever any listed content does
@@ -834,7 +969,10 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
     const files = result.outputs
       .filter((o) => o.path.endsWith(".js"))
       .map((o) => "/assets/" + outPath(o.path).replaceAll("\\", "/").split("/").pop());
-    if (existsSync(`${outDir}/style.css`)) files.push("/assets/style.css");
+    // the emitted name, not style.css: cache.addAll rejects as a whole on one
+    // missing url, and an install that never completes is a worker that can
+    // never replace the one already holding the previous deploy
+    if (stylesheet) files.push(`/assets/${stylesheet}`);
     files.sort();
     const stamp = await precacheStamp(outDir, files);
     await Bun.write(`${outDir}/precache.json`, JSON.stringify({ stamp, assets: files }));
@@ -863,10 +1001,12 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   // build replaces it. The directory travels with the sizes so the server
   // matches the whole path, never a folder that happens to be spelled "assets".
   const vouchable = hashed.flatMap((name) => [name, `${name}.gz`, `${name}.br`]);
-  await writeBuildInventory(emitted, {
-    dir: outDir,
-    sizes: recordedOutputSizes(outDir, vouchable),
-  });
+  await writeBuildInventory(
+    written,
+    { dir: outDir, sizes: recordedOutputSizes(outDir, vouchable) },
+    inventoryPath,
+    names,
+  );
   await Bun.write(buildModePath, buildModeFor(dev));
 
   // dev: page chunks carry an injected marker, so the fast-refresh channel
@@ -883,7 +1023,7 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
       }
     }
   }
-  return { assets, chunkMap };
+  return { assets, chunkMap, names };
 }
 
 // full react-refresh instrumentation: the babel plugin emits $RefreshReg$

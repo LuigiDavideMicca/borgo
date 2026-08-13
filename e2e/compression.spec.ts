@@ -19,8 +19,17 @@ test("ssr html falls back to identity", async ({ request }) => {
   expect(await res.text()).toContain("<h1>Tasks</h1>");
 });
 
+// the entry bundle's name carries its content hash, so it is read off the
+// document the server just sent rather than spelled out here
+const entryUrl = async (request: { get: (url: string) => Promise<{ text: () => Promise<string> }> }) => {
+  const html = await (await request.get("/")).text();
+  const src = /src="(\/assets\/client-[^"]+\.js)"/.exec(html);
+  expect(src, "the document names no client entry").not.toBeNull();
+  return src![1];
+};
+
 test("client entry serves the precompressed brotli sibling", async ({ request }) => {
-  const res = await request.get("/assets/client.js", {
+  const res = await request.get(await entryUrl(request), {
     headers: { "accept-encoding": "gzip, br" },
   });
   expect(res.status()).toBe(200);

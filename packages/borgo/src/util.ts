@@ -925,10 +925,33 @@ export type ShellParts = {
   stateTail: string;
 };
 
+// which file each of the names an index.html is written against became. Empty
+// is the honest default: every url stays exactly as the document spelled it.
+export type AssetNames = Record<string, string>;
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// A production build names its entry bundle and stylesheet after their bytes,
+// so the url can be pinned for a year; the app's index.html goes on naming
+// /assets/client.js and /assets/style.css, and this is where the two meet. The
+// document is never edited on disk - an app author must never have to keep a
+// hash in their html - and an unrecorded name is left alone, which costs a
+// revalidation rather than a 404 on a file that was never emitted.
+export function resolveAssetUrls(shell: string, names: AssetNames): string {
+  let resolved = shell;
+  for (const [logical, emitted] of Object.entries(names)) {
+    if (emitted && emitted !== logical) {
+      resolved = resolved.replaceAll(`/assets/${logical}`, `/assets/${emitted}`);
+    }
+  }
+  return resolved;
+}
+
 // the shell is scanned once at boot so a render only concatenates strings:
 // injecting <head> content is a per-request rewrite of the whole shell head,
 // and the props slot and client script tag are resolved here, not per page
-export function prepareShell(shell: string, dev: boolean): ShellParts {
+export function prepareShell(source: string, dev: boolean, names: AssetNames = {}): ShellParts {
+  const shell = resolveAssetUrls(source, names);
   const [start, end = ""] = shell.split("<!--app-->");
   const title = shell.match(/<title>(.*?)<\/title>/s)?.[1] ?? "";
   const splitAtHead = (html: string): [string, string] => {
@@ -942,14 +965,19 @@ export function prepareShell(shell: string, dev: boolean): ShellParts {
   };
   // tolerate any attribute order/extras on the client script tag; a shell
   // where it cannot be found would otherwise hydrate the wrong page over a
-  // zero-js document
-  const clientScriptRe = /[ \t]*<script\b[^>]*src="\/assets\/client\.js"[^>]*><\/script>\r?\n?/;
+  // zero-js document. built from the resolved name, since that is what the
+  // shell above now carries
+  const clientSrc = escapeRe(names["client.js"] ?? "client.js");
+  const clientScriptRe = new RegExp(
+    `[ \\t]*<script\\b[^>]*src="/assets/${clientSrc}"[^>]*></script>\\r?\\n?`,
+  );
+  const islandsSrc = names["islands-client.js"] ?? "islands-client.js";
   const zeroJsTail = (islands: boolean) =>
     end
       .replace(PROPS_SLOT, dev ? DEV_INLINE_CLIENT : "")
       .replace(
         clientScriptRe,
-        islands ? '<script type="module" src="/assets/islands-client.js"></script>' : "",
+        islands ? `<script type="module" src="/assets/${islandsSrc}"></script>` : "",
       );
   return {
     start,

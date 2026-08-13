@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
-import { buildAssets, compileCss, readBuildOutputs } from "./build";
+import { buildAssets, compileCss, needsBuild, readAssetNames, readBuildOutputs } from "./build";
 import { banner, c, fmtMs, g, statusColor } from "./colors";
 import {
   buildAssetIndex,
@@ -66,8 +66,12 @@ function composeElement(route: Route, props: Record<string, unknown>) {
 export async function serve({ dev = false } = {}) {
   const started = performance.now();
   let chunkMap: Record<string, string> = {};
-  if (dev || !existsSync(".borgo/routes.gen.tsx") || !existsSync("public/assets/client.js")) {
-    ({ chunkMap } = await buildAssets(dev));
+  // every name the last build recorded, not a fixed one: a production build
+  // names its outputs after their content, and a tree missing any of them is
+  // rebuilt rather than served as a document naming a file that is not there
+  let assetNames = readAssetNames();
+  if (needsBuild(dev, assetNames)) {
+    ({ chunkMap, names: assetNames } = await buildAssets(dev));
   }
 
   const manifest = pathToFileURL(join(process.cwd(), ".borgo/routes.gen.tsx")).href;
@@ -86,7 +90,9 @@ export async function serve({ dev = false } = {}) {
     createContext: React.createContext,
     useContext: React.useContext,
   });
-  const shell = prepareShell(await Bun.file("index.html").text(), dev);
+  // resolved once: a build landing under a running server leaves this document
+  // naming files that build has already swept, so a rebuild needs a restart
+  const shell = prepareShell(await Bun.file("index.html").text(), dev, assetNames);
 
   const port = Number(process.env.PORT || 3000);
   const api = process.env.API_URL || `http://localhost:${process.env.API_PORT || 3501}`;

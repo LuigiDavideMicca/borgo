@@ -63,12 +63,12 @@ switch (command) {
     console.log(`\n  ${banner("build")}\n`);
 
     if (!(await runBorgogen())) process.exit(1);
-    const { assets } = await build();
+    const { assets, names } = await build();
     const rel = (p: string) => p.replaceAll("\\", "/").replace(/^.*?(public\/assets\/)/, "$1");
     for (const asset of assets.sort((a, b) => (a.kind === b.kind ? b.size - a.size : a.kind === "entry-point" ? -1 : 1))) {
       await assetLine(rel(asset.path), asset.kind === "entry-point" ? "entry (runtime + react)" : "");
     }
-    await assetLine("public/assets/style.css");
+    if (names["style.css"]) await assetLine(`public/assets/${names["style.css"]}`);
 
     const bin = `dist/${goBinName()}`;
     const goBuild = Bun.spawn(["go", "build", "-o", bin, "."], {
@@ -81,7 +81,12 @@ switch (command) {
     }
     const binSize = Bun.file(bin).size;
     console.log(`  ${c.sage(g.ok)} ${bin.padEnd(28)} ${kb(binSize).padStart(9)} ${c.dim("go api binary")}`);
-    console.log(`\n  done in ${c.bold(fmtMs(performance.now() - t0))}\n`);
+    console.log(`\n  done in ${c.bold(fmtMs(performance.now() - t0))}`);
+    // this build swept the names the previous one emitted, so a server still
+    // running from before it serves a document whose every asset url now 404s
+    console.log(
+      `  ${c.dim(`${g.dot} restart borgo start to serve this build ${g.dot} a server left running holds the previous document, whose assets are gone`)}\n`,
+    );
     break;
   }
 

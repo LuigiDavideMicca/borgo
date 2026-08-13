@@ -480,6 +480,42 @@ describe("prepareShell", () => {
     expect(s.stateTail).not.toContain("__BORGO_DEV__");
   });
 
+  // The scaffolded index.html names /assets/client.js and /assets/style.css
+  // for the life of the app; a production build emits those bytes under a name
+  // that carries their hash, and this is where the two are reconciled - once,
+  // at boot, without the document on disk ever being touched.
+  const HASHED = {
+    "client.js": "client-6j5pq722.js",
+    "islands-client.js": "islands-client-p5d0n9ga.js",
+    "style.css": "style-9f3a1c07.css",
+  };
+
+  test("the emitted names replace the ones the document was written against", () => {
+    const shell = SHELL.replace("/assets/app.css", "/assets/style.css");
+    const s = prepareShell(shell, false, HASHED);
+    expect(s.head[0]).toContain('href="/assets/style-9f3a1c07.css"');
+    expect(s.head[0]).not.toContain("/assets/style.css");
+    expect(s.endProps[1]).toContain('src="/assets/client-6j5pq722.js"');
+    expect(s.endProps[1]).not.toContain('src="/assets/client.js"');
+  });
+
+  // a tag the regex no longer recognises is a client bundle left on a page
+  // that must not hydrate; a name the build never emitted is a 404
+  test("the zero-js tails follow the emitted names too", () => {
+    const s = prepareShell(SHELL, false, HASHED);
+    expect(s.zeroJsEnd.plain).toBe("</div></body></html>");
+    expect(s.zeroJsEnd.islands).toBe(
+      '</div><script type="module" src="/assets/islands-client-p5d0n9ga.js"></script></body></html>',
+    );
+  });
+
+  test("an unrecorded name is left exactly as the document spelled it", () => {
+    const s = prepareShell(SHELL, false, { "style.css": "style-9f3a1c07.css" });
+    expect(s.endProps[1]).toContain('src="/assets/client.js"');
+    expect(s.zeroJsEnd.plain).toBe("</div></body></html>");
+    expect(s.zeroJsEnd.islands).toContain('src="/assets/islands-client.js"');
+  });
+
   test("a shell missing optional markers degrades instead of throwing", () => {
     const bare = "<html><body><!--app--></body></html>";
     const s = prepareShell(bare, false);

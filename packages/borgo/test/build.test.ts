@@ -10,7 +10,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { buildAssetIndex } from "../src/compress";
+import { buildAssetIndex, findAsset, serveAsset, serveIndexed } from "../src/compress";
+import { serviceWorker } from "../src/pwa";
+import { prepareShell } from "../src/util";
 
 // an app with react installed, so a real bundle can resolve its imports
 const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
@@ -21,12 +23,17 @@ import {
   BundleFailed,
   compileCss,
   cssSource,
+  emittedStylesheet,
+  entryOutputNames,
   generateManifest,
   hashedOutputNames,
   isSweepable,
+  missingBuiltAssets,
   nameCarriesHash,
+  needsBuild,
   parseHydrate,
   precacheStamp,
+  readAssetNames,
   readBuildInventory,
   readBuildOutputs,
   recordedOutputSizes,
@@ -726,14 +733,14 @@ describe("build inventory", () => {
 });
 
 // The distinction the old rule could not make. Bun reports a content hash for
-// every artifact including the entry points, and borgo names those
-// "[name].[ext]" on purpose - so "has a hash" and "says its hash in its name"
-// are different questions, and only the second one is a promise to a cache.
+// every artifact, and a dev build names its entry points "[name].[ext]" - so
+// "has a hash" and "says its hash in its name" are different questions, and
+// only the second one is a promise to a cache.
 describe("nameCarriesHash", () => {
   test("a name is a promise only when it contains that file's own hash", () => {
     expect(nameCarriesHash("page-a1b2c3d4.js", "a1b2c3d4")).toBe(true);
     expect(nameCarriesHash("out/assets/logo-6nnjve26.png", "6nnjve26")).toBe(true);
-    // the entry: bun computed a hash, borgo's naming block kept it out of the
+    // a dev entry: bun computed a hash, the naming block kept it out of the
     // filename, and the url therefore promises nothing
     expect(nameCarriesHash("client.js", "7js0fvsn")).toBe(false);
     // a different build's hash is not this file's hash
@@ -776,7 +783,7 @@ describe("nameCarriesHash", () => {
   // It runs inside examples/tasks because a real bundle has to resolve react,
   // and skips where that app has no node_modules rather than failing there.
   test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
-    "a real build records its chunks as hashed and its entry as not",
+    "a real build records every output it vouches for, entry included",
     async () => {
       const dir = mkdtempSync(join(APP_HOST, "borgo-build-inventory-"));
       const cwd = process.cwd();
@@ -791,10 +798,14 @@ describe("nameCarriesHash", () => {
 
         const files = readBuildInventory()!;
         const outputs = readBuildOutputs();
-        expect(files).toContain("client.js");
-        // the entry is emitted by this very build and is still not cacheable:
-        // `on the inventory` and `content-addressed` are different questions
-        expect(outputs.sizes.has("client.js")).toBe(false);
+        const entry = readAssetNames()["client.js"];
+        expect(entry).toMatch(/^client-[a-z0-9]+\.js$/);
+        expect(files).toContain(entry);
+        // the point of the whole change: the entry's url names its bytes, so
+        // it is vouched for like any chunk
+        expect(outputs.sizes.has(entry!)).toBe(true);
+        // and the name it used to keep is not on disk to be served stale
+        expect(existsSync("public/assets/client.js")).toBe(false);
         expect(outputs.sizes.size).toBeGreaterThan(0);
         // the directory the server will match against, recorded by the build
         expect(outputs.dir).toBe("public/assets");
@@ -820,7 +831,9 @@ describe("nameCarriesHash", () => {
 
         // the payoff, stated where a server would ask it
         const index = buildAssetIndex("public", undefined, outputs);
-        expect(index.get("/assets/client.js")!.identity.pinnedSize).toBeNull();
+        expect(index.get(`/assets/${entry}`)!.identity.pinnedSize).toBe(
+          outputs.sizes.get(entry!)!,
+        );
         const chunk = [...index].find(([url]) => outputs.sizes.has(url.split("/").pop()!))!;
         expect(chunk[1].identity.pinnedSize).toBe(
           outputs.sizes.get(chunk[0].split("/").pop()!) ?? null,
@@ -857,9 +870,9 @@ describe("nameCarriesHash", () => {
         entrypoints: [join(dir, "client.ts")],
         outdir: join(dir, "out"),
         splitting: true,
-        // the same block buildAssets uses: entries keep a stable name, and
-        // everything else is named by content
-        naming: { entry: "[name].[ext]", chunk: "[name]-[hash].[ext]" },
+        // the same block a production buildAssets uses: everything it emits is
+        // named by content, entry included
+        naming: { entry: "[name]-[hash].[ext]", chunk: "[name]-[hash].[ext]" },
         throw: false,
       });
       expect(result.success).toBe(true);
@@ -872,18 +885,17 @@ describe("nameCarriesHash", () => {
       const of = (kind: string) => classified.filter((c) => c.kind === kind);
 
       // the exact list buildAssets records, against real bundler output: every
-      // artifact except the entry, and the entry emphatically not among them
+      // artifact, with nothing left over
       const recorded = hashedOutputNames(result.outputs);
       expect(recorded.sort()).toEqual(classified.filter((c) => c.hashed).map((c) => c.file).sort());
-      expect(recorded).not.toContain("client.js");
-      expect(recorded.length).toBe(result.outputs.length - 1);
+      expect(recorded.length).toBe(result.outputs.length);
 
-      // the entry: bun computes a hash for it, borgo keeps it out of the name,
-      // and it must therefore never be pinned
+      // the entry: bun puts the hash it computed into the name, and the name
+      // is what a cache is asked to trust
       const entry = of("entry-point");
-      expect(entry.map((e) => e.file)).toEqual(["client.js"]);
-      expect(entry.every((e) => e.hashed)).toBe(false);
-      expect(result.outputs.find((o) => o.kind === "entry-point")!.hash).toBeTruthy();
+      expect(entry.map((e) => e.file)).toEqual([expect.stringMatching(/^client-[a-z0-9]+\.js$/)]);
+      expect(entry.every((e) => e.hashed)).toBe(true);
+      expect(entryOutputNames(entry.map((e) => e.file))["client.js"]).toBe(entry[0].file);
 
       // the split chunk, and the imported image and font - the last two are
       // exactly what the old js/css rule refused to cache
@@ -899,6 +911,337 @@ describe("nameCarriesHash", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+// The outcome, off the wire, on both paths a borgo server can answer an asset
+// on: the boot-time index and the live lookup. Everything above proves a name
+// was recorded; this proves the browser is told that name and that the url it
+// is told is the one that carries the year.
+describe("a served production build", () => {
+  const IMMUTABLE = "public, max-age=31536000, immutable";
+  // the scaffolded shell, unedited, because the whole design is that an app
+  // author never types a hash into their html
+  const TEMPLATE_SHELL = join(import.meta.dir, "../../create-borgo/templates/base/index.html");
+
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "hands the browser the emitted names, and those urls are pinned for a year",
+    async () => {
+      const dir = mkdtempSync(join(APP_HOST, "borgo-served-build-"));
+      const cwd = process.cwd();
+      const running: Array<() => void> = [];
+      try {
+        mkdirSync(join(dir, "pages"), { recursive: true });
+        mkdirSync(join(dir, "public"), { recursive: true });
+        writeFileSync(join(dir, "index.html"), readFileSync(TEMPLATE_SHELL, "utf8"));
+        writeFileSync(join(dir, "style.scss"), "body { color: rebeccapurple; }\n");
+        writeFileSync(join(dir, "pages/index.tsx"), "export default () => <h1>one</h1>;\n");
+        writeFileSync(join(dir, "public/sw.js"), serviceWorker());
+        process.chdir(dir);
+
+        // what `borgo start` does at boot, and nothing more: read the build's
+        // record, resolve the shell once against it, index public/ once
+        const boot = () => {
+          const outputs = readBuildOutputs();
+          const names = readAssetNames();
+          const parts = prepareShell(readFileSync("index.html", "utf8"), false, names);
+          const doc = parts.start + parts.endProps[0] + parts.endProps[1];
+          const index = buildAssetIndex("public", undefined, outputs);
+          const answer = (mode: string) => async (req: Request) => {
+            const path = new URL(req.url).pathname;
+            if (path === "/") return new Response(doc, { headers: { "Content-Type": "text/html" } });
+            if (mode === "indexed") {
+              const info = findAsset(index, path);
+              return info ? serveIndexed(req, info) : new Response("no such asset", { status: 404 });
+            }
+            const file = "public" + path;
+            const asset = Bun.file(file);
+            return (await asset.exists())
+              ? serveAsset(req, file, asset, { dev: false, outputs })
+              : new Response("no such asset", { status: 404 });
+          };
+          const servers = ["indexed", "live"].map((mode) => {
+            const server = Bun.serve({ port: 0, fetch: answer(mode) });
+            running.push(() => server.stop(true));
+            return { mode, base: `http://localhost:${server.port}` };
+          });
+          return { names, servers };
+        };
+
+        const built = await buildAssets(false);
+        const one = boot();
+        const entry = one.names["client.js"]!;
+        const style = one.names["style.css"]!;
+        expect(entry).toMatch(/^client-[a-z0-9]+\.js$/);
+        expect(style).toMatch(/^style-[a-z0-9]+\.css$/);
+        // the artifact bun called the entry point, not a name that looks like
+        // one: splitting also emits a shared chunk named client-<hash>.js, and
+        // a document pointed at that one would carry every cache header this
+        // test asserts and hydrate nothing
+        expect(built.assets.filter((a) => a.kind === "entry-point").map((a) => basename(a.path))).toEqual([
+          entry,
+        ]);
+        // the app's own html still says what it always said
+        expect(readFileSync("index.html", "utf8")).toContain('src="/assets/client.js"');
+
+        for (const { mode, base } of one.servers) {
+          const html = await (await fetch(`${base}/`)).text();
+          const refs = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((m) => m[1]);
+          expect(refs).toContain(`/assets/${entry}`);
+          expect(refs).toContain(`/assets/${style}`);
+          // every asset url in the document, answered by the server that sent it
+          for (const url of refs) {
+            const res = await fetch(base + url);
+            expect(`${mode} ${url}: ${res.status} ${res.headers.get("Cache-Control")}`).toBe(
+              `${mode} ${url}: 200 ${IMMUTABLE}`,
+            );
+          }
+        }
+
+        // the worker's precache: every url listed exists, because cache.addAll
+        // rejects as a whole and a worker that cannot install never replaces
+        // the one already holding the previous deploy
+        const precache = JSON.parse(readFileSync("public/assets/precache.json", "utf8"));
+        expect(precache.assets).toContain(`/assets/${entry}`);
+        expect(precache.assets).toContain(`/assets/${style}`);
+        for (const url of precache.assets) {
+          expect(`${url} exists: ${existsSync("public" + url)}`).toBe(`${url} exists: true`);
+        }
+        expect(readFileSync("public/sw.js", "utf8")).toContain(
+          `const BUILD = ${JSON.stringify(precache.stamp)};`,
+        );
+
+        for (const stop of running.splice(0)) stop();
+        writeFileSync(join(dir, "pages/index.tsx"), "export default () => <h1>two</h1>;\n");
+        writeFileSync(join(dir, "style.scss"), "body { color: seagreen; }\n");
+        await buildAssets(false);
+        const two = boot();
+        expect(two.names["client.js"]).not.toBe(entry);
+        expect(two.names["style.css"]).not.toBe(style);
+
+        for (const { mode, base } of two.servers) {
+          const html = await (await fetch(`${base}/`)).text();
+          expect(`${mode}: ${html.includes(`/assets/${two.names["client.js"]}`)}`).toBe(
+            `${mode}: true`,
+          );
+          expect(html).not.toContain(`/assets/${entry}`);
+          expect(html).not.toContain(`/assets/${style}`);
+          for (const url of [`/assets/${two.names["client.js"]}`, `/assets/${two.names["style.css"]}`]) {
+            const res = await fetch(base + url);
+            expect(`${mode} ${url}: ${res.status} ${res.headers.get("Cache-Control")}`).toBe(
+              `${mode} ${url}: 200 ${IMMUTABLE}`,
+            );
+          }
+          // the year is only safe because the previous url left with its bytes
+          expect(`${mode}: ${(await fetch(`${base}/assets/${entry}`)).status}`).toBe(`${mode}: 404`);
+        }
+
+        const restamped = JSON.parse(readFileSync("public/assets/precache.json", "utf8"));
+        expect(restamped.stamp).not.toBe(precache.stamp);
+        for (const url of restamped.assets) {
+          expect(`${url} exists: ${existsSync("public" + url)}`).toBe(`${url} exists: true`);
+        }
+
+        // a partial deploy: .borgo/ from this build, public/assets/ missing one
+        // of the files it names. Nothing about that url can be repaired at
+        // request time, so the server must refuse to boot on the record alone
+        for (const stop of running.splice(0)) stop();
+        rmSync(join("public/assets", two.names["style.css"]!));
+        expect(missingBuiltAssets()).toEqual([two.names["style.css"]!]);
+        await buildAssets(false); // which is what serve() does when it reports one
+        expect(missingBuiltAssets()).toEqual([]);
+        for (const { mode, base } of boot().servers) {
+          const html = await (await fetch(`${base}/`)).text();
+          const refs = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((m) => m[1]);
+          expect(refs.length).toBeGreaterThan(1);
+          for (const url of refs) {
+            const res = await fetch(base + url);
+            expect(`${mode} ${url}: ${res.status}`).toBe(`${mode} ${url}: 200`);
+          }
+        }
+      } finally {
+        for (const stop of running) stop();
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  // dev names the entry once and keeps it, because the dev server resolves the
+  // shell at boot and rebuilds behind it all day. The production build that
+  // follows must take that name away with it, which is also the upgrade from
+  // any borgo that never hashed an entry at all.
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "a dev build keeps the plain names, and the next production build removes them",
+    async () => {
+      const dir = mkdtempSync(join(APP_HOST, "borgo-dev-names-"));
+      const cwd = process.cwd();
+      try {
+        mkdirSync(join(dir, "pages"), { recursive: true });
+        writeFileSync(join(dir, "style.scss"), "body { color: rebeccapurple; }\n");
+        writeFileSync(join(dir, "pages/index.tsx"), "export default () => <h1>one</h1>;\n");
+        process.chdir(dir);
+
+        await buildAssets(true);
+        expect(readAssetNames()).toMatchObject({ "client.js": "client.js", "style.css": "style.css" });
+        expect(existsSync("public/assets/client.js")).toBe(true);
+
+        await buildAssets(false);
+        expect(readAssetNames()["client.js"]).toMatch(/^client-[a-z0-9]+\.js$/);
+        for (const stale of ["public/assets/client.js", "public/assets/style.css"]) {
+          expect(`${stale} left behind: ${existsSync(stale)}`).toBe(`${stale} left behind: false`);
+        }
+      } finally {
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+});
+
+describe("the names a document is written against", () => {
+  test("entryOutputNames reads the emitted filename, hashed or not", () => {
+    expect(
+      entryOutputNames(["client-6j5pq722.js", "islands-client-p5d0n9ga.js", "page-a1b2c3d4.js"]),
+    ).toEqual({ "client.js": "client-6j5pq722.js", "islands-client.js": "islands-client-p5d0n9ga.js" });
+    // a dev build, where the entries keep their plain names
+    expect(entryOutputNames(["client.js", "islands-client.js"])).toEqual({
+      "client.js": "client.js",
+      "islands-client.js": "islands-client.js",
+    });
+    // the islands entry is not the client entry with a prefix
+    expect(entryOutputNames(["islands-client-abc12345.js"])["client.js"]).toBeUndefined();
+  });
+
+  // every degradation here must land on the name the document already carries:
+  // that url revalidates and works, where a guessed one is a blank page
+  test("a missing, old or malformed record resolves to no name at all", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-names-"));
+    const path = join(dir, "build-output.json");
+    try {
+      expect(readAssetNames(path)).toEqual({});
+      for (const body of [
+        "{not json",
+        "",
+        JSON.stringify({ files: ["client.js"] }), // an older borgo, no entries
+        JSON.stringify({ entries: ["client.js"] }),
+        JSON.stringify({ entries: { "client.js": 7 } }),
+        JSON.stringify({ entries: { "client.js": "" } }),
+        // a name that describes some other file is not a name in this directory
+        JSON.stringify({ entries: { "client.js": "../../etc/passwd" } }),
+        JSON.stringify({ entries: { "client.js": "sub\\client.js" } }),
+        // only the urls a shell can hold are honoured
+        JSON.stringify({ entries: { "vendor.js": "vendor-a1b2c3d4.js" } }),
+      ]) {
+        writeFileSync(path, body);
+        expect(`${body.slice(0, 45)} -> ${JSON.stringify(readAssetNames(path))}`).toBe(
+          `${body.slice(0, 45)} -> {}`,
+        );
+      }
+      writeFileSync(path, JSON.stringify({ entries: { "client.js": "client-6j5pq722.js", "sw.js": "x" } }));
+      expect(readAssetNames(path)).toEqual({ "client.js": "client-6j5pq722.js" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // `.borgo/` from one build beside a public/assets/ from another - a partial
+  // deploy, a COPY that missed the css - is a record naming files that are not
+  // there. Checking only the entry boots a healthy-looking server that serves
+  // an unstyled page, or a page with no islands, until someone rebuilds by hand.
+  test("every recorded name is checked on disk, not just the entry", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-present-"));
+    const cwd = process.cwd();
+    try {
+      mkdirSync(join(dir, "public/assets"), { recursive: true });
+      process.chdir(dir);
+      const names = {
+        "client.js": "client-6j5pq722.js",
+        "islands-client.js": "islands-client-p5d0n9ga.js",
+        "style.css": "style-9f3a1c07.css",
+      };
+      for (const name of Object.values(names)) writeFileSync(`public/assets/${name}`, "x");
+      expect(missingBuiltAssets(names)).toEqual([]);
+
+      for (const gone of Object.values(names)) {
+        rmSync(`public/assets/${gone}`);
+        expect(missingBuiltAssets(names)).toEqual([gone]);
+        writeFileSync(`public/assets/${gone}`, "x");
+      }
+
+      // no record at all: the plain entry name stands in, so an app upgrading
+      // from a borgo that hashed nothing still has its build recognised
+      expect(missingBuiltAssets({})).toEqual(["client.js"]);
+      writeFileSync("public/assets/client.js", "x");
+      expect(missingBuiltAssets({})).toEqual([]);
+
+      // and the decision the server actually makes on it
+      mkdirSync(".borgo", { recursive: true });
+      expect(needsBuild(false, names)).toBe(true); // no route manifest yet
+      writeFileSync(".borgo/routes.gen.tsx", "");
+      expect(needsBuild(false, names)).toBe(false);
+      expect(needsBuild(true, names)).toBe(true); // dev always rebuilds
+      rmSync(`public/assets/${names["style.css"]}`);
+      expect(needsBuild(false, names)).toBe(true);
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  describe("emittedStylesheet", () => {
+    const fixture = (fn: (dir: string) => Promise<void> | void) => async () => {
+      const dir = mkdtempSync(join(tmpdir(), "borgo-stylesheet-"));
+      try {
+        await fn(dir.replaceAll("\\", "/"));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    test(
+      "production names it after its bytes, and moves the name when they move",
+      fixture(async (dir) => {
+        writeFileSync(join(dir, "style.css"), "body{color:red}");
+        const first = (await emittedStylesheet(false, undefined, dir))!;
+        expect(first).toMatch(/^style-[a-z0-9]{8}\.css$/);
+        // renamed, not copied: two files with the same bytes under different
+        // names is the state where the sweep deletes the one in use
+        expect(existsSync(join(dir, "style.css"))).toBe(false);
+        expect(readFileSync(join(dir, first), "utf8")).toBe("body{color:red}");
+
+        // the same bytes recompiled keep the same url, so a redeploy that did
+        // not touch the css does not throw away a year of caching
+        writeFileSync(join(dir, "style.css"), "body{color:red}");
+        expect(await emittedStylesheet(false, first, dir)).toBe(first);
+
+        writeFileSync(join(dir, "style.css"), "body{color:blue}");
+        expect(await emittedStylesheet(false, first, dir)).not.toBe(first);
+      }),
+    );
+
+    test(
+      "a build that compiled no css keeps the name the last one emitted",
+      fixture(async (dir) => {
+        writeFileSync(join(dir, "style-a1b2c3d4.css"), "body{}");
+        expect(await emittedStylesheet(false, "style-a1b2c3d4.css", dir)).toBe("style-a1b2c3d4.css");
+        // and one whose recorded file is gone reports no stylesheet rather
+        // than a name nothing can answer
+        expect(await emittedStylesheet(false, "style-deadbeef.css", dir)).toBeNull();
+        expect(await emittedStylesheet(false, undefined, dir)).toBeNull();
+      }),
+    );
+
+    test(
+      "dev leaves the plain name, because the shell is resolved once at boot",
+      fixture(async (dir) => {
+        writeFileSync(join(dir, "style.css"), "body{color:red}");
+        expect(await emittedStylesheet(true, undefined, dir)).toBe("style.css");
+        expect(existsSync(join(dir, "style.css"))).toBe(true);
+      }),
+    );
+  });
 });
 
 describe("sweepBuildOutput", () => {
@@ -957,6 +1300,27 @@ describe("sweepBuildOutput", () => {
 
   test("a directory that does not exist yet is not an error", () => {
     expect(sweepBuildOutput(join(tmpdir(), "borgo-no-such-dir-" + Date.now()), [])).toEqual([]);
+  });
+
+  // A build that compiles no css keeps the stylesheet the last one emitted, so
+  // that name is on the previous inventory *and* in use by the document this
+  // build is about to serve. Swept, it is a page with no styles until someone
+  // rebuilds - the same shape as the precache pointing at a name that is gone.
+  test("an output this build reused is kept, though the last build recorded it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-sweep-reuse-"));
+    try {
+      for (const f of ["style-a1b2c3d4.css", "style-a1b2c3d4.css.gz", "client-old00000.js"]) {
+        writeFileSync(join(dir, f), "x");
+      }
+      const previous = ["style-a1b2c3d4.css", "client-old00000.js"];
+      const removed = sweepBuildOutput(dir, previous, ["client-new00000.js", "style-a1b2c3d4.css"]);
+      // the precompressed sibling goes, as every sibling does - precompression
+      // runs after the sweep and writes it again
+      expect(removed.sort()).toEqual(["client-old00000.js", "style-a1b2c3d4.css.gz"]);
+      expect(existsSync(join(dir, "style-a1b2c3d4.css"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

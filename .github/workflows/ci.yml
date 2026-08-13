@@ -187,8 +187,9 @@ jobs:
           go mod tidy
           bunx tsc --noEmit
           bun run build
-          grep -q "tab-size" public/assets/style.css
-          grep -q "hero" public/assets/style.css
+          # the stylesheet is emitted under a content-hashed name
+          grep -q "tab-size" public/assets/style-*.css
+          grep -q "hero" public/assets/style-*.css
 
   # the deploy story must keep building; a separate job so the image build
   # runs in parallel with the test pipeline
