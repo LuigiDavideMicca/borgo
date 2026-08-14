@@ -711,15 +711,29 @@ export function metricsEnabled(env: Record<string, string | undefined>): boolean
 // so SESSION_SECURE=true gave the session cookie Secure and left the csrf
 // cookie without it - one variable, one intent, two answers, silently, in the
 // direction that downgrades. Same grammar as ParseBool, same refusal.
-export function sessionSecure(env: Record<string, string | undefined>): boolean {
-  const v = env.SESSION_SECURE;
-  if (v === undefined || v === "") return false;
+/**
+ * A boolean switch as go's strconv.ParseBool reads it, or undefined when it was
+ * never set. Refuses what it cannot read rather than picking a side: a value
+ * nobody can parse is a value whose author had an intent, and guessing it wrong
+ * is how `=true` came to mean off.
+ */
+export function envBool(name: string, v: string | undefined, unsetMeans: string): boolean | undefined {
+  if (v === undefined || v === "") return undefined;
   if (["1", "t", "T", "true", "TRUE", "True"].includes(v)) return true;
   if (["0", "f", "F", "false", "FALSE", "False"].includes(v)) return false;
   throw new Error(
-    `borgo: SESSION_SECURE: invalid value "${v}" (want "1"/"true" or "0"/"false"; unset means not secure)`,
+    `borgo: ${name}: invalid value "${v}" (want "1"/"true" or "0"/"false"; unset means ${unsetMeans})`,
   );
 }
+
+export function sessionSecure(env: Record<string, string | undefined>): boolean {
+  return envBool("SESSION_SECURE", env.SESSION_SECURE, "not secure") ?? false;
+}
+
+// on in production, off in dev, BORGO_CSRF decides either way. It tested
+// === "1" once, so BORGO_CSRF=true turned off the check it names
+export const csrfEnabled = (dev: boolean, env: Record<string, string | undefined>): boolean =>
+  envBool("BORGO_CSRF", env.BORGO_CSRF, dev ? "off in dev" : "on") ?? !dev;
 
 /**
  * Who may POST /__borgo/publish.

@@ -28,6 +28,7 @@ import {
   scriptJson,
   shouldBufferBody,
   UNKNOWN_CHANGE,
+  csrfEnabled,
   sessionSecure,
 } from "../src/util";
 import { readFileSync } from "node:fs";
@@ -1243,6 +1244,50 @@ describe("sessionSecure", () => {
     for (const v of ["yes", "on", "2", " 1", "true ", "secure"]) {
       expect(() => sessionSecure({ SESSION_SECURE: v })).toThrow(/SESSION_SECURE/);
     }
+  });
+});
+
+// BORGO_CSRF governs the check on both unsafe paths. It tested === "1", so
+// every spelling but that one read as "not 1" - and in dev that meant the
+// operator who wrote BORGO_CSRF=true to switch the check on switched it off.
+// The direction that matters is a value nobody can parse: it must refuse, not
+// fall through to whichever side the ternary happened to leave.
+describe("csrfEnabled", () => {
+  test("accepts everything go's ParseBool accepts, both ways, in both modes", () => {
+    for (const dev of [true, false]) {
+      for (const v of ["1", "t", "T", "true", "TRUE", "True"]) {
+        expect(csrfEnabled(dev, { BORGO_CSRF: v })).toBe(true);
+      }
+      for (const v of ["0", "f", "F", "false", "FALSE", "False"]) {
+        expect(csrfEnabled(dev, { BORGO_CSRF: v })).toBe(false);
+      }
+    }
+  });
+
+  // the defect itself: on in dev, this used to be false
+  test("BORGO_CSRF=true enforces the check in dev", () => {
+    expect(csrfEnabled(true, { BORGO_CSRF: "true" })).toBe(true);
+  });
+
+  test("unset and empty leave the mode's default: on in production, off in dev", () => {
+    expect(csrfEnabled(false, {})).toBe(true);
+    expect(csrfEnabled(false, { BORGO_CSRF: "" })).toBe(true);
+    expect(csrfEnabled(true, {})).toBe(false);
+    expect(csrfEnabled(true, { BORGO_CSRF: "" })).toBe(false);
+  });
+
+  test("refuses what it cannot read rather than picking a side", () => {
+    for (const v of ["yes", "on", "off", "2", " 1", "true ", "enabled"]) {
+      expect(() => csrfEnabled(false, { BORGO_CSRF: v })).toThrow(/BORGO_CSRF/);
+      expect(() => csrfEnabled(true, { BORGO_CSRF: v })).toThrow(/BORGO_CSRF/);
+    }
+  });
+
+  // the message has to name the default it is refusing to guess, or an
+  // operator reading it cannot tell what happens if they unset the variable
+  test("the refusal names what unset would have meant", () => {
+    expect(() => csrfEnabled(false, { BORGO_CSRF: "yes" })).toThrow(/unset means on/);
+    expect(() => csrfEnabled(true, { BORGO_CSRF: "yes" })).toThrow(/unset means off in dev/);
   });
 });
 

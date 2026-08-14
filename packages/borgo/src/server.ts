@@ -46,6 +46,7 @@ import {
   type ActionOptions,
   type PropsOptions,
   type RenderPageOptions,
+  csrfEnabled,
   sessionSecure,
 } from "./util";
 
@@ -156,10 +157,9 @@ export async function serve({ dev = false } = {}) {
   // required back on both unsafe paths - echoed in a hidden field by a page
   // form action, in the X-CSRF-Token header by a proxied /api/* call. a
   // cross-site post can read neither the cookie nor set the header. one flag
-  // governs both: on by default in production, BORGO_CSRF=1 forces the check
-  // in dev, BORGO_CSRF=0 disables it.
-  const csrfEnforced =
-    process.env.BORGO_CSRF === "0" ? false : dev ? process.env.BORGO_CSRF === "1" : true;
+  // governs both: on by default in production, off by default in dev, and
+  // BORGO_CSRF decides either way.
+  const csrfEnforced = csrfEnabled(dev, process.env);
   const csrfCookieAttrs = `Path=/; SameSite=Lax${sessionSecure(process.env) ? "; Secure" : ""}`;
 
   const renderOptions: RenderPageOptions = {
