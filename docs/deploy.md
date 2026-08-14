@@ -257,6 +257,8 @@ Three more exist for the build, not the runtime: `BORGO_TAILWIND=1` is what `bor
 
 The front server exits with the API it supervises, and both exit if their launcher dies — a force-killed deploy script cannot leave a process holding port 3000.
 
+**A rebuild is not a redeploy: restart the process after one.** `borgo start` resolves the document and the built asset names *once, at boot* — `index.html` is read into the shell it serves and the hashed filenames come from the record that build wrote — and neither is consulted again. Run `bun run build` (or `borgo build`) while a `borgo start` is live and the running process keeps serving the old document, naming chunks the finished build has already swept from `public/assets`; the new bytes are on disk and nothing is using them. Restart it and the boot reads both afresh. The reverse case is handled for you: a `borgo start` that finds no route manifest, or one of the three entry names missing from `public/assets`, builds before it serves and prints on stdout the cause it verified and how long the build took. So does one that finds assets left by `borgo dev` or `borgo export`, which are unfit to serve for different reasons. What it does *not* check is every chunk the record names — a `public/assets` that lost a file other than the three entries boots silently.
+
 For a redeploy with no dropped requests, run two instances and switch the proxy between them:
 
 ```bash

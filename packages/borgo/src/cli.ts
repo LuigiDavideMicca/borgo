@@ -177,11 +177,20 @@ switch (command) {
     // with the props endpoint compiled out - every client navigation would
     // degrade to a full document reload. Either way: rebuild for production
     // instead of serving them silently.
+    // BORGO_STATIC belongs to `borgo export` and is documented as nobody's to
+    // set by hand; inherited here it made every rebuild this command drives an
+    // export build - the props endpoint compiled out, the mode never reaching
+    // production, so the next boot rebuilt too, forever, announcing production
+    // each time. Clear it before anything builds, `serve()` included
+    delete process.env.BORGO_STATIC;
+
     const mode = assetsBuildMode();
     if (mode === "dev" || mode === "export") {
       const held = mode === "dev" ? "a dev build" : "a static export build";
       console.log(`  ${c.terracotta(g.change)} public/assets holds ${held} ${c.dim("- rebuilding for production")}`);
+      const rebuildStarted = performance.now();
       await build();
+      console.log(`  ${c.sage(g.ok)} built in ${c.bold(fmtMs(performance.now() - rebuildStarted))}`);
     }
 
     // the manifest's own warnings were printed by whoever ran `borgo build`,

@@ -3,7 +3,14 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
-import { buildAssets, compileCss, needsBuild, readAssetNames, readBuildOutputs } from "./build";
+import {
+  buildAssets,
+  buildReasons,
+  compileCss,
+  needsBuild,
+  readAssetNames,
+  readBuildOutputs,
+} from "./build";
 import { banner, c, fmtMs, g, statusColor } from "./colors";
 import {
   buildAssetIndex,
@@ -71,7 +78,19 @@ export async function serve({ dev = false } = {}) {
   // rebuilt rather than served as a document naming a file that is not there
   let assetNames = readAssetNames();
   if (needsBuild(dev, assetNames)) {
+    // fails towards saying too much and towards the cause it verified. dev
+    // rebuilds on every boot, where a line per boot is noise the ready time
+    // already accounts for
+    const announce = !dev;
+    if (announce) {
+      const why = buildReasons(assetNames);
+      console.log(`  ${c.terracotta(g.change)} ${why.join("; ")} ${c.dim("- building before serving")}`);
+    }
+    const buildStarted = performance.now();
     ({ chunkMap, names: assetNames } = await buildAssets(dev));
+    if (announce) {
+      console.log(`  ${c.sage(g.ok)} built in ${c.bold(fmtMs(performance.now() - buildStarted))}`);
+    }
   }
 
   const manifest = pathToFileURL(join(process.cwd(), ".borgo/routes.gen.tsx")).href;

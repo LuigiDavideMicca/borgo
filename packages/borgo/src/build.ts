@@ -665,11 +665,25 @@ export function missingBuiltAssets(names: AssetNames = readAssetNames()): string
     .sort();
 }
 
+/**
+ * Why a production boot has to build, in the operator's words, or nothing.
+ *
+ * The reasons and the decision come from here together: a boot that announces
+ * one cause and rebuilds for another sends whoever reads it to the wrong file.
+ */
+export function buildReasons(names: AssetNames = readAssetNames()): string[] {
+  const why: string[] = [];
+  const missing = missingBuiltAssets(names);
+  if (missing.length) why.push(`public/assets is missing ${missing.join(", ")}`);
+  if (!existsSync(`${genDir}/routes.gen.tsx`)) why.push("there is no route manifest here");
+  return why;
+}
+
 // what `borgo start` asks before serving a tree it did not build. Doubt
 // resolves toward rebuilding: the cost is one build, and the alternative is a
 // document naming files that are not there, permanently and with no error.
 export const needsBuild = (dev: boolean, names: AssetNames = readAssetNames()): boolean =>
-  dev || !existsSync(`${genDir}/routes.gen.tsx`) || missingBuiltAssets(names).length > 0;
+  dev || buildReasons(names).length > 0;
 
 /**
  * Which emitted file each logical name became, read off the emitted names.
