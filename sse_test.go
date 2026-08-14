@@ -418,6 +418,325 @@ func TestHubCloseAndCountAreRaceFree(t *testing.T) {
 	}
 }
 
+// SSEHub is documented as built by NewSSEHub, but nothing stops `var hub
+// SSEHub` - a struct field, a package-level var - and half the type already
+// handled it: Publish, Close and Subscribers create the close latch lazily.
+// ServeHTTP did not, so registering a subscription wrote to a nil map and
+// panicked with h.mu held under a bare unlock: from that moment every Publish,
+// Close, Subscribers and later ServeHTTP blocked forever on a hub that looked
+// alive. The property below is scoped to that: no sequence of calls on a
+// zero-value hub may panic or leave the mutex held.
+//
+// Every test here starts from a zero value, never NewSSEHub, and every wait is
+// bounded - a wedged hub blocks its caller for good, so a test that called it
+// straight would hang instead of reporting, and a hang is indistinguishable
+// from a slow machine.
+
+// hubCall runs op on its own goroutine so a held mutex fails the test instead
+// of stopping it.
+func hubCall(t *testing.T, what string, op func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		op()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never returned on a zero-value hub: ServeHTTP left the mutex held", what)
+	}
+}
+
+func zeroHubSubscribers(t *testing.T, hub *SSEHub) int {
+	t.Helper()
+	n := -1
+	hubCall(t, "Subscribers()", func() { n = hub.Subscribers() })
+	return n
+}
+
+func waitZeroHubSubscribers(t *testing.T, hub *SSEHub, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := zeroHubSubscribers(t, hub)
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("zero-value hub reports %d subscribers, want %d", got, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// closeZeroHubServer stands in for `defer server.Close()`: httptest waits for
+// outstanding requests, and a handler wedged on the hub's mutex never finishes
+// one, so the plain defer would hang the test after its assertions passed.
+func closeZeroHubServer(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	server.CloseClientConnections()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.Close()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Errorf("the test server never shut down: a hub handler is still wedged in ServeHTTP")
+	}
+}
+
+// openZeroHubStream makes one real request - a client on a socket, not a direct
+// call - and consumes the opening comment, so the subscription is live when it
+// returns. The request carries a deadline, so every read below it fails loudly
+// rather than blocking.
+func openZeroHubStream(t *testing.T, server *httptest.Server) (*http.Response, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	if err != nil {
+		cancel()
+		t.Fatalf("building the request: %v", err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatalf("a zero-value hub did not answer a real request: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		res.Body.Close()
+		cancel()
+		t.Fatalf("a zero-value hub answered %s, want 200", res.Status)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != "text/event-stream" {
+		res.Body.Close()
+		cancel()
+		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+	}
+	opening := make([]byte, len(":ok\n\n"))
+	if _, err := io.ReadFull(res.Body, opening); err != nil {
+		res.Body.Close()
+		cancel()
+		t.Fatalf("reading the opening of the stream from a zero-value hub: %v", err)
+	}
+	return res, cancel
+}
+
+func TestZeroValueHubServesARealRequest(t *testing.T) {
+	var hub SSEHub
+	server := httptest.NewServer(&hub)
+	defer closeZeroHubServer(t, server)
+
+	res, cancel := openZeroHubStream(t, server)
+	defer res.Body.Close()
+	defer cancel()
+
+	waitZeroHubSubscribers(t, &hub, 1)
+}
+
+func TestZeroValueHubServesConcurrentRequests(t *testing.T) {
+	var hub SSEHub
+	server := httptest.NewServer(&hub)
+	defer closeZeroHubServer(t, server)
+
+	type opened struct {
+		body io.ReadCloser
+		err  error
+	}
+	// the requests run together on purpose: the lazy creation of the subscriber
+	// set happens under h.mu, and two arrivals must not each make their own
+	results := make(chan opened, 2)
+	for range 2 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+			if err != nil {
+				results <- opened{err: err}
+				return
+			}
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				results <- opened{err: err}
+				return
+			}
+			opening := make([]byte, len(":ok\n\n"))
+			if _, err := io.ReadFull(res.Body, opening); err != nil {
+				res.Body.Close()
+				results <- opened{err: err}
+				return
+			}
+			results <- opened{body: res.Body}
+			<-ctx.Done()
+		}()
+	}
+
+	for i := range 2 {
+		select {
+		case got := <-results:
+			if got.err != nil {
+				t.Fatalf("concurrent request %d against a zero-value hub failed: %v", i, got.err)
+			}
+			defer got.body.Close()
+		case <-time.After(20 * time.Second):
+			t.Fatalf("concurrent request %d never opened its stream", i)
+		}
+	}
+	waitZeroHubSubscribers(t, &hub, 2)
+}
+
+func TestZeroValueHubCloseAfterAServedRequest(t *testing.T) {
+	var hub SSEHub
+	server := httptest.NewServer(&hub)
+	defer closeZeroHubServer(t, server)
+
+	res, cancel := openZeroHubStream(t, server)
+	defer cancel()
+	waitZeroHubSubscribers(t, &hub, 1)
+
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		defer res.Body.Close()
+		io.Copy(io.Discard, res.Body)
+	}()
+
+	hubCall(t, "Close()", hub.Close)
+
+	if got := zeroHubSubscribers(t, &hub); got != 0 {
+		t.Fatalf("Subscribers() = %d right after Close on a zero-value hub, want 0", got)
+	}
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the open stream never ended after Close on a zero-value hub")
+	}
+}
+
+func TestZeroValueHubPublishAfterAServedRequest(t *testing.T) {
+	var hub SSEHub
+	server := httptest.NewServer(&hub)
+	defer closeZeroHubServer(t, server)
+
+	res, cancel := openZeroHubStream(t, server)
+	defer res.Body.Close()
+	defer cancel()
+	waitZeroHubSubscribers(t, &hub, 1)
+
+	hubCall(t, "Publish()", func() { hub.Publish("task-created", map[string]int{"id": 7}) })
+
+	// and the event really reaches the client the zero-value hub registered:
+	// the request's deadline bounds this read, so a lost frame is reported
+	frames := make(chan []string, 1)
+	go func() {
+		scanner := bufio.NewScanner(res.Body)
+		var lines []string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" || strings.HasPrefix(line, ":") {
+				continue
+			}
+			lines = append(lines, line)
+			if len(lines) == 2 {
+				break
+			}
+		}
+		frames <- lines
+	}()
+	select {
+	case lines := <-frames:
+		if len(lines) != 2 || lines[0] != "event: task-created" || lines[1] != `data: {"id":7}` {
+			t.Fatalf("a zero-value hub broadcast %q", lines)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the published event never reached the stream a zero-value hub was serving")
+	}
+}
+
+func TestZeroValueHubSubscribersAfterAServedRequest(t *testing.T) {
+	var hub SSEHub
+	server := httptest.NewServer(&hub)
+	defer closeZeroHubServer(t, server)
+
+	res, cancel := openZeroHubStream(t, server)
+	waitZeroHubSubscribers(t, &hub, 1)
+
+	// and it drops back once the client goes: the count a zero-value hub keeps
+	// is the same count NewSSEHub keeps
+	res.Body.Close()
+	cancel()
+	waitZeroHubSubscribers(t, &hub, 0)
+}
+
+func TestZeroValueHubServesARequestArrivingAfterClose(t *testing.T) {
+	var hub SSEHub
+	hubCall(t, "Close()", hub.Close)
+
+	server := httptest.NewServer(&hub)
+	defer closeZeroHubServer(t, server)
+
+	res, cancel := openZeroHubStream(t, server)
+	defer cancel()
+
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		defer res.Body.Close()
+		io.Copy(io.Discard, res.Body)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a request to a closed zero-value hub hung instead of ending at once")
+	}
+	if got := zeroHubSubscribers(t, &hub); got != 0 {
+		t.Fatalf("Subscribers() = %d on a closed zero-value hub", got)
+	}
+}
+
+// The panic mattered less than what it left behind. Wrapped in the recover
+// middleware every app has, the request turns into a 500 and the process looks
+// healthy - while the hub's mutex is held for good and the next call on it
+// never returns.
+func TestZeroValueHubLeavesNoHeldMutexBehindARecoveredPanic(t *testing.T) {
+	var hub SSEHub
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+
+	served := make(chan any, 1)
+	go func() {
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			hub.ServeHTTP(httptest.NewRecorder(), req)
+		}()
+		served <- recovered
+	}()
+
+	waitZeroHubSubscribers(t, &hub, 1)
+	cancel()
+
+	select {
+	case recovered := <-served:
+		if recovered != nil {
+			t.Fatalf("ServeHTTP panicked on a zero-value hub: %v", recovered)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeHTTP neither returned nor panicked out to the middleware; it is wedged on the hub's mutex")
+	}
+
+	// whatever happened in there, the hub is still usable
+	if got := zeroHubSubscribers(t, &hub); got != 0 {
+		t.Fatalf("Subscribers() = %d after the request ended, want 0", got)
+	}
+	hubCall(t, "Publish()", func() { hub.Publish("after", 1) })
+	hubCall(t, "Close()", hub.Close)
+}
+
 func BenchmarkHubPublish(b *testing.B) {
 	hub := NewSSEHub()
 	for range 100 {

@@ -216,6 +216,16 @@ func (h *SSEHub) closedChan() chan struct{} {
 	return h.closed
 }
 
+// subsSet returns the subscriber set, creating it on first use so a hub that
+// was not built by NewSSEHub registers its streams instead of panicking on a
+// nil map. Callers must hold h.mu.
+func (h *SSEHub) subsSet() map[chan []byte]struct{} {
+	if h.subs == nil {
+		h.subs = map[chan []byte]struct{}{}
+	}
+	return h.subs
+}
+
 // Publish sends the event to every connected client. Clients too slow to
 // keep up skip messages instead of blocking the publisher. A payload that
 // will not encode is logged and dropped: one bad Publish must not disconnect
@@ -287,23 +297,27 @@ func (h *SSEHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ch := make(chan []byte, 8)
-	h.mu.Lock()
-	// read the latch under the same lock that registers the subscription: a
-	// Close racing this call either sees the subscription and clears it, or
-	// trips the latch first and this stream ends on its first select. In that
-	// second case the subscription is not taken at all, so Subscribers really
-	// does read 0 for the whole life of a closed hub, as it documents - a
-	// request arriving after Close used to register itself for the microsecond
-	// before the select unwound it, and a presence counter could sample it
-	closed := h.closedChan()
-	if !h.shut {
-		h.subs[ch] = struct{}{}
-	}
-	h.mu.Unlock()
+	// a function so the unlock is deferred: the section must fail toward
+	// releasing the lock, never toward holding it
+	closed := func() chan struct{} {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		// read the latch under the same lock that registers the subscription: a
+		// Close racing this call either sees the subscription and clears it, or
+		// trips the latch first and this stream ends on its first select. In that
+		// second case the subscription is not taken at all, so Subscribers really
+		// does read 0 for the whole life of a closed hub, as it documents - a
+		// request arriving after Close used to register itself for the microsecond
+		// before the select unwound it, and a presence counter could sample it
+		if !h.shut {
+			h.subsSet()[ch] = struct{}{}
+		}
+		return h.closedChan()
+	}()
 	defer func() {
 		h.mu.Lock()
+		defer h.mu.Unlock()
 		delete(h.subs, ch)
-		h.mu.Unlock()
 	}()
 
 	ping := time.NewTicker(25 * time.Second)
