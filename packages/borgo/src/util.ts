@@ -383,12 +383,43 @@ export function apiCsrfRejects(req: Request, { enforced }: CsrfOptions): boolean
   return !given || !keysEqual(given, expected);
 }
 
-// env knobs are limits: a typo must fall back to the default, never become
-// NaN and silently disable the limit it was meant to tune
-export function envInt(value: string | undefined, fallback: number): number {
-  if (value === undefined || value === "") return fallback;
-  const n = Number(value);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+/**
+ * A whole non-negative number as the operator wrote it, or undefined when the
+ * variable was never set. Same form as envBool below, deliberately: one
+ * grammar, one refusal, one meaning for "unset".
+ *
+ * IT USED TO FLOOR, AND EVERY VARIABLE IT PARSES READS 0 AS "NO LIMIT AT ALL".
+ * `BORGO_API_TIMEOUT=0.5` is an operator reaching for the tightest deadline they
+ * can spell; floored to 0 it did not shorten the deadline, it REMOVED it - no
+ * AbortController is created at 0 - and `BORGO_MAX_BODY=0.5` is the body limit
+ * taken off the same way. The one repair borgo performed silently was the one
+ * that could only ever move a limit towards off, in the direction nobody checks.
+ *
+ * So a fraction is refused by name rather than truncated. "0" remains the
+ * documented way to disable a limit, and it is the ONLY way: unset (and "",
+ * which is unset everywhere in this file) returns undefined, so the caller's
+ * default is a value this function never invents.
+ */
+export function envInt(name: string, v: string | undefined, unsetMeans: string): number | undefined {
+  if (envText(name, v) === undefined) return undefined;
+  // `Number(" ")` is 0, and 0 is this limit switched off. A value made of
+  // nothing but spaces is not a number an operator wrote, it is a variable that
+  // came out blank - and it must not be the way a limit gets removed
+  const n = v!.trim() === "" ? Number.NaN : Number(v);
+  // -0 is zero and leaves here spelled as zero: it passes `>= 0` and
+  // `Number.isInteger`, and Bun.serve then answers "expects idleTimeout to be
+  // an integer" and the boot dies. Only Object.is can tell the zeroes apart,
+  // so the normalisation happens once, here, rather than at each use.
+  if (Number.isInteger(n) && n >= 0) return n === 0 ? 0 : n;
+  const truncated = Number.isFinite(n) && n > 0 && !Number.isInteger(n);
+  throw new Error(
+    `borgo: ${name}: invalid value ${JSON.stringify(v)} (want a whole number, 0 or more` +
+      (truncated
+        ? `; rounding it down would reach ${Math.floor(n)}` +
+          (Math.floor(n) === 0 ? `, which is this limit switched off - the opposite of what was asked for` : "")
+        : "") +
+      `; unset means ${unsetMeans})`,
+  );
 }
 
 /**
@@ -584,37 +615,45 @@ export const WHEEL_MIN_ARMED_SECONDS = 5;
  * Neither older name is honoured as an alias, here or anywhere: an alias kept
  * for compatibility is an alias that keeps the collision alive.
  */
-export function readTimeout(env: Record<string, string | undefined>): number {
-  const raw = env.BORGO_FRONT_READ_TIMEOUT;
+// A TIGHTENING MUST NEVER BECOME A DISABLING. The deadline is whole seconds, so
+// `=0.5` had to become something; flooring made it 0, which is the documented
+// "no deadline at all" - the operator who reached for the strictest setting
+// turned the control off (measured at 0.5: a dribbled body still connected at
+// 45s, against 8.0s at 8). Every fraction is therefore rounded down but never
+// below one second, which is the smallest thing this side can say.
+//
+// Nothing else is moved. An earlier revision raised everything under five here,
+// on the theory that bun cannot re-arm below that - which was measured on the
+// wrong variable. The dead zone belongs to the NUMBER BEING ARMED, not to the
+// connection's configured timeout (property 2), and the keep-warm arms its own
+// number. So 1 through 4 are honoured exactly as written.
+const wholeSeconds = (raw: string | undefined): number | null => {
   const n = Number(raw);
-  // A TIGHTENING MUST NEVER BECOME A DISABLING. envInt floors, so `=0.5` asked
-  // for half a second, floored to 0, and 0 is the documented "no deadline at
-  // all" - the operator who reached for the strictest setting turned the control
-  // off (measured at 0.5: a dribbled body still connected at 45s, against 8.0s
-  // at 8). A second below one second is the smallest thing this side can say.
-  //
-  // Nothing else is moved. An earlier revision raised everything under five
-  // here, on the theory that bun cannot re-arm below that - which was measured
-  // on the wrong variable. The dead zone belongs to the NUMBER BEING ARMED, not
-  // to the connection's configured timeout (property 2), and the keep-warm arms
-  // its own number. So 1 through 4 are honoured exactly as written, and the
-  // operator who asks for a 3s slowloris bound gets one.
-  if (raw !== undefined && raw !== "" && Number.isFinite(n) && n > 0 && n < 1) return 1;
-  // the name is spelled out again rather than passed as `raw`: envNamesDoNotCollide
-  // in util.test.ts reads this file for `envInt(env.NAME` to prove no variable is
-  // parsed as a go duration on one side and a plain number on this one, and a
-  // name hidden behind a local is a name that guard cannot see
-  const seconds = Math.min(envInt(env.BORGO_FRONT_READ_TIMEOUT, READ_TIMEOUT_SECONDS), READ_TIMEOUT_MAX);
-  // NEGATIVE ZERO REACHES Bun.serve AND KILLS THE BOOT. `-0` passes every guard
-  // above and below: `-0 > 0` is false so the raise declines, `-0 >= 0` is true
-  // so envInt keeps it, `Math.floor(-0)` is `-0`, `Math.min(-0, 255)` is `-0`,
-  // and `-0 === 0` and `Number.isInteger(-0)` are both true - so no unit
-  // assertion written with `===` can see it. Bun.serve can: it answers
-  // `TypeError: Bun.serve expects idleTimeout to be an integer` and the server
-  // never starts. Five spellings reach it (`-0`, `-0.0`, `-.0`, `-0e5`, ` -0 `).
-  // Object.is is the only operator that tells the two zeroes apart, here and in
-  // the test that guards it.
-  return Object.is(seconds, -0) ? 0 : seconds;
+  if (raw === undefined || raw === "" || !Number.isFinite(n) || n <= 0 || Number.isInteger(n)) return null;
+  return Math.min(Math.max(1, Math.floor(n)), READ_TIMEOUT_MAX);
+};
+
+export function readTimeout(env: Record<string, string | undefined>): number {
+  const rounded = wholeSeconds(env.BORGO_FRONT_READ_TIMEOUT);
+  if (rounded !== null) return rounded;
+  // THE ONE VARIABLE THAT FALLS BACK INSTEAD OF REFUSING, AND WHY IT MAY.
+  // envInt throws, because the limits it parses read 0 as "off" and their
+  // fallback direction is the weak one. This value's is not: every reading
+  // borgo cannot parse lands on READ_TIMEOUT_SECONDS, which is a deadline that
+  // APPLIES, and the fraction that could have reached 0 was already caught
+  // above. It is also read below serve-entry's `try`, so a throw here would be
+  // answered from the fallback server's bound port - the very shape
+  // resolveSwitches exists to close. One grammar, two dispositions, both said
+  // out loud. The name is spelled out rather than passed as a local because
+  // envNamesDoNotCollide in util.test.ts reads this file for `envInt("NAME"`,
+  // and a name hidden behind a variable is a name that guard cannot see.
+  let asked: number | undefined;
+  try {
+    asked = envInt("BORGO_FRONT_READ_TIMEOUT", env.BORGO_FRONT_READ_TIMEOUT, `${READ_TIMEOUT_SECONDS}s`);
+  } catch {
+    return READ_TIMEOUT_SECONDS;
+  }
+  return Math.min(asked ?? READ_TIMEOUT_SECONDS, READ_TIMEOUT_MAX);
 }
 
 // A value borgo moved is a value the operator has to hear about, or the next
@@ -623,12 +662,12 @@ export function readTimeout(env: Record<string, string | undefined>): number {
 // warning that fires per call is a warning nobody reads.
 export function readTimeoutNotice(env: Record<string, string | undefined>): string | null {
   const raw = env.BORGO_FRONT_READ_TIMEOUT;
-  const n = Number(raw);
-  if (raw === undefined || raw === "" || !Number.isFinite(n) || n <= 0 || n >= 1) return null;
+  const rounded = wholeSeconds(raw);
+  if (rounded === null) return null;
   return (
-    `BORGO_FRONT_READ_TIMEOUT=${raw} raised to 1s ` +
-    `(the read deadline is whole seconds, and rounding it down would have reached 0, ` +
-    `which is the documented "no deadline at all" - the opposite of what was asked for)`
+    `BORGO_FRONT_READ_TIMEOUT=${raw} read as ${rounded}s ` +
+    `(the read deadline is whole seconds; rounding down to 0 would have been ` +
+    `the documented "no deadline at all" - the opposite of what was asked for)`
   );
 }
 
@@ -959,6 +998,12 @@ export function sessionSecure(env: Record<string, string | undefined>): boolean 
 export const csrfEnabled = (dev: boolean, env: Record<string, string | undefined>): boolean =>
   envBool("BORGO_CSRF", env.BORGO_CSRF, dev ? "off in dev" : "on") ?? !dev;
 
+// how long borgo waits for the go api's response headers, and how big a request
+// body it will take, both 0 for "no limit". They are defaults, not policy: the
+// arguments for the numbers are on their reads in server.ts.
+export const API_TIMEOUT_MS = 30_000;
+export const MAX_BODY_BYTES = 32 * 1024 * 1024;
+
 export type Switches = {
   dev: boolean;
   security: Security | null;
@@ -966,6 +1011,17 @@ export type Switches = {
   csrfCookieAttrs: string;
   metrics: boolean;
   reloading: boolean;
+  // ms and bytes. Resolved here rather than where they are used, because envInt
+  // now refuses what it cannot read and a refusal read inside serve() would be
+  // caught by serve-entry's try and answered from the fallback server's bound
+  // port - the whole reason this function exists.
+  apiTimeout: number;
+  maxBody: number;
+  // whether a /ws handshake carrying no Origin at all may upgrade. Off: a
+  // browser always sends one, so "absent" is a non-browser client, and the
+  // check exists to keep a cross-origin *browser* out. See the /ws handler for
+  // when to turn it on.
+  wsAllowNoOrigin: boolean;
 };
 
 /**
@@ -1004,6 +1060,9 @@ export function resolveSwitches(
     csrfCookieAttrs: `Path=/; SameSite=Lax${sessionSecure(env) ? "; Secure" : ""}`,
     metrics: metricsEnabled(env),
     reloading: reloadBanner(env),
+    apiTimeout: envInt("BORGO_API_TIMEOUT", env.BORGO_API_TIMEOUT, `${API_TIMEOUT_MS}ms`) ?? API_TIMEOUT_MS,
+    maxBody: envInt("BORGO_MAX_BODY", env.BORGO_MAX_BODY, `${MAX_BODY_BYTES} bytes`) ?? MAX_BODY_BYTES,
+    wsAllowNoOrigin: envBool("BORGO_WS_ALLOW_NO_ORIGIN", env.BORGO_WS_ALLOW_NO_ORIGIN, "refused") ?? false,
   };
 }
 
@@ -1033,17 +1092,150 @@ export function resolveSwitches(
  */
 export type PushVerdict = "ok" | "bad-key" | "half-configured" | "not-local";
 
+/**
+ * Did any hop stamp this request on its way here.
+ *
+ * PRESENCE, NEVER CONTENT. The loopback rule was disarmed by a header the
+ * caller writes: `X-Forwarded-For:` with an empty value read as falsy, so
+ * `!forwarded` said "nothing forwarded this" about a request that arrived
+ * carrying a forwarding header, and `?? ` made it worse - an empty
+ * X-Forwarded-For is not null, so it satisfied the coalesce and MASKED a real
+ * `Forwarded:` behind it. Two spellings of "" (empty, spaces) and one ordering
+ * took a 403 to a 204 (measured: all three ACCEPTED a push).
+ *
+ * The question was never what the chain says. borgo cannot verify a chain
+ * anyway; what it can see is that a proxy touched this request at all, and that
+ * is a property of the header EXISTING. So this reads `has`, and it reads every
+ * header a proxy stamps rather than the two that happened to be checked -
+ * borgo's own generated nginx sets X-Forwarded-Proto, and a value the guard
+ * does not look at is a hop it cannot see.
+ */
+export const FORWARDING_HEADERS = [
+  "x-forwarded-for",
+  "forwarded",
+  "x-forwarded-proto",
+  "x-forwarded-host",
+  "x-forwarded-port",
+  "x-real-ip",
+] as const;
+
+export const isForwarded = (headers: Headers): boolean =>
+  FORWARDING_HEADERS.some((name) => headers.has(name));
+
 export function pushAuthorized(req: {
   key: string | undefined;
   presented: string | null;
   address: string | undefined;
-  forwarded: string | null;
+  // isForwarded above, never a header value: a boolean cannot be emptied by
+  // whoever is calling
+  forwarded: boolean;
 }): PushVerdict {
   if (req.key) return keysEqual(req.presented ?? "", req.key) ? "ok" : "bad-key";
   if (req.presented !== null) return "half-configured";
   const local =
     req.address === "127.0.0.1" || req.address === "::1" || req.address === "::ffff:127.0.0.1";
   return local && !req.forwarded ? "ok" : "not-local";
+}
+
+/**
+ * A COMMA IN A TOPIC IS NOT A CHARACTER, IT IS THE SEPARATOR.
+ *
+ * The relay packs a socket's topics into one query parameter - /ws?topics=a,b -
+ * so `subscribe("a,b")` percent-encodes the comma, borgo decoded it, split on
+ * it, and subscribed the browser to "a" AND "b" while its onmessage went on
+ * filtering every frame for the topic "a,b". Measured: the handshake returns
+ * 101, the `__count` frames arrive (for "a" and for "b"), the counters move, and
+ * a `borgo.Push("a,b", ...)` publishes into a topic with no subscribers. The
+ * channel looks alive from every angle a person debugging would check, and not
+ * one message is ever delivered.
+ *
+ * Escaping it would put a second protocol inside the first - every producer of a
+ * topic name (this file, the go side, the browser) would have to agree on the
+ * escape, and the one that did not would fail exactly this silently again. So it
+ * is refused, by name, at the door, in both directions: a subscription that
+ * names one and a push that names one.
+ */
+export const TOPIC_SEPARATOR = ",";
+
+export const topicRejection = (topic: string): string | null =>
+  topic.includes(TOPIC_SEPARATOR)
+    ? `topic ${JSON.stringify(topic)} contains ${JSON.stringify(TOPIC_SEPARATOR)}, which separates topics ` +
+      `on the wire (/ws?topics=a,b) and cannot appear inside one - rename the topic`
+    : null;
+
+/**
+ * Responses borgo did not write.
+ *
+ * /api is exempt from the security headers because go states its own and borgo
+ * does not second-guess them. That exemption was written on the PATH, so it
+ * covered borgo's own answers on that path too: the 403 for a bad csrf token,
+ * the 504 when the api does not answer in time, the 502 when it cannot be
+ * reached at all. Measured on the socket - 502 and 403 shipped with no nosniff,
+ * no Referrer-Policy, no X-Frame-Options and no CSP, while a 404 from the same
+ * server one path over carried all four.
+ *
+ * The rule is about AUTHORSHIP, so it is recorded on the response object the
+ * author produced, not on the url it happened to be produced for. A WeakSet
+ * cannot drift from the path the way a string test can, and a response borgo
+ * builds is unmarked by construction - the safe direction, since an unmarked
+ * response gets the headers.
+ */
+const upstreamResponses = new WeakSet<Response>();
+
+export const markUpstream = <T extends Response>(res: T): T => (upstreamResponses.add(res), res);
+
+export const isUpstream = (res: Response): boolean => upstreamResponses.has(res);
+
+/**
+ * May this /ws handshake upgrade.
+ *
+ * A browser attaches cookies to a websocket handshake whatever page opened it,
+ * and there is no preflight and no CORS on the way in, so `Origin` is the only
+ * thing separating "this app's page" from "any page on the internet". It was
+ * compared on the HOST ALONE, and an absent one was waved through:
+ *
+ *   - host alone means `http://app.test` may join the socket of
+ *     `https://app.test`. That is not a hypothetical: it is what a network
+ *     attacker who can answer plain http for the name arranges, and the whole
+ *     point of serving the app over tls is that such a page is not the app.
+ *     Measured: `Origin: https://localhost:3111` upgraded on an http server,
+ *     101, cookies attached.
+ *   - absent means anything that is not a browser, which is the entire
+ *     population this check exists to tell browsers apart from. `curl` with no
+ *     Origin got 101 while `curl -H 'Origin: http://evil.test'` got 403 - the
+ *     header the caller controls decided whether the guard applied.
+ *
+ * So: scheme and host, and no Origin is a refusal. The scheme compared is the
+ * one the request arrived on, or what a terminating proxy says it arrived on -
+ * borgo behind nginx sees http and the browser sent https, and its own generated
+ * config sets X-Forwarded-Proto for exactly this. That header is trusted here
+ * and nowhere near a security decision it could weaken: a browser cannot set it,
+ * and anything that can set it can set Origin to whatever it likes anyway.
+ *
+ * BORGO_WS_ALLOW_NO_ORIGIN=1 admits the originless client on purpose - a native
+ * app, a CLI, a service-to-service socket. It is a real need and it is a real
+ * hole: it re-admits every non-browser caller, so it is a switch the operator
+ * turns on knowing that, not a default they never saw.
+ */
+export function wsOriginAllowed(req: {
+  origin: string | null;
+  host: string;
+  proto: string;
+  forwardedProto: string | null;
+  allowNoOrigin: boolean;
+}): boolean {
+  if (req.origin === null) return req.allowNoOrigin;
+  // a proxy chain joins its values; the first is the client's hop
+  const scheme = (req.forwardedProto?.split(",")[0] ?? "").trim().toLowerCase() || req.proto;
+  let origin: URL;
+  try {
+    // "null" is what a sandboxed iframe and a cross-origin redirect send. It
+    // parses as no url at all, which is the answer: it is not this origin
+    origin = new URL(req.origin);
+  } catch {
+    return false;
+  }
+  return origin.host === req.host && origin.protocol === `${scheme}:`;
 }
 
 export const goBinName = () => "api" + (process.platform === "win32" ? ".exe" : "");
@@ -1198,6 +1390,9 @@ export const DEV_INLINE_CLIENT =
 export type ShellParts = {
   // everything before <!--app-->, untouched
   start: string;
+  // the shell's default title as TEXT, not as the markup it was written in.
+  // The browser runtime assigns it to document.title, which takes text.
+  title: string;
   // start split at </head>, with and without its <title>
   head: [string, string];
   headNoTitle: [string, string];
@@ -1216,6 +1411,46 @@ export type ShellParts = {
 export type AssetNames = Record<string, string>;
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// the five references a <title> can legally carry, plus the numeric forms.
+// `escapeHtml` above emits exactly the first four; the fifth is what an author
+// types, and browsers accept both spellings of the numeric one
+const NAMED_REFS: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+};
+
+/**
+ * The text an element's markup stands for.
+ *
+ * `<title>` holds HTML, and `window.__BORGO_TITLE__` is read by the client
+ * router into `document.title`, which holds TEXT. Shipping the markup verbatim
+ * meant one title had two spellings: the server-rendered tab said `Tom & Jerry`
+ * and the first client-side navigation back to the shell default replaced it
+ * with the literal `Tom &amp; Jerry` (measured on the wire:
+ * `window.__BORGO_TITLE__="Tom &amp; Jerry"`). Nothing looks broken until you
+ * navigate, which is why it survived.
+ *
+ * A reference borgo does not know is left exactly as written: this decodes a
+ * value, it does not repair one, and a half-decoded `&` would be a new way to
+ * disagree with the browser about the same bytes.
+ */
+export const decodeHtmlText = (s: string): string =>
+  s.replace(/&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);/g, (whole, ref: string) => {
+    const named = NAMED_REFS[ref.toLowerCase()];
+    if (named !== undefined) return named;
+    if (ref[0] !== "#") return whole;
+    const code = ref[1] === "x" || ref[1] === "X" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+    // surrogates and out-of-range values are not characters; String.fromCodePoint
+    // would throw on the second and produce a lone surrogate for the first
+    if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+      return whole;
+    }
+    return String.fromCodePoint(code);
+  });
 
 // A production build names its entry bundle and stylesheet after their bytes,
 // so the url can be pinned for a year; the app's index.html goes on naming
@@ -1239,7 +1474,9 @@ export function resolveAssetUrls(shell: string, names: AssetNames): string {
 export function prepareShell(source: string, dev: boolean, names: AssetNames = {}): ShellParts {
   const shell = resolveAssetUrls(source, names);
   const [start, end = ""] = shell.split("<!--app-->");
-  const title = shell.match(/<title>(.*?)<\/title>/s)?.[1] ?? "";
+  // decoded here, once, so what leaves this function is the title as DATA and
+  // nothing downstream has to know it was ever markup
+  const title = decodeHtmlText(shell.match(/<title>(.*?)<\/title>/s)?.[1] ?? "");
   const splitAtHead = (html: string): [string, string] => {
     const at = html.indexOf("</head>");
     return at === -1 ? [html, ""] : [html.slice(0, at), html.slice(at)];
@@ -1267,6 +1504,7 @@ export function prepareShell(source: string, dev: boolean, names: AssetNames = {
       );
   return {
     start,
+    title,
     head: splitAtHead(start),
     headNoTitle: splitAtHead(start.replace(/<title>.*?<\/title>/s, "")),
     endProps: splitAtProps(end),
@@ -1852,7 +2090,11 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
       // comment was tried and reverted: reading the native body through a
       // JS ReadableStream and cancelling it when the client hangs up
       // segfaults bun 1.3.14, which takes the whole front server with it.
-      return upstream;
+      //
+      // marked as go's: this is the ONE response on /api the security headers
+      // must not be applied to, and every other answer this function returns -
+      // the 504s and the 502s below - is borgo's own and carries them
+      return markUpstream(upstream);
     } catch (err) {
       if (timedOut) return new Response("api timeout", { status: 504 });
       if (retriable && attempt < retries && isConnRefused(err)) {

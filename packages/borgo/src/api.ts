@@ -81,12 +81,30 @@ async function errorBody(res: Response, max = 2048): Promise<string> {
   return new TextDecoder().decode(joined).slice(0, max);
 }
 
+// THE SAME NUMBER AS THE PROXY, BECAUSE IT IS THE SAME GO PROCESS.
+//
+// This client and the /api proxy both dial the api the front server was started
+// beside, and both retry a refused connection because a refused connection never
+// reached it. The proxy takes 3 in production and says why on its read in
+// server.ts: in production a refused connection means the api is down, and
+// holding every request open while it is retried only piles connections up. This
+// side took 15 - 16 attempts, at 250ms apart, so a call that should have failed
+// at once hung for about four seconds, per loader, on every request. In a
+// container that is longer than a readiness probe's own deadline, so the front
+// server fails the probe for a reason the probe cannot see.
+//
+// The value is the caller's, and the caller is the one that knows whether the
+// api is mid-restart (dev) or down (production). The default is the production
+// number: whoever wants to wait has to say so.
+export const API_RETRIES = 3;
+
 // onSetCookie receives every Set-Cookie header an api response carries, so
 // the front server can forward go's cookies (login, logout) to the browser
 export function makeApiClient(
   base: string,
   defaults: Record<string, string> = {},
   onSetCookie?: (cookies: string[]) => void,
+  retries: number = API_RETRIES,
 ): ApiClient {
   return (async (route: string, opts: ApiOptions<string> = {}) => {
     const space = route.indexOf(" ");
@@ -117,7 +135,8 @@ export function makeApiClient(
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     };
     // loaders and actions run while the go api may be mid-restart in dev; a
-    // refused connection never reached it, so a short retry is always safe
+    // refused connection never reached it, so a short retry is always safe.
+    // how many is API_RETRIES' argument, above
     // an explicit controller instead of AbortSignal.timeout: the timer is
     // cleared once the body is consumed, so a fast call leaves nothing behind
     const abort = opts.timeout ? new AbortController() : null;
@@ -137,7 +156,7 @@ export function makeApiClient(
           break;
         } catch (err) {
           if (timedOut(err)) throw new Error(`api ${route}: no response within ${opts.timeout}ms`);
-          if (attempt >= 15 || !isConnRefused(err)) throw err;
+          if (attempt >= retries || !isConnRefused(err)) throw err;
           await new Promise((r) => setTimeout(r, 250));
         }
       }

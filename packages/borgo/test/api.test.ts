@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ApiError, makeApiClient } from "../src/api";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { API_RETRIES, ApiError, makeApiClient } from "../src/api";
 
 type Call = { url: string; init: RequestInit };
 
@@ -152,5 +154,68 @@ describe("makeApiClient", () => {
     stubFetch(() => Response.json({ ok: true }));
     const api = makeApiClient("http://api:1");
     expect(await api("GET /api/tasks", { timeout: 5_000 })).toEqual({ ok: true });
+  });
+});
+
+// ONE NUMBER FOR BOTH HOPS TO THE SAME PROCESS.
+//
+// This client and the /api proxy dial the go api the front server was started
+// beside. The proxy takes 3 in production and its comment says why - a refused
+// connection there means the api is DOWN, and holding requests open while they
+// are retried only piles connections up. This side hard-coded 15, so 16
+// attempts at 250ms apart: a call that should have failed at once hung about
+// four seconds, per loader, on every request - longer than a container
+// readiness probe's own deadline, and invisible in it.
+describe("connection-refused retries", () => {
+  const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+
+  // the real sleep would make this test four seconds long, which is the point
+  const noWait = <T>(run: () => Promise<T>) => {
+    const realSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((fn: () => void) => realSetTimeout(fn, 0)) as typeof setTimeout;
+    return run().finally(() => {
+      globalThis.setTimeout = realSetTimeout;
+    });
+  };
+
+  const attemptsUntilItGivesUp = (retries?: number) =>
+    noWait(async () => {
+      let attempts = 0;
+      globalThis.fetch = (async () => {
+        attempts++;
+        throw refused();
+      }) as unknown as typeof fetch;
+      const api = makeApiClient("http://api:1", {}, undefined, retries);
+      await api("GET /api/tasks").catch(() => {});
+      return attempts;
+    });
+
+  test("the default is the production number the proxy already uses", async () => {
+    expect(API_RETRIES).toBe(3);
+    expect(await attemptsUntilItGivesUp()).toBe(API_RETRIES + 1);
+  });
+
+  test("the caller decides, because only the caller knows dev from production", async () => {
+    expect(await attemptsUntilItGivesUp(0)).toBe(1);
+    expect(await attemptsUntilItGivesUp(15)).toBe(16);
+  });
+
+  test("nothing but a refused connection is retried", async () => {
+    let attempts = 0;
+    globalThis.fetch = (async () => {
+      attempts++;
+      throw new Error("some other failure");
+    }) as unknown as typeof fetch;
+    const api = makeApiClient("http://api:1");
+    await expect(api("GET /api/tasks")).rejects.toThrow("some other failure");
+    expect(attempts).toBe(1);
+  });
+
+  test("the front server hands both hops the same number", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    expect(src).toContain("const apiRetries = dev ? 15 : API_RETRIES;");
+    // the same value reaches the typed client and the proxy
+    expect(src).toContain("makeApiClient(api, cookie ? { cookie } : {}, onSetCookie, apiRetries)");
+    expect(src).toContain("retries: apiRetries,");
   });
 });

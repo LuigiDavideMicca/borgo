@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { makeApiClient } from "./api";
+import { API_RETRIES, makeApiClient } from "./api";
 import {
   buildAssets,
   buildReasons,
@@ -29,8 +29,9 @@ import {
   createKeepWarm,
   csrfRejects,
   decodeChanged,
-  envInt,
   headResponse,
+  isForwarded,
+  isUpstream,
   keepWarmSeconds,
   prepareShell,
   proxyRequest,
@@ -42,6 +43,8 @@ import {
   resolveSwitches,
   runAction,
   runPropsRequest,
+  topicRejection,
+  wsOriginAllowed,
   type ActionOptions,
   type PropsOptions,
   type RenderPageOptions,
@@ -128,19 +131,22 @@ export async function serve({
   // outbound limits towards go. dev restarts the api on every .go edit, so a
   // refused connection is routine there and worth waiting out; in production
   // it means the api is down, and holding every request for four seconds only
-  // piles connections up. BORGO_API_TIMEOUT is in ms, 0 disables it.
-  const apiRetries = dev ? 15 : 3;
-  const apiTimeout = envInt(process.env.BORGO_API_TIMEOUT, 30_000);
+  // piles connections up. ONE NUMBER for both hops - the proxy and the typed
+  // client dial the same process, and makeApiClient's own 15 meant a loader
+  // spent four seconds on a call the proxy beside it had already given up on.
+  // BORGO_API_TIMEOUT is in ms, 0 disables it.
+  const apiRetries = dev ? 15 : API_RETRIES;
+  const apiTimeout = switches.apiTimeout;
   // a body nobody bounded is free memory for anyone who can post: both the
   // proxy and form actions buffer. BORGO_MAX_BODY (bytes) raises it.
-  const maxRequestBodySize = envInt(process.env.BORGO_MAX_BODY, 32 * 1024 * 1024);
+  const maxRequestBodySize = switches.maxBody;
 
   // the api client forwards the browser's cookies, so go handlers see the
   // session during ssr and in actions; set-cookie headers coming back from
   // go (login, logout) are collected and forwarded to the browser
   const apiFor = (req: Request, onSetCookie?: (cookies: string[]) => void) => {
     const cookie = req.headers.get("cookie");
-    return makeApiClient(api, cookie ? { cookie } : {}, onSetCookie);
+    return makeApiClient(api, cookie ? { cookie } : {}, onSetCookie, apiRetries);
   };
 
   const runLoader = (
@@ -234,7 +240,13 @@ export async function serve({
       // before the body is read and before anything is proxied: a refused
       // request must cost go nothing and must not have been half-delivered
       if (apiCsrfRejects(req, { enforced: csrfEnforced })) {
-        return new Response("invalid csrf token", { status: 403 });
+        // borgo's own answer, not go's: it is left unmarked, so the security
+        // headers land on it below, and it states its type rather than leaving
+        // the framing to whatever default happens to be in effect
+        return new Response("invalid csrf token", {
+          status: 403,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        });
       }
       return proxyRequest(req, {
         target: api + url.pathname + url.search,
@@ -346,6 +358,11 @@ export async function serve({
     const data = JSON.stringify(msg);
     for (const ws of devSockets) ws.send(data);
   };
+
+  // a refusal is only useful if it says which value was refused, and it states
+  // its own type so nothing downstream has to guess at the framing
+  const badRequest = (why: string) =>
+    new Response(why, { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 
   type SocketData = { kind: "dev" } | { kind: "app"; topics: string[] };
   const MAX_WS_TOPICS = 32;
@@ -506,18 +523,40 @@ export async function serve({
       // browsers attach cookies to ws handshakes from any origin, so a
       // cross-origin page must not be able to join (or publish into) topics
       if (url.pathname === "/ws") {
-        const origin = req.headers.get("origin");
-        if (origin) {
-          let allowed = false;
+        // scheme AND host, and no Origin at all is a refusal: wsOriginAllowed in
+        // util.ts has the measurements for both halves
+        const allowed = wsOriginAllowed({
+          origin: req.headers.get("origin"),
+          host: url.host,
+          proto: url.protocol.replace(":", ""),
+          forwardedProto: req.headers.get("x-forwarded-proto"),
+          allowNoOrigin: switches.wsAllowNoOrigin,
+        });
+        if (!allowed) return secure(new Response("forbidden", { status: 403 }));
+        // split on the ENCODED comma. searchParams decodes %2C first, and the
+        // split then turned one topic named "a,b" into the two topics "a" and
+        // "b" - a socket that upgrades, reports counts, and delivers nothing.
+        // topicRejection in util.ts carries the measurement
+        const raw = url.search.slice(1).split("&").find((p) => p.startsWith("topics="))?.slice(7) ?? "";
+        const topics: string[] = [];
+        for (const part of raw.split(",")) {
+          let topic: string;
           try {
-            allowed = new URL(origin).host === url.host;
-          } catch {}
-          if (!allowed) return secure(new Response("forbidden", { status: 403 }));
+            topic = decodeURIComponent(part.replaceAll("+", " ")).trim();
+          } catch {
+            return secure(badRequest("topics is not a decodable query value"));
+          }
+          if (!topic) continue;
+          const rejected = topicRejection(topic);
+          if (rejected) {
+            // and said out loud: the handshake failure a browser reports is
+            // "connection closed", which names nothing. The operator needs the
+            // topic, once, here
+            console.error(`  ${c.red(g.err)} /ws refused: ${rejected}`);
+            return secure(badRequest(rejected));
+          }
+          topics.push(topic);
         }
-        const topics = (url.searchParams.get("topics") ?? "")
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean);
         // each topic is a subscription table entry held for the life of the
         // socket: unbounded counts or names are cheap resident memory for
         // anyone who can open a socket
@@ -537,13 +576,24 @@ export async function serve({
           key: process.env.BORGO_PUSH_KEY,
           presented: req.headers.get("x-borgo-key"),
           address: server.requestIP(req)?.address,
-          forwarded: req.headers.get("x-forwarded-for") ?? req.headers.get("forwarded"),
+          // PRESENCE, not the value: `x-forwarded-for ?? forwarded` read an
+          // empty X-Forwarded-For as "nothing forwarded this" AND swallowed a
+          // real Forwarded behind it. isForwarded in util.ts has the three
+          // measured spellings that turned a 403 into a 204
+          forwarded: isForwarded(req.headers),
         });
         if (verdict === "half-configured") warnHalfConfiguredPushKey();
         if (verdict !== "ok") return secure(new Response("forbidden", { status: 403 }));
         const msg = await req.json().catch(() => null);
         if (!msg || typeof msg.topic !== "string" || typeof msg.event !== "string") {
           return secure(new Response("bad request", { status: 400 }));
+        }
+        // a topic no subscriber can ever name is not a push, it is a message
+        // dropped with a 204 on it. refused where the pusher can still read why
+        const rejected = topicRejection(msg.topic);
+        if (rejected) {
+          console.error(`  ${c.red(g.err)} /__borgo/publish refused: ${rejected}`);
+          return secure(badRequest(rejected));
         }
         server.publish(
           wsTopic(msg.topic),
@@ -614,12 +664,21 @@ export async function serve({
           }
         }
       }
+      // AUTHORSHIP, NOT PATH. Asked before dropBody, which builds a new
+      // response object for a HEAD and would otherwise lose the answer. The
+      // /api exemption is "go stated its own headers"; written as a path test it
+      // also exempted every answer BORGO produced on that path - the 403 above,
+      // the 504 when go does not answer, the 502 when it cannot be reached -
+      // and those went out bare (measured). isUpstream in util.ts carries the
+      // account; the direction is that a response borgo wrote always carries
+      // borgo's headers, wherever it was written.
+      const fromApi = isUpstream(response);
       response = dropBody(response);
       if (metrics && !url.pathname.startsWith("/assets/") && url.pathname !== "/favicon.ico") {
         metrics.observe(label.route, response.status, (performance.now() - t0) / 1000);
       }
       if (dev) logRequest(req, url.pathname, response.status, performance.now() - t0);
-      return url.pathname.startsWith("/api/") ? response : secure(response);
+      return fromApi ? response : secure(response);
     },
   }));
 

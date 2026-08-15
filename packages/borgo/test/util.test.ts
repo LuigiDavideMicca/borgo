@@ -33,6 +33,17 @@ import {
   cspSetting,
   devMode,
   reloadBanner,
+  resolveSwitches,
+  API_TIMEOUT_MS,
+  MAX_BODY_BYTES,
+  isForwarded,
+  FORWARDING_HEADERS,
+  topicRejection,
+  wsOriginAllowed,
+  decodeHtmlText,
+  prepareShell,
+  markUpstream,
+  isUpstream,
 } from "../src/util";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -168,23 +179,83 @@ describe("scriptJson", () => {
   });
 });
 
+// A TIGHTENING MUST NEVER BECOME A DISABLING, and every variable envInt parses
+// reads 0 as "no limit at all". Flooring `BORGO_API_TIMEOUT=0.5` did not shorten
+// the deadline, it removed it - at 0 no AbortController is created at all - and
+// the same floor took BORGO_MAX_BODY off. The tightest thing an operator can
+// spell was the one value that turned the control off.
 describe("envInt", () => {
-  test("unset and empty fall back", () => {
-    expect(envInt(undefined, 30_000)).toBe(30_000);
-    expect(envInt("", 30_000)).toBe(30_000);
+  const NAME = "BORGO_API_TIMEOUT";
+
+  test("unset and empty are undefined, so the caller's default is never invented here", () => {
+    expect(envInt(NAME, undefined, "30000ms")).toBeUndefined();
+    expect(envInt(NAME, "", "30000ms")).toBeUndefined();
   });
 
-  test("valid values win, zero is a valid value", () => {
-    expect(envInt("5000", 30_000)).toBe(5000);
-    expect(envInt("0", 30_000)).toBe(0);
-    expect(envInt("1.9", 30_000)).toBe(1);
+  test("a whole number wins, and zero is a value the operator can reach", () => {
+    expect(envInt(NAME, "5000", "30000ms")).toBe(5000);
+    expect(envInt(NAME, "0", "30000ms")).toBe(0);
+    // unset and zero are two different answers, and this is the pair that
+    // proves it: one disables the limit, the other asks for the default
+    expect(envInt(NAME, "0", "30000ms")).not.toBeUndefined();
   });
 
-  test("garbage and negatives fall back instead of disabling the limit", () => {
-    expect(envInt("banana", 30_000)).toBe(30_000);
-    expect(envInt("-1", 30_000)).toBe(30_000);
-    expect(envInt("Infinity", 30_000)).toBe(30_000);
-    expect(envInt("NaN", 30_000)).toBe(30_000);
+  // THE ONE THAT USED TO TRUNCATE
+  test("a fraction is refused by name, never rounded towards off", () => {
+    for (const v of ["0.5", "0.001", "1.9", "0.9999", "1e-3"]) {
+      expect(() => envInt(NAME, v, "30000ms")).toThrow(/BORGO_API_TIMEOUT/);
+      expect(() => envInt(NAME, v, "30000ms")).toThrow(new RegExp(JSON.stringify(v).slice(1, -1)));
+    }
+    // and the message says what the truncation would have done, because that
+    // is the part nobody would guess
+    expect(() => envInt(NAME, "0.5", "30000ms")).toThrow(/switched off/);
+  });
+
+  test("garbage and negatives are refused, not silently turned into a default", () => {
+    for (const v of ["banana", "-1", "Infinity", "NaN", "1_0", "1,5", " ", "5s", "1.0.0"]) {
+      expect(() => envInt(NAME, v, "30000ms")).toThrow(/BORGO_API_TIMEOUT/);
+    }
+    // written down rather than discovered: the grammar is Number's, so the
+    // spellings Number reads as a whole number are whole numbers here too
+    expect(envInt(NAME, "0x10", "30000ms")).toBe(16);
+    expect(envInt(NAME, "1e3", "30000ms")).toBe(1000);
+    expect(envInt(NAME, " 42 ", "30000ms")).toBe(42);
+    // the same refusal envText owns, reached through the same door
+    expect(() => envInt(NAME, "30\r", "30000ms")).toThrow(/control character/);
+  });
+
+  test("negative zero is zero, spelled as zero", () => {
+    for (const v of ["-0", "-0.0", "-.0", "-0e5", " -0 "]) {
+      const n = envInt(NAME, v, "30000ms");
+      expect(Object.is(n, -0)).toBe(false);
+      expect(n).toBe(0);
+    }
+  });
+
+  // the two variables this is actually for, through the function that resolves
+  // them - a unit that is right while the switch it feeds is wrong is the bug
+  // this whole file exists about
+  test("the limits resolve through it, and a refusal names the variable", () => {
+    expect(resolveSwitches({}).apiTimeout).toBe(API_TIMEOUT_MS);
+    expect(resolveSwitches({}).maxBody).toBe(MAX_BODY_BYTES);
+    expect(resolveSwitches({ BORGO_API_TIMEOUT: "0" }).apiTimeout).toBe(0);
+    expect(resolveSwitches({ BORGO_MAX_BODY: "0" }).maxBody).toBe(0);
+    expect(resolveSwitches({ BORGO_API_TIMEOUT: "1500" }).apiTimeout).toBe(1500);
+    expect(() => resolveSwitches({ BORGO_API_TIMEOUT: "0.5" })).toThrow(/BORGO_API_TIMEOUT/);
+    expect(() => resolveSwitches({ BORGO_MAX_BODY: "0.5" })).toThrow(/BORGO_MAX_BODY/);
+  });
+
+  // AND THE REFUSAL HAPPENS ABOVE THE TRY. Both were read inside serve(), which
+  // serve-entry wraps in a catch that BINDS A PORT: a refused value would have
+  // been answered from a listening socket with no security headers at all -
+  // exactly what resolveSwitches was written to close for the six switches
+  // before them.
+  test("neither limit is read inside serve()", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    expect(src).not.toContain("process.env.BORGO_API_TIMEOUT");
+    expect(src).not.toContain("process.env.BORGO_MAX_BODY");
+    expect(src).toContain("switches.apiTimeout");
+    expect(src).toContain("switches.maxBody");
   });
 });
 
@@ -635,8 +706,8 @@ describe("the read deadline: how long a REQUEST may take to arrive", () => {
 
     const goDurations = names(read("../../../borgo.go"), /envDuration\("(\w+)"/g);
     const frontInts = new Set([
-      ...names(read("../src/server.ts"), /envInt\(\s*(?:process\.)?env\.(\w+)/g),
-      ...names(read("../src/util.ts"), /envInt\(\s*(?:process\.)?env\.(\w+)/g),
+      ...names(read("../src/server.ts"), /envInt\("(\w+)"/g),
+      ...names(read("../src/util.ts"), /envInt\("(\w+)"/g),
     ]);
 
     // the regexes have to be finding something, or this passes by reading nothing
@@ -1564,55 +1635,55 @@ describe("pushAuthorized: the two halves must agree that key auth is on", () => 
   const local = "127.0.0.1";
 
   test("both halves configured: the key decides, and nothing else has to", () => {
-    expect(pushAuthorized({ key: "s3cret", presented: "s3cret", address: local, forwarded: null })).toBe("ok");
+    expect(pushAuthorized({ key: "s3cret", presented: "s3cret", address: local, forwarded: false })).toBe("ok");
     // cross-host push is the entire reason the key exists, so a key holder is
     // not additionally required to be on loopback or unproxied
-    expect(pushAuthorized({ key: "s3cret", presented: "s3cret", address: "10.0.0.9", forwarded: "1.2.3.4" })).toBe("ok");
+    expect(pushAuthorized({ key: "s3cret", presented: "s3cret", address: "10.0.0.9", forwarded: true })).toBe("ok");
   });
 
   test("a wrong or missing key is refused when one is configured here", () => {
-    expect(pushAuthorized({ key: "s3cret", presented: "wrong", address: local, forwarded: null })).toBe("bad-key");
+    expect(pushAuthorized({ key: "s3cret", presented: "wrong", address: local, forwarded: false })).toBe("bad-key");
     // the front-server-only asymmetry: the api sends nothing, and this closes
-    expect(pushAuthorized({ key: "s3cret", presented: null, address: local, forwarded: null })).toBe("bad-key");
-    expect(pushAuthorized({ key: "s3cret", presented: "", address: local, forwarded: null })).toBe("bad-key");
+    expect(pushAuthorized({ key: "s3cret", presented: null, address: local, forwarded: false })).toBe("bad-key");
+    expect(pushAuthorized({ key: "s3cret", presented: "", address: local, forwarded: false })).toBe("bad-key");
     // a prefix of the key is not the key
-    expect(pushAuthorized({ key: "s3cret", presented: "s3cre", address: local, forwarded: null })).toBe("bad-key");
+    expect(pushAuthorized({ key: "s3cret", presented: "s3cre", address: local, forwarded: false })).toBe("bad-key");
   });
 
   // THE ONE THAT USED TO FAIL OPEN
   test("a key presented to a front server that has none is refused, not downgraded", () => {
-    expect(pushAuthorized({ key: undefined, presented: "s3cret", address: local, forwarded: null })).toBe(
+    expect(pushAuthorized({ key: undefined, presented: "s3cret", address: local, forwarded: false })).toBe(
       "half-configured",
     );
     // and it stays refused however loopback-ish the caller looks - the whole
     // defect was that this fell back to exactly that test
     for (const address of [local, "::1", "::ffff:127.0.0.1"]) {
-      expect(pushAuthorized({ key: undefined, presented: "anything", address, forwarded: null })).toBe(
+      expect(pushAuthorized({ key: undefined, presented: "anything", address, forwarded: false })).toBe(
         "half-configured",
       );
     }
     // an empty key env is not a configured key
-    expect(pushAuthorized({ key: "", presented: "s3cret", address: local, forwarded: null })).toBe(
+    expect(pushAuthorized({ key: "", presented: "s3cret", address: local, forwarded: false })).toBe(
       "half-configured",
     );
   });
 
   test("with no key anywhere, loopback and only loopback may push", () => {
     for (const address of [local, "::1", "::ffff:127.0.0.1"]) {
-      expect(pushAuthorized({ key: undefined, presented: null, address, forwarded: null })).toBe("ok");
+      expect(pushAuthorized({ key: undefined, presented: null, address, forwarded: false })).toBe("ok");
     }
     for (const address of [undefined, "10.0.0.9", "192.168.1.4", "1.2.3.4"]) {
-      expect(pushAuthorized({ key: undefined, presented: null, address, forwarded: null })).toBe("not-local");
+      expect(pushAuthorized({ key: undefined, presented: null, address, forwarded: false })).toBe("not-local");
     }
   });
 
   // behind a local reverse proxy every external request arrives from 127.0.0.1,
   // so the forwarding headers the proxy stamps are what tells the two apart
   test("a forwarded request is not local, whatever address it arrived from", () => {
-    expect(pushAuthorized({ key: undefined, presented: null, address: local, forwarded: "1.2.3.4" })).toBe(
+    expect(pushAuthorized({ key: undefined, presented: null, address: local, forwarded: true })).toBe(
       "not-local",
     );
-    expect(pushAuthorized({ key: undefined, presented: null, address: "::1", forwarded: "for=1.2.3.4" })).toBe(
+    expect(pushAuthorized({ key: undefined, presented: null, address: "::1", forwarded: true })).toBe(
       "not-local",
     );
   });
@@ -1627,6 +1698,286 @@ describe("pushAuthorized: the two halves must agree that key auth is on", () => 
     expect(src).toContain('if (verdict === "half-configured") warnHalfConfiguredPushKey();');
     // the old shape read the key and fell through to the loopback test
     expect(src).not.toContain("isLoopback(server.requestIP(req)?.address) && !forwarded");
+  });
+});
+
+// THE GUARD STOPPED APPLYING FOR A VALUE THE CALLER WRITES.
+//
+// `req.headers.get("x-forwarded-for") ?? req.headers.get("forwarded")` reads
+// "did a proxy touch this" out of a header's CONTENT. An empty X-Forwarded-For
+// is a string, so `??` was satisfied by it and never looked at `Forwarded` -
+// and `!forwarded` then called the empty string "nothing forwarded this".
+// Measured on the socket against the running front server: empty, spaces, and
+// empty-plus-a-real-Forwarded all took /__borgo/publish from 403 to 204.
+describe("isForwarded: presence, never content", () => {
+  const h = (init: Array<[string, string]>) => {
+    const headers = new Headers();
+    for (const [k, v] of init) headers.append(k, v);
+    return headers;
+  };
+
+  test("absent is the only shape that is not forwarded", () => {
+    expect(isForwarded(h([]))).toBe(false);
+    expect(isForwarded(h([["content-type", "application/json"]]))).toBe(false);
+  });
+
+  // the four spellings the wire produced, each of which used to disarm it
+  test("empty, spaces and duplicates are all a proxy having been here", () => {
+    expect(isForwarded(h([["x-forwarded-for", "1.2.3.4"]]))).toBe(true);
+    expect(isForwarded(h([["x-forwarded-for", ""]]))).toBe(true);
+    expect(isForwarded(h([["x-forwarded-for", "   "]]))).toBe(true);
+    // a repeated header: Headers joins them, and either half being empty
+    // changes nothing about the fact that it was sent
+    expect(isForwarded(h([["x-forwarded-for", ""], ["x-forwarded-for", "1.2.3.4"]]))).toBe(true);
+    expect(isForwarded(h([["x-forwarded-for", "1.2.3.4"], ["x-forwarded-for", ""]]))).toBe(true);
+  });
+
+  // THE MASKING. An empty first header satisfied the coalesce, so the second
+  // one - carrying a real chain - was never read at all.
+  test("an empty header cannot hide a real one behind it", () => {
+    expect(isForwarded(h([["x-forwarded-for", ""], ["forwarded", "for=1.2.3.4"]]))).toBe(true);
+    expect(isForwarded(h([["x-forwarded-for", "   "], ["forwarded", "for=1.2.3.4"]]))).toBe(true);
+    // and the coalesce this replaces, spelled out, so the difference is visible
+    const headers = h([["x-forwarded-for", ""], ["forwarded", "for=1.2.3.4"]]);
+    const old = headers.get("x-forwarded-for") ?? headers.get("forwarded");
+    expect(old).toBe("");
+    expect(Boolean(old)).toBe(false); // what the guard used to conclude
+    expect(isForwarded(headers)).toBe(true); // what is true
+  });
+
+  // borgo's own generated nginx sets X-Forwarded-Proto, and a hop the guard
+  // does not look at is a hop it cannot see
+  test("every header a proxy stamps counts, not the two that were checked", () => {
+    for (const name of FORWARDING_HEADERS) {
+      expect(isForwarded(h([[name, ""]]))).toBe(true);
+    }
+    expect(FORWARDING_HEADERS).toContain("x-forwarded-proto");
+    expect(FORWARDING_HEADERS).toContain("x-real-ip");
+  });
+
+  test("and the two ends meet: a forwarded request is not local", () => {
+    const local = "127.0.0.1";
+    const push = (headers: Headers) =>
+      pushAuthorized({ key: undefined, presented: null, address: local, forwarded: isForwarded(headers) });
+    expect(push(h([]))).toBe("ok");
+    for (const headers of [
+      h([["x-forwarded-for", ""]]),
+      h([["x-forwarded-for", "   "]]),
+      h([["x-forwarded-for", ""], ["forwarded", "for=1.2.3.4"]]),
+      h([["x-forwarded-proto", "https"]]),
+    ]) {
+      expect(push(headers)).toBe("not-local");
+    }
+  });
+
+  test("the front server asks presence, not a header value", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    expect(src).toContain("forwarded: isForwarded(req.headers)");
+    expect(src).not.toContain('req.headers.get("x-forwarded-for") ?? req.headers.get("forwarded")');
+  });
+});
+
+// A COMMA IS THE SEPARATOR, SO IT CANNOT ALSO BE A CHARACTER.
+//
+// Measured against the running front server: /ws?topics=a%2Cb upgraded (101),
+// the browser was subscribed to "a" and "b", the __count frames for both
+// arrived, and a push naming "a,b" was answered 204 having reached nobody. Every
+// signal a person debugging would look at said the channel was working.
+describe("topicRejection", () => {
+  test("a plain topic passes", () => {
+    for (const t of ["chat", "room:1", "tasks/7", "a b", "a;b", "a.b"]) {
+      expect(topicRejection(t)).toBeNull();
+    }
+  });
+
+  test("a comma anywhere is refused, and the message names the topic", () => {
+    for (const t of ["a,b", ",lead", "trail,", "a,,b"]) {
+      const why = topicRejection(t);
+      expect(why).not.toBeNull();
+      expect(why).toContain(JSON.stringify(t));
+    }
+    // and it says what to do, because the refusal is the first the author hears
+    expect(topicRejection("a,b")).toContain("rename");
+  });
+
+  test("both doors are shut in the front server, and both say the topic", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    // the subscription: read off the RAW query, or searchParams decodes the
+    // %2C back into the separator before anything can see it
+    expect(src).toContain("topicRejection(topic)");
+    expect(src).toContain("url.search.slice(1)");
+    expect(src).not.toContain('url.searchParams.get("topics")');
+    // the push
+    expect(src).toContain("topicRejection(msg.topic)");
+  });
+});
+
+// THE ORIGIN CHECK IGNORED THE SCHEME, AND NO ORIGIN AT ALL WAS A PASS.
+// Measured on the socket: `Origin: https://localhost:3111` upgraded (101)
+// against a server listening on http, and a handshake with no Origin header
+// upgraded too - while `Origin: http://evil.test` was refused. The guard applied
+// exactly when the caller chose to make it apply.
+describe("wsOriginAllowed", () => {
+  const ask = (over: Partial<Parameters<typeof wsOriginAllowed>[0]>) =>
+    wsOriginAllowed({
+      origin: null,
+      host: "app.test",
+      proto: "http",
+      forwardedProto: null,
+      allowNoOrigin: false,
+      ...over,
+    });
+
+  test("the same scheme and host is the app's own page", () => {
+    expect(ask({ origin: "http://app.test" })).toBe(true);
+    expect(ask({ origin: "http://app.test/some/page?q=1" })).toBe(true);
+  });
+
+  test("another host is refused, port included", () => {
+    expect(ask({ origin: "http://evil.test" })).toBe(false);
+    expect(ask({ origin: "http://app.test:8080" })).toBe(false);
+    expect(ask({ origin: "http://sub.app.test" })).toBe(false);
+    // "null" is a sandboxed iframe or a cross-origin redirect, not this origin
+    expect(ask({ origin: "null" })).toBe(false);
+    expect(ask({ origin: "" })).toBe(false);
+    expect(ask({ origin: "not a url" })).toBe(false);
+  });
+
+  // THE ONE THE HOST COMPARISON LET THROUGH
+  test("the scheme is part of the origin", () => {
+    expect(ask({ origin: "https://app.test" })).toBe(false);
+    expect(ask({ origin: "http://app.test", proto: "https" })).toBe(false);
+    expect(ask({ origin: "ws://app.test" })).toBe(false);
+    expect(ask({ origin: "https://app.test", proto: "https" })).toBe(true);
+  });
+
+  // borgo behind nginx reads http and the browser sent https; the generated
+  // config sets this header for exactly that
+  test("a terminating proxy's scheme is the one compared", () => {
+    expect(ask({ origin: "https://app.test", forwardedProto: "https" })).toBe(true);
+    expect(ask({ origin: "http://app.test", forwardedProto: "https" })).toBe(false);
+    // a chain: the client's hop is the first
+    expect(ask({ origin: "https://app.test", forwardedProto: "https, http" })).toBe(true);
+    expect(ask({ origin: "https://app.test", forwardedProto: " HTTPS " })).toBe(true);
+    // an empty one is not a claim, so the scheme borgo read stands
+    expect(ask({ origin: "http://app.test", forwardedProto: "" })).toBe(true);
+    expect(ask({ origin: "https://app.test", forwardedProto: "" })).toBe(false);
+  });
+
+  // THE OTHER ONE: absent meant admitted, and absent is every non-browser caller
+  test("no Origin is a refusal unless the operator said otherwise", () => {
+    expect(ask({ origin: null })).toBe(false);
+    expect(ask({ origin: null, allowNoOrigin: true })).toBe(true);
+    // and the exemption is only about the absent case: it does not re-admit a
+    // cross-origin browser
+    expect(ask({ origin: "http://evil.test", allowNoOrigin: true })).toBe(false);
+    expect(ask({ origin: "https://app.test", allowNoOrigin: true })).toBe(false);
+  });
+
+  test("the switch is resolved with every other switch, above the try", () => {
+    expect(resolveSwitches({}).wsAllowNoOrigin).toBe(false);
+    expect(resolveSwitches({ BORGO_WS_ALLOW_NO_ORIGIN: "1" }).wsAllowNoOrigin).toBe(true);
+    expect(resolveSwitches({ BORGO_WS_ALLOW_NO_ORIGIN: "false" }).wsAllowNoOrigin).toBe(false);
+    // the same grammar as every other boolean switch, refusal included
+    expect(() => resolveSwitches({ BORGO_WS_ALLOW_NO_ORIGIN: "yes" })).toThrow(/BORGO_WS_ALLOW_NO_ORIGIN/);
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    expect(src).toContain("allowNoOrigin: switches.wsAllowNoOrigin");
+    expect(src).not.toContain("new URL(origin).host === url.host");
+  });
+});
+
+// THE EXEMPTION WAS WRITTEN ON THE PATH AND MEANT TO BE ABOUT THE AUTHOR.
+// Measured on the socket: borgo's own 502 (api down) and 403 (bad csrf token) on
+// /api left with no nosniff, no Referrer-Policy, no X-Frame-Options and no CSP,
+// while a 404 from the same server carried all four.
+describe("isUpstream: the headers follow the author, not the url", () => {
+  test("a response borgo built is unmarked, which is the safe direction", () => {
+    expect(isUpstream(new Response("invalid csrf token", { status: 403 }))).toBe(false);
+    expect(isUpstream(new Response("api timeout", { status: 504 }))).toBe(false);
+    expect(isUpstream(new Response("api unreachable", { status: 502 }))).toBe(false);
+  });
+
+  test("only what came back from go carries the mark, and it is the same object", () => {
+    const upstream = new Response("{}", { status: 200 });
+    expect(markUpstream(upstream)).toBe(upstream);
+    expect(isUpstream(upstream)).toBe(true);
+    // and the mark does not travel to a copy: a rebuilt response is a response
+    // borgo built
+    expect(isUpstream(new Response(null, { status: 200, headers: upstream.headers }))).toBe(false);
+  });
+
+  test("the proxy marks the upstream answer and nothing else it returns", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/util.ts"), "utf8");
+    expect(src).toContain("return markUpstream(upstream);");
+    for (const own of ['new Response("api timeout", { status: 504 })', 'new Response("api unreachable", { status: 502 })']) {
+      expect(src).toContain(`return ${own}`);
+      expect(src).not.toContain(`return markUpstream(${own})`);
+    }
+  });
+
+  test("the front server asks the author, not the path", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    expect(src).toContain("const fromApi = isUpstream(response);");
+    expect(src).toContain("return fromApi ? response : secure(response);");
+    // the path test that let borgo's own answers out bare
+    expect(src).not.toContain('url.pathname.startsWith("/api/") ? response : secure(response)');
+    // and it is read BEFORE dropBody, which builds a new object for a HEAD
+    expect(src.indexOf("const fromApi = isUpstream(response);")).toBeLessThan(
+      src.indexOf("response = dropBody(response);"),
+    );
+  });
+});
+
+// THE TITLE TRAVELLED AS MARKUP AND WAS ASSIGNED AS TEXT.
+// Measured on the wire with `<title>Tom &amp; Jerry</title>` in index.html: the
+// server-rendered tab read `Tom & Jerry` and the document carried
+// `window.__BORGO_TITLE__="Tom &amp; Jerry"`, so the first client navigation back
+// to the shell default put the literal entity in the tab. One title, two
+// spellings, and only the second one is ever seen.
+describe("the shell title is data, not markup", () => {
+  const shell = (title: string) =>
+    prepareShell(`<html><head><title>${title}</title></head><body><!--app--><!--props--></body></html>`, false);
+
+  test("the four references escapeHtml emits come back as themselves", () => {
+    expect(decodeHtmlText("Tom &amp; Jerry")).toBe("Tom & Jerry");
+    expect(decodeHtmlText("&lt;b&gt;")).toBe("<b>");
+    expect(decodeHtmlText("say &quot;hi&quot;")).toBe('say "hi"');
+    expect(decodeHtmlText("it&apos;s")).toBe("it's");
+    expect(decodeHtmlText("it&#39;s")).toBe("it's");
+    expect(decodeHtmlText("&#x2713; done")).toBe("\u2713 done");
+    // a round trip through the escaper this file already owns
+    for (const s of ['a & b < c > d "e"', "&&&", "<script>", "plain"]) {
+      expect(decodeHtmlText(escapeHtml(s))).toBe(s);
+    }
+  });
+
+  test("a reference borgo does not know is left exactly as written", () => {
+    // decoding a value is not repairing one: a half-decoded & would be a new
+    // way to disagree with the browser about the same bytes
+    expect(decodeHtmlText("&nosuchref; &amp")).toBe("&nosuchref; &amp");
+    expect(decodeHtmlText("100% &#x110000; &#0;")).toBe("100% &#x110000; &#0;");
+    expect(decodeHtmlText("&#xD800;")).toBe("&#xD800;");
+    expect(decodeHtmlText("")).toBe("");
+  });
+
+  test("the value the browser assigns to document.title is the text", () => {
+    expect(shell("Tom &amp; Jerry").title).toBe("Tom & Jerry");
+    expect(shell("Tom &amp; Jerry").stateTail).toBe(
+      ';window.__BORGO_TITLE__="Tom & Jerry"</script>',
+    );
+    // and it is still json, so a title carrying a quote or a </script> cannot
+    // end the script it rides in
+    expect(shell("a &quot;b&quot; c").stateTail).toBe(
+      ';window.__BORGO_TITLE__="a \\"b\\" c"</script>',
+    );
+    expect(shell("&lt;/script&gt;").stateTail).toBe(
+      ';window.__BORGO_TITLE__="\\u003c/script>"</script>',
+    );
+  });
+
+  test("a shell with no title still has none, and a plain one is untouched", () => {
+    expect(prepareShell("<html><head></head><body><!--app--></body></html>", false).title).toBe("");
+    expect(shell("borgo tasks").title).toBe("borgo tasks");
   });
 });
 
