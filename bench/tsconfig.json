@@ -15,6 +15,19 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["bun"]
   },
-  "include": ["run.ts", "lib/**/*.ts", "tools/**/*.ts", "test/**/*.ts"],
+  // bench is not a workspace member (see package.json), so a root `bun install`
+  // never creates bench/node_modules and the root `bun run typecheck` cannot
+  // run this project - it would fail on missing @types/bun. It is not
+  // unchecked, though: bench/bun.lock is committed, and the "bench harness"
+  // step in .github/workflows/ci.yml installs here with --frozen-lockfile and
+  // runs `bun run typecheck`. Locally, the same two commands from bench/.
+  //
+  // apps/ holds the competing frameworks' own sources: third-party shapes,
+  // their own toolchains, and in one case checked-in build output. Only
+  // apps/borgo carries a tsconfig, and it is its own project - deliberately
+  // not run by any gate, because it needs a full app install (react,
+  // borgo-framework) that no committed lockfile pins, and it would only
+  // re-prove for a fixture what examples/tasks proves for the real app.
+  "include": ["run.ts", "lib/**/*.ts", "shared/**/*.ts", "tools/**/*.ts", "test/**/*.ts"],
   "exclude": ["apps", "node_modules", ".tools"]
 }

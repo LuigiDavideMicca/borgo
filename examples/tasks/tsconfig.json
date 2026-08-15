@@ -18,13 +18,37 @@
     "forceConsistentCasingInFileNames": true
   },
   // typescript skips dot-directories, so everything under .borgo/ has to be
-  // named. the generated client entries matter as much as the types: borgo
-  // writes their import statements, and a wrong specifier there breaks every
-  // app at build time while a typecheck of the app's own sources stays green
+  // named. all of it, not just the leaves: borgo writes these files' import
+  // statements, and a wrong specifier there breaks every app at build time
+  // while a typecheck of the app's own sources stays green. routes.gen.tsx in
+  // particular is unreachable from any other file - the server loads it at
+  // runtime through pathToFileURL - so if it is not named here nothing checks
+  // that the route manifest still matches pages/.
+  //
+  // .borgo/refresh.ts is the one generated file left out, on purpose: it only
+  // exists after a dev build, and the generator writes `// @ts-nocheck` at the
+  // top of it because it patches globals that no lib declares.
+  //
+  // scripts/typecheck.ts asserts each of these exists before running tsc. an
+  // include entry that matches nothing is silent, so without that assertion a
+  // cold clone - where .borgo/ holds only the tracked api-types.d.ts - reports
+  // success having checked none of them.
   "include": [
     "**/*",
     ".borgo/api-types.d.ts",
+    ".borgo/client-routes.gen.ts",
     ".borgo/client.tsx",
-    ".borgo/islands-client.tsx"
-  ]
+    ".borgo/islands-client.tsx",
+    ".borgo/islands.gen.ts",
+    ".borgo/routes.gen.tsx"
+  ],
+  // build output, not source: `**/*` plus allowJs was pulling in 49 minified
+  // bundles. harmless only for as long as checkJs stays off.
+  //
+  // borgo-* is not this app: packages/borgo/test/build.test.ts mkdtempSync's
+  // whole scratch apps in here, because a real bundle has to resolve react
+  // from somewhere. `**/*` swallowed them, so the gate typechecked - and once
+  // failed on, with TS6053 - a directory a test was still writing into or had
+  // been killed while holding. no source of this app is named borgo-*.
+  "exclude": ["node_modules", "dist", "public/assets", "borgo-*"]
 }

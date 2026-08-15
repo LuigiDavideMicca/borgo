@@ -14,5 +14,12 @@
     "strict": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["**/*", "../../shared/items.js", ".borgo/api-types.d.ts"]
+  // this config mirrors what create-borgo scaffolds, so the fixture is shaped
+  // like a real app in an editor; no gate runs it - see bench/tsconfig.json for
+  // why. shared/items.js is the one .js on purpose: every bench app serves the
+  // same payload from it.
+  "include": ["**/*", "../../shared/items.js", ".borgo/api-types.d.ts"],
+  // build output, not source: allowJs was pulling the app's own minified
+  // bundles back in
+  "exclude": ["node_modules", "dist", "public/assets"]
 }

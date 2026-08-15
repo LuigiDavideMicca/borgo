@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleDetection": "force",
+    "moduleResolution": "bundler",
+    "types": [],
+    "noEmit": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": false
+  },
+
+  // Every other project here sets skipLibCheck: true, which does not mean "skip
+  // node_modules" - it means skip the body of every .d.ts, this repo's own
+  // included. So the generated API contract and the hand-written ambient
+  // declarations were in the program but never checked: a probe inside
+  // src/ambient.d.ts came back clean, and only --skipLibCheck false caught it.
+  //
+  // Turning it off repo-wide would drag in every @types/* body, so this is the
+  // one project that checks .d.ts and nothing else: types: [] blocks automatic
+  // @types inclusion, and because a .d.ts declares rather than imports, the
+  // program stays at these files plus typescript's own lib.*.d.ts. Verify with
+  // `bunx tsc -p tsconfig.dts.json --listFiles`; if a node_modules body ever
+  // shows up there, something in this list started importing.
+  //
+  // Deliberately out:
+  //   packages/create-borgo/templates/*  - template sources, see that package's
+  //     tsconfig; CI typechecks them after scaffolding
+  //   bench/**                           - not a workspace member, see bench/tsconfig.json
+  //   cmd/borgogen/testdata/*/.borgo/api-types.d.ts - 33 golden outputs that
+  //     augment the same module with disagreeing members; see tsconfig.json
+  "include": [
+    "packages/borgo/src/ambient.d.ts",
+    "examples/tasks/ws-events.d.ts",
+    "examples/tasks/.borgo/api-types.d.ts"
+  ]
+}

@@ -59,17 +59,18 @@ Two rules follow from the layout. **No package an app links into its binary may 
 CI runs all of these on every pull request and on every push to `main` — pushes to a branch with no pull request open are not built. Run them locally before opening one, in this order, because the cheap ones fail fastest.
 
 ```bash
-bun scripts/check-doc-links.ts     # docs links resolve, doc snippets compile
-bun run typecheck                  # tsc --noEmit across both packages and the example app
-bun run test                       # bun test packages/borgo/test packages/create-borgo/test
-go test -race ./...                # the go module and borgogen, race detector on
-bunx playwright test               # end to end, against a production build of examples/tasks
+bun run check:docs                    # docs links resolve, doc snippets compile
+cd examples/tasks && bun run build    # writes the generated files typecheck covers, see below
+bun run typecheck                     # tsc --noEmit across every project the gate owns
+bun run test                          # bun test packages/borgo/test packages/create-borgo/test
+go test -race ./...                   # the go module and borgogen, race detector on
+bunx playwright test                  # end to end, against a production build of examples/tasks
 ```
 
 What each one actually is, verified against `package.json` and `.github/workflows/ci.yml`:
 
-- **`bun scripts/check-doc-links.ts`** — every internal link in the README, all of `docs/`, and each package and template README points at a file that exists, with the anchor it names. Then every `ts` / `tsx` fenced block becomes a module inside `examples/tasks` and is typechecked against the real framework types, and every `go` block that opens with a declaration is compiled inside the example's module. Failures are reported at the line of the doc file, not the scratch file.
-- **`bun run typecheck`** — `bunx tsc --noEmit` in `packages/borgo`, then `packages/create-borgo`, then `examples/tasks`.
+- **`bun run check:docs`** (`bun scripts/check-doc-links.ts`) — every internal link in the README, all of `docs/`, and each package and template README points at a file that exists, with the anchor it names. Then every `ts` / `tsx` fenced block becomes a module inside `examples/tasks` and is typechecked against the real framework types, and every `go` block that opens with a declaration is compiled inside the example's module. Failures are reported at the line of the doc file, not the scratch file.
+- **`bun run typecheck`** — `bun scripts/typecheck.ts`, which owns the list of projects: the repo root (`e2e/`, `scripts/`, `playwright.config.ts`), `tsconfig.dts.json`, `packages/borgo`, `packages/create-borgo`, `examples/tasks`. Two things about it. First, it asserts that every literal path a project's `include` names actually exists before running `tsc` — an include entry that matches nothing is silent, and the six generated entries under `examples/tasks/.borgo` are gitignored, so on a clean checkout the gate used to report success having checked none of them. Run `cd examples/tasks && bun run build` first, as CI does. Second, `tsconfig.dts.json` is the only project with `skipLibCheck` off: everywhere else that option skips the body of *this repo's* `.d.ts` too, generated API contract included, so that one project checks them and nothing else. `bench/` is its own project with its own lockfile — `cd bench && bun install --frozen-lockfile && bun run typecheck`, which is exactly the CI step.
 - **`bun run test`** — `bun test packages/borgo/test packages/create-borgo/test`. Mostly unit tests, but not exclusively: `proxy.test.ts`, `action-path.test.ts`, `serve-assets.test.ts`, `metrics.test.ts`, `util.test.ts` and `doctor.test.ts` each bind a real listener with `Bun.serve` on an ephemeral port (`port: 0`) and drive it over HTTP, and `create-borgo`'s suite spawns the scaffolder as a subprocess into a temp directory. They clean up after themselves and need no fixed port, so the suite is still safe to run beside a live `borgo dev` — but it is not a pure in-memory suite, and a change to the proxy or the asset server is genuinely exercised over a socket here.
 - **`go test -race ./...`** — the root module and `cmd/borgogen`, including its fixture apps under `testdata`. `bun run test:go` is the same suite without `-race`; CI uses `-race`, so use `-race`.
 - **`bunx playwright test`** — the root script `bun run e2e` and CI's `npx playwright test` run the same config. It builds and starts `examples/tasks` itself on port 3400, then runs four projects in dependency order: the app specs, the destructive `clear-all` spec, a dev-server project for fast refresh, and an export project last. Expect a few minutes.
@@ -80,7 +81,6 @@ CI also runs, and you should reproduce locally when you touch the relevant area:
 go build ./... && go vet ./...
 gofmt -l . | grep -v testdata            # must print nothing
 cd examples/tasks && go tool borgogen    # then: git diff --exit-code -- .borgo/api-types.d.ts api/borgo.gen.go
-cd examples/tasks && bun run build
 docker build -f examples/tasks/Dockerfile -t borgo-tasks .
 ```
 

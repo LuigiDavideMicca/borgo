@@ -27,7 +27,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: docs links resolve and snippets typecheck
-        run: bun scripts/check-doc-links.ts
+        run: bun run check:docs
 
       - name: build go core
         run: |
@@ -54,8 +54,23 @@ jobs:
           go tool borgogen
           git diff --exit-code -- .borgo/api-types.d.ts api/borgo.gen.go
 
+      # must precede every tsc step below. six of the files examples/tasks
+      # names in its tsconfig are written here and are gitignored, so on a cold
+      # runner they simply do not exist - and an include entry that matches
+      # nothing is silent in tsc. scripts/typecheck.ts now fails loudly on
+      # that, which is the guard; this ordering is what makes it pass.
+      - name: build example app
+        working-directory: examples/tasks
+        run: bun run build
+
       - name: typecheck
         run: bun run typecheck
+
+      - name: bench harness typechecks
+        working-directory: bench
+        run: |
+          bun install --frozen-lockfile
+          bun run typecheck
 
       - name: bun tests
         run: bun run test
@@ -102,10 +117,6 @@ jobs:
             > pages/__wrong-publish.tsx
           if bunx tsc --noEmit; then echo "wrong publish payload was accepted" && exit 1; fi
           rm pages/__wrong-publish.tsx
-
-      - name: build example app
-        working-directory: examples/tasks
-        run: bun run build
 
       - name: server-only code stays out of client assets
         working-directory: examples/tasks

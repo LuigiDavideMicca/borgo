@@ -16,5 +16,11 @@
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src"]
+  // templates/ is deliberately NOT here: a template is source for a scaffolded
+  // app, not source for this package. It imports "borgo-framework" and keeps
+  // its generated types under _borgo/, both of which only resolve once
+  // create-borgo has copied and `bun install`ed it. CI typechecks the real
+  // thing instead - see the "scaffold test" steps in .github/workflows/ci.yml,
+  // which run `bunx tsc --noEmit` inside each freshly scaffolded app.
+  "include": ["src", "test"]
 }

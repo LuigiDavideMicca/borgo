@@ -87,6 +87,26 @@ for (const source of sources) {
 // do from a real pages/ file, and one tsc pass checks them all
 const appDir = "examples/tasks";
 const scratch = join(appDir, ".doc-snippets");
+const goScratch = join(appDir, "docsnippets");
+
+// both are gitignored, and `gofmt -l .` does not read gitignore - nor do `go
+// build ./...`, `go vet` or `go test`, which walk the example app's module and
+// compile whatever is sitting in it. so a failed run used to hand the next
+// person ten unformatted files they did not write and a red gofmt that stayed
+// red until someone deleted the directory by hand. removing them only where
+// the run succeeds is not enough for the same reason a `finally` exists: the
+// path that leaves the mess is the path that fails. an empty snippet list
+// leaked too - the mkdir below is unconditional, the old rmSync was not.
+process.on("exit", () => {
+  const dirs = [scratch, goScratch];
+  if (process.env.BORGO_KEEP_DOC_SNIPPETS) {
+    const kept = dirs.filter(existsSync);
+    if (kept.length) console.error(`\nkept for inspection: ${kept.join(" ")}`);
+    return;
+  }
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+});
+
 type Snippet = { file: string; source: string; fenceLine: number };
 const snippets: Snippet[] = [];
 
@@ -138,8 +158,6 @@ if (snippets.length) {
       fail(`${s.source}:${s.fenceLine + Number(m[2])}${m[4]}`);
     }
     if (failures === before) fail(`snippet typecheck failed:\n${out}`);
-  } else {
-    rmSync(scratch, { recursive: true, force: true });
   }
 }
 
@@ -148,7 +166,6 @@ if (snippets.length) {
 // resolves as it does from a real api/ file, and one `go build` checks them
 // all. a block that is a fragment (no package-level declaration to hang the
 // imports off) marks itself no-check, like its typescript siblings
-const goScratch = join(appDir, "docsnippets");
 const goSnippets: Snippet[] = [];
 rmSync(goScratch, { recursive: true, force: true });
 mkdirSync(goScratch, { recursive: true });
@@ -269,8 +286,6 @@ if (goSnippets.length) {
       fail(`${s.source}:${s.fenceLine + Number(m[2]) - offset}:${m[4]}`);
     }
     if (failures === before) fail(`go snippet build failed:\n${out}`);
-  } else {
-    rmSync(goScratch, { recursive: true, force: true });
   }
 }
 

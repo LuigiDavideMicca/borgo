@@ -7,13 +7,16 @@
     "examples/*"
   ],
   "scripts": {
-    "typecheck": "cd packages/borgo && bunx tsc --noEmit && cd ../create-borgo && bunx tsc --noEmit && cd ../../examples/tasks && bunx tsc --noEmit",
+    "typecheck": "bun scripts/typecheck.ts",
+    "check:docs": "bun scripts/check-doc-links.ts",
     "test": "bun test packages/borgo/test packages/create-borgo/test",
     "test:go": "go test ./...",
     "e2e": "playwright test",
     "bench": "bun bench/run.ts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0"
+    "@playwright/test": "^1.49.0",
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.9.0"
   }
 }

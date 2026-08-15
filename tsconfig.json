@@ -1,0 +1,46 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleDetection": "force",
+    "types": ["bun"],
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+
+    "skipLibCheck": true,
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
+  },
+
+  // The repo-root TypeScript that no package owns: the playwright suite, its
+  // config, and the CI scripts. These went unchecked for the project's whole
+  // life simply because no tsconfig named them - `bun run typecheck` walked
+  // into packages/ and examples/ and never looked here, while CI happily ran
+  // scripts/check-doc-links.ts as a gate.
+  //
+  // Everything else under the root has an owner and is checked by its own
+  // config, so it is deliberately not listed here:
+  //   packages/*, examples/*  - checked by their own tsconfig, same gate
+  //   bench/                  - not a workspace member; its own gate, run from
+  //                             bench/ and by the "bench harness" CI step
+  //   bench/apps/*            - benchmark fixtures, see bench/apps/borgo/tsconfig.json
+  //   packages/create-borgo/templates/* - see packages/create-borgo/tsconfig.json
+  //   cmd/borgogen/testdata/*/.borgo/api-types.d.ts - 33 golden borgogen
+  //                             outputs. They are assertions, not sources, and
+  //                             they cannot share a program: all 33 augment
+  //                             `declare module "borgo-framework"`, and they
+  //                             disagree - "GET /api/ping" is declared with two
+  //                             different response types across fixtures. Each
+  //                             one is right for its own fixture app, which is
+  //                             what `go test ./cmd/borgogen` asserts, byte for
+  //                             byte.
+  //
+  // .d.ts bodies are checked nowhere here, because skipLibCheck is on in every
+  // project - see tsconfig.dts.json, which exists only to check them.
+  "include": ["e2e", "scripts", "playwright.config.ts"]
+}
