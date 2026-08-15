@@ -43,7 +43,7 @@ In dev there are three processes: the `borgo dev` watcher, the Go binary it buil
 
 `serve()` in `packages/borgo/src/server.ts` runs a fixed sequence before it binds a port. Everything here is work that would otherwise happen on every request.
 
-**1. Build or verify the assets.** In production, if `.borgo/routes.gen.tsx` and `public/assets/client.js` are both present, boot skips the build entirely and uses what `borgo build` left on disk. If either is missing — or if this is `borgo dev` — the assets are built now. `borgo start` additionally reads `.borgo/build-mode`: a tree whose last build was a dev build holds development React and no precompressed siblings, so it is rebuilt for production rather than served silently.
+**1. Build or verify the assets.** In production the boot serves what `borgo build` left on disk only when it can establish that a finished production build is there; anything else is rebuilt, and the reason is printed. Four things have to hold. `.borgo/routes.gen.tsx` exists. Every name the build recorded is on disk as a file, of the length recorded — not merely present, because an entry truncated to nothing answers 204 with no body and nothing hydrates, silently. `.borgo/build-mode` says `production` in so many words: absent, empty or unreadable is not a licence to serve, since a half-copied `.borgo` is exactly how a tree reaches that state and the cost of guessing wrong is a development bundle on a production port. And `.borgo/build-incomplete` is gone — it is written before the first generated file and removed after the last byte of a successful build, so a build that died in the middle cannot be mistaken for one that finished. Under `borgo dev` the assets are built every time.
 
 **2. Load the route manifests.** `.borgo/routes.gen.tsx` is imported as a module. It exports `routes` (each with its pattern, its file, its module, its resolved layout chain and whether it uses islands), plus `notFound` and `serverError` for `_404.tsx` and `_500.tsx`. The array is already sorted by the build so that static segments beat dynamic ones — `/tasks/new` is ahead of `/tasks/:id` in the list, so a linear scan finds the right one first.
 
@@ -136,7 +136,8 @@ The same endpoint is what hover prefetching warms. See [client navigation](clien
     islands.gen.ts            island name -> component
     client.tsx                the browser entry point
     islands-client.tsx        the smaller entry for zero-js pages that use islands
-    build-mode                "dev" or "production" - which kind of build wrote public/assets
+    build-mode                "dev", "production" or "export" - which build wrote public/assets
+    build-incomplete          present while a build runs, and after one that died partway
   api/
     borgo.gen.go              init() { borgo.Handle(...) } for every //borgo:route (borgogen)
   public/assets/

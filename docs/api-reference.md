@@ -334,7 +334,7 @@ These are as much a public API as any function: an app depends on them, and chan
 | `index.html` | The SSR shell. | stable |
 | `style.scss` | Compiled to `public/assets/style.css` when present. | stable |
 | `style.css` | Tailwind entry, used only with `--tailwind`. | stable |
-| `.borgo/` | Generated: `api-types.d.ts`, `routes.gen.tsx`, `client-routes.gen.ts`, `islands.gen.ts`, `client.tsx`, `islands-client.tsx`, `refresh.ts` (dev only), `build-mode`, and the dev api binary. Everything but `api-types.d.ts` is gitignored by the templates. | internal |
+| `.borgo/` | Generated: `api-types.d.ts`, `routes.gen.tsx`, `client-routes.gen.ts`, `islands.gen.ts`, `client.tsx`, `islands-client.tsx`, `refresh.ts` (dev only), `build-mode`, `build-incomplete` (present only while a build is running, or after one that died), and the dev api binary. Everything but `api-types.d.ts` is gitignored by the templates. | internal |
 | `dist/` | `borgo build` output (the Go binary) and `borgo export` output (`dist/site/`). | stable |
 
 ### Page module exports

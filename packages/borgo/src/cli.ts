@@ -28,7 +28,7 @@ const debug = debugEnabled(process.argv);
 // refused here, before any command runs: a flag borgo does not know is a flag
 // the operator believes is doing something, and a build that ignores it exits 0
 // having done something other than what was asked
-const badArg = unknownArg(command, process.argv.slice(3).filter((arg) => arg !== "--debug"));
+const badArg = unknownArg(command, process.argv.slice(3));
 if (badArg) {
   console.log(`\n  ${banner(command)}\n`);
   console.log(`  ${c.red(g.err)} ${badArg}`);

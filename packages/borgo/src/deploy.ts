@@ -84,7 +84,10 @@ export type InitArgv = { ok: true; target?: string; force: boolean } | { ok: fal
  * `--tailwind` is legal everywhere: cli.ts reads it off the whole argv before
  * dispatching, so it is a global, not a per-command flag.
  */
-export const GLOBAL_FLAGS = ["--tailwind"] as const;
+// --debug is legal after any command, deploy init and pwa init included: they
+// go through parseInitArgv rather than the check below, so leaving it out here
+// refused it on exactly the commands whose failures are hardest to read
+export const GLOBAL_FLAGS = ["--tailwind", "--debug"] as const;
 export const COMMAND_FLAGS: Record<string, readonly string[]> = {
   dev: [],
   build: [],

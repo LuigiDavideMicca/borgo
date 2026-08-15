@@ -10,6 +10,7 @@ import {
   needsBuild,
   readAssetNames,
   readBuildOutputs,
+  reportBuildFailure,
 } from "./build";
 import { banner, c, fmtMs, g, statusColor } from "./colors";
 import {
@@ -98,7 +99,15 @@ export async function serve({
       console.log(`  ${c.terracotta(g.change)} ${why.join("; ")} ${c.dim("- building before serving")}`);
     }
     const buildStarted = performance.now();
-    ({ chunkMap, names: assetNames } = await buildAssets(dev));
+    // the cli frames a build failure, but serve() is exported and an app that
+    // imports it never passes through that wrapper - so it reported the same
+    // failure as a raw trace with borgo's own comments quoted in it
+    try {
+      ({ chunkMap, names: assetNames } = await buildAssets(dev));
+    } catch (error) {
+      reportBuildFailure(error);
+      throw error;
+    }
     if (announce) {
       console.log(`  ${c.sage(g.ok)} built in ${c.bold(fmtMs(performance.now() - buildStarted))}`);
     }
