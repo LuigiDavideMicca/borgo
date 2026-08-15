@@ -186,7 +186,7 @@ A hung Go handler cannot take the front server with it: past `BORGO_API_TIMEOUT`
 
 ## Realtime surface
 
-WebSocket upgrades on `/ws` are refused when the `Origin` header names a different host, because browsers attach cookies to WebSocket handshakes regardless of origin — without the check, any page on the internet could open a socket as your logged-in user. A client may subscribe to at most 32 topics of at most 128 characters, and a single message is capped at 1 MB.
+WebSocket upgrades on `/ws` are refused when the `Origin` header names a different scheme or host, because browsers attach cookies to WebSocket handshakes regardless of origin — without the check, any page on the internet could open a socket as your logged-in user. **An absent `Origin` is refused too**, as of 0.21: admitting it meant the one header an attacker can simply leave out switched the check off. Non-browser clients send none and are now refused; `BORGO_WS_ALLOW_NO_ORIGIN=1` admits them, and admits every other originless caller with them. A client may subscribe to at most 32 topics of at most 128 characters, and a single message is capped at 1 MB.
 
 Go pushes to browsers through `/__borgo/publish` on the front server. Without a shared key that endpoint accepts loopback traffic only — but behind a reverse proxy on the same box, *every* request arrives from loopback, so borgo additionally refuses anything carrying forwarding headers. In any deployment where Go and the front server are not the same machine, set a key on both sides:
 
