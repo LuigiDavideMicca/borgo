@@ -4,7 +4,7 @@ GET /assets/app-{{HASH}}.js
   cache-control: public, max-age=31536000, immutable
   content-length: 45
   content-type: text/javascript;charset=utf-8
-  etag: "19-{{MTIME}}"
+  etag: W/"19-{{MTIME}}"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
@@ -16,7 +16,7 @@ GET /assets/app-{{HASH}}.js
   content-encoding: br
   content-length: 23
   content-type: text/javascript;charset=utf-8
-  etag: "n-{{MTIME}}-br"
+  etag: W/"n-{{MTIME}}-br"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
@@ -28,7 +28,7 @@ GET /assets/app-{{HASH}}.js
   content-encoding: gzip
   content-length: 33
   content-type: text/javascript;charset=utf-8
-  etag: "x-{{MTIME}}-gzip"
+  etag: W/"x-{{MTIME}}-gzip"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
@@ -40,7 +40,7 @@ GET /assets/style-{{HASH}}.css
   content-encoding: gzip
   content-length: 24
   content-type: text/css;charset=utf-8
-  etag: "o-{{MTIME}}-gzip"
+  etag: W/"o-{{MTIME}}-gzip"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
@@ -52,7 +52,7 @@ GET /assets/style-{{HASH}}.css
   content-encoding: gzip
   content-length: 24
   content-type: text/css;charset=utf-8
-  etag: "o-{{MTIME}}-gzip"
+  etag: W/"o-{{MTIME}}-gzip"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
@@ -63,7 +63,7 @@ GET /site.css
   cache-control: no-cache
   content-length: 18
   content-type: text/css;charset=utf-8
-  etag: "i-{{MTIME}}"
+  etag: W/"i-{{MTIME}}"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
@@ -73,7 +73,7 @@ GET /assets/hero-carousel.js
   cache-control: no-cache
   content-length: 18
   content-type: text/javascript;charset=utf-8
-  etag: "i-{{MTIME}}"
+  etag: W/"i-{{MTIME}}"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
@@ -83,7 +83,7 @@ GET /sw.js
   cache-control: no-cache
   content-length: 38
   content-type: text/javascript;charset=utf-8
-  etag: "12-{{MTIME}}"
+  etag: W/"12-{{MTIME}}"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
@@ -94,40 +94,40 @@ GET /logo.png
   cache-control: no-cache
   content-length: 21
   content-type: image/png
-  etag: "l-{{MTIME}}"
+  etag: W/"l-{{MTIME}}"
   last-modified: {{HTTP_DATE}}
 
 ### revalidation on the identity etag
 GET /assets/app-{{HASH}}.js
-  if-none-match: "19-{{MTIME}}"
+  if-none-match: W/"19-{{MTIME}}"
 --> 304 (no body)
   cache-control: public, max-age=31536000, immutable
-  etag: "19-{{MTIME}}"
+  etag: W/"19-{{MTIME}}"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
 ### revalidation on the br etag while negotiating br
 GET /assets/app-{{HASH}}.js
   accept-encoding: br
-  if-none-match: "n-{{MTIME}}-br"
+  if-none-match: W/"n-{{MTIME}}-br"
 --> 304 (no body)
   cache-control: public, max-age=31536000, immutable
   content-encoding: br
   content-type: text/javascript;charset=utf-8
-  etag: "n-{{MTIME}}-br"
+  etag: W/"n-{{MTIME}}-br"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
 ### the identity etag cannot revalidate the br representation
 GET /assets/app-{{HASH}}.js
   accept-encoding: br
-  if-none-match: "19-{{MTIME}}"
+  if-none-match: W/"19-{{MTIME}}"
 --> 200
   cache-control: public, max-age=31536000, immutable
   content-encoding: br
   content-length: 23
   content-type: text/javascript;charset=utf-8
-  etag: "n-{{MTIME}}-br"
+  etag: W/"n-{{MTIME}}-br"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
 
@@ -136,6 +136,6 @@ GET /assets/app-{{HASH}}.js
   if-modified-since: {{HTTP_DATE}}
 --> 304 (no body)
   cache-control: public, max-age=31536000, immutable
-  etag: "19-{{MTIME}}"
+  etag: W/"19-{{MTIME}}"
   last-modified: {{HTTP_DATE}}
   vary: Accept-Encoding
