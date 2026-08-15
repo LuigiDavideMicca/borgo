@@ -487,13 +487,27 @@ export function portHolder(d: DoctorEnv, port: number): { pid: string; name: str
   return pid && /^\d+$/.test(pid) ? { pid, name } : null;
 }
 
-// the processes `borgo dev` and `borgo start` are made of: the bun front
-// server, and the go api binary, which is `api` in dev (.borgo/api) and
-// dist/api in a build. lsof truncates long command names, so these are
-// compared as the short image names both platforms report.
+// the images `borgo dev` and `borgo start` run under: the bun front server,
+// and the go api binary, which is `api` in dev (.borgo/api) and dist/api in a
+// build. lsof truncates long command names, so these are compared as the short
+// image names both platforms report.
 const OWN_IMAGES = new Set(["bun", "api", "borgo"]);
 
-export function isOwnProcess(image: string): boolean {
+/**
+ * Whether the holder of a port *could* be one of ours, by image name alone.
+ *
+ * It cannot be more than that, and the old name (`isOwnProcess`) claimed it
+ * was. Every bun on the machine is called bun: a scratch script holding :3000
+ * matched, doctor called it "in use by borgo itself", filed it as a note and
+ * exited 0 - on a machine where `borgo dev` cannot bind. The one command that
+ * exists to say what is in the way said nothing was.
+ *
+ * What a port check verifies is that the port is taken and which image took
+ * it. It does not verify who started that image, so nothing downstream may
+ * assert it: this decides which *advice* to print, never whether the occupied
+ * port counts.
+ */
+export function looksLikeOwnImage(image: string): boolean {
   const base = image.replaceAll("\\", "/").split("/").pop() ?? image;
   return OWN_IMAGES.has(base.toLowerCase().replace(/\.exe$/, ""));
 }
@@ -506,25 +520,57 @@ export async function checkPort(d: DoctorEnv, port: number, label: string, envVa
     return { name, ok: false, detail: "in use", fix: `free it, or set ${envVar} to another port` };
   }
   const kill = d.platform === "win32" ? `taskkill /F /PID ${holder.pid}` : `kill ${holder.pid}`;
-  // doctor is what you run *while* something is off, which usually means with
-  // `borgo dev` up: a port held by borgo's own processes is the app running,
-  // not a broken machine, and failing red and exiting 1 over it made the one
-  // command meant to diagnose the problem report a problem of its own.
-  if (isOwnProcess(holder.name)) {
-    return {
-      name,
-      ok: false,
-      info: true,
-      detail: `in use by borgo itself ${g.dot} ${holder.name} (pid ${holder.pid})`,
-      fix: `nothing to fix if that is your own borgo ${g.dot} a leftover from a killed run: ${kill}`,
-    };
-  }
+  // an occupied port is a failure whoever holds it, because `borgo dev` cannot
+  // bind it either way. Recognising the image is worth a line of advice and
+  // nothing else - printed as the condition it is ("if that is your own"),
+  // never as a fact about a process doctor never identified.
+  const advice = looksLikeOwnImage(holder.name)
+    ? `nothing to fix if that is your own borgo ${g.dot} otherwise ${kill}`
+    : kill;
   return {
     name,
     ok: false,
     detail: `in use by ${holder.name} (pid ${holder.pid})`,
-    fix: `${kill} ${g.dot} or set ${envVar} to another port`,
+    fix: `${advice} ${g.dot} or set ${envVar} to another port`,
   };
+}
+
+/**
+ * The port a variable asks for, or null when it does not name one.
+ *
+ * `Number(d.env.PORT || 3000)` was handed straight to net.listen, so `PORT=abc`
+ * did not print "port NaN" - it threw ERR_INVALID_ARG_VALUE out of doctor and
+ * killed the run with a stack trace, and `PORT=70000` did the same with a
+ * RangeError. A diagnostic dying on the environment it was asked to diagnose
+ * reports nothing at all.
+ *
+ * 0 is refused with them: it binds, so the check read "port 0 free", but it
+ * names no port - `borgo dev` passes it through and then waits forever on
+ * localhost:0 for a server that bound something random.
+ */
+export function resolvePort(raw: string | undefined, fallback: number): number | null {
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+}
+
+export async function checkPortSetting(
+  d: DoctorEnv,
+  envVar: string,
+  fallback: number,
+  label: string,
+): Promise<Check> {
+  const raw = d.env[envVar];
+  const port = resolvePort(raw, fallback);
+  if (port === null) {
+    return {
+      name: `port (${label})`,
+      ok: false,
+      detail: `${envVar} is ${JSON.stringify(raw)}, which is not a port between 1 and 65535`,
+      fix: `set ${envVar} to a port number, or unset it to use ${fallback}`,
+    };
+  }
+  return checkPort(d, port, label, envVar);
 }
 
 export function checkApiBinary(d: DoctorEnv): Check {
@@ -537,12 +583,30 @@ export function checkApiBinary(d: DoctorEnv): Check {
   // report a false ETXTBSY "busy")
   if (d.platform !== "win32") return { name, ok: true, detail: `${bin} swappable` };
   if (d.openForWrite(bin) === "busy") {
-    const kill = d.platform === "win32" ? `taskkill /F /IM ${image}` : "pkill -x api";
+    // What the probe establishes is that the file will not open for writing
+    // right now. Not what holds it: openForWrite calls every error but ENOENT
+    // "busy", so an antivirus, a sync client, a backup agent and a lost write
+    // permission all arrive here looking exactly like a running api.
+    //
+    // It used to read `locked by a running "api" process, dev cannot swap in
+    // a new build`, and both halves went past that evidence. The second was
+    // false in the commonest case: during a healthy `borgo dev` the holder is
+    // dev's own api, which dev kills before the rename and then retries for
+    // two seconds - so doctor printed red and exited 1 over a session that
+    // was working. Windows only by the guard above, so there is no other
+    // platform to branch on.
+    //
+    // A note, not a failure, and for the reason opposite to the ports above:
+    // there an occupied port stops `borgo dev` whoever holds it, so the
+    // verified fact is itself the failure. Here the verified fact stops
+    // nothing on its own, and whether it stops anything at all is exactly
+    // what this check cannot see.
     return {
       name,
       ok: false,
-      detail: `${bin} is locked by a running "api" process, dev cannot swap in a new build`,
-      fix: kill,
+      info: true,
+      detail: `${bin} cannot be opened for writing`,
+      fix: `nothing to fix if borgo dev is running ${g.dot} otherwise something still holds it: taskkill /F /IM ${image}`,
     };
   }
   return { name, ok: true, detail: `${bin} swappable` };
@@ -618,8 +682,6 @@ export function checkDeps(d: DoctorEnv): Check | null {
 }
 
 export async function runChecks(d: DoctorEnv): Promise<Check[]> {
-  const port = Number(d.env.PORT || 3000);
-  const apiPort = Number(d.env.API_PORT || 3501);
   const results: Array<Check | null> = [
     // toolchain
     checkBun(d),
@@ -629,8 +691,8 @@ export async function runChecks(d: DoctorEnv): Promise<Check[]> {
     checkNode(d),
     checkDocker(d),
     // machine
-    await checkPort(d, port, "front", "PORT"),
-    await checkPort(d, apiPort, "api", "API_PORT"),
+    await checkPortSetting(d, "PORT", 3000, "front"),
+    await checkPortSetting(d, "API_PORT", 3501, "api"),
     checkDisk(d),
     // project
     checkApiBinary(d),

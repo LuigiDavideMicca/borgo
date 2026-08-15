@@ -90,7 +90,7 @@ Fourteen checks, in three groups. A check that has nothing to say about your app
 | port 3000 (front) | machine | `PORT` already in use, naming the process and its pid |
 | port 3501 (api) | machine | `API_PORT` already in use, same |
 | disk space | machine | less free space than a build wants |
-| api binary | project | a stale API process holding `.borgo/api.exe` so dev cannot swap a new build in |
+| api binary | project | `.borgo/api.exe` not opening for writing — a running API, an antivirus, a sync client, a lost permission. A note, not a failure: `dev` kills its own API before the rename and retries |
 | api types | project | `.borgo/api-types.d.ts` missing, or stale against your `api/*.go` |
 | node_modules | project | missing or not installed |
 | app deps | project | `borgo-framework`, `react` and `react-dom` present and consistent, and `go.mod` carrying the `borgogen` tool directive |

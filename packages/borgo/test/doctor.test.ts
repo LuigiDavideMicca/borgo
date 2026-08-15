@@ -15,13 +15,15 @@ import {
   checkNodeModules,
   checkPlaywright,
   checkPort,
+  checkPortSetting,
   checkWritable,
   isFailure,
-  isOwnProcess,
+  looksLikeOwnImage,
   parseNetstatPid,
   parseVersion,
   portHolder,
   realEnv,
+  resolvePort,
   runChecks,
   versionAtLeast,
   type DoctorEnv,
@@ -536,49 +538,49 @@ describe("ports", () => {
     expect(r.ok).toBe(true);
   });
 
+  const heldBy = (image: string) =>
+    fakeEnv({
+      platform: "win32",
+      isPortFree: async () => false,
+      exec: (cmd) =>
+        cmd[0] === "netstat"
+          ? { code: 0, out: netstat }
+          : { code: 0, out: `"${image}","4321","Console","1","10,000 K"` },
+    });
+
   test("busy port names the holder on windows", async () => {
-    const r = await checkPort(
-      fakeEnv({
-        platform: "win32",
-        isPortFree: async () => false,
-        exec: (cmd) =>
-          cmd[0] === "netstat"
-            ? { code: 0, out: netstat }
-            : { code: 0, out: '"api.exe","4321","Console","1","10,000 K"' },
-      }),
-      3000,
-      "front",
-      "PORT",
-    );
+    const r = await checkPort(heldBy("api.exe"), 3000, "front", "PORT");
     expect(r.ok).toBe(false);
     expect(r.detail).toContain("api.exe");
     expect(r.detail).toContain("4321");
     expect(r.fix).toContain("taskkill /F /PID 4321");
-    // the holder is borgo's own api binary, so the advice is not "move your
-    // port" - it is "that is probably you, left over from a killed run"
+    // the image is one borgo runs under, so the advice says so - as a
+    // condition the reader resolves, not as a fact doctor established
     expect(r.fix).toContain("your own borgo");
-    // without info the wording is identical and borgo doctor exits 1 while
-    // borgo dev is up
-    expect(r.info).toBe(true);
-    expect(isFailure(r)).toBe(false);
+  });
+
+  /**
+   * The measured case, on a real machine: `bun some-script.ts` holding :3000
+   * was reported "in use by borgo itself - bun.exe (pid 4284)" and doctor
+   * exited 0, while `borgo dev` could not bind. Every bun is called bun, so
+   * the image name never carried the identity the message claimed.
+   *
+   * A diagnostic must not assert more than it verified. It verified that the
+   * port is taken and by which image; both of those are said, and neither is
+   * turned into "that is us, carry on".
+   */
+  test("a bun that is not borgo is reported as a bun, and counts", async () => {
+    const r = await checkPort(heldBy("bun.exe"), 3000, "front", "PORT");
+    expect(isFailure(r)).toBe(true);
+    expect(r.info).toBeUndefined();
+    expect(r.detail).toBe("in use by bun.exe (pid 4321)");
+    expect(r.detail).not.toContain("borgo itself");
   });
 
   // a neighbouring project's binary, sharing a substring with ours on purpose:
   // misclassified as a note, doctor reads healthy while nothing can start
   test("a port held by a stranger is a failure, not a note", async () => {
-    const r = await checkPort(
-      fakeEnv({
-        platform: "win32",
-        isPortFree: async () => false,
-        exec: (cmd) =>
-          cmd[0] === "netstat"
-            ? { code: 0, out: netstat }
-            : { code: 0, out: '"myapi.exe","4321","Console","1","10,000 K"' },
-      }),
-      3000,
-      "front",
-      "PORT",
-    );
+    const r = await checkPort(heldBy("myapi.exe"), 3000, "front", "PORT");
     expect(isFailure(r)).toBe(true);
     expect(r.info).toBeUndefined();
     expect(r.detail).toContain("in use by myapi.exe (pid 4321)");
@@ -636,14 +638,48 @@ describe("ports", () => {
   });
 
   // the short image names lsof leaves after truncation, matched exactly: on a
-  // substring the neighbours below read as ours and doctor exits 0
-  test("isOwnProcess knows borgo's processes from the ones that resemble them", () => {
+  // substring the neighbours below would read as ours too
+  test("looksLikeOwnImage separates borgo's images from the ones that resemble them", () => {
     for (const own of ["bun", "api", "borgo", "api.exe", "BUN.EXE", "/usr/local/bin/bun", "C:\\app\\.borgo\\api.exe"]) {
-      expect(`${own}: ${isOwnProcess(own)}`).toBe(`${own}: true`);
+      expect(`${own}: ${looksLikeOwnImage(own)}`).toBe(`${own}: true`);
     }
     for (const other of ["myapi.exe", "chat-api", "apiserver", "rapid.exe", "bunny.exe", "borgo-proxy", "nginx.exe"]) {
-      expect(`${other}: ${isOwnProcess(other)}`).toBe(`${other}: false`);
+      expect(`${other}: ${looksLikeOwnImage(other)}`).toBe(`${other}: false`);
     }
+  });
+
+  /**
+   * Measured by running it: `PORT=abc borgo doctor` threw
+   * ERR_INVALID_ARG_VALUE out of net.listen and printed a stack trace instead
+   * of a report; `PORT=70000` threw a RangeError; `PORT=0` printed
+   * "port 0 free", which names no port `borgo dev` can be found on.
+   */
+  test("resolvePort refuses what is not a port instead of handing it to listen", () => {
+    expect(resolvePort(undefined, 3000)).toBe(3000);
+    expect(resolvePort("", 3000)).toBe(3000);
+    expect(resolvePort("8080", 3000)).toBe(8080);
+    expect(resolvePort("65535", 3000)).toBe(65535);
+    for (const bad of ["abc", "3000abc", "0", "-1", "70000", "3000.5", " ", "NaN"]) {
+      expect(`${bad}: ${resolvePort(bad, 3000)}`).toBe(`${bad}: null`);
+    }
+  });
+
+  test("an unusable PORT is reported, not thrown", async () => {
+    const r = await checkPortSetting(
+      fakeEnv({ env: { PORT: "abc" }, isPortFree: async () => { throw new Error("must not bind"); } }),
+      "PORT",
+      3000,
+      "front",
+    );
+    expect(isFailure(r)).toBe(true);
+    expect(r.detail).toContain('PORT is "abc"');
+    expect(r.fix).toContain("unset it to use 3000");
+  });
+
+  test("a usable PORT is checked as that port", async () => {
+    const r = await checkPortSetting(fakeEnv({ env: { PORT: "8080" } }), "PORT", 3000, "front");
+    expect(r.name).toBe("port 8080 (front)");
+    expect(r.ok).toBe(true);
   });
 
   test("portHolder parses lsof output", () => {
@@ -661,7 +697,19 @@ describe("checkApiBinary", () => {
     expect(checkApiBinary(fakeEnv()).ok).toBe(true);
   });
 
-  test("locked binary fails with the kill command", () => {
+  /**
+   * Measured by running it: with a healthy `borgo dev` up, this check printed
+   * red and doctor exited 1 - `.borgo/api.exe is locked by a running "api"
+   * process, dev cannot swap in a new build`. Both halves went past the
+   * evidence. `openForWrite` calls every error but ENOENT "busy", so the
+   * holder is not established; and dev kills its own api before the rename
+   * and retries twenty times, so "cannot swap" is false in precisely the
+   * state that produces the message.
+   *
+   * The check may say the file would not open. It may not say who has it or
+   * what that prevents.
+   */
+  test("a binary that will not open reports that, and nothing beyond it", () => {
     const r = checkApiBinary(
       fakeEnv({
         platform: "win32",
@@ -670,7 +718,24 @@ describe("checkApiBinary", () => {
       }),
     );
     expect(r.ok).toBe(false);
-    expect(r.fix).toBe("taskkill /F /IM api.exe");
+    expect(r.detail).toBe(".borgo/api.exe cannot be opened for writing");
+    expect(r.detail).not.toContain("process");
+    expect(r.detail).not.toContain("cannot swap");
+    expect(r.fix).toContain("taskkill /F /IM api.exe");
+  });
+
+  // the port checks report what verifiably blocks a dev session; this one
+  // verified only that a file would not open, which stops nothing by itself
+  test("a locked binary is a note, so it does not fail a working dev session", () => {
+    const r = checkApiBinary(
+      fakeEnv({
+        platform: "win32",
+        exists: (p) => p === ".borgo/api.exe",
+        openForWrite: () => "busy",
+      }),
+    );
+    expect(r.info).toBe(true);
+    expect(isFailure(r)).toBe(false);
   });
 
   // off windows the check returns before consulting openForWrite, so a linux
