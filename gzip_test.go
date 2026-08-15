@@ -423,6 +423,22 @@ func BenchmarkGzipLargeBodyCompressed(b *testing.B) { benchGzipLargeBody(b, "gzi
 
 func BenchmarkGzipLargeBodyIdentity(b *testing.B) { benchGzipLargeBody(b, "identity") }
 
+// the length check costs one add per Write, and every other benchmark here
+// writes its whole body in one call, where one add per response is unmeasurable.
+// A handler streaming a megabyte in kilobyte writes pays it a thousand times.
+func benchGzipManyWrites(b *testing.B, acceptEncoding string) {
+	chunk := bytes.Repeat([]byte("borgo benchmark payload "), 43)[:1<<10]
+	benchGzip(b, acceptEncoding, func(w http.ResponseWriter) {
+		for range 1 << 10 {
+			w.Write(chunk)
+		}
+	})
+}
+
+func BenchmarkGzipManyWritesCompressed(b *testing.B) { benchGzipManyWrites(b, "gzip") }
+
+func BenchmarkGzipManyWritesIdentity(b *testing.B) { benchGzipManyWrites(b, "identity") }
+
 // CI runs tests, not benchmarks, so the flat cost above is asserted here too:
 // the guard is the growth from 64 KB to 1 MB, which is ~0 when the body is
 // streamed and ~1 MB when it is copied.
@@ -702,6 +718,234 @@ func TestGzipDeclaresNoEncodingWhereNoBodyCanBe(t *testing.T) {
 				if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(len(big)) {
 					t.Errorf("Content-Length = %q, want %d", got, len(big))
 				}
+			}
+		})
+	}
+}
+
+// contentLengthLog serves one request and returns only what the middleware said
+// about Content-Length, so the two encodings can be compared line for line.
+func contentLengthLog(t *testing.T, method, acceptEncoding string, h http.HandlerFunc) string {
+	t.Helper()
+	var out bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&out)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(flags)
+	}()
+
+	req := httptest.NewRequest(method, "/api/test", nil)
+	if acceptEncoding != "" {
+		req.Header.Set("Accept-Encoding", acceptEncoding)
+	}
+	recoverMiddleware(gzipMiddleware(h)).ServeHTTP(httptest.NewRecorder(), req)
+
+	var said []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "borgo: Content-Length") {
+			said = append(said, line)
+		}
+	}
+	return strings.Join(said, "\n")
+}
+
+// A handler whose body is not the size it declared is a bug the two encodings
+// answer differently and neither answers well: identity ships the declared
+// length and the client reads "unexpected EOF", gzip drops the length - it
+// describes uncompressed bytes - and repairs the bug in silence. The developer
+// whose browser sends Accept-Encoding: gzip never sees what the health check,
+// the proxy and curl see, which is why such a handler survives. Neither path
+// can be made to send a correct response, so both are made to say the same
+// thing, and the line has to be identical or the asymmetry just moves.
+//
+// The other half of the table is the half that matters: this is new noise in
+// everyone's log, and every response that is merely unusual - streamed,
+// bodyless, interrupted, written in pieces - has to pass without a word.
+func TestContentLengthMismatchIsLoggedWhateverTheEncoding(t *testing.T) {
+	const size = 4000
+	body := strings.Repeat("x", size)
+	declare := func(w http.ResponseWriter, n int) {
+		w.Header().Set("Content-Length", strconv.Itoa(n))
+	}
+
+	cases := []struct {
+		name   string
+		method string
+		h      http.HandlerFunc
+		want   string
+	}{
+		{"no Content-Length", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(body))
+		}, ""},
+		{"Content-Length right", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			w.Write([]byte(body))
+		}, ""},
+		{"Content-Length too small", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size-10)
+			w.Write([]byte(body))
+		}, "borgo: Content-Length 3990 but wrote 4000 bytes"},
+		{"Content-Length too large", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size+1000)
+			w.Write([]byte(body))
+		}, "borgo: Content-Length 5000 but wrote 4000 bytes"},
+		{"zero with a body", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, 0)
+			w.Write([]byte(body))
+		}, "borgo: Content-Length 0 but wrote 4000 bytes"},
+		{"zero without a body", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, 0)
+			w.WriteHeader(http.StatusOK)
+		}, ""},
+		{"declared, then flushed half way", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			w.Write([]byte(body[:size/2]))
+			w.(http.Flusher).Flush()
+			w.Write([]byte(body[size/2:]))
+		}, ""},
+		// net/http drops the body of these three, so the counter reads zero
+		// against a length that correctly describes the response the client
+		// asked about - a 304 carries the headers its 200 would (RFC 9110
+		// 15.4.5) and a HEAD answers for the GET it stands in for
+		{"declared on a 204", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			w.WriteHeader(http.StatusNoContent)
+		}, ""},
+		{"declared on a 304", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			w.WriteHeader(http.StatusNotModified)
+		}, ""},
+		{"declared on a HEAD", http.MethodHead, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			w.WriteHeader(http.StatusOK)
+		}, ""},
+		// a panicking handler stops mid-body by definition; the panic is
+		// already logged, and the short body is its consequence, not a defect
+		// of its own
+		{"declared, then panic inside the buffer", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			w.Write([]byte(body[:100]))
+			panic("boom")
+		}, ""},
+		{"declared, then panic past the buffer", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			w.Write([]byte(body[:size/2]))
+			panic("boom")
+		}, ""},
+		{"declared, written in ten writes", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			for i := range 10 {
+				w.Write([]byte(body[i*size/10 : (i+1)*size/10]))
+			}
+		}, ""},
+		// the same ten writes one chunk short: without this the counter could
+		// be reading only the first Write and the row above would still pass
+		{"declared, ten writes one short", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			for i := range 9 {
+				w.Write([]byte(body[i*size/10 : (i+1)*size/10]))
+			}
+		}, "borgo: Content-Length 4000 but wrote 3600 bytes"},
+		// net/http rejects and logs this one itself; a second complaint about
+		// it would say nothing the first did not
+		{"Content-Length not a number", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "banana")
+			w.Write([]byte(body))
+		}, ""},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			identity := contentLengthLog(t, c.method, "", c.h)
+			compressed := contentLengthLog(t, c.method, "gzip", c.h)
+
+			if identity != compressed {
+				t.Errorf("what the log says depends on Accept-Encoding:\n identity %q\n gzip     %q",
+					identity, compressed)
+			}
+			if identity != c.want {
+				t.Errorf("identity log = %q, want %q", identity, c.want)
+			}
+			if compressed != c.want {
+				t.Errorf("gzip log = %q, want %q", compressed, c.want)
+			}
+		})
+	}
+}
+
+// failingWriter stops taking bytes part way through, the way a connection does
+// when the client hangs up.
+type failingWriter struct {
+	header http.Header
+	limit  int
+	taken  int
+}
+
+func (f *failingWriter) Header() http.Header { return f.header }
+func (f *failingWriter) WriteHeader(int)     {}
+
+func (f *failingWriter) Write(p []byte) (int, error) {
+	if f.taken >= f.limit {
+		return 0, io.ErrClosedPipe
+	}
+	n := min(len(p), f.limit-f.taken)
+	f.taken += n
+	if n < len(p) {
+		return n, io.ErrClosedPipe
+	}
+	return n, nil
+}
+
+// The third guard, and the one worth the most: a handler that checks Write and
+// returns when it fails is the well-behaved one - io.Copy and http.ServeContent
+// both do - so every client that cancels a download mid-flight leaves a body
+// shorter than its declared length through no fault of the handler. Reported,
+// that would put a line in the log for every cancelled download and bury the
+// bug this check exists to surface.
+func TestShortBodyAfterAWriteErrorIsNotReportedOnEitherEncoding(t *testing.T) {
+	const size = 64 << 10
+	// incompressible, so the failure reaches the handler on the gzip path too
+	// rather than sitting in the deflate window
+	body := make([]byte, size)
+	for i, s := 0, uint32(1); i < len(body); i++ {
+		s = s*1664525 + 1013904223
+		body[i] = byte(s >> 24)
+	}
+
+	for _, ae := range []string{"", "gzip"} {
+		t.Run("Accept-Encoding "+ae, func(t *testing.T) {
+			var out bytes.Buffer
+			flags := log.Flags()
+			log.SetOutput(&out)
+			log.SetFlags(0)
+			defer func() {
+				log.SetOutput(os.Stderr)
+				log.SetFlags(flags)
+			}()
+
+			var sent int
+			req := httptest.NewRequest(http.MethodGet, "/api/download", nil)
+			if ae != "" {
+				req.Header.Set("Accept-Encoding", ae)
+			}
+			gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", strconv.Itoa(size))
+				for sent < size {
+					n, err := w.Write(body[sent : sent+1024])
+					sent += n
+					if err != nil {
+						return
+					}
+				}
+			})).ServeHTTP(&failingWriter{header: http.Header{}, limit: 4 * gzipMinBytes}, req)
+
+			if sent >= size {
+				t.Fatalf("the handler sent all %d bytes: the write never failed, so this proves nothing", sent)
+			}
+			if strings.Contains(out.String(), "borgo: Content-Length") {
+				t.Errorf("a cancelled download was reported as a handler bug: %q", out.String())
 			}
 		})
 	}

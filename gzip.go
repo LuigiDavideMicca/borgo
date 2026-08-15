@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -43,6 +44,7 @@ func gzipMiddleware(next http.Handler) http.Handler {
 		accept := strings.Join(r.Header.Values("Accept-Encoding"), ",")
 		gw := &gzipResponseWriter{
 			rw:       w,
+			declared: -1,
 			compress: acceptsGzip(accept),
 			// net/http discards a HEAD body, so there are no bytes to compress
 			// and none to describe: declaring an encoding over nothing, and
@@ -168,10 +170,13 @@ type gzipResponseWriter struct {
 	header      http.Header // snapshot taken at WriteHeader, written at commit
 	buf         []byte
 	gz          *gzip.Writer
-	compress    bool // the client accepts gzip; only what a full buffer becomes
-	bodyless    bool // HEAD: net/http drops the body, so there is none to encode
+	declared    int64 // Content-Length the handler set, -1 when it set none
+	written     int64 // bytes the handler passed to Write
+	compress    bool  // the client accepts gzip; only what a full buffer becomes
+	bodyless    bool  // no body can exist: HEAD, 204, 304
 	passthrough bool
 	complete    bool
+	writeFailed bool // the connection refused bytes; a short body is not the handler's
 }
 
 func (g *gzipResponseWriter) Header() http.Header { return g.rw.Header() }
@@ -203,10 +208,31 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 	g.status = status
 	h := g.rw.Header()
 	g.header = maps.Clone(h)
-	if g.bodyless || bodylessStatus(status) ||
+	// read the length here, before startGzip deletes it: that deletion is what
+	// makes a wrong one invisible on the compressed path
+	g.declared = declaredLength(h)
+	g.bodyless = g.bodyless || bodylessStatus(status)
+	if g.bodyless ||
 		strings.HasPrefix(h.Get("Content-Type"), "text/event-stream") || h.Get("Content-Encoding") != "" {
 		g.startPassthrough()
 	}
+}
+
+// declaredLength reads the Content-Length the handler set, or -1 for none. A
+// length that is not a number is also -1: net/http rejects and logs that one
+// itself, and a second complaint about it would say nothing new.
+func declaredLength(h http.Header) int64 {
+	// indexed rather than Get: the key is already canonical, and this is the
+	// same lookup net/http makes when it decides what to put on the wire
+	v := h["Content-Length"]
+	if len(v) == 0 {
+		return -1
+	}
+	n, err := strconv.ParseInt(v[0], 10, 64)
+	if err != nil || n < 0 {
+		return -1
+	}
+	return n
 }
 
 // bodylessStatus reports the statuses that carry no body, matching net/http's
@@ -261,11 +287,12 @@ func (g *gzipResponseWriter) Write(p []byte) (int, error) {
 	if g.status == 0 {
 		g.WriteHeader(http.StatusOK)
 	}
+	g.written += int64(len(p))
 	if g.passthrough {
-		return g.rw.Write(p)
+		return g.noteWrite(g.rw.Write(p))
 	}
 	if g.gz != nil {
-		return g.gz.Write(p)
+		return g.noteWrite(g.gz.Write(p))
 	}
 	// buffer only what the decision needs. Appending the whole slice before
 	// testing the threshold copied the entire body of a handler that writes it
@@ -295,9 +322,18 @@ func (g *gzipResponseWriter) writeCommitted(p []byte) (int, error) {
 		return 0, nil
 	}
 	if g.gz != nil {
-		return g.gz.Write(p)
+		return g.noteWrite(g.gz.Write(p))
 	}
-	return g.rw.Write(p)
+	return g.noteWrite(g.rw.Write(p))
+}
+
+// noteWrite remembers that the destination refused bytes, which is the one way
+// a body can come up short without the handler being at fault.
+func (g *gzipResponseWriter) noteWrite(n int, err error) (int, error) {
+	if err != nil {
+		g.writeFailed = true
+	}
+	return n, err
 }
 
 // Flush lets streamed handlers deliver progressively: an active gzip writer
@@ -305,6 +341,7 @@ func (g *gzipResponseWriter) writeCommitted(p []byte) (int, error) {
 func (g *gzipResponseWriter) Flush() {
 	if g.status == 0 {
 		g.status = http.StatusOK
+		g.declared = declaredLength(g.rw.Header())
 	}
 	if g.gz != nil {
 		g.gz.Flush()
@@ -332,7 +369,7 @@ func (g *gzipResponseWriter) startGzip() {
 	} else {
 		g.gz = gzip.NewWriter(g.rw)
 	}
-	g.gz.Write(g.buf)
+	g.noteWrite(g.gz.Write(g.buf))
 	g.buf = nil
 }
 
@@ -341,7 +378,7 @@ func (g *gzipResponseWriter) startPassthrough() {
 	g.commitHeader()
 	g.rw.WriteHeader(g.status)
 	if len(g.buf) > 0 {
-		g.rw.Write(g.buf)
+		g.noteWrite(g.rw.Write(g.buf))
 		g.buf = nil
 	}
 }
@@ -362,6 +399,7 @@ func (g *gzipResponseWriter) finish() {
 		g.buf = nil
 		g.passthrough = true
 	}()
+	g.reportLengthMismatch()
 	if g.gz != nil {
 		if err := g.gz.Close(); err != nil {
 			log.Printf("borgo: gzip close: %v", err)
@@ -391,4 +429,36 @@ func (g *gzipResponseWriter) finish() {
 	if len(g.buf) > 0 {
 		g.rw.Write(g.buf)
 	}
+}
+
+// reportLengthMismatch names a handler whose body is not the size it promised.
+//
+// The two encodings cannot be made to answer that handler alike: identity ships
+// the declared length and net/http then truncates or stalls the body, which the
+// client reads as "unexpected EOF", while startGzip has to delete the header -
+// it describes the uncompressed body and would be wrong over compressed bytes -
+// and so repairs the same bug in silence. Aligning them on the wire would mean
+// sending one client a response we know to be wrong. What is left is to stop
+// the silence: the handler is at fault either way, and this is the same line on
+// both paths, so the developer whose browser asks for gzip sees what the health
+// check and curl have been seeing.
+//
+// It says nothing about a response that is merely unusual. A body that no
+// Content-Length described, one that matched, one on a status that carries no
+// body at all (net/http drops those, so the counter would read 0 against a
+// length that was right about the body it stood for), one cut short by a panic,
+// and one cut short because the connection stopped taking bytes are all
+// correct, or at least not this defect, and none of them is worth a line.
+func (g *gzipResponseWriter) reportLengthMismatch() {
+	if g.declared < 0 || g.written == g.declared || g.bodyless || !g.complete {
+		return
+	}
+	// a body that stopped short of a write error is the connection's doing; the
+	// handler that checks Write and returns - io.Copy, http.ServeContent - is
+	// the well-behaved one, and every client that hangs up mid-download would
+	// otherwise be reported as an application bug
+	if g.writeFailed && g.written < g.declared {
+		return
+	}
+	log.Printf("borgo: Content-Length %d but wrote %d bytes", g.declared, g.written)
 }
