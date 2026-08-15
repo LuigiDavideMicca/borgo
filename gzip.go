@@ -7,7 +7,6 @@ import (
 	"maps"
 	"net/http"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -23,6 +22,14 @@ var gzipWriters sync.Pool
 // gzipMiddleware compresses responses when the client accepts gzip. Small
 // responses stay identity, event streams and pre-encoded responses pass
 // through, and Flush keeps working so SSE and streamed handlers are unhurt.
+//
+// Every request goes through the writer, gzip or not. Accept-Encoding decides
+// only what the committed bytes look like, never when the commit happens: with
+// the identity path writing straight to the connection, the same handler
+// panicking over the same body answered 500 to a client that asked for gzip
+// and a truncated 200 to one that did not - the same defect twice, visible
+// only to half the clients, which is why it went unnoticed. One writer means
+// one commit point, so the two paths cannot drift apart again.
 func gzipMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// the representation depends on Accept-Encoding whether or not this
@@ -30,11 +37,19 @@ func gzipMiddleware(next http.Handler) http.Handler {
 		// take gzip: an identity response cached without Vary would be served
 		// to gzip-capable clients too
 		w.Header().Set("Vary", "Accept-Encoding")
-		if !acceptsGzip(r.Header.Get("Accept-Encoding")) {
-			next.ServeHTTP(w, r)
-			return
+		// repeated field lines are the same list joined by commas (RFC 9110
+		// 5.3): reading only the first, two lines of "gzip" then "gzip;q=0"
+		// compressed for a client whose second line refused
+		accept := strings.Join(r.Header.Values("Accept-Encoding"), ",")
+		gw := &gzipResponseWriter{
+			rw:       w,
+			compress: acceptsGzip(accept),
+			// net/http discards a HEAD body, so there are no bytes to compress
+			// and none to describe: declaring an encoding over nothing, and
+			// dropping the Content-Length the handler set for the GET it stands
+			// in for, both misdescribe the response the client asked about
+			bodyless: r.Method == http.MethodHead,
 		}
-		gw := &gzipResponseWriter{rw: w}
 		defer gw.finish()
 		next.ServeHTTP(gw, r)
 		// reached only when the handler returned on its own: a panic unwinds
@@ -47,42 +62,91 @@ func gzipMiddleware(next http.Handler) http.Handler {
 // only for codings the header did not name (RFC 9110 12.5.3), so an explicit
 // gzip entry decides on its own: "gzip;q=0, *" is a refusal, and compressing it
 // would ship bytes the client just said it cannot decode.
+//
+// A refusal wins wherever it appears. A list may name the same coding twice
+// ("gzip, gzip;q=0") and stopping at the first entry read the acceptance and
+// missed the refusal behind it - the unsafe direction every time, since the
+// client that said no is the one that cannot decode what we then sent.
 func acceptsGzip(acceptEncoding string) bool {
-	wildcard := false
+	var gzipYes, gzipNo, starYes, starNo bool
 	for _, part := range strings.Split(acceptEncoding, ",") {
 		params := strings.Split(part, ";")
-		name := strings.TrimSpace(params[0])
 		// coding names are case-insensitive (RFC 9110): "GZIP" must compress too
-		gzipNamed := strings.EqualFold(name, "gzip")
-		if !gzipNamed && name != "*" {
-			continue
+		name := strings.TrimSpace(params[0])
+		refused := refusesCoding(params[1:])
+		switch {
+		case strings.EqualFold(name, "gzip"):
+			gzipYes, gzipNo = gzipYes || !refused, gzipNo || refused
+		case name == "*":
+			starYes, starNo = starYes || !refused, starNo || refused
 		}
-		if gzipNamed {
-			return !refusesCoding(params[1:])
-		}
-		wildcard = !refusesCoding(params[1:])
 	}
-	return wildcard
+	switch {
+	case gzipNo:
+		return false
+	case gzipYes:
+		return true
+	case starNo:
+		return false
+	}
+	return starYes
 }
 
-// refusesCoding reports whether a coding's parameters carry a zero quality;
-// any spelling of it (q=0, q=0.0, q=0.00) is a refusal.
+// refusesCoding reports whether a coding's parameters withhold acceptance.
 //
 // The parameter name is matched case-insensitively, like the coding name
 // beside it: RFC 9110 5.6.6 makes parameter names case-insensitive, and
 // "gzip;Q=0" is a client refusing gzip in a spelling no less valid than
 // "gzip;q=0". Matching only the lowercase one compressed a response for a
 // client that had just said it cannot decode it.
+//
+// Every parameter is read, not just the first: "gzip;q=1;q=0" returned on the
+// leading q and never saw the refusal behind it.
 func refusesCoding(params []string) bool {
 	for _, param := range params {
 		name, value, ok := strings.Cut(param, "=")
-		if !ok || !strings.EqualFold(strings.TrimSpace(name), "q") {
+		if !strings.EqualFold(strings.TrimSpace(name), "q") {
 			continue
 		}
-		q, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-		return err == nil && q <= 0
+		// a bare "q" names a quality it never gives, and a q that is not a
+		// quality is not one the client offered: neither is a licence to
+		// compress for a client whose header we could not read
+		if !ok || !positiveQuality(value) {
+			return true
+		}
 	}
 	return false
+}
+
+// positiveQuality reports whether an Accept-Encoding q parameter names a
+// weight above zero. HTTP qvalues are "0[.0-3 digits]" or "1[.up to three
+// zeroes]" (RFC 9110 12.4.2) and nothing else, so they are read here rather
+// than by strconv.ParseFloat, which also accepts Go literal spellings: "q=1_0"
+// parsed as ten and compressed for a client whose header held no number at all,
+// and "q=NaN" survived every "greater than zero" test.
+func positiveQuality(value string) bool {
+	whole, frac, dotted := strings.Cut(strings.TrimSpace(value), ".")
+	if whole != "0" && whole != "1" {
+		return false
+	}
+	if !dotted {
+		return whole == "1"
+	}
+	if len(frac) > 3 {
+		return false
+	}
+	nonZero := false
+	for _, d := range []byte(frac) {
+		if d < '0' || d > '9' {
+			return false
+		}
+		nonZero = nonZero || d != '0'
+	}
+	// "1.5" is not a qvalue; only "1" followed by zeroes is
+	if whole == "1" {
+		return !nonZero
+	}
+	return nonZero
 }
 
 // gzipResponseWriter holds the status and buffers the first kilobyte, so the
@@ -104,6 +168,8 @@ type gzipResponseWriter struct {
 	header      http.Header // snapshot taken at WriteHeader, written at commit
 	buf         []byte
 	gz          *gzip.Writer
+	compress    bool // the client accepts gzip; only what a full buffer becomes
+	bodyless    bool // HEAD: net/http drops the body, so there is none to encode
 	passthrough bool
 	complete    bool
 }
@@ -137,9 +203,19 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 	g.status = status
 	h := g.rw.Header()
 	g.header = maps.Clone(h)
-	if strings.HasPrefix(h.Get("Content-Type"), "text/event-stream") || h.Get("Content-Encoding") != "" {
+	if g.bodyless || bodylessStatus(status) ||
+		strings.HasPrefix(h.Get("Content-Type"), "text/event-stream") || h.Get("Content-Encoding") != "" {
 		g.startPassthrough()
 	}
+}
+
+// bodylessStatus reports the statuses that carry no body, matching net/http's
+// own rule (1xx is handled before this). Compressing them announced an
+// encoding over zero bytes; on a 304 that is not cosmetic, since RFC 9110
+// 15.4.5 has it carry the headers a 200 would and a cache updating its stored
+// entry copies our Content-Encoding onto bytes that were never compressed.
+func bodylessStatus(status int) bool {
+	return status == http.StatusNoContent || status == http.StatusNotModified
 }
 
 // commitHeader restores the WriteHeader-time snapshot into the live header
@@ -158,7 +234,27 @@ func (g *gzipResponseWriter) commitHeader() {
 		clear(h)
 		maps.Copy(h, g.header)
 	}
+	varyAcceptEncoding(h)
 	privateIfCookies(h)
+}
+
+// varyAcceptEncoding keeps our Vary on the response next to whatever the
+// handler put there. The middleware sets it before the handler runs, but a
+// handler that Set or Del'd Vary of its own - "Vary: Cookie" on
+// session-dependent content is ordinary - dropped it, and a compressed body
+// with no Vary: Accept-Encoding is one a shared cache hands to the next client
+// along, which may have no way to decode it. Added, never substituted: the
+// handler's own reasons for varying outlive ours.
+func varyAcceptEncoding(h http.Header) {
+	for _, line := range h.Values("Vary") {
+		for _, field := range strings.Split(line, ",") {
+			field = strings.TrimSpace(field)
+			if field == "*" || strings.EqualFold(field, "Accept-Encoding") {
+				return
+			}
+		}
+	}
+	h.Add("Vary", "Accept-Encoding")
 }
 
 func (g *gzipResponseWriter) Write(p []byte) (int, error) {
@@ -171,11 +267,37 @@ func (g *gzipResponseWriter) Write(p []byte) (int, error) {
 	if g.gz != nil {
 		return g.gz.Write(p)
 	}
-	g.buf = append(g.buf, p...)
-	if len(g.buf) >= gzipMinBytes {
-		g.startGzip()
+	// buffer only what the decision needs. Appending the whole slice before
+	// testing the threshold copied the entire body of a handler that writes it
+	// in one call - a second megabyte allocated per megabyte served, on the
+	// identity path too. Past the decision the bytes go straight out.
+	split := min(len(p), max(gzipMinBytes-len(g.buf), 0))
+	g.buf = append(g.buf, p[:split]...)
+	if len(g.buf) < gzipMinBytes {
+		return len(p), nil
 	}
-	return len(p), nil
+	// the buffer decided: commit here, compressed or not. Both answers commit
+	// at the same byte, so a panic one byte later means the same thing to
+	// either client
+	if g.compress {
+		g.startGzip()
+	} else {
+		g.startPassthrough()
+	}
+	n, err := g.writeCommitted(p[split:])
+	return split + n, err
+}
+
+// writeCommitted sends bytes past the commit point, where the encoding is
+// settled and nothing is buffered any more.
+func (g *gzipResponseWriter) writeCommitted(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if g.gz != nil {
+		return g.gz.Write(p)
+	}
+	return g.rw.Write(p)
 }
 
 // Flush lets streamed handlers deliver progressively: an active gzip writer
@@ -224,7 +346,22 @@ func (g *gzipResponseWriter) startPassthrough() {
 	}
 }
 
+// finish is the single commit policy both encodings obey: a response already
+// committed is truncated, never restated - past the commit point a status can
+// no longer be written, so pretending otherwise would only corrupt what the
+// client already holds. Below the commit point nothing is on the wire, so the
+// response is left uncommitted and the recovery above still owns it.
 func (g *gzipResponseWriter) finish() {
+	// the response is over. Using a ResponseWriter after the handler returns is
+	// already forbidden by net/http, but the leftovers made it worse than
+	// inert: the buffer would be shipped a second time, and with g.gz cleared a
+	// late write opened a fresh gzip stream nobody closes, sending gzip bytes
+	// under no Content-Encoding. Emptied and pinned to passthrough, that write
+	// reaches the connection net/http already refuses and stops there
+	defer func() {
+		g.buf = nil
+		g.passthrough = true
+	}()
 	if g.gz != nil {
 		if err := g.gz.Close(); err != nil {
 			log.Printf("borgo: gzip close: %v", err)
