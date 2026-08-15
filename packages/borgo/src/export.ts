@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
 import { buildAssets, reportBuildFailure } from "./build";
 import { banner, c, fmtMs, g } from "./colors";
+import { CSRF_COOKIE, CSRF_FIELD } from "./index";
 import type { Route } from "./router";
 import { goBinName, runBorgogen } from "./util";
 
@@ -121,9 +122,67 @@ export function outputPath(path: string): string {
 // for every link a pointer merely crossed (prefetch caches the doomed promise).
 // buildDefine turns this into a literal in the bundle, so the whole path is
 // compiled out rather than tried and caught.
+//
+// AND THE CSP GOES OFF, because a csp is a response HEADER. A static host
+// serves the file, not the header borgo would have written, so no policy ever
+// governs an exported page - but the nonce minted for that policy was written
+// into every <script> in the file. Measured on a real dist/site: six documents,
+// six different `nonce="..."`, one per fetch, frozen. A nonce printed in the
+// document, the same for every visitor and permanent, is not a nonce: a
+// `script-src 'nonce-<that>'` allows exactly what an injected script can copy
+// off the page it was injected into. Rendering with no csp means no nonce is
+// minted at all - by react for its suspense scripts either - and the policy is
+// left where a static site can actually have one, in the host's header config.
 export function markStaticExport(env: NodeJS.ProcessEnv = process.env) {
   env.BORGO_STATIC = "1";
+  env.BORGO_CSP = "0";
 }
+
+// A value minted for one request cannot be published as a file. `<CsrfField />`
+// renders the token that has to match a borgo_csrf cookie, and a static host
+// sets no cookies: what ships is one constant string, identical for every
+// visitor, checked against nothing. The form is not weakly protected, it is
+// dead - and a page that ships a dead form looks exactly like a page that works.
+//
+// ASKED OF THE BYTES ABOUT TO BE WRITTEN, NEVER OF THE ROUTE MODULE. A
+// `<CsrfField />` can come from a layout, an island, a conditional or a
+// component three packages deep; the module tells you nothing, and the file is
+// the thing that ships. `<` is escaped in text (react) and in props
+// (scriptJson's <), so a tag can only match a real tag - page content
+// about csrf cannot trip these.
+//
+// `what` names it on the page's own line, which stays short enough to read;
+// `why` is printed once at the end, for the residues actually found.
+export type Residue = { what: string; why: string[] };
+
+const RESIDUE: Array<Residue & { test: RegExp }> = [
+  {
+    test: new RegExp(`<input\\b[^>]*\\bname="${CSRF_FIELD}"`),
+    what: "a <CsrfField /> token",
+    why: [
+      `the token is only ever checked against a ${CSRF_COOKIE} cookie, and a static host sets none: what ships is one constant, and the form is inert`,
+      "<CsrfField /> guards a borgo action, and a static export runs no actions: drop the form, or serve that page with borgo start",
+      `a form posting anywhere else needs no <CsrfField /> ${g.dot} check your layouts too, they render into every page`,
+    ],
+  },
+  {
+    test: /<(?:script|style)\b[^>]*\snonce="/i,
+    what: "a csp nonce",
+    why: [
+      "the header that would name the nonce does not ship with the file, so the value is public, permanent, and allows whatever can read the page",
+      "borgo export renders with no csp for exactly that reason: set the policy on your static host",
+    ],
+  },
+];
+
+// what this document carries that only meant something to the request that
+// produced it; empty when the file can be published as it is
+export function requestResidue(html: string): Residue[] {
+  return RESIDUE.filter((r) => r.test.test(html)).map(({ what, why }) => ({ what, why }));
+}
+
+export const residueMessage = (residue: Residue[]) =>
+  `cannot be exported ${g.dot} it carries ${residue.map((r) => r.what).join(" and ")}`;
 
 const listenFree = () =>
   new Promise<import("node:net").Server>((resolve, reject) => {
@@ -170,6 +229,7 @@ export async function exportSite(): Promise<number> {
   console.log(`\n  ${banner("export")}\n`);
 
   if (!(await runBorgogen())) return 1;
+  const hadCsp = process.env.BORGO_CSP !== undefined;
   markStaticExport();
   try {
     await buildAssets(false);
@@ -270,6 +330,16 @@ export async function exportSite(): Promise<number> {
 
     let written = 0;
     const failed: string[] = [];
+    // pages refused for what they carry, not for failing to render: they get
+    // their own closing note, since the fix is in the page and not in the run
+    const refused: string[] = [];
+    // keyed by `what`, so two pages carrying the same residue explain it once
+    const refusedWhy = new Map<string, string[]>();
+    const noteRefusal = (path: string, residue: Residue[]) => {
+      refused.push(path);
+      for (const r of residue) refusedWhy.set(r.what, r.why);
+      return new Error(residueMessage(residue));
+    };
     for (const { path, route } of pages) {
       const zeroJs = route.module.hydrate === false && !route.islands;
       const target = join(stageDir, outputPath(path));
@@ -277,6 +347,8 @@ export async function exportSite(): Promise<number> {
         const res = await fetch(`http://localhost:${frontPort}${path}`);
         if (!res.ok) throw new Error(`responded ${res.status}`);
         const html = await res.text();
+        const residue = requestResidue(html);
+        if (residue.length) throw noteRefusal(path, residue);
         mkdirSync(dirname(target), { recursive: true });
         await Bun.write(target, html);
         written++;
@@ -298,7 +370,10 @@ export async function exportSite(): Promise<number> {
       try {
         const res = await fetch(`http://localhost:${frontPort}/__borgo-export-404-probe`);
         if (res.status !== 404) throw new Error(`responded ${res.status}`);
-        await Bun.write(join(stageDir, "404.html"), await res.text());
+        const html = await res.text();
+        const residue = requestResidue(html);
+        if (residue.length) throw noteRefusal("404", residue);
+        await Bun.write(join(stageDir, "404.html"), html);
         wrote404 = true;
         console.log(
           `  ${c.sage(g.ok)} ${"404".padEnd(16)} ${c.dim(`${g.arrow} ${outDir}/404.html ${g.dot} wire it as your host's error page`)}`,
@@ -343,8 +418,24 @@ export async function exportSite(): Promise<number> {
         `  ${c.dim(`${g.dot} nothing was published ${g.dot} dist/site still holds the last export that rendered whole`)}`,
       );
     }
+    // said once, and only when a page was actually refused: the fix is in the
+    // page, not in the run, and repeating it per page buries it
+    if (refused.length) {
+      console.log(
+        `\n  ${c.red(g.err)} ${refused.join(", ")} ${refused.length > 1 ? "carry" : "carries"} a value that only meant something to the request that rendered it, and an exported page is one file served to everyone.`,
+      );
+      for (const [what, why] of refusedWhy) {
+        console.log(`  ${c.dim(`${g.dot} ${what}:`)}`);
+        for (const line of why) console.log(`    ${c.dim(`${g.dot} ${line}`)}`);
+      }
+    }
     console.log(
       `  ${c.dim(`${g.dot} a static export serves pages only: actions, sse and websocket topics need borgo start`)}`,
+    );
+    // BORGO_CSP is overridden by markStaticExport, so an operator who set one
+    // has to be told their policy is not in these files - it never could be
+    console.log(
+      `  ${c.dim(`${g.dot} the csp is a response header, so it is not in these files ${g.dot} set it on your static host${hadCsp ? ` (BORGO_CSP was set here and does not ship)` : ""}`)}`,
     );
     // the export rebuilt public/assets with the props endpoint compiled out of
     // the bundle. `.borgo/build-mode` now says so, and `borgo start` rebuilds

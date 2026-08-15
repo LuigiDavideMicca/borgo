@@ -19,8 +19,11 @@ import {
   markStaticExport,
   outputPath,
   planExport,
+  requestResidue,
   unsafeParamReason,
 } from "../src/export";
+import { CSRF_FIELD } from "../src/index";
+import { createSecurity } from "../src/util";
 import { buildDefine } from "../src/build";
 import type { Route } from "../src/router";
 import { propsPathEnabled } from "../src/runtime";
@@ -89,6 +92,91 @@ describe("planExport", () => {
     );
     expect(plans).toEqual([]);
     expect(export404).toBe(true);
+  });
+});
+
+// EVERY DOCUMENT BELOW IS A REAL ONE, copied out of a dist/site produced by
+// `borgo export` against a scratch app - which is where the defect was read in
+// the first place: six files, six different nonces, and a __borgo_csrf value
+// sitting in a form whose cookie no static host will ever set.
+describe("requestResidue", () => {
+  const doc = (body: string, tail = "<script>window.__PROPS__={}</script>") =>
+    `<!DOCTYPE html>\n<html lang="en">\n<head><title>t</title></head>\n<body>\n<div id="root">${body}</div>\n${tail}\n</body>\n</html>\n`;
+
+  test("a page with no form is publishable", () => {
+    expect(requestResidue(doc("<h1>no form here</h1>"))).toEqual([]);
+  });
+
+  test("a form without a CsrfField is publishable", () => {
+    const body = `<form action="https://example.com/collect" method="post"><input name="q"/><button>search</button></form>`;
+    expect(requestResidue(doc(body))).toEqual([]);
+  });
+
+  test("a form with a CsrfField is refused, naming the cookie that is missing", () => {
+    const body = `<form method="post"><input type="hidden" name="${CSRF_FIELD}" value="4c9a31f601a942679a32ea71f873d9d9"/><button>go</button></form>`;
+    const [found, ...rest] = requestResidue(doc(body));
+    expect(rest).toEqual([]);
+    expect(found.what).toContain("CsrfField");
+    // and the advice says what to do, not only what is wrong
+    expect(found.why.join(" ")).toContain("borgo_csrf");
+    expect(found.why.join(" ")).toContain("borgo start");
+  });
+
+  // an empty token is not the safe case: the field is still there, still
+  // checked against nothing, and the form is still dead
+  test("an empty CsrfField value is refused too", () => {
+    const body = `<form method="post"><input type="hidden" name="${CSRF_FIELD}" value=""/></form>`;
+    expect(requestResidue(doc(body))).toHaveLength(1);
+  });
+
+  // react writes props in whatever order the component passed them, and a
+  // future react could reorder attributes; the check must not depend on it
+  test("the field is caught whatever the attribute order", () => {
+    for (const input of [
+      `<input name="${CSRF_FIELD}" type="hidden" value="a"/>`,
+      `<input value="a" type="hidden" name="${CSRF_FIELD}"/>`,
+      `<input\n  type="hidden"\n  name="${CSRF_FIELD}"\n/>`,
+    ]) {
+      expect(requestResidue(doc(`<form method="post">${input}</form>`))).toHaveLength(1);
+    }
+  });
+
+  test("a nonce on any inline script or style is refused", () => {
+    const nonced = `<script nonce="2e92acefe362452dabdc8a2e74c3f227">window.__PROPS__={}</script>`;
+    const [found] = requestResidue(doc("<h1>hi</h1>", nonced));
+    expect(found.what).toContain("nonce");
+    expect(found.why.join(" ")).toContain("static host");
+    expect(requestResidue(doc(`<style nonce="abc">.a{}</style>`))).toHaveLength(1);
+  });
+
+  // an inline script the page wrote itself is fine - it is the nonce that is
+  // the per-request value, not the script
+  test("an inline script without a nonce is publishable", () => {
+    const body = `<div><script>window.__probe = 1;</script><p>inline script above</p></div>`;
+    expect(requestResidue(doc(body))).toEqual([]);
+  });
+
+  test("both residues are reported, not just the first", () => {
+    const body = `<form method="post"><input type="hidden" name="${CSRF_FIELD}" value="x"/></form>`;
+    expect(requestResidue(doc(body, `<script nonce="x">1</script>`))).toHaveLength(2);
+  });
+
+  // a page ABOUT csrf, or a loader that returns the words, must export: react
+  // escapes "<" in text and scriptJson escapes it in props, so a tag pattern
+  // can only ever match a real tag. This is why the checks are anchored on the
+  // tag and not on the bare field name.
+  test("page content that merely talks about csrf still exports", () => {
+    const prose = doc(
+      `<p>write &lt;input type="hidden" name="${CSRF_FIELD}" value="..."/&gt; by hand and set nonce="x" on it</p>`,
+      `<script>window.__PROPS__={"post":"\\u003cscript nonce=\\"x\\"\\u003e and \\u003cinput name=\\"${CSRF_FIELD}\\"\\u003e"}</script>`,
+    );
+    expect(requestResidue(prose)).toEqual([]);
+  });
+
+  // the export renders through the same server as ssr, so a route that opts out
+  // of hydration produces a document with no inline script at all
+  test("a zero-js document has nothing to strip", () => {
+    expect(requestResidue(doc("<p>static</p>", ""))).toEqual([]);
   });
 });
 
@@ -215,6 +303,102 @@ describe("outputPath", () => {
   });
 });
 
+// THE PROOF IS ON THE BYTES OF THE EXPORTED FILE, not on what a function
+// returned. requestResidue above is asked of strings a test wrote; this asks
+// the real command, against a real app, and then reads what is on disk - which
+// is the only artifact a visitor ever sees.
+//
+// What was on disk before this: every document carried `nonce="<32 hex>"` on
+// its props script, a different one per page and per run, referring to a
+// Content-Security-Policy header that a static host does not send and cannot
+// reproduce. And a page with <CsrfField /> carried a hidden __borgo_csrf value
+// that was the same for every visitor forever, checked against a borgo_csrf
+// cookie that nothing on a static site sets. Both are the same mistake: a value
+// that meant something to ONE request, published as a file.
+describe("an exported page carries nothing per-request", () => {
+  const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
+  const CLI = join(import.meta.dir, "../src/cli.ts");
+
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "no nonce, no csrf token, and the page that would need one is refused by name",
+    async () => {
+      const dir = mkdtempSync(join(APP_HOST, "borgo-residue-"));
+      const run = (env: Record<string, string> = {}) =>
+        Bun.spawnSync([process.execPath, CLI, "export"], {
+          cwd: dir,
+          env: { ...process.env, BORGO_RELOAD: "1", ...env },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+      const site = join(dir, "dist/site");
+      const htmlFiles = () =>
+        [...new Bun.Glob("**/*.html").scanSync(site)].map((f) => f.replaceAll("\\", "/")).sort();
+      const read = (f: string) => readFileSync(join(site, f), "utf8");
+      try {
+        mkdirSync(join(dir, "pages"), { recursive: true });
+        cpSync(join(APP_HOST, "index.html"), join(dir, "index.html"));
+        writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "residue-scratch", private: true }));
+        writeFileSync(join(dir, "style.scss"), "body { color: #3d2f24; }\n");
+        writeFileSync(join(dir, "pages/index.tsx"), "export default () => <h1>no form here</h1>;\n");
+        // a form that posts somewhere else needs no csrf token and must export
+        writeFileSync(
+          join(dir, "pages/search.tsx"),
+          `export default () => <form method="post" action="https://example.com/collect"><input name="q" /></form>;\n`,
+        );
+        // an inline script is fine; it is the nonce that is per-request
+        writeFileSync(
+          join(dir, "pages/inline.tsx"),
+          `export default () => <script dangerouslySetInnerHTML={{ __html: "window.__probe = 1;" }} />;\n`,
+        );
+        writeFileSync(join(dir, "pages/_404.tsx"), "export default () => <p>nothing here</p>;\n");
+
+        // the operator asks for a csp on purpose: it still cannot ship in a
+        // file, so it must not leave a nonce behind pretending it did
+        expect(run({ BORGO_CSP: "default-src 'self'; script-src 'self'{nonce}" }).exitCode).toBe(0);
+        const whole = htmlFiles();
+        expect(whole).toEqual(["404.html", "index.html", "inline/index.html", "search/index.html"]);
+
+        for (const f of whole) {
+          const html = read(f);
+          expect(html).not.toContain("nonce=");
+          expect(html).not.toContain(CSRF_FIELD);
+        }
+        // and the pages are otherwise whole: the props script is still there
+        // without its nonce, and the page's own inline script is untouched
+        expect(read("index.html")).toContain("<script>window.__PROPS__=");
+        expect(read("inline/index.html")).toContain("window.__probe = 1;");
+        expect(read("search/index.html")).toContain('action="https://example.com/collect"');
+        expect(read("404.html")).toContain("nothing here");
+
+        const first = whole.map(read);
+
+        // now the page that cannot be static
+        writeFileSync(
+          join(dir, "pages/login.tsx"),
+          `import { CsrfField } from "borgo-framework";\n` +
+            `export default () => <form method="post"><CsrfField /><input name="u" /></form>;\n`,
+        );
+        const refused = run();
+        expect(refused.exitCode).toBe(1);
+        const said = refused.stdout.toString() + refused.stderr.toString();
+        // it names the page, says what the value is, and says what to do
+        expect(said).toContain("/login");
+        expect(said).toContain("CsrfField");
+        expect(said).toContain("borgo start");
+        expect(said).toContain("not published");
+        // nothing partial reached the published tree, and the login page is
+        // nowhere in it - the export stopped rather than shipping a dead form
+        expect(htmlFiles()).toEqual(whole);
+        expect(whole.map(read)).toEqual(first);
+        expect(existsSync(join(site, "login/index.html"))).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    300_000,
+  );
+});
+
 // a static host has no ?__borgo=props endpoint: it answers that url with the
 // page's own html document and a 200, so res.ok passes, res.json() throws, and
 // the navigation ends in the full reload the catch does anyway - having paid
@@ -304,6 +488,28 @@ describe("static export flag", () => {
     expect(buildDefine(false, env)["process.env.BORGO_STATIC"]).toBe('"1"');
     // NODE_ENV is still the thing that decides dev vs production
     expect(buildDefine(true, env)["process.env.NODE_ENV"]).toBe('"development"');
+  });
+
+  // the nonce is not stripped from the html afterwards, it is never minted:
+  // one lever, read by the same resolveSwitches the export's own front server
+  // reads, and it has to survive an operator who asked for a policy - because
+  // their policy cannot ship with a file either
+  test("markStaticExport turns the csp off, so no render mints a nonce", () => {
+    const production = createSecurity(false, {});
+    expect(production!.needsNonce).toBe(true);
+
+    for (const asked of [undefined, "1", "true", "default-src 'self'; script-src 'self'{nonce}"]) {
+      const env: NodeJS.ProcessEnv = asked === undefined ? {} : { BORGO_CSP: asked };
+      markStaticExport(env);
+      const security = createSecurity(false, { csp: env.BORGO_CSP });
+      expect(security!.needsNonce).toBe(false);
+      // and the header itself is gone: a policy that reaches no browser must
+      // not sit in the response looking like one
+      const res = security!.apply(new Response("<html></html>", { headers: { "Content-Type": "text/html" } }));
+      expect(res.headers.get("Content-Security-Policy")).toBeNull();
+      // the rest of the security headers are not collateral
+      expect(res.headers.get("X-Frame-Options")).toBe("DENY");
+    }
   });
 
   test("the runtime reads that exact key, and defaults to the props path", () => {
