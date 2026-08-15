@@ -175,7 +175,10 @@ describe("serveIndexed: conditional requests", () => {
   test("if-none-match: * and weak/list forms match", () => {
     const i = info("/assets/client-abcd1234.js");
     expect(serveIndexed(req({ "if-none-match": "*" }), i).status).toBe(304);
-    expect(serveIndexed(req({ "if-none-match": `W/${i.identity.etag}` }), i).status).toBe(304);
+    // the tag is already weak, and "W/W/\"...\"" is not an entity-tag at all
+    // (RFC 9110 §8.8.3) - refusing it is the right answer, so the fixture asks
+    // the question it meant to ask: the same tag, quoted as the client sends it
+    expect(serveIndexed(req({ "if-none-match": i.identity.etag }), i).status).toBe(304);
     expect(serveIndexed(req({ "if-none-match": `"nope", ${i.identity.etag}` }), i).status).toBe(304);
   });
 
@@ -223,13 +226,19 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
     expect(res.headers.get("Content-Range")).toBe(`bytes 0-3/${RAW_CSS.length}`);
   });
 
-  test("if-range with the current validator keeps the 206", async () => {
+  // the retirement, asserted rather than deleted: the validator is size+mtime,
+  // which two different files can share, and a range is the one place where a
+  // wrong match CORRUPTS - new bytes spliced onto an old prefix - instead of
+  // merely serving stale that no-cache would recheck. RFC 9110 §13.1.5 lets
+  // only a strong validator authorise one, so ours never does
+  test("a range is refused even when the client quotes back the validator we sent", async () => {
     const i = info("/style.css");
     const res = await fetch(`${base}/style.css`, {
       headers: { range: "bytes=5-9", "if-range": i.identity.etag, "accept-encoding": "identity" },
     });
-    expect(res.status).toBe(206);
-    expect(await res.text()).toBe(RAW_CSS.slice(5, 10));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(RAW_CSS);
+    expect(res.headers.get("Content-Range")).toBeNull();
   });
 
   test("if-range with a stale validator gets the whole representation as 200", async () => {
@@ -439,7 +448,7 @@ describe("serveAsset: the unindexed path", () => {
     test("every response carries an etag and a last-modified", async () => {
       for (const path of [p("public", "style.css"), p("public", "logo.png"), p("public", "sw.js")]) {
         const res = await serve(path);
-        expect(res.headers.get("ETag")).toMatch(/^"[0-9a-z]+-[0-9a-z]+"$/);
+        expect(res.headers.get("ETag")).toMatch(/^W\/"[0-9a-z]+-[0-9a-z]+"$/);
         expect(Date.parse(res.headers.get("Last-Modified")!)).not.toBeNaN();
       }
     });
@@ -500,15 +509,18 @@ describe("serveAsset: the unindexed path", () => {
 
       afterAll(() => server.stop(true));
 
-      test("a range with a matching if-range is still a 206 of exactly those bytes", async () => {
+      // same retirement on the live path: the tag we hand out is weak, so
+      // handing it straight back does not buy a range
+      test("the validator we just served does not authorise a range", async () => {
         const etag = (await fetch(`${base}/style.css`, {
           headers: { "accept-encoding": "identity" },
         })).headers.get("ETag")!;
+        expect(etag).toMatch(/^W\//);
         const res = await fetch(`${base}/style.css`, {
           headers: { range: "bytes=0-3", "if-range": etag, "accept-encoding": "identity" },
         });
-        expect(res.status).toBe(206);
-        expect(await res.text()).toBe(RAW_CSS.slice(0, 4));
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe(RAW_CSS);
       });
 
       test("a range with a stale if-range gets the whole representation as 200", async () => {
@@ -588,6 +600,12 @@ test("a precompressed sibling deleted after boot degrades to identity, not a 500
 // disagreeing about one url - the indexed snapshot said nothing, the live path
 // said nothing in production and no-cache in dev - and a function's return
 // value cannot say which of them answered.
+// brotli at max quality on a real tree runs past bun's 5s default, and these
+// two blocks precompress one. A test that goes red because the machine was
+// busy is not measuring what it claims - it teaches everyone to re-run instead
+// of to read, which is how a real failure gets waved through.
+const WIRE_TIMEOUT = 60_000;
+
 describe("cache-control on the wire: every serving path, every encoding", () => {
   let root: string;
   let servers: { name: string; base: string; stop: () => void }[];
@@ -739,11 +757,11 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
           // no-cache is not no-store: the body may be kept, it just may not be
           // reused without asking, which is what the validator below is for
           expect(res.headers.get("Cache-Control")).not.toContain("no-store");
-          expect(res.headers.get("ETag")).toMatch(/^"[0-9a-z]+-[0-9a-z]+(-br|-gzip)?"$/);
+          expect(res.headers.get("ETag")).toMatch(/^W\/"[0-9a-z]+-[0-9a-z]+(-br|-gzip)?"$/);
         }
       }
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // The dangerous direction, and the one that was actually shipping. An app
   // file living in the build's output directory is not the build's, and no
@@ -764,7 +782,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
         }
       }
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // A folder called "assets" is not the build's output directory. These hold
   // bytes identical to the recorded ones, so the length check passes and only
@@ -781,7 +799,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
         }
       }
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // The representation on the wire is the one that has to be vouched for.
   // Measured before this: identity untouched at its recorded length, the .gz
@@ -810,7 +828,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
     } finally {
       writeFileSync(gz, original);
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // a sibling on disk that no build measured cannot be pinned either, however
   // intact the identity file beside it is
@@ -843,7 +861,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
     } finally {
       rmSync(br, { force: true });
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // The manifest vouches for bytes, not for a name. A recorded chunk deleted
   // and recreated after boot keeps its name and its manifest entry, and used
@@ -876,7 +894,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
     } finally {
       writeFileSync(path, original);
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // The other direction, and the cost of getting cautious wrong. Too strict and
   // every content-addressed asset loses its year - a regression nobody notices
@@ -895,7 +913,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
         }
       }
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // the invariant that actually broke: not "the wrong policy" but "no policy",
   // which is the one answer a browser is free to replace with a guess
@@ -908,7 +926,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
         );
       }
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // no-cache is only cheap because the revalidation it forces is answered
   // without a body: if the etag did not round-trip, this would be a full
@@ -931,7 +949,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
         }
       }
     }
-  });
+  }, WIRE_TIMEOUT);
 });
 
 // A deploy that replaces files in place under a running `borgo start`. The
@@ -1026,7 +1044,7 @@ describe("validators on the wire: an in-place deploy under a running server", ()
       const server = Bun.serve({ port: 0, fetch: fetchOne });
       return { name, base: `http://localhost:${server.port}`, stop: () => server.stop(true) };
     });
-  });
+  }, WIRE_TIMEOUT);
 
   afterAll(() => {
     for (const s of servers) s.stop();
@@ -1043,7 +1061,8 @@ describe("validators on the wire: an in-place deploy under a running server", ()
   // labels, in base36. A response whose etag and Content-Length disagree is
   // carrying a validator for bytes it is not sending, and that mismatch is
   // readable off a single response with nothing to compare it to.
-  const etagSize = (etag: string) => parseInt(etag.slice(1).split("-")[0], 36);
+  // the tag is weak, so the W/ prefix comes off before the length is read
+  const etagSize = (etag: string) => parseInt(etag.replace(/^W\//, "").slice(1).split("-")[0], 36);
 
   // The strict direction, and it costs too: a validator that moves while the
   // bytes did not turns every revalidation into a full re-download of an asset
@@ -1072,7 +1091,7 @@ describe("validators on the wire: an in-place deploy under a running server", ()
         }
       }
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // Boot and the socket must compute one url's validator the same way, or an
   // untouched file appears to change between the snapshot and the wire. When
@@ -1093,7 +1112,7 @@ describe("validators on the wire: an in-place deploy under a running server", ()
         `${rel} date: ${i.lastModified}`,
       );
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // The bug. Every assertion here is a header off a real socket, taken after
   // the bytes on disk moved under the running server.
@@ -1174,7 +1193,7 @@ describe("validators on the wire: an in-place deploy under a running server", ()
       for (const [rel, body] of Object.entries(V1)) write(rel, body);
       backdate();
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // A sibling replaced on its own. The identity file is untouched at its
   // recorded length, so only the sibling's own stat can tell that the bytes
@@ -1224,7 +1243,7 @@ describe("validators on the wire: an in-place deploy under a running server", ()
       writeFileSync(gz, original);
       backdate();
     }
-  });
+  }, WIRE_TIMEOUT);
 
   // One url, one answer. The indexed path used to serve an orphaned sibling
   // 200 while the live path 404'd it - so the same server answered the same
@@ -1245,6 +1264,6 @@ describe("validators on the wire: an in-place deploy under a running server", ()
       writeFileSync(identityPath, body);
       backdate();
     }
-  });
+  }, WIRE_TIMEOUT);
 
 });

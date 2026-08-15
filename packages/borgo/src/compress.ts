@@ -178,8 +178,36 @@ export async function precompressAssets(dir: string) {
 
 // size and mtime, base36. the suffix keeps one url's encodings from
 // revalidating each other.
+//
+// Weak, because size and mtime are weak. rfc 9110 §8.8.1 asks a strong
+// validator to change whenever the content changes observably, and this pair
+// does not: two files of equal length share the size half, and every tool that
+// copies a file with its date - cp -p, rsync -t, tar, a reproducible build,
+// docker's COPY - carries the mtime half across unchanged. Measured on
+// public/sw.js, the file that controls every url in its scope: one byte
+// substituted at constant length under a preserved mtime produced a byte-equal
+// tag, so an If-None-Match holding the old bytes 304s on the new ones.
+//
+// W/ does not make that revalidation exact - the weak comparison still matches
+// and the 304 still goes out - and nothing available per request can, since the
+// only evidence a request has is the same size and mtime. What it buys is that
+// the header stops claiming an equality it cannot check, and that the tag is
+// disqualified from If-Range, the one place a wrong match splices new bytes
+// onto an old prefix rather than merely reusing a stale file no-cache will
+// recheck anyway.
+//
+// The build's content hash is not the missing strong validator. It vouches for
+// a name at build time, and deciding per request whether the disk still holds
+// what it hashed lands back on size and mtime - see assetCacheControl, where
+// that same claim is checked against a length for exactly this reason, and the
+// residual hole it declares is this one. It also covers only the build's own
+// output directory: sw.js is deliberately outside it and never pinned.
 export const assetEtag = (size: number, mtimeMs: number, suffix: string): string =>
-  `"${size.toString(36)}-${Math.floor(mtimeMs).toString(36)}${suffix}"`;
+  `W/"${size.toString(36)}-${Math.floor(mtimeMs).toString(36)}${suffix}"`;
+
+const WEAK = /^W\//;
+const isWeak = (validator: string) => WEAK.test(validator);
+const strong = (validator: string) => validator.replace(WEAK, "");
 
 // pinnedSize is the byte length the build recorded for *this representation's*
 // file, or null if no build vouched for it. Per variant, not per url: the
@@ -361,8 +389,12 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
   const ifNoneMatch = req.headers.get("if-none-match");
   if (ifNoneMatch !== null) {
     if (ifNoneMatch.trim() === "*") return true;
+    // §8.8.3.2: if-none-match compares weakly, so the marker comes off both
+    // sides. Stripping only the client's was equivalent while every tag we sent
+    // was strong; the moment they are not, a client echoing our own W/"..."
+    // stops matching it and every asset revalidation becomes a full download.
     for (const candidate of ifNoneMatch.split(",")) {
-      if (candidate.trim().replace(/^W\//, "") === etag) return true;
+      if (strong(candidate.trim()) === strong(etag)) return true;
     }
     return false;
   }
@@ -388,7 +420,15 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
 // a different encoding on every Accept-Encoding, so a resume that arrives
 // without the accept-encoding the first request carried is asking for a range
 // of the brotli file to be filled from the identity one.
-// a weak validator (W/"...") can never authorise a range, so it never matches.
+//
+// §13.1.5 wants the strong comparison, so a weak validator on either side can
+// never authorise a range. Ours are all weak now (see assetEtag), which makes
+// this refuse every If-Range on an asset: a resume pays a full body instead of
+// splicing a prefix onto bytes its validator cannot tell apart from it. That is
+// a bandwidth regression confined to interrupted downloads - a bare Range with
+// no If-Range is untouched, so media seeking is unaffected - and it is the
+// direction the rfc requires. The check is written as the rule rather than as
+// today's answer, so a validator that ever earns strength gets ranges back.
 //
 // Only the etag is accepted, and the date deliberately is not. Each
 // representation reports its own mtime now, but an http date resolves to one
@@ -401,7 +441,8 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
 export function isRangeStale(req: Request, etag: string): boolean {
   const ifRange = req.headers.get("if-range");
   if (ifRange === null || !req.headers.has("range")) return false;
-  return ifRange.trim() !== etag;
+  const given = ifRange.trim();
+  return isWeak(etag) || isWeak(given) || given !== etag;
 }
 
 const statOf = (path: string) => {

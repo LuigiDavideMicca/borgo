@@ -1,11 +1,23 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import {
   isRangeStale,
   assetCacheControl,
+  assetEtag,
   buildAssetIndex,
   documentStream,
   gzipStream,
@@ -15,6 +27,9 @@ import {
   NO_BUILD_OUTPUTS,
   pickEncoding,
   precompressAssets,
+  serveAsset,
+  serveIndexed,
+  type AssetInfo,
   type BuildOutputs,
 } from "../src/compress";
 
@@ -633,5 +648,350 @@ describe("isRangeStale", () => {
 
   test("a weak validator can never authorise a range", () => {
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": `W/${ETAG}` }), ETAG)).toBe(true);
+    // and weak on *our* side is the same refusal, echoed back exactly. This is
+    // the live clause, not the one above: every tag borgo emits is weak, so a
+    // client that quotes the validator it was given still gets the whole body.
+    const weak = assetEtag(591, 1_770_000_000_000, "");
+    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": weak }), weak)).toBe(true);
+    expect(isRangeStale(req({ range: "bytes=0-9", "if-range": weak.replace("W/", "") }), weak)).toBe(
+      true,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE VALIDATOR, MEASURED ON REAL FILES
+//
+// The etag is size and mtime. Both halves are forgeable by ordinary tools, so
+// this block writes the files rather than the numbers: every case below is a
+// real stat of a real file, served through the real production path.
+//
+// What is asserted, per case, is the *outcome* of a conditional request:
+// If-None-Match alone, If-Modified-Since alone, and the two together (rfc 9110
+// §13.1.3: when both are present the etag decides and the date is ignored).
+// Where the outcome is a 304 on bytes the client does not have, it is asserted
+// as such and the validator is required to have declared itself weak - which is
+// the whole of what this pair can honestly promise.
+// ---------------------------------------------------------------------------
+describe("asset validators, on real files", () => {
+  let dir: string;
+  let index: Map<string, AssetInfo>;
+
+  // one fixed date for everything that has to collide, because a collision is
+  // exactly what cp -p, rsync -t, tar, a reproducible build and docker's COPY
+  // produce: the bytes get a new inode and the old mtime rides along
+  const SHARED_MTIME = Date.parse("2026-03-01T12:00:00.000Z");
+
+  const at = (p: string) => join(dir, "public", p);
+  const mtimeOf = (p: string) => statSync(at(p)).mtimeMs;
+  const setMtime = (p: string, ms: number) => utimesSync(at(p), new Date(ms), new Date(ms));
+  const write = (p: string, body: string, ms = SHARED_MTIME) => {
+    writeFileSync(at(p), body);
+    setMtime(p, ms);
+  };
+  // `cp -p`: the bytes, then the timestamps
+  const copyPreserving = (from: string, to: string) => {
+    copyFileSync(at(from), at(to));
+    setMtime(to, mtimeOf(from));
+  };
+  // one byte replaced in place, the length untouched, the date put back. A
+  // deploy that rewrites a file and preserves its mtime leaves exactly this.
+  const substituteByte = (p: string, offset: number, byte: string) => {
+    const was = mtimeOf(p);
+    const buf = readFileSync(at(p));
+    buf[offset] = byte.charCodeAt(0);
+    writeFileSync(at(p), buf);
+    setMtime(p, was);
+  };
+
+  const HASHED = "assets/app-a1b2c3d4.js";
+  const HASHED_BODY = "export const hello=()=>0;"; // 25
+  const PLAIN_BODY = "main{padding:1rem}"; // 18
+  const SW_BODY = "self.addEventListener('fetch',()=>{});"; // 38
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "borgo-validators-"));
+    mkdirSync(join(dir, "public", "assets"), { recursive: true });
+
+    // 1. two different files of equal length, given the same mtime
+    write("twin-a.txt", "AAAAAAAAAA");
+    write("twin-b.txt", "BBBBBBBBBB");
+    // 2. the same content copied the way every deploy tool copies it
+    write("origin.txt", "the original bytes");
+    copyPreserving("origin.txt", "copy.txt");
+    // 3. a file back-dated after it was written
+    write("dated.txt", "some content here", Date.parse("2026-06-01T00:00:00.000Z"));
+    // 4. the one that matters: one byte substituted at constant length
+    write("edited.txt", "payload version one");
+    // 5. permissions changed, content and mtime untouched
+    write("moded.txt", "unchanged bytes");
+    // 6. the service worker, which controls every url in its scope
+    write("sw.js", SW_BODY);
+    // 7. and 8. a file the build hashed and vouched for, and one it did not
+    write(HASHED, HASHED_BODY);
+    write("site.css", PLAIN_BODY);
+
+    index = buildAssetIndex(join(dir, "public"), undefined, {
+      dir: join(dir, "public", "assets").replaceAll("\\", "/"),
+      sizes: new Map([["app-a1b2c3d4.js", HASHED_BODY.length]]),
+    });
+  });
+
+  afterAll(() => {
+    chmodSync(at("moded.txt"), 0o666);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const info = (url: string) => {
+    const found = index.get(url);
+    if (!found) throw new Error(`not indexed: ${url}`);
+    return found;
+  };
+  // the indexed production path. It re-stats on every request, so a file
+  // rewritten after boot is measured as it is now, not as the index saw it.
+  const serve = (url: string, headers: Record<string, string> = {}) =>
+    serveIndexed(new Request(`http://app.test${url}`, { headers }), info(url));
+
+  const validators = (url: string) => {
+    const res = serve(url, { "accept-encoding": "identity" });
+    return { etag: res.headers.get("ETag")!, date: res.headers.get("Last-Modified")! };
+  };
+
+  // one url, one validator pair the client claims to hold, three request shapes
+  const conditional = (url: string, etag: string, date: string) => ({
+    inm: serve(url, { "if-none-match": etag }).status,
+    ims: serve(url, { "if-modified-since": date }).status,
+    both: serve(url, { "if-none-match": etag, "if-modified-since": date }).status,
+  });
+
+  const isWeak = (tag: string) => tag.startsWith('W/"');
+
+  test("every validator borgo emits declares itself weak", () => {
+    for (const url of [
+      "/twin-a.txt",
+      "/copy.txt",
+      "/dated.txt",
+      "/edited.txt",
+      "/moded.txt",
+      "/sw.js",
+      `/${HASHED}`,
+      "/site.css",
+    ]) {
+      expect(isWeak(validators(url).etag)).toBe(true);
+    }
+    // including the negotiated siblings, whose suffix rides inside the quotes
+    expect(assetEtag(23, SHARED_MTIME, "-br")).toBe(
+      `W/"n-${Math.floor(SHARED_MTIME).toString(36)}-br"`,
+    );
+  });
+
+  // 1. two files of equal length with the same mtime
+  test("two different files of equal length and equal mtime share one validator", () => {
+    const a = validators("/twin-a.txt");
+    const b = validators("/twin-b.txt");
+    expect(a.etag).toBe(b.etag);
+    expect(a.date).toBe(b.date);
+    // a client holding twin-a's bytes revalidates twin-b and is told to keep
+    // them. Nothing in the pair can separate the two files, which is why the
+    // tag says W/ instead of pretending otherwise.
+    expect(conditional("/twin-b.txt", a.etag, a.date)).toEqual({ inm: 304, ims: 304, both: 304 });
+  });
+
+  // 2. the same content copied with cp -p
+  test("cp -p reproduces the validator, and here the 304 is right", () => {
+    const origin = validators("/origin.txt");
+    const copy = validators("/copy.txt");
+    expect(copy.etag).toBe(origin.etag);
+    expect(conditional("/copy.txt", origin.etag, origin.date)).toEqual({
+      inm: 304,
+      ims: 304,
+      both: 304,
+    });
+    // the bytes really are the same, so this 304 is correct. It is listed
+    // because it is the mechanism, not the bug: preserving the mtime is what
+    // the tool is *for*, which is what makes case 1 and case 4 reachable.
+    expect(readFileSync(at("copy.txt")).equals(readFileSync(at("origin.txt")))).toBe(true);
+  });
+
+  // 3. a file touched to a past date
+  test("touching a file to a past date moves the etag and back-dates the 304", () => {
+    const before = validators("/dated.txt");
+    const heldDate = before.date;
+    setMtime("dated.txt", Date.parse("2020-01-01T00:00:00.000Z"));
+    const after = validators("/dated.txt");
+    expect(after.etag).not.toBe(before.etag);
+    // the etag moved, so a client holding the old one is served the body...
+    expect(conditional("/dated.txt", before.etag, before.date).inm).toBe(200);
+    // ...but a date-only client is told nothing changed, because the file now
+    // claims to predate what that client holds. This is the direction that
+    // hurts: back-dating is what tar and restored backups do, and a client
+    // that revalidates by date alone never learns the file moved.
+    expect(serve("/dated.txt", { "if-modified-since": heldDate }).status).toBe(304);
+    // both headers: the etag decides and the date is ignored (§13.1.3)
+    expect(serve("/dated.txt", { "if-none-match": before.etag, "if-modified-since": heldDate })
+      .status).toBe(200);
+  });
+
+  // 4. THE CASE: one byte substituted, length and mtime unchanged
+  test("a byte substituted at constant length under a preserved mtime is invisible", () => {
+    const before = validators("/edited.txt");
+    const bodyBefore = readFileSync(at("edited.txt")).toString();
+    substituteByte("edited.txt", 8, "2");
+    const after = validators("/edited.txt");
+    const bodyAfter = readFileSync(at("edited.txt")).toString();
+
+    // the bytes changed and the validator did not
+    expect(bodyAfter).not.toBe(bodyBefore);
+    expect(bodyAfter.length).toBe(bodyBefore.length);
+    expect(after.etag).toBe(before.etag);
+    expect(after.date).toBe(before.date);
+
+    // so every conditional shape 304s over changed bytes. This is the defect,
+    // stated rather than hidden: size and mtime cannot see this edit, and no
+    // per-request check can, because size and mtime are all a request has.
+    expect(conditional("/edited.txt", before.etag, before.date)).toEqual({
+      inm: 304,
+      ims: 304,
+      both: 304,
+    });
+
+    // THE PROPERTY, in the only form this validator can keep: it does not
+    // claim to be exact. A strong tag here would be a promise that these two
+    // bodies are byte-identical, and they are not.
+    expect(isWeak(after.etag)).toBe(true);
+    // and a weak tag can never authorise a range, so the one failure that
+    // corrupts rather than staling - a resume splicing new bytes onto an old
+    // prefix - is refused even when the client quotes our own validator back
+    expect(
+      isRangeStale(
+        new Request("http://app.test/edited.txt", {
+          headers: { range: "bytes=0-3", "if-range": after.etag },
+        }),
+        after.etag,
+      ),
+    ).toBe(true);
+  });
+
+  test("the refused range is a whole 200 on the wire, not a 206", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(r) {
+        const found = index.get(new URL(r.url).pathname);
+        return found ? serveIndexed(r, found) : new Response("no", { status: 404 });
+      },
+    });
+    try {
+      const { etag } = validators("/edited.txt");
+      const res = await fetch(`http://localhost:${server.port}/edited.txt`, {
+        headers: { range: "bytes=0-3", "if-range": etag, "accept-encoding": "identity" },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Range")).toBeNull();
+      expect(await res.text()).toBe(readFileSync(at("edited.txt")).toString());
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  // 5. chmod: ctime moves, mtime does not
+  test("a chmod leaves the validator alone, which is why ctime is not in it", () => {
+    const before = validators("/moded.txt");
+    const mtimeBefore = mtimeOf("moded.txt");
+    const ctimeBefore = statSync(at("moded.txt")).ctimeMs;
+    chmodSync(at("moded.txt"), 0o444);
+    const after = validators("/moded.txt");
+
+    // the bytes did not change, so nothing about the answer should
+    expect(mtimeOf("moded.txt")).toBe(mtimeBefore);
+    expect(after.etag).toBe(before.etag);
+    expect(conditional("/moded.txt", before.etag, before.date)).toEqual({
+      inm: 304,
+      ims: 304,
+      both: 304,
+    });
+    // ctime is the metadata clock: it never runs backwards, and a chmod is
+    // exactly the event that advances it while the content stands still. A
+    // validator built on it would have charged a full download for a
+    // permission bit - and for every backup and hardlink besides. Whether this
+    // particular filesystem advances it is not asserted (windows does not),
+    // because the reason ctime is out is that it moves for non-content events
+    // wherever it moves at all.
+    expect(statSync(at("moded.txt")).ctimeMs).toBeGreaterThanOrEqual(ctimeBefore);
+  });
+
+  // 6. sw.js, the file this was measured on
+  test("sw.js is never pinned, and its validator is as weak as any other", () => {
+    const res = serve("/sw.js", { "accept-encoding": "identity" });
+    // it controls every url in its scope, so it always revalidates...
+    expect(res.headers.get("Cache-Control")).toBe("no-cache");
+    const before = validators("/sw.js");
+    substituteByte("sw.js", 0, "S");
+    const after = validators("/sw.js");
+    // ...and that revalidation is the one this edit walks straight through
+    expect(readFileSync(at("sw.js")).toString()).not.toBe(SW_BODY);
+    expect(after.etag).toBe(before.etag);
+    expect(conditional("/sw.js", before.etag, before.date)).toEqual({
+      inm: 304,
+      ims: 304,
+      both: 304,
+    });
+    expect(isWeak(after.etag)).toBe(true);
+  });
+
+  // 7. a file the build hashed and recorded
+  test("a hashed asset keeps its year and still says W/", () => {
+    const res = serve(`/${HASHED}`, { "accept-encoding": "identity" });
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
+    const before = validators(`/${HASHED}`);
+    substituteByte(HASHED, 7, "X");
+    const after = serve(`/${HASHED}`, { "accept-encoding": "identity" });
+    // the length is what pinPolicy checks and the length did not move, so the
+    // year survives the edit too. The name's content hash is not a validator
+    // the server can verify per request - it is a claim about what the build
+    // wrote, checked against exactly the size this edit preserves.
+    expect(after.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
+    expect(after.headers.get("ETag")).toBe(before.etag);
+    expect(conditional(`/${HASHED}`, before.etag, before.date)).toEqual({
+      inm: 304,
+      ims: 304,
+      both: 304,
+    });
+    expect(isWeak(after.headers.get("ETag")!)).toBe(true);
+  });
+
+  // 8. a file no build vouched for
+  test("an unhashed asset revalidates every load, which is what bounds the blast radius", () => {
+    const res = serve("/site.css", { "accept-encoding": "identity" });
+    expect(res.headers.get("Cache-Control")).toBe("no-cache");
+    const { etag, date } = validators("/site.css");
+    expect(conditional("/site.css", etag, date)).toEqual({ inm: 304, ims: 304, both: 304 });
+    // a stale answer here is corrected by the next revalidation; under
+    // `immutable` there is no next revalidation for a year
+    expect(isWeak(etag)).toBe(true);
+  });
+
+  // the live path (dev, and anything written after boot) must say the same
+  test("serveAsset emits the same weak validator as the indexed path", () => {
+    const path = at("site.css");
+    const res = serveAsset(
+      new Request("http://app.test/site.css", { headers: { "accept-encoding": "identity" } }),
+      path,
+      Bun.file(path),
+      { dev: false },
+    );
+    expect(res.headers.get("ETag")).toBe(validators("/site.css").etag);
+    expect(isWeak(res.headers.get("ETag")!)).toBe(true);
+  });
+
+  test("a client echoing the weak validator still gets its 304", () => {
+    // the weak comparison strips the marker from both sides. Stripping only
+    // the client's side - which was enough while every tag was strong - would
+    // turn every asset revalidation into a full download the moment they were
+    // not, and the cost would show up as bandwidth, not as a failure.
+    const { etag } = validators("/site.css");
+    const r = (h: Record<string, string>) => new Request("http://app.test/site.css", { headers: h });
+    expect(isNotModified(r({ "if-none-match": etag }), etag, 0)).toBe(true);
+    expect(isNotModified(r({ "if-none-match": etag.replace("W/", "") }), etag, 0)).toBe(true);
+    expect(serve("/site.css", { "if-none-match": etag }).status).toBe(304);
   });
 });
