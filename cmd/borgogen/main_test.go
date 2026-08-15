@@ -81,17 +81,33 @@ func read(t *testing.T, path string) string {
 	return string(b)
 }
 
-// typechecks compiles the emitted declarations with tsc. Every other assertion
-// in this file is a substring, and a substring is still found when the "<" that
-// opened around it never closed - the whole point of a generated .d.ts is that
-// it parses, because one bad declaration in it costs every route in the project
-// its types at once, not just the field that produced it.
-func typechecks(t *testing.T, types string) {
+// tscBin resolves the compiler this repo pins and a runtime to run it with. A
+// go test runs with cwd at its package directory, so the path below is the
+// workspace's own typescript and never a download: bunx outside the workspace
+// fetches typescript@latest, and a gate that fails must fail for the generated
+// code, not for whatever npm published this morning.
+func tscBin(t *testing.T) (bin, script string) {
 	t.Helper()
-	bunx, err := exec.LookPath("bunx")
+	script, err := filepath.Abs(filepath.Join("..", "..", "node_modules", "typescript", "bin", "tsc"))
 	if err != nil {
-		t.Skip("bunx is not on PATH, so the emitted declarations cannot be compiled here")
+		t.Fatal(err)
 	}
+	if _, err := os.Stat(script); err != nil {
+		t.Skipf("the workspace typescript is not installed at %s (bun install), so the emitted declarations cannot be compiled here", script)
+	}
+	for _, name := range []string{"bun", "node"} {
+		if bin, err = exec.LookPath(name); err == nil {
+			return bin, script
+		}
+	}
+	t.Skip("neither bun nor node is on PATH, so the emitted declarations cannot be compiled here")
+	return "", ""
+}
+
+// typecheck compiles declarations with that compiler and reports what it said.
+func typecheck(t *testing.T, types string) ([]byte, error) {
+	t.Helper()
+	bin, script := tscBin(t)
 	dir := t.TempDir()
 	writeTemp(t, dir, "api-types.d.ts", types)
 	// the emitted file augments "borgo-framework", and augmenting a module that
@@ -104,10 +120,36 @@ func typechecks(t *testing.T, types string) {
 	writeTemp(t, dir, "tsconfig.json",
 		`{"compilerOptions":{"strict":true,"noEmit":true,"skipLibCheck":false,"types":[]},"include":["*.d.ts"]}`)
 
-	cmd := exec.Command(bunx, "tsc", "--noEmit", "-p", "tsconfig.json")
+	cmd := exec.Command(bin, script, "--noEmit", "-p", "tsconfig.json")
 	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
+	return cmd.CombinedOutput()
+}
+
+// typechecks compiles the emitted declarations with tsc. Every other assertion
+// in this file is a substring, and a substring is still found when the "<" that
+// opened around it never closed - the whole point of a generated .d.ts is that
+// it parses, because one bad declaration in it costs every route in the project
+// its types at once, not just the field that produced it.
+func typechecks(t *testing.T, types string) {
+	t.Helper()
+	if out, err := typecheck(t, types); err != nil {
 		t.Errorf("tsc rejected the generated declarations: %v\n%s\n%s", err, out, types)
+	}
+}
+
+// A gate resolved to a local compiler is worth exactly what it still rejects,
+// so both properties typechecks is here for are asserted directly: that the
+// file parses, and - skipLibCheck being off - that it means something.
+func TestTypecheckRejectsBrokenDeclarations(t *testing.T) {
+	for _, c := range []struct{ name, types string }{
+		{"unclosed generic", "export interface Broken {\n  m: Record<string, number;\n}\n"},
+		{"undefined type", "export interface Broken {\n  m: NoSuchType;\n}\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if out, err := typecheck(t, c.types); err == nil {
+				t.Errorf("tsc accepted a declaration it has to reject:\n%s", out)
+			}
+		})
 	}
 }
 

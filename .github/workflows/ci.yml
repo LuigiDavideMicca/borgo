@@ -4,20 +4,29 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # only the bun-latest alarm below runs on this
+    - cron: "23 5 * * 1"
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # the event is part of the group: a scheduled run sits on refs/heads/main too,
+  # and cancel-in-progress would have it kill the push CI it is not replacing
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   ci:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # the version the lockfiles were produced with. --frozen-lockfile is
+      # resolver-sensitive, so pinning nine manifests and floating the tool
+      # that reads them pins nothing
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       - uses: actions/setup-go@v5
         with:
@@ -202,9 +211,39 @@ jobs:
           grep -q "tab-size" public/assets/style-*.css
           grep -q "hero" public/assets/style-*.css
 
+  # early warning for the pin above: a bun that stops accepting our lockfiles,
+  # or stops running our scripts, breaks here on a schedule of its own instead
+  # of on somebody's unrelated pull request
+  bun-latest:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: bun version under test
+        run: bun --version
+
+      - name: install workspace
+        run: bun install --frozen-lockfile
+
+      - name: install bench
+        working-directory: bench
+        run: bun install --frozen-lockfile
+
+      - name: docs links resolve and snippets typecheck
+        run: bun run check:docs
+
+      - name: bun tests
+        run: bun run test
+
   # the deploy story must keep building; a separate job so the image build
   # runs in parallel with the test pipeline
   docker:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
