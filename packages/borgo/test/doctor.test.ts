@@ -6,6 +6,8 @@ import {
   checkBun,
   checkBunShim,
   checkDeps,
+  checkEnginesBun,
+  declaredFloor,
   checkDisk,
   checkDocker,
   checkGo,
@@ -149,6 +151,63 @@ describe("checkBun", () => {
 
     test("an unparseable engines range is ignored rather than trusted", () => {
       expect(bunMinimum(withEngines({ bun: "latest" })).source).toBe("borgo");
+    });
+
+    // the floor used to be "the first version in the string", which reads a
+    // ceiling as a floor: `"<1.5.0"` is an app saying it cannot run on 1.5 yet,
+    // and doctor turned it into "you need at least 1.5.0" and exited 1 on a
+    // machine whose bun was exactly what the app asked for.
+    test("a ceiling is not a floor", () => {
+      for (const range of ["<1.5.0", "<=1.4.9", "<2"]) {
+        const got = bunMinimum(withEngines({ bun: range }));
+        expect(`${range}: ${got.min} from ${got.source}`).toBe(`${range}: 1.3.0 from borgo`);
+        expect(got.unreadable).toContain(range);
+      }
+    });
+
+    test("the forms borgo does read, and where each one puts its floor", () => {
+      const floors: Array<[string, string | null]> = [
+        [">=1.4.2", "1.4.2"],
+        [">1.4.2", "1.4.2"],
+        ["^1.4.2", "1.4.2"],
+        ["~1.4.2", "1.4.2"],
+        ["=1.4.2", "1.4.2"],
+        ["1.4.2", "1.4.2"],
+        ["v1.4.2", "1.4.2"],
+        ["1.4", "1.4.0"],
+        [">=1.3.2 <2", "1.3.2"],
+        ["1.4.2 - 2.0.0", "1.4.2"],
+        // and the ones with no floor borgo will guess at
+        ["<1.5.0", null],
+        ["*", null],
+        ["1.x", null],
+        ["latest", null],
+        ["^1.2 || ^2", null],
+        ["", null],
+      ];
+      for (const [range, want] of floors) {
+        expect(`${range || "(empty)"} -> ${declaredFloor(range)}`).toBe(`${range || "(empty)"} -> ${want}`);
+      }
+    });
+
+    // a range borgo cannot read is the operator's to resolve, not a broken
+    // machine: the check is a note, it never touches the exit code, and it says
+    // which forms would have been read
+    test("an unreadable range is reported as a note naming the forms borgo reads", () => {
+      const note = checkEnginesBun(withEngines({ bun: "<1.5.0" }))!;
+      expect(note.info).toBe(true);
+      expect(isFailure(note)).toBe(false);
+      expect(note.detail).toContain('"<1.5.0"');
+      expect(note.detail).toContain("1.3.0");
+      expect(note.fix).toContain(">=1.3.0");
+      // nothing to say about a range it reads, or about an app that declares none
+      expect(checkEnginesBun(withEngines({ bun: ">=1.4.2" }))).toBeNull();
+      expect(checkEnginesBun(fakeEnv())).toBeNull();
+    });
+
+    test("a machine on a bun the app excluded is not failed by the ceiling", () => {
+      const d = withEngines({ bun: "<1.5.0" });
+      expect(checkBun({ ...d, exec: () => ({ code: 0, out: "1.3.14\n" }) }).ok).toBe(true);
     });
 
     // an app may ask for a newer bun than borgo does; asking for an older one

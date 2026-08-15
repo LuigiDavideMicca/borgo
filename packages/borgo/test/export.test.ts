@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -212,6 +221,80 @@ describe("outputPath", () => {
 // for a second whole document per link, and one more for every link a pointer
 // crossed, since prefetch caches that doomed promise on hover. The flag is set
 // before the bundle is built and reaches the runtime through the define map.
+// A PARTIAL EXPORT IS NOT A SITE.
+//
+// `borgo export` deleted dist/site and then rendered into it, counting the
+// pages that failed. So a run that died on page four published the three it had
+// managed - with a valid index.html at the top, the assets beside it, and a
+// hole where the rest of the site used to be. Exit was 1, which a CI step that
+// uploads dist/ after the build does not necessarily read, and nothing about
+// the published tree says it is incomplete.
+//
+// Run as a child process against a real app: the whole point is the order in
+// which the real command touches the real directory.
+describe("a partial export publishes nothing", () => {
+  const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
+  const CLI = join(import.meta.dir, "../src/cli.ts");
+
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "a page that fails to render leaves the last whole export standing",
+    async () => {
+      // inside the example app, which is where a real bundle finds react
+      const dir = mkdtempSync(join(APP_HOST, "borgo-export-"));
+      const run = () =>
+        Bun.spawnSync([process.execPath, CLI, "export"], {
+          cwd: dir,
+          env: { ...process.env, BORGO_RELOAD: "1" },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+      const published = () =>
+        [...new Bun.Glob("**/*.html").scanSync(join(dir, "dist/site"))].map((f) => f.replaceAll("\\", "/")).sort();
+      try {
+        mkdirSync(join(dir, "pages"), { recursive: true });
+        cpSync(join(APP_HOST, "index.html"), join(dir, "index.html"));
+        writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "export-scratch", private: true }));
+        writeFileSync(join(dir, "style.scss"), "body { color: #3d2f24; }\n");
+        writeFileSync(join(dir, "pages/index.tsx"), "export default () => <h1>the first export</h1>;\n");
+        writeFileSync(join(dir, "pages/about.tsx"), "export default () => <p>about</p>;\n");
+
+        expect(run().exitCode).toBe(0);
+        const whole = published();
+        expect(whole).toEqual(["about/index.html", "index.html"]);
+        const home = readFileSync(join(dir, "dist/site/index.html"), "utf8");
+        expect(home).toContain("the first export");
+
+        // the next export changes a page that renders fine and adds one that
+        // throws where it renders - which is every reason a page fails at
+        // export time: the server answers 500 and the run counts it
+        writeFileSync(join(dir, "pages/index.tsx"), "export default () => <h1>the second export</h1>;\n");
+        writeFileSync(
+          join(dir, "pages/boom.tsx"),
+          "export default function Boom() { throw new Error('this page cannot render'); }\n",
+        );
+        const second = run();
+        expect(second.exitCode).toBe(1);
+        const said = second.stdout.toString() + second.stderr.toString();
+        expect(said).toContain("/boom");
+        expect(said).toContain("not published");
+
+        // what is on disk is still the export that rendered whole, byte for
+        // byte: not one page of the run that failed reached it
+        expect(published()).toEqual(whole);
+        const onDisk = readFileSync(join(dir, "dist/site/index.html"), "utf8");
+        expect(onDisk).toContain("the first export");
+        expect(onDisk).not.toContain("the second export");
+        expect(onDisk).toBe(home);
+        // and no half-rendered tree was left beside it
+        expect(readdirSync(join(dir, "dist"))).toEqual(["site"]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    180_000,
+  );
+});
+
 describe("static export flag", () => {
   test("markStaticExport reaches the bundle through buildDefine", () => {
     const env: NodeJS.ProcessEnv = {};

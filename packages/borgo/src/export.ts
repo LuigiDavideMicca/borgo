@@ -3,12 +3,12 @@
 // exportable means: no loader, or `export const prerender = true` (the loader
 // runs once now, against a temporary api process); dynamic-param routes need
 // `export const prerenderPaths` returning the param sets.
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
-import { buildAssets, BundleFailed } from "./build";
+import { buildAssets, reportBuildFailure } from "./build";
 import { banner, c, fmtMs, g } from "./colors";
 import type { Route } from "./router";
 import { goBinName, runBorgogen } from "./util";
@@ -174,10 +174,10 @@ export async function exportSite(): Promise<number> {
   try {
     await buildAssets(false);
   } catch (error) {
-    if (!(error instanceof BundleFailed)) throw error;
-    console.error(`\n  ${c.red(g.err)} the client bundle failed to build`);
-    for (const detail of error.details) console.error(`    ${detail}`);
-    console.error("");
+    // every way the build can fail, not just the bundler's: an export that
+    // dies on a sass error or a missing --tailwind is still an export that
+    // must not print a v8 trace and must not go on to render pages
+    reportBuildFailure(error);
     return 1;
   }
 
@@ -238,6 +238,14 @@ export async function exportSite(): Promise<number> {
   }
 
   let failures = 0;
+  // rendered beside the published directory and moved onto it at the end,
+  // because dist/site is what CI uploads. Deleting it first meant a run that
+  // failed on page four published the three pages it had managed plus a valid
+  // index.html - a site that looks complete, with a hole in it, and no way to
+  // tell from the outside. The previous export stays up until this one has
+  // rendered every page it planned.
+  const outDir = "dist/site";
+  const stageDir = `dist/.site-staged-${process.pid}`;
   try {
     const apiUrl = `http://localhost:${apiPort}/api`;
     const api = makeApiClient(`http://localhost:${apiPort}`);
@@ -257,14 +265,14 @@ export async function exportSite(): Promise<number> {
     const { serve } = await import("./server");
     await serve({ dev: false });
 
-    const outDir = "dist/site";
-    rmSync(outDir, { recursive: true, force: true });
-    mkdirSync(outDir, { recursive: true });
+    rmSync(stageDir, { recursive: true, force: true });
+    mkdirSync(stageDir, { recursive: true });
 
     let written = 0;
+    const failed: string[] = [];
     for (const { path, route } of pages) {
       const zeroJs = route.module.hydrate === false && !route.islands;
-      const target = join(outDir, outputPath(path));
+      const target = join(stageDir, outputPath(path));
       try {
         const res = await fetch(`http://localhost:${frontPort}${path}`);
         if (!res.ok) throw new Error(`responded ${res.status}`);
@@ -272,11 +280,12 @@ export async function exportSite(): Promise<number> {
         mkdirSync(dirname(target), { recursive: true });
         await Bun.write(target, html);
         written++;
-        const rel = target.replaceAll("\\", "/");
+        const rel = join(outDir, outputPath(path)).replaceAll("\\", "/");
         const note = zeroJs ? ` ${g.dot} zero js` : "";
         console.log(`  ${c.sage(g.ok)} ${path.padEnd(16)} ${c.dim(`${g.arrow} ${rel}${note}`)}`);
       } catch (error) {
         failures++;
+        failed.push(path);
         console.log(`  ${c.red(g.err)} ${path.padEnd(16)} ${error instanceof Error ? error.message : error}`);
       }
     }
@@ -289,13 +298,14 @@ export async function exportSite(): Promise<number> {
       try {
         const res = await fetch(`http://localhost:${frontPort}/__borgo-export-404-probe`);
         if (res.status !== 404) throw new Error(`responded ${res.status}`);
-        await Bun.write(join(outDir, "404.html"), await res.text());
+        await Bun.write(join(stageDir, "404.html"), await res.text());
         wrote404 = true;
         console.log(
           `  ${c.sage(g.ok)} ${"404".padEnd(16)} ${c.dim(`${g.arrow} ${outDir}/404.html ${g.dot} wire it as your host's error page`)}`,
         );
       } catch (error) {
         failures++;
+        failed.push("404");
         console.log(`  ${c.red(g.err)} ${"404".padEnd(16)} ${error instanceof Error ? error.message : error}`);
       }
     }
@@ -308,15 +318,31 @@ export async function exportSite(): Promise<number> {
     let assets = 0;
     let precompressed = 0;
     if (existsSync("public")) {
-      cpSync("public", outDir, { recursive: true });
       ({ assets, precompressed } = countAssets("public"));
+      // only onto a staging directory that is going to be published
+      if (!failures) cpSync("public", stageDir, { recursive: true });
+    }
+
+    // the swap, and only now: a partial render is not published under the name
+    // a deploy step reads. What is already in dist/site is the last export that
+    // rendered whole, which is a site that works.
+    if (!failures) {
+      rmSync(outDir, { recursive: true, force: true });
+      mkdirSync(dirname(outDir), { recursive: true });
+      renameSync(stageDir, outDir);
     }
 
     const mark = failures ? c.red(g.err) : c.sage(g.ok);
+    const where = failures ? `${g.dot} not published` : `${g.arrow} dist/site`;
     console.log(
-      `\n  ${mark} ${exportSummary(written, wrote404, assets, precompressed)} ${g.arrow} dist/site in ${c.bold(fmtMs(performance.now() - t0))}`,
+      `\n  ${mark} ${exportSummary(written, wrote404, assets, precompressed)} ${where} in ${c.bold(fmtMs(performance.now() - t0))}`,
     );
-    if (failures) console.log(`  ${c.red(g.err)} ${failures} page(s) failed to export`);
+    if (failures) {
+      console.log(`  ${c.red(g.err)} ${failures} page(s) failed to export: ${failed.join(", ")}`);
+      console.log(
+        `  ${c.dim(`${g.dot} nothing was published ${g.dot} dist/site still holds the last export that rendered whole`)}`,
+      );
+    }
     console.log(
       `  ${c.dim(`${g.dot} a static export serves pages only: actions, sse and websocket topics need borgo start`)}`,
     );
@@ -329,6 +355,9 @@ export async function exportSite(): Promise<number> {
   } finally {
     apiProc?.kill();
     await apiProc?.exited;
+    // a successful run renamed it away; anything else leaves a half-rendered
+    // tree in dist/ that nothing will ever read again
+    rmSync(stageDir, { recursive: true, force: true });
   }
   return failures ? 1 : 0;
 }

@@ -19,7 +19,9 @@ const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
 import {
   assetsBuildMode,
   buildAssets,
+  buildLeftUnfinished,
   buildModeFor,
+  buildReasons,
   BundleFailed,
   compileCss,
   cssSource,
@@ -35,13 +37,17 @@ import {
   precacheStamp,
   readAssetNames,
   readBuildInventory,
+  readBuildMode,
   readBuildOutputs,
+  rebuildBeforeServing,
   recordedOutputSizes,
   refreshTransform,
   renameUnsafeChunks,
   reservedRoutes,
+  reportBuildFailure,
   scanCode,
   sweepBuildOutput,
+  unusableBuiltAssets,
   warnDeadRoutes,
   writeBuildInventory,
 } from "../src/build";
@@ -287,6 +293,39 @@ describe("assetsBuildMode", () => {
       }
     } finally {
       process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The guard `borgo start` hangs on this was `mode === "dev" || mode ===
+  // "export"`, so every way of not knowing - no file, an empty one, a
+  // truncated one, `DEV` - fell through to serving whatever was in
+  // public/assets. Proved on a real tree: a dev build (unminified react, no
+  // precompressed siblings) served on a production port, silently, because
+  // .borgo/build-mode said something the reader did not recognise.
+  test("a stamp that cannot be read rebuilds, it does not serve", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-mode-guard-"));
+    const path = join(dir, "build-mode");
+    try {
+      // no file at all
+      expect(rebuildBeforeServing(readBuildMode(path))).toBe(
+        "nothing here records which build public/assets holds",
+      );
+      const said = (body: string) => {
+        writeFileSync(path, body);
+        return rebuildBeforeServing(readBuildMode(path));
+      };
+      // every unreadable stamp names the file, and every one of them rebuilds
+      for (const body of ["", "   ", "DEV", "Production", "{}", "dev\nproduction"]) {
+        expect(`${JSON.stringify(body)}: ${said(body)}`).toBe(
+          `${JSON.stringify(body)}: .borgo/build-mode does not say which build public/assets holds`,
+        );
+      }
+      // and the ones it does read, including the only one that may be served
+      expect(said("dev")).toBe("public/assets holds a dev build");
+      expect(said("export")).toBe("public/assets holds a static export build");
+      expect(said("production\n")).toBeNull();
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -1091,6 +1130,10 @@ describe("a served production build", () => {
         for (const stale of ["public/assets/client.js", "public/assets/style.css"]) {
           expect(`${stale} left behind: ${existsSync(stale)}`).toBe(`${stale} left behind: false`);
         }
+        // a build that wrote everything it promised takes its mark with it, or
+        // every boot after it would rebuild a tree that is perfectly good
+        expect(buildLeftUnfinished()).toBe(false);
+        expect(buildReasons()).toEqual([]);
       } finally {
         process.chdir(cwd);
         rmSync(dir, { recursive: true, force: true });
@@ -1188,6 +1231,130 @@ describe("the names a document is written against", () => {
       process.chdir(cwd);
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // existsSync answers a question nobody asked. Measured on a real tree before
+  // this looked at anything but the path: an entry truncated to zero bytes
+  // booted silently and answered /assets/client-<hash>.js with 204 and an empty
+  // body - a success, to every cache and every log - and the page never
+  // hydrated. A directory in its place booted silently and 404'd. A chunk the
+  // record names, deleted, booted silently: the check only ever looked at the
+  // three logical names, and the entry imports the other fourteen.
+  describe("a recorded name is checked as a file, not as a path", () => {
+    const ENTRY = "client-6j5pq722.js";
+    const CHUNK = "page-a1b2c3d4.js";
+    const STYLE = "style-9f3a1c07.css";
+    const names = { "client.js": ENTRY, "style.css": STYLE };
+    const inventory = [ENTRY, CHUNK, STYLE];
+
+    const withTree = (fn: (dir: string, check: () => string[]) => void) => () => {
+      const dir = mkdtempSync(join(tmpdir(), "borgo-usable-"));
+      try {
+        // the entry's length as the build recorded it; the chunk and the
+        // stylesheet are on the record's `files` list but not vouched for
+        const outputs = { dir, sizes: new Map([[ENTRY, 11]]) };
+        writeFileSync(join(dir, ENTRY), "console.log");
+        writeFileSync(join(dir, CHUNK), "export{}");
+        writeFileSync(join(dir, STYLE), "body{}");
+        fn(dir, () =>
+          unusableBuiltAssets(names, inventory, outputs, dir).map((p) => `${p.name} ${p.why}`),
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    test(
+      "an intact tree is usable",
+      withTree((_dir, check) => {
+        expect(check()).toEqual([]);
+      }),
+    );
+
+    test(
+      "an entry truncated to nothing is not a build, it is a 204",
+      withTree((dir, check) => {
+        writeFileSync(join(dir, ENTRY), "");
+        expect(check()).toEqual([`${ENTRY} is empty`]);
+      }),
+    );
+
+    test(
+      "a directory standing where the entry should be",
+      withTree((dir, check) => {
+        rmSync(join(dir, ENTRY));
+        mkdirSync(join(dir, ENTRY));
+        expect(check()).toEqual([`${ENTRY} is not a file`]);
+      }),
+    );
+
+    test(
+      "a chunk the record names, which is not one of the three logical names",
+      withTree((dir, check) => {
+        rmSync(join(dir, CHUNK));
+        expect(check()).toEqual([`${CHUNK} is missing`]);
+      }),
+    );
+
+    test(
+      "a file that is not the length the build recorded",
+      withTree((dir, check) => {
+        writeFileSync(join(dir, ENTRY), "cut");
+        expect(check()).toEqual([`${ENTRY} is 3 bytes where the build recorded 11`]);
+      }),
+    );
+
+    // and the one empty file that is not a symptom: a style.scss holding
+    // nothing but variables compiles to zero bytes, and a boot that rebuilt for
+    // that would rebuild on every boot forever, for a file that is exactly what
+    // it was written to be. It is condemned only when the record vouches for a
+    // length it no longer has.
+    test(
+      "an empty stylesheet nothing vouched for is left alone",
+      withTree((dir, check) => {
+        writeFileSync(join(dir, STYLE), "");
+        expect(check()).toEqual([]);
+      }),
+    );
+
+    test("but an empty one the build measured is not", () => {
+      const dir = mkdtempSync(join(tmpdir(), "borgo-usable-css-"));
+      try {
+        writeFileSync(join(dir, ENTRY), "console.log");
+        writeFileSync(join(dir, STYLE), "");
+        const outputs = { dir, sizes: new Map([[STYLE, 6]]) };
+        expect(unusableBuiltAssets(names, [ENTRY, STYLE], outputs, dir)).toEqual([
+          { name: STYLE, why: "is empty" },
+        ]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    // and the decision a boot makes on all of it
+    test("a chunk missing from a real record is a reason to build", () => {
+      const dir = mkdtempSync(join(tmpdir(), "borgo-usable-boot-"));
+      const cwd = process.cwd();
+      try {
+        mkdirSync(join(dir, "public/assets"), { recursive: true });
+        mkdirSync(join(dir, ".borgo"), { recursive: true });
+        process.chdir(dir);
+        for (const name of inventory) writeFileSync(`public/assets/${name}`, "x");
+        writeFileSync(".borgo/routes.gen.tsx", "");
+        writeFileSync(
+          ".borgo/build-output.json",
+          JSON.stringify({ files: inventory, dir: "public/assets", hashed: {}, entries: names }) + "\n",
+        );
+        expect(needsBuild(false)).toBe(false);
+
+        rmSync(`public/assets/${CHUNK}`);
+        expect(needsBuild(false)).toBe(true);
+        expect(buildReasons()).toEqual([`in public/assets, ${CHUNK} is missing`]);
+      } finally {
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("emittedStylesheet", () => {
@@ -1336,11 +1503,18 @@ describe("compileCss", () => {
     process.chdir(dir);
     try {
       mkdirSync(join(dir, "public/assets"), { recursive: true });
+      mkdirSync(join(dir, ".borgo"), { recursive: true });
       for (const f of ["style.css", "style.css.gz", "style.css.br"]) {
         writeFileSync(join(dir, "public/assets", f), "body{color:red}");
       }
       // an app file in the same directory is not compileCss's to remove
       writeFileSync(join(dir, "public/assets", "analytics.js"), "// mine");
+      // and the record of the build that emitted the stylesheet, which is what
+      // makes it borgo's to drop rather than a file of somebody else's
+      writeFileSync(
+        join(dir, ".borgo/build-output.json"),
+        JSON.stringify({ files: ["client.js", "style.css"] }) + "\n",
+      );
 
       expect(existsSync(join(dir, "public/assets/style.css"))).toBe(true);
       await compileCss(false); // no style.scss here: the source is gone
@@ -1351,6 +1525,50 @@ describe("compileCss", () => {
       expect(existsSync(join(dir, "public/assets/analytics.js"))).toBe(true);
     } finally {
       process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // the other half of the same rule, and the reason the fixture above needs a
+  // record at all: public/assets is gitignored by every template, so a
+  // stylesheet borgo cannot prove it wrote is one nothing can restore. The
+  // sweep settled this question the same way for chunks - with no record, the
+  // file stays - and this used to be the one deletion that ignored it, silently
+  // and on exit 0.
+  test("a stylesheet no build of borgo's recorded is not compileCss's to delete", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-css-unowned-"));
+    process.chdir(dir);
+    try {
+      mkdirSync(join(dir, "public/assets"), { recursive: true });
+      // no .borgo/build-output.json at all: an older borgo, a copy step, a
+      // hand-placed file - nothing here says this was borgo's output
+      for (const f of ["style.css", "style.css.gz"]) {
+        writeFileSync(join(dir, "public/assets", f), "body{color:red}");
+      }
+
+      expect(await compileCss(false)).toBe(false);
+
+      for (const f of ["style.css", "style.css.gz"]) {
+        expect(`${f} kept: ${existsSync(join(dir, "public/assets", f))}`).toBe(`${f} kept: true`);
+      }
+      expect(readFileSync(join(dir, "public/assets/style.css"), "utf8")).toBe("body{color:red}");
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // and a build that did not write it does not get to rename it into its own
+  // output either: adopting the file is the next build's licence to sweep it
+  test("a stylesheet this build did not compile is not renamed into its output", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-css-adopt-"));
+    try {
+      writeFileSync(join(dir, "style.css"), "body{color:red}");
+      expect(await emittedStylesheet(false, undefined, dir, false)).toBeNull();
+      expect(existsSync(join(dir, "style.css"))).toBe(true);
+      // the build that did compile it names it after its bytes, as before
+      expect(await emittedStylesheet(false, undefined, dir, true)).toMatch(/^style-[a-z0-9]{8}\.css$/);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -1381,6 +1599,31 @@ describe("compileCss", () => {
         expect(existsSync(join(dir, "public/assets", f))).toBe(true);
       }
       expect(readFileSync(join(dir, "public/assets/style.css"), "utf8")).toBe("body{color:red}");
+    } finally {
+      if (hadFlag === undefined) delete process.env.BORGO_TAILWIND;
+      else process.env.BORGO_TAILWIND = hadFlag;
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // the same forgotten flag on a clone that has never been built. There is no
+  // "last build" to leave the stylesheet as, and public/assets is gitignored by
+  // every template, so what the message described did not exist: the build
+  // exited 0 having produced an app whose every page links a stylesheet that is
+  // not there, and said so in words that read like everything was fine.
+  test("a tailwind app with nothing to keep fails instead of exiting 0 with no stylesheet", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-css-clean-clone-"));
+    process.chdir(dir);
+    const hadFlag = process.env.BORGO_TAILWIND;
+    delete process.env.BORGO_TAILWIND;
+    try {
+      writeFileSync(join(dir, "style.css"), '@import "tailwindcss";\n');
+      mkdirSync(join(dir, "public/assets"), { recursive: true });
+
+      expect(compileCss(false)).rejects.toThrow("re-run with --tailwind");
+      // and it says so before anything is written, not after
+      expect(existsSync(join(dir, "public/assets/style.css"))).toBe(false);
     } finally {
       if (hadFlag === undefined) delete process.env.BORGO_TAILWIND;
       else process.env.BORGO_TAILWIND = hadFlag;
@@ -1421,6 +1664,53 @@ describe("compileCss", () => {
     // the only test that reaches sass: importing sass-embedded and spawning
     // its dart compiler measured 6.9s cold, ~310ms warm
   }, 60_000);
+});
+
+// BundleFailed had a handler and nothing else did. A sass parse error, an
+// EACCES on public/assets, a tailwind plugin throwing - each came out of
+// `borgo build` as a raw v8 trace with borgo's own source comments quoted
+// inside it, which is the one thing on screen that names no file of the
+// operator's, printed instead of the one line that does.
+describe("reportBuildFailure", () => {
+  const captured = (error: unknown, debug = false) => {
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void lines.push(args.join(" "));
+    try {
+      reportBuildFailure(error, debug);
+    } finally {
+      console.error = original;
+    }
+    // the colour codes are not what is under test
+    return lines.join("\n").replaceAll(/\[[0-9;]*m/g, "");
+  };
+
+  test("a bundler failure keeps the framing it always had", () => {
+    const out = captured(new BundleFailed(["pages/index.tsx:1:1 - unexpected }"]));
+    expect(out).toContain("the client bundle failed to build");
+    expect(out).toContain("pages/index.tsx:1:1");
+    expect(out).toContain("public/assets still holds the last build that worked");
+  });
+
+  test("anything else gets the message, its cause, its path, and the stack behind a flag", () => {
+    const error = Object.assign(new Error("EACCES: permission denied, open 'public/assets/style.css'"), {
+      path: "public\\assets\\style.css",
+      cause: new Error("the directory is read-only"),
+    });
+    const out = captured(error);
+    expect(out).toContain("EACCES: permission denied");
+    expect(out).toContain("caused by");
+    expect(out).toContain("the directory is read-only");
+    expect(out).toContain("public/assets/style.css");
+    // the stack is offered, not printed
+    expect(out).toContain("run it again with --debug for the stack");
+    expect(out).not.toContain("at <anonymous>");
+    expect(captured(error, true)).toContain("Error: EACCES");
+  });
+
+  test("a thrown non-error is still a message and not a trace", () => {
+    expect(captured("go build died")).toContain("go build died");
+  });
 });
 
 describe("renameUnsafeChunks", () => {
@@ -1546,5 +1836,19 @@ describe("a failed bundle leaves the last good build alone", () => {
 
   test("and the inventory still names what is actually on disk", () => {
     expect(readBuildInventory()).toEqual(["client.js", "page-a1b2c3d4.js", "precache.json"]);
+  });
+
+  // AND IT MUST NOT ERASE THE REASON IT WAS NEEDED.
+  //
+  // generateManifest writes .borgo/routes.gen.tsx before anything downstream
+  // can fail, so the first thing this failed build did was to satisfy the one
+  // question the next boot asks: manifest present, assets present, nothing to
+  // do. The operator read the failure once, restarted, and was told everything
+  // was fine - on the previous build's assets, forever, with the error gone.
+  test("the mark it left says the last build here did not finish", () => {
+    expect(buildLeftUnfinished()).toBe(true);
+    expect(buildReasons()).toContain("the last build here did not finish");
+    // and the manifest it wrote before dying is exactly why the mark is needed
+    expect(existsSync(join(dir, ".borgo/routes.gen.tsx"))).toBe(true);
   });
 });

@@ -2,7 +2,14 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { assetsBuildMode, buildAssets, BundleFailed, warnDeadRoutes, type BuildResult } from "./build";
+import {
+  buildAssets,
+  debugEnabled,
+  rebuildBeforeServing,
+  reportBuildFailure,
+  warnDeadRoutes,
+  type BuildResult,
+} from "./build";
 import { banner, c, fmtMs, g } from "./colors";
 import { parseInitArgv, unknownArg } from "./deploy";
 import { goBinName, runBorgogen } from "./util";
@@ -13,10 +20,15 @@ const command = process.argv[2];
 // pipeline to @tailwindcss/cli; the env carries it into child processes
 if (process.argv.includes("--tailwind")) process.env.BORGO_TAILWIND = "1";
 
+// --debug asks for the stack behind a failure and is legal after any command,
+// so it is read off the whole argv here and kept out of the per-command check,
+// exactly like --tailwind above (which deploy.ts lists in GLOBAL_FLAGS)
+const debug = debugEnabled(process.argv);
+
 // refused here, before any command runs: a flag borgo does not know is a flag
 // the operator believes is doing something, and a build that ignores it exits 0
 // having done something other than what was asked
-const badArg = unknownArg(command, process.argv.slice(3));
+const badArg = unknownArg(command, process.argv.slice(3).filter((arg) => arg !== "--debug"));
 if (badArg) {
   console.log(`\n  ${banner(command)}\n`);
   console.log(`  ${c.red(g.err)} ${badArg}`);
@@ -26,16 +38,27 @@ if (badArg) {
 
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} kB`;
 
-// a failed bundle is a first-class cli failure, not an escaped stack trace:
-// one red line per bundler message, with the file and position bun reported
+// a failed build is a first-class cli failure, not an escaped stack trace -
+// and every way of failing, not just the bundler's: a sass parse error, a
+// permission denied on public/assets and a tailwind app built without the flag
+// all used to come out as a raw trace with borgo's own comments quoted in it
 async function build(dev = false): Promise<BuildResult> {
   try {
     return await buildAssets(dev);
   } catch (error) {
-    if (!(error instanceof BundleFailed)) throw error;
-    console.error(`\n  ${c.red(g.err)} the client bundle failed to build`);
-    for (const detail of error.details) console.error(`    ${detail}`);
-    console.error(`  ${c.dim(`${g.dot} public/assets still holds the last build that worked`)}\n`);
+    reportBuildFailure(error, debug);
+    process.exit(1);
+  }
+}
+
+// `serve()` builds on its own when it finds a tree it cannot serve, so a boot
+// is one more place a build failure comes out of - and the one place it used to
+// come out unframed, because the wrapper above is not on that path
+async function framed<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    reportBuildFailure(error, debug);
     process.exit(1);
   }
 }
@@ -54,7 +77,7 @@ switch (command) {
     // lazy: the server module resolves react from the app, which does not
     // exist when the cli runs outside a project (e.g. bare `borgo`)
     const { dev } = await import("./dev");
-    await dev();
+    await framed(dev);
     break;
   }
 
@@ -184,10 +207,11 @@ switch (command) {
     // each time. Clear it before anything builds, `serve()` included
     delete process.env.BORGO_STATIC;
 
-    const mode = assetsBuildMode();
-    if (mode === "dev" || mode === "export") {
-      const held = mode === "dev" ? "a dev build" : "a static export build";
-      console.log(`  ${c.terracotta(g.change)} public/assets holds ${held} ${c.dim("- rebuilding for production")}`);
+    // and a stamp that cannot be read is not a licence to serve: the only
+    // answer this branch accepts is the one that says production
+    const rebuildWhy = rebuildBeforeServing();
+    if (rebuildWhy) {
+      console.log(`  ${c.terracotta(g.change)} ${rebuildWhy} ${c.dim("- rebuilding for production")}`);
       const rebuildStarted = performance.now();
       await build();
       console.log(`  ${c.sage(g.ok)} built in ${c.bold(fmtMs(performance.now() - rebuildStarted))}`);
@@ -205,7 +229,7 @@ switch (command) {
     }
 
     const { serve } = await import("./server");
-    await serve({ dev: false });
+    await framed(() => serve({ dev: false }));
     break;
   }
 

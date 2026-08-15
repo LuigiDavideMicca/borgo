@@ -175,17 +175,71 @@ const packageJson = (d: DoctorEnv): Record<string, unknown> | null => {
   }
 };
 
+// the comparators that put a floor under a range. Anything else is either a
+// ceiling or a form with no single floor at all, and both are refused by name
+// rather than read for whichever number appears first in them.
+export const SUPPORTED_RANGES = ">=1.3.0, >1.3.0, ^1.3.0, ~1.3.0 or 1.3.0, optionally followed by an upper bound";
+
+/**
+ * The lowest version a range admits, or null when it declares no floor we read.
+ *
+ * This used to be `parseVersion` over the whole string, which returns the first
+ * version it can find and never looks at what is in front of it. So `"<1.5.0"`
+ * - a *ceiling*, the app saying it cannot run on 1.5 yet - was read as "at
+ * least 1.5.0", and `borgo doctor` exited 1 on a machine whose bun was exactly
+ * what the app asked for. A comparator borgo cannot read is refused out loud
+ * instead: an unread range must not become a requirement nobody wrote.
+ *
+ * A hyphen range ("1.2.3 - 2.0.0") and a two-comparator range (">=1.3.2 <2")
+ * both begin with their floor, which is why the first token is the one read.
+ */
+export function declaredFloor(range: string): string | null {
+  // an alternation's floor is the lowest of its branches, not the first one
+  // written: "^2 || ^1.2" read left to right would fail every machine the app
+  // is happy on. Refused rather than half-read.
+  if (range.includes("||")) return null;
+  const first = range.trim().split(/\s+/)[0] ?? "";
+  const m = first.match(/^(?:>=|>|\^|~|=)?v?(\d+)\.(\d+)(?:\.(\d+))?$/);
+  // ">1.4.2" admits 1.4.3 and not 1.4.2, and is read as a floor of 1.4.2: the
+  // one version of error it can produce is a green check on the exact release
+  // the app excluded, where reading it as no floor at all drops the whole
+  // declaration
+  return m ? `${Number(m[1])}.${Number(m[2])}.${Number(m[3] ?? 0)}` : null;
+}
+
 // the app may ask for a newer bun than the framework does; it may not ask for
 // an older one. a declared floor below borgo's is not a relaxation, it is a
 // green check on a bun that `borgo build` will fail on, so the higher of the
-// two wins. a range like ">=1.3.2 <2" is read for its first version.
-export function bunMinimum(d: DoctorEnv): { min: string; source: string } {
+// two wins.
+export function bunMinimum(d: DoctorEnv): { min: string; source: string; unreadable?: string } {
   const engines = packageJson(d)?.engines as { bun?: string } | undefined;
-  const declared = typeof engines?.bun === "string" ? parseVersion(engines.bun) : null;
+  const declared = typeof engines?.bun === "string" ? engines.bun.trim() : "";
   if (!declared) return { min: MIN_BUN, source: "borgo" };
-  const asked = declared.join(".");
-  if (!versionAtLeast(asked, MIN_BUN)) return { min: MIN_BUN, source: "borgo" };
-  return { min: asked, source: "package.json engines.bun" };
+  const floor = declaredFloor(declared);
+  if (!floor) {
+    return {
+      min: MIN_BUN,
+      source: "borgo",
+      unreadable: `engines.bun is "${declared}", which borgo does not read as a minimum`,
+    };
+  }
+  if (!versionAtLeast(floor, MIN_BUN)) return { min: MIN_BUN, source: "borgo" };
+  return { min: floor, source: "package.json engines.bun" };
+}
+
+// a declared range borgo could not read is a note, not a failure: the machine
+// is fine, the check simply fell back to borgo's own minimum, and the operator
+// is the only one who can say whether that is what they meant
+export function checkEnginesBun(d: DoctorEnv): Check | null {
+  const { unreadable } = bunMinimum(d);
+  if (!unreadable) return null;
+  return {
+    name: "engines.bun",
+    ok: false,
+    info: true,
+    detail: `${unreadable} ${g.dot} checked against borgo's own ${MIN_BUN} instead`,
+    fix: `write it as one of: ${SUPPORTED_RANGES}`,
+  };
 }
 
 // an npm-installed bun is a wrapper under node_modules, not the real binary:
@@ -570,6 +624,7 @@ export async function runChecks(d: DoctorEnv): Promise<Check[]> {
     // toolchain
     checkBun(d),
     checkBunShim(d),
+    checkEnginesBun(d),
     checkGo(d),
     checkNode(d),
     checkDocker(d),

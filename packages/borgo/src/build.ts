@@ -1,6 +1,7 @@
 import { Glob } from "bun";
 import {
   existsSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -8,7 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { c, g } from "./colors";
 import { NO_BUILD_OUTPUTS, precompressAssets, type BuildOutputs } from "./compress";
 import { stampWorkerFile } from "./pwa";
@@ -31,13 +32,80 @@ export function buildModeFor(dev: boolean, env: NodeJS.ProcessEnv = process.env)
   return env.BORGO_STATIC === "1" ? "export" : "production";
 }
 
-export function assetsBuildMode(): BuildMode | null {
+// `recorded` separates "no build has run here" from "a build-mode is on disk
+// and it is not one borgo writes" - an empty file, a truncated one, a `DEV`
+// some editor upper-cased. Both are unknown, and the two lines they earn name
+// different things to go and look at.
+export type BuildModeRead = { mode: BuildMode | null; recorded: boolean };
+
+export function readBuildMode(path = buildModePath): BuildModeRead {
+  let raw: string;
   try {
-    const mode = readFileSync(buildModePath, "utf8").trim();
-    return mode === "dev" || mode === "production" || mode === "export" ? mode : null;
+    raw = readFileSync(path, "utf8");
   } catch {
-    return null;
+    return { mode: null, recorded: false };
   }
+  const mode = raw.trim();
+  return mode === "dev" || mode === "production" || mode === "export"
+    ? { mode, recorded: true }
+    : { mode: null, recorded: true };
+}
+
+export function assetsBuildMode(path = buildModePath): BuildMode | null {
+  return readBuildMode(path).mode;
+}
+
+/**
+ * Why `borgo start` has to rebuild before serving, or null to serve what is here.
+ *
+ * The guard used to be `mode === "dev" || mode === "export"`, so every way of
+ * not knowing - no file, an empty one, garbage, `DEV` - fell through to
+ * serving. That is the guard failing toward the outcome it exists to prevent:
+ * an unreadable stamp is the state a dev tree reaches by having its `.borgo`
+ * half-copied, and the reward for guessing right is nothing while the cost of
+ * guessing wrong is a development bundle on a production port, silently.
+ *
+ * So only the stamp that says "production" in so many words is served. Doubt
+ * rebuilds: the price is one build.
+ */
+export function rebuildBeforeServing(read: BuildModeRead = readBuildMode()): string | null {
+  if (read.mode === "production") return null;
+  if (read.mode === "dev") return "public/assets holds a dev build";
+  if (read.mode === "export") return "public/assets holds a static export build";
+  return read.recorded
+    ? `${buildModePath} does not say which build public/assets holds`
+    : "nothing here records which build public/assets holds";
+}
+
+// the mark a build leaves on the tree while it is running, removed only when
+// it has written everything it promises. See buildLeftUnfinished.
+const incompletePath = `${genDir}/build-incomplete`;
+
+export function markBuildStarted(path = incompletePath) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${new Date().toISOString()}\n`);
+}
+
+export function clearBuildMark(path = incompletePath) {
+  rmSync(path, { force: true });
+}
+
+/**
+ * Whether the last build here stopped somewhere in the middle.
+ *
+ * generateManifest writes `.borgo/routes.gen.tsx` before anything can fail, so
+ * the very first thing a failed build did was to erase the evidence that it was
+ * needed: the boot after it found a manifest and a public/assets from the last
+ * build that worked, decided there was nothing to do, and served the old assets
+ * without a word. An error that deletes its own cause is worse than one that
+ * stays - the operator reads the failure once, fixes nothing, restarts, and is
+ * told everything is fine.
+ *
+ * The mark is written before the manifest and removed after the last byte of a
+ * successful build, so the state in between is legible to whoever boots next.
+ */
+export function buildLeftUnfinished(path = incompletePath): boolean {
+  return existsSync(path);
 }
 
 const dynamicSegments = (pattern: string) =>
@@ -234,6 +302,9 @@ export async function generateManifest(dev = false) {
   if (!existsSync("pages")) {
     throw new Error("no pages/ directory here - run borgo from the app root (the folder holding pages/)");
   }
+  // before the first generated file is written, because the first one written
+  // is what a later boot mistakes for a finished build
+  markBuildStarted();
   const files = [...new Glob("**/*.tsx").scanSync("pages")]
     .map((f) => f.replaceAll("\\", "/"))
     .sort();
@@ -503,46 +574,90 @@ export function cssSource(dir = "."): "scss" | "css" | null {
   return null;
 }
 
-// the emitted stylesheet and its precompressed siblings, dropped when the
-// previous build's css outlives the file it came from: still served, still
-// recompressed, still listed in precache.json, forever.
-//
-// the orphan test is made HERE rather than by the caller. A tailwind app whose
-// build was launched without --tailwind (`borgo export` never got the flag)
-// reaches this with no style.scss and a perfectly live style.css entry beside
-// it, and public/assets is gitignored by every template - deleting the app's
-// only stylesheet there is not recoverable. Returns whether it deleted.
-function dropStylesheet(): boolean {
-  if (cssSource() !== null) return false;
+// which stylesheet is sitting in public/assets right now, under the name the
+// last build recorded or the plain one. null means there is none: nothing to
+// keep, and nothing a message may claim was kept.
+function stylesheetOnDisk(dir = outDir): string | null {
+  const emitted = readAssetNames()["style.css"];
+  if (emitted && existsSync(`${dir}/${emitted}`)) return emitted;
+  return existsSync(`${dir}/style.css`) ? "style.css" : null;
+}
+
+/**
+ * The previous build's stylesheet, dropped once its source is gone.
+ *
+ * Only names the build's own record claims. This used to delete
+ * `public/assets/style.css` on sight, which is a file this build did not write
+ * and cannot restore: public/assets is gitignored by every template, so a
+ * stylesheet put there by anything other than borgo - a copy step, an older
+ * borgo, a hand-placed file - was removed silently, exit 0, with no line
+ * anywhere saying it had happened. The sweep two functions down settled the
+ * same question the same way: with no record, the file is not provably borgo's
+ * and stays.
+ *
+ * Returns the names it removed, which the caller prints. A build that deletes
+ * something says so.
+ */
+function dropStylesheet(inventory: string[] | null = readBuildInventory()): string[] {
+  const owned = new Set(inventory ?? []);
   // the name the last build emitted it under as well as the plain one: a
   // production build renames the stylesheet after its content, so style.css
   // alone would leave the orphan on disk under the name still being served
   const emitted = readAssetNames()["style.css"];
-  for (const name of new Set(["style.css", ...(emitted ? [emitted] : [])])) {
+  const removed: string[] = [];
+  for (const name of new Set([...(emitted ? [emitted] : []), "style.css"])) {
+    if (!owned.has(name)) continue;
     for (const suffix of ["", ".gz", ".br"]) rmSync(`${outDir}/${name}${suffix}`, { force: true });
+    removed.push(name);
   }
-  return true;
+  return removed;
 }
 
-export async function compileCss(dev = false) {
-  if (process.env.BORGO_TAILWIND === "1") return compileTailwind(dev);
+// whether this build compiled the stylesheet itself. What it did not write, it
+// does not get to rename or record as its own output.
+export async function compileCss(dev = false): Promise<boolean> {
+  if (process.env.BORGO_TAILWIND === "1") {
+    await compileTailwind(dev);
+    return true;
+  }
+  if (existsSync("style.scss")) {
+    const sass = await import("sass-embedded");
+    const css = await sass.compileAsync("style.scss", { style: dev ? "expanded" : "compressed" });
+    await Bun.write(`${outDir}/style.css`, css.css);
+    return true;
+  }
   // a deleted or renamed style.scss - and the scss -> tailwind switch, which
   // leaves BORGO_TAILWIND unset on the build that removed the scss - must take
   // the stylesheet it produced with it
-  if (!existsSync("style.scss")) {
-    if (dropStylesheet()) return;
-    // tailwind is opt-in by flag, never by detection, so this build cannot
-    // compile it - but it must not delete it either, and silence here reads
-    // as "the stylesheet is stale" on the next page load
-    console.warn(
-      `  ${c.terracotta(g.change)} style.css is the app's stylesheet but this command ran without ` +
-        `${c.bold("--tailwind")} ${c.dim(`${g.dot} public/assets/style.css left as the last build wrote it`)}`,
-    );
-    return;
+  if (cssSource() === null) {
+    for (const name of dropStylesheet()) {
+      console.warn(
+        `  ${c.terracotta(g.change)} public/assets/${name} dropped ` +
+          `${c.dim(`${g.dot} the app has no style.scss or style.css left to compile`)}`,
+      );
+    }
+    return false;
   }
-  const sass = await import("sass-embedded");
-  const css = await sass.compileAsync("style.scss", { style: dev ? "expanded" : "compressed" });
-  await Bun.write(`${outDir}/style.css`, css.css);
+  // tailwind is opt-in by flag, never by detection, so this build cannot
+  // compile it - but it must not delete it either, and silence here reads
+  // as "the stylesheet is stale" on the next page load
+  const kept = stylesheetOnDisk();
+  if (!kept) {
+    // "left as the last build wrote it" was printed on a clean clone, where
+    // there is no last build and public/assets is empty: the build then exited
+    // 0 having produced an app with no stylesheet at all, and said so in words
+    // that describe a tree that does not exist. Nothing here can be recovered
+    // by rebuilding without the flag, so this is where it stops.
+    throw new Error(
+      "style.css is the app's stylesheet but this command ran without --tailwind, " +
+        "and public/assets holds no stylesheet from an earlier build - re-run with --tailwind",
+    );
+  }
+  console.warn(
+    `  ${c.terracotta(g.change)} style.css is the app's stylesheet but this command ran without ` +
+      `${c.bold("--tailwind")} ${c.dim(`${g.dot} public/assets/${kept} left as the last build wrote it`)}`,
+  );
+  return false;
 }
 
 // the names borgo writes on every build, whatever the app looks like. the
@@ -658,11 +773,63 @@ export function readAssetNames(path = inventoryPath): AssetNames {
  * With no record at all, the plain entry name stands in: an app upgrading from
  * a borgo that hashed nothing still has its build recognised.
  */
-export function missingBuiltAssets(names: AssetNames = readAssetNames()): string[] {
-  const wanted = { "client.js": "client.js", ...names };
-  return [...new Set(Object.values(wanted))]
-    .filter((name) => !existsSync(`${outDir}/${name}`))
-    .sort();
+export type AssetProblem = { name: string; why: string };
+
+/**
+ * Every name the last build recorded, checked as a file rather than as a path.
+ *
+ * `existsSync` answers a question nobody asked. A directory exists. A file
+ * truncated to nothing exists - and an empty entry point is the worst of the
+ * three, because the server answers it 204 with a zero-length body, which is a
+ * success: no 404, no error page, no line in any log, and a document that never
+ * hydrates. Measured on a real tree before this checked lengths.
+ *
+ * The set is the record's own `files[]`, not the three logical names. The
+ * document only ever names the entry and the stylesheet, but the entry imports
+ * the chunks beside it, and a chunk that is missing takes hydration down just
+ * as completely while `client.js` sits there looking healthy.
+ *
+ * Zero length condemns a `.js` outright - the bundler does not emit empty
+ * javascript. Anything else is condemned for it only when the record vouches
+ * for a length it no longer has: a style.scss holding nothing but variables
+ * really does compile to zero bytes, and a build must not spend every boot
+ * rebuilding a file that is exactly what it was written to be.
+ */
+export function unusableBuiltAssets(
+  names: AssetNames = readAssetNames(),
+  inventory: string[] | null = readBuildInventory(),
+  outputs: BuildOutputs = readBuildOutputs(),
+  dir = outDir,
+): AssetProblem[] {
+  const wanted = new Set([...Object.values({ "client.js": "client.js", ...names }), ...(inventory ?? [])]);
+  const problems: AssetProblem[] = [];
+  for (const name of [...wanted].sort()) {
+    const recorded = outputs.dir === dir ? outputs.sizes.get(name) : undefined;
+    let stat;
+    try {
+      stat = statSync(`${dir}/${name}`);
+    } catch {
+      problems.push({ name, why: "is missing" });
+      continue;
+    }
+    if (!stat.isFile()) {
+      problems.push({ name, why: "is not a file" });
+    } else if (stat.size === 0 && (name.endsWith(".js") || recorded)) {
+      problems.push({ name, why: "is empty" });
+    } else if (recorded && stat.size !== recorded) {
+      problems.push({ name, why: `is ${stat.size} bytes where the build recorded ${recorded}` });
+    }
+  }
+  return problems;
+}
+
+// the names alone, for callers that only need to know which files failed
+export function missingBuiltAssets(
+  names: AssetNames = readAssetNames(),
+  inventory: string[] | null = readBuildInventory(),
+  outputs: BuildOutputs = readBuildOutputs(),
+): string[] {
+  return unusableBuiltAssets(names, inventory, outputs).map((p) => p.name);
 }
 
 /**
@@ -673,9 +840,16 @@ export function missingBuiltAssets(names: AssetNames = readAssetNames()): string
  */
 export function buildReasons(names: AssetNames = readAssetNames()): string[] {
   const why: string[] = [];
-  const missing = missingBuiltAssets(names);
-  if (missing.length) why.push(`public/assets is missing ${missing.join(", ")}`);
+  const bad = unusableBuiltAssets(names);
+  if (bad.length) {
+    // a partial deploy can leave every name broken at once, and a boot line
+    // naming seventeen files is a boot line nobody reads
+    const shown = bad.slice(0, 3).map((p) => `${p.name} ${p.why}`);
+    if (bad.length > shown.length) shown.push(`and ${bad.length - shown.length} more`);
+    why.push(`in public/assets, ${shown.join(", ")}`);
+  }
   if (!existsSync(`${genDir}/routes.gen.tsx`)) why.push("there is no route manifest here");
+  if (buildLeftUnfinished()) why.push("the last build here did not finish");
   return why;
 }
 
@@ -718,14 +892,20 @@ const contentHash = (bytes: ArrayBuffer): string =>
  * sitting in the output directory. Renaming rather than copying: two files
  * with the same bytes under different names is the state where the sweep
  * deletes the one the document is using.
+ *
+ * `wrote` is whether this build compiled that plain style.css. A build that did
+ * not must not rename it: the file would be one nobody produced, moved to a
+ * name nobody asked for, and recorded as this build's own output - which is the
+ * next build's licence to delete it.
  */
 export async function emittedStylesheet(
   dev: boolean,
   previous: string | undefined,
   dir = outDir,
+  wrote = true,
 ): Promise<string | null> {
   const plain = `${dir}/style.css`;
-  if (existsSync(plain)) {
+  if (wrote && existsSync(plain)) {
     if (dev) return "style.css";
     const name = `style-${contentHash(await Bun.file(plain).arrayBuffer())}.css`;
     if (name !== "style.css") renameSync(plain, `${dir}/${name}`);
@@ -915,12 +1095,63 @@ export class BundleFailed extends Error {
   }
 }
 
+// whether the operator asked for the stack. `--debug` is read off the whole
+// argv by cli.ts, like --tailwind; the variable is for everything that reaches
+// a build without a command line (the dev server's own rebuilds, a test).
+export const debugEnabled = (
+  argv: readonly string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => argv.includes("--debug") || env.BORGO_DEBUG === "1";
+
+// the chain of `cause`s an error carries, which is where the real reason lives
+// once anything has wrapped it
+function causeChain(error: unknown): string[] {
+  const chain: string[] = [];
+  let current: unknown = (error as { cause?: unknown })?.cause;
+  while (current && chain.length < 4) {
+    chain.push(current instanceof Error ? current.message : String(current));
+    current = (current as { cause?: unknown })?.cause;
+  }
+  return chain;
+}
+
+/**
+ * Any failure a build can end in, printed as a borgo failure.
+ *
+ * `BundleFailed` had a handler and nothing else did, so every other way a build
+ * dies - a sass parse error, an EACCES on public/assets, a tailwind plugin
+ * throwing, an ENOSPC - escaped as a raw v8 trace with borgo's own source
+ * comments quoted inside it. The trace is the one thing there that names no
+ * file of the operator's, and it hides the one line that does.
+ *
+ * The stack is not lost, only moved behind `--debug`: the operator who needs it
+ * is the one who already read the message and wants more.
+ */
+export function reportBuildFailure(error: unknown, debug = debugEnabled()): void {
+  if (error instanceof BundleFailed) {
+    console.error(`\n  ${c.red(g.err)} the client bundle failed to build`);
+    for (const detail of error.details) console.error(`    ${detail}`);
+    console.error(`  ${c.dim(`${g.dot} public/assets still holds the last build that worked`)}\n`);
+    return;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`\n  ${c.red(g.err)} ${message}`);
+  for (const cause of causeChain(error)) console.error(`    ${c.dim(`caused by ${g.dot}`)} ${cause}`);
+  // an fs error names the path it failed on and nothing else does
+  const path = (error as { path?: unknown }).path;
+  if (typeof path === "string") console.error(`    ${c.dim(`at ${g.dot}`)} ${path.replaceAll("\\", "/")}`);
+  const stack = error instanceof Error ? error.stack : null;
+  if (debug && stack) console.error(`\n${stack}`);
+  else if (stack) console.error(`  ${c.dim(`${g.dot} run it again with --debug for the stack`)}`);
+  console.error("");
+}
+
 export async function buildAssets(dev = false): Promise<BuildResult> {
   if (dev) void loadBabelRefresh();
   const { hasIslands } = await generateManifest(dev);
   const lastNames = readAssetNames();
-  await compileCss(dev);
-  const stylesheet = await emittedStylesheet(dev, lastNames["style.css"]);
+  const wroteCss = await compileCss(dev);
+  const stylesheet = await emittedStylesheet(dev, lastNames["style.css"], outDir, wroteCss);
 
   // read before the bundle runs, swept after it succeeds: the sweep used to go
   // first, so one parse error left public/assets holding nothing but style.css
@@ -1022,6 +1253,9 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
     names,
   );
   await Bun.write(buildModePath, buildModeFor(dev));
+  // every byte this build promises is on disk: the tree is a finished build
+  // again, and the next boot has nothing to inherit from this one
+  clearBuildMark();
 
   // dev: page chunks carry an injected marker, so the fast-refresh channel
   // can tell the browser which chunk file belongs to which page
