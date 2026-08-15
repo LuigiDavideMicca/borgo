@@ -3,11 +3,16 @@ package borgo
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -735,6 +740,935 @@ func TestZeroValueHubLeavesNoHeldMutexBehindARecoveredPanic(t *testing.T) {
 	}
 	hubCall(t, "Publish()", func() { hub.Publish("after", 1) })
 	hubCall(t, "Close()", hub.Close)
+}
+
+// The hub's zero value was made safe above; its neighbour in the same file had
+// the same disease. `var s SSEStream` reached Send or Ping and dereferenced a
+// nil ResponseController, and Done handed back a nil channel - a handler
+// selecting only on that parks for good, which is the worst way to fail
+// because nothing crashes and nothing shows. A zero-value stream is a stream
+// that never opened: it must refuse writes with an error that names SSE, and
+// it must report itself finished rather than never finishing.
+//
+// Every test below starts from a zero value, never from SSE(), and every wait
+// is bounded - a hang is indistinguishable from a slow machine and is not a
+// verification.
+
+// streamCall runs op on its own goroutine, so a call that panics takes the
+// goroutine rather than the test binary, and a call that wedges on the
+// stream's mutex fails the test instead of hanging it.
+func streamCall(t *testing.T, what string, op func()) {
+	t.Helper()
+	outcome := make(chan any, 1)
+	go func() {
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			op()
+		}()
+		outcome <- recovered
+	}()
+	select {
+	case recovered := <-outcome:
+		if recovered != nil {
+			t.Fatalf("%s panicked on a zero-value SSEStream: %v", what, recovered)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never returned on a zero-value SSEStream: its mutex is held", what)
+	}
+}
+
+// each subtest makes its call the very first one on its own zero value: the
+// first call is the one that used to panic
+func TestZeroValueSSEStreamRefusesToWrite(t *testing.T) {
+	t.Run("Send", func(t *testing.T) {
+		var s SSEStream
+		var err error
+		streamCall(t, "Send()", func() { err = s.Send("greet", map[string]string{"msg": "ciao"}) })
+		if err == nil {
+			t.Fatal("Send() reported success on a stream that has nowhere to write")
+		}
+		if !strings.Contains(err.Error(), "SSE") {
+			t.Errorf("Send() error %q does not tell the caller to go through SSE()", err)
+		}
+	})
+	t.Run("Ping", func(t *testing.T) {
+		var s SSEStream
+		var err error
+		streamCall(t, "Ping()", func() { err = s.Ping() })
+		if err == nil {
+			t.Fatal("Ping() reported success on a stream that has nowhere to write")
+		}
+	})
+	t.Run("write", func(t *testing.T) {
+		var s SSEStream
+		var err error
+		streamCall(t, "write()", func() { err = s.write(pingFrame) })
+		if err == nil {
+			t.Fatal("write() reported success on a stream that has nowhere to write")
+		}
+	})
+	t.Run("Done", func(t *testing.T) {
+		var s SSEStream
+		var done <-chan struct{}
+		streamCall(t, "Done()", func() { done = s.Done() })
+		if done == nil {
+			t.Fatal("Done() returned nil on a zero-value stream: a handler selecting on it parks for good")
+		}
+	})
+}
+
+// the nil channel a zero value used to return is not a crash, it is a handler
+// that never comes back; the timer is what tells the two apart
+func TestZeroValueSSEStreamDoneNeverParksItsHandler(t *testing.T) {
+	var s SSEStream
+	select {
+	case <-s.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("a handler selecting on a zero-value stream's Done() waited for a channel nothing will ever close")
+	}
+	// and it stays that way: a second reader gets the same answer
+	select {
+	case <-s.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done() fired once and then parked the next caller")
+	}
+}
+
+// a still write is one thing; the mutex under -race with several callers is
+// another, and the hub's bug was a held mutex, not the panic that caused it
+func TestZeroValueSSEStreamUnderConcurrentCalls(t *testing.T) {
+	var s SSEStream
+
+	panics := make(chan any, 32)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panics <- r
+				}
+			}()
+			for range 25 {
+				_ = s.Send("tick", 1)
+				_ = s.Ping()
+				_ = s.write(pingFrame)
+				_ = s.Done()
+			}
+		}()
+	}
+
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("concurrent calls on a zero-value stream never all returned: the stream's mutex is held")
+	}
+	select {
+	case r := <-panics:
+		t.Fatalf("a concurrent call on a zero-value stream panicked: %v", r)
+	default:
+	}
+}
+
+// a zero value is not only `var s SSEStream`: it is any field or element
+// nobody assigned, and those are the ones that arrive by accident
+func TestZeroValueSSEStreamInsideAStructAndASlice(t *testing.T) {
+	var holder struct {
+		name   string
+		stream SSEStream
+	}
+	streamCall(t, "Send() on a struct field", func() {
+		if err := holder.stream.Send("greet", 1); err == nil {
+			t.Error("Send() on a zero-value struct field reported success")
+		}
+	})
+	select {
+	case <-holder.stream.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done() on a zero-value struct field parks its handler")
+	}
+
+	streams := make([]SSEStream, 3)
+	for i := range streams {
+		streamCall(t, "Ping() on a slice element", func() {
+			if err := streams[i].Ping(); err == nil {
+				t.Errorf("Ping() on zero-value element %d reported success", i)
+			}
+		})
+		select {
+		case <-streams[i].Done():
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Done() on zero-value element %d parks its handler", i)
+		}
+	}
+}
+
+// Every stream started a watcher goroutine that sat on the request context and
+// the server's shutdown latch. When neither exists - a handler called with a
+// background-context request and no server behind it, which is how a test or a
+// non-net/http mount reaches it - that watcher waited on two nil channels, and
+// nothing would ever wake it. The suite parks a thousand of them in one test.
+// A stream must leave no goroutine behind once its life is over, including
+// when its request cannot be cancelled at all.
+
+// streamGoroutineBaseline is a baseline taken once the goroutines of earlier tests
+// have finished unwinding: the count has to hold still before it means
+// anything.
+func streamGoroutineBaseline(t *testing.T) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	last, stable := -1, 0
+	for {
+		n := runtime.NumGoroutine()
+		if n == last {
+			if stable++; stable == 5 {
+				return n
+			}
+		} else {
+			last, stable = n, 0
+		}
+		select {
+		case <-ctx.Done():
+			t.Logf("goroutine count never settled; taking %d as the baseline", n)
+			return n
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// goroutineTolerance covers the handful of goroutines this package's earlier
+// tests can still be retiring in the background - idle transport connections,
+// the race detector's own. It is small on purpose: the leak under test is one
+// goroutine per stream, so it shows up as hundreds, never as a few.
+const goroutineTolerance = 8
+
+// waitGoroutinesBackTo fails saying how many are left, rather than timing out
+// in silence.
+func waitGoroutinesBackTo(t *testing.T, baseline int, what string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		n := runtime.NumGoroutine()
+		if n <= baseline+goroutineTolerance {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("%s: %d goroutines still running, baseline was %d (tolerance %d) - %d left behind",
+				what, n, baseline, goroutineTolerance, n-baseline)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func TestSSEStreamLeavesNoGoroutineOnAnUncancellableRequest(t *testing.T) {
+	const streams = 200
+	baseline := streamGoroutineBaseline(t)
+
+	for range streams {
+		// httptest.NewRequest carries a background context and no server, so
+		// neither of the two signals a stream watches can ever fire
+		req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+		if req.Context().Done() != nil {
+			t.Fatal("this test needs a request that cannot be cancelled")
+		}
+		if _, err := SSE(httptest.NewRecorder(), req); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	waitGoroutinesBackTo(t, baseline, "after opening 200 streams on uncancellable requests")
+}
+
+// and when the request can be cancelled but never is, the stream's own end is
+// enough: the watcher must go when the stream goes, not when the client
+// eventually happens to disconnect
+func TestSSEStreamWatcherEndsWithTheStream(t *testing.T) {
+	const streams = 200
+	baseline := streamGoroutineBaseline(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // never fires during the test: the streams end themselves
+	for range streams {
+		req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+		stream, err := SSE(httptest.NewRecorder(), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream.end()
+	}
+
+	waitGoroutinesBackTo(t, baseline, "after ending 200 streams whose requests were never cancelled")
+}
+
+// the hub is the handler most streams go through, so it must end the stream it
+// opened however its loop returns
+func TestSSEHubEndsTheStreamItOpened(t *testing.T) {
+	baseline := streamGoroutineBaseline(t)
+
+	hub := NewSSEHub()
+	hub.Close() // so ServeHTTP returns on its first select
+
+	// the requests are cancellable and are never cancelled, so each one really
+	// does start a watcher: what has to release it is the handler returning
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for range 200 {
+		req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+		hub.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	waitGoroutinesBackTo(t, baseline, "after 200 hub requests that ended at once")
+}
+
+// streamDeadline is how long every wait below is allowed to take. It is not a
+// performance budget: each of these fires in microseconds when it fires at
+// all, and the whole point is telling "did not happen" from "was slow".
+const streamDeadline = 10 * time.Second
+
+// waitStreamEnd fails saying what was still open, instead of timing out mute.
+func waitStreamEnd(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
+	defer cancel()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatalf("%s: still open %v later, so the handler waiting on Done() is parked there for good", what, streamDeadline)
+	}
+}
+
+// assertStillOpen is the other half: the streams below have to be unreachable
+// before Close is what reaches them.
+func assertStillOpen(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+		t.Fatalf("%s: the stream ended on its own, so this test is no longer about Close", what)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// openedStream is a stream on a recorder: opened by SSE, with no server and no
+// cancellable request behind it, which is all the in-process cases below need.
+func openedStream(t *testing.T) (*SSEStream, *httptest.ResponseRecorder) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	s, err := SSE(w, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+	if err != nil {
+		t.Fatalf("opening a stream: %v", err)
+	}
+	return s, w
+}
+
+// closeStream calls Close on its own goroutine: Close that blocks - on the
+// write mutex, say - is a failure with a message, not a hung test.
+func closeStream(t *testing.T, s *SSEStream, what string) {
+	t.Helper()
+	returned := make(chan any, 1)
+	go func() {
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			s.Close()
+		}()
+		returned <- recovered
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
+	defer cancel()
+	select {
+	case recovered := <-returned:
+		if recovered != nil {
+			t.Fatalf("Close() %s panicked: %v", what, recovered)
+		}
+	case <-ctx.Done():
+		t.Fatalf("Close() %s never returned within %v", what, streamDeadline)
+	}
+}
+
+// An app that mounts borgo's handlers on its own server is told, by
+// Middleware's own doc comment, to write exactly the server below and that it
+// "gets the same guarantees borgo's own server has". Its streams were not
+// among them: nothing armed a latch for a server borgo did not start, so
+// Shutdown had no way to end a stream and waited on it for the whole of its
+// context. borgo's own server escaped only because it follows the grace period
+// with Close.
+func TestShutdownEndsStreamsOnAServerTheAppStarted(t *testing.T) {
+	handlerReturned := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerReturned)
+		pingStream(w, r)
+	})
+	// verbatim the disposition Middleware documents
+	srv := &http.Server{Handler: Middleware(mux)}
+	base := serveOn(t, srv)
+	// the stream is alive and unclosable until then: Close is what releases the
+	// connection when Shutdown could not
+	defer srv.Close()
+
+	// the response reaching the client means SSE has written and flushed its
+	// opening comment, so the handler is inside the stream by now
+	ended := readingStream(t, base+"/api/events")
+
+	ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
+	defer cancel()
+	start := time.Now()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown gave up after %v (%v): it was waiting on an event stream it had no way to end", time.Since(start), err)
+	}
+	waitStreamEnd(t, ended, "the client's side of the stream after Shutdown returned")
+	waitStreamEnd(t, handlerReturned, "the handler after Shutdown returned")
+}
+
+// and a server the app starts must not lose the streams of a server borgo
+// starts, or the other way round: the latch is per server, whichever of the
+// two armed it.
+func TestAnAppServersShutdownLeavesAnotherServersStreamsAlone(t *testing.T) {
+	mine := &http.Server{Handler: http.HandlerFunc(pingStream)}
+	other := &http.Server{Handler: http.HandlerFunc(pingStream)}
+	base := serveOn(t, mine)
+	otherBase := serveOn(t, other)
+	defer mine.Close()
+	defer other.Close()
+
+	ours := readingStream(t, base)
+	theirs := readingStream(t, otherBase)
+
+	ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
+	defer cancel()
+	if err := srvShutdown(ctx, mine); err != nil {
+		t.Fatalf("shutting the first server down: %v", err)
+	}
+	waitStreamEnd(t, ours, "the stream of the server that shut down")
+	assertStillOpen(t, theirs, "the stream of the server that is still serving")
+}
+
+func srvShutdown(ctx context.Context, srv *http.Server) error { return srv.Shutdown(ctx) }
+
+// The two ways a server gets a latch have to meet on one latch. A stream arms
+// one lazily the moment it opens; serveContext arms the same server before it
+// binds. When the stream got there first, the arming that follows must adopt
+// what is already there - a second latch would leave the live stream watching
+// one nobody will ever trip, which is the failure this file's own comment
+// describes with the roles reversed.
+func TestArmingAServerAStreamAlreadyArmedKeepsTheOneLatch(t *testing.T) {
+	srv := &http.Server{Handler: http.HandlerFunc(pingStream)}
+	base := serveOn(t, srv)
+	defer srv.Close()
+
+	ended := readingStream(t, base)
+	watched := latchOf(t, srv)
+
+	// verbatim what serveContext does, on a server a stream already armed
+	disarm := armStreamShutdown(srv)
+	if latchOf(t, srv) != watched {
+		t.Fatal("arming the server replaced the latch its open stream is watching, so nothing that trips the new one can reach that stream")
+	}
+	assertStillOpen(t, watched, "the latch before anything tripped it")
+
+	disarm()
+	waitStreamEnd(t, watched, "the latch after the run that armed it ended")
+	waitStreamEnd(t, ended, "the stream that armed the latch first")
+}
+
+// A handler that detaches the request context - to go on working after the
+// response, which is what context.WithoutCancel and r.Clone(context.Background())
+// are for - got a stream that nothing could end: the client's disconnection is
+// gone with the cancellation, and Clone drops the context values, so the
+// server's shutdown latch is unreachable too. Close is the only thing that can
+// reach such a stream, which is why it is exported.
+func TestCloseEndsAStreamNothingElseCanReach(t *testing.T) {
+	streams := make(chan *SSEStream, 1)
+	handlerReturned := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerReturned)
+		// keeps the response writer, drops the cancellation and the values -
+		// http.ServerContextKey with them
+		detached := r.Clone(context.Background())
+		stream, err := SSE(w, detached)
+		if err != nil {
+			return
+		}
+		streams <- stream
+		select {
+		case <-stream.Done():
+		case <-time.After(2 * streamDeadline):
+			// the test has already failed by now; this only keeps a red run
+			// from leaving a goroutine parked in every later test
+		}
+	})}
+	base := serveOn(t, srv)
+	defer srv.Close()
+
+	res, err := http.Get(base)
+	if err != nil {
+		t.Fatalf("opening the stream: %v", err)
+	}
+	var stream *SSEStream
+	select {
+	case stream = <-streams:
+	case <-time.After(streamDeadline):
+		res.Body.Close()
+		t.Fatal("the handler never reached its stream")
+	}
+
+	// the client goes: on a detached context nothing hears it
+	res.Body.Close()
+	assertStillOpen(t, stream.Done(), "a stream on a detached context after the client disconnected")
+
+	// and neither does the server's own shutdown, since the clone kept no way
+	// of naming the server
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	srv.Shutdown(ctx)
+	assertStillOpen(t, stream.Done(), "a stream on a detached context after Shutdown")
+
+	closeStream(t, stream, "on a stream nothing else can reach")
+	waitStreamEnd(t, stream.Done(), "the stream after Close")
+	waitStreamEnd(t, handlerReturned, "the handler after Close")
+}
+
+func TestSSEStreamClose(t *testing.T) {
+	t.Run("twice", func(t *testing.T) {
+		s, _ := openedStream(t)
+		closeStream(t, s, "the first time")
+		closeStream(t, s, "the second time")
+		waitStreamEnd(t, s.Done(), "the stream after two Closes")
+	})
+
+	t.Run("from two goroutines at once", func(t *testing.T) {
+		s, _ := openedStream(t)
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		panics := make(chan any, 8)
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						panics <- r
+					}
+				}()
+				<-start
+				s.Close()
+				_ = s.Send("tick", 1)
+				_ = s.Done()
+			}()
+		}
+		close(start)
+		finished := make(chan struct{})
+		go func() { wg.Wait(); close(finished) }()
+		select {
+		case <-finished:
+		case <-time.After(streamDeadline):
+			t.Fatal("eight concurrent Close/Send callers never all returned: the stream is holding its mutex")
+		}
+		select {
+		case r := <-panics:
+			t.Fatalf("a concurrent Close panicked: %v", r)
+		default:
+		}
+		waitStreamEnd(t, s.Done(), "the stream after eight concurrent Closes")
+	})
+
+	t.Run("on a zero value", func(t *testing.T) {
+		var s SSEStream
+		closeStream(t, &s, "on a zero value")
+		closeStream(t, &s, "on a zero value, again")
+		waitStreamEnd(t, s.Done(), "a zero-value stream after Close")
+		// it never opened, and that is what it keeps saying: the caller is told
+		// to go through SSE, not that it closed something
+		if err := s.Send("tick", 1); !errors.Is(err, errStreamNotOpen) {
+			t.Errorf("Send() after Close on a zero value = %v, want the not-opened refusal", err)
+		}
+	})
+
+	t.Run("before any Send", func(t *testing.T) {
+		s, w := openedStream(t)
+		opening := w.Body.Len()
+		closeStream(t, s, "before anything was sent")
+		if err := s.Send("tick", 1); !errors.Is(err, ErrStreamClosed) {
+			t.Fatalf("Send() after Close = %v, want %v", err, ErrStreamClosed)
+		}
+		// and the same one every time, whichever call notices
+		if err := s.Send("tick", 2); !errors.Is(err, ErrStreamClosed) {
+			t.Errorf("the second Send() after Close = %v, want %v", err, ErrStreamClosed)
+		}
+		if err := s.Ping(); !errors.Is(err, ErrStreamClosed) {
+			t.Errorf("Ping() after Close = %v, want %v", err, ErrStreamClosed)
+		}
+		if n := w.Body.Len(); n != opening {
+			t.Errorf("%d bytes reached the client after Close; the refusals are not refusals", n-opening)
+		}
+	})
+
+	t.Run("while a Send is in flight", func(t *testing.T) {
+		w := &gatedWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), gate: make(chan struct{})}
+		s, err := SSE(w, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+		if err != nil {
+			t.Fatalf("opening a stream: %v", err)
+		}
+		w.armed.Store(true)
+
+		sent := make(chan error, 1)
+		go func() { sent <- s.Send("slow", 1) }()
+		select {
+		case <-w.entered:
+		case <-time.After(streamDeadline):
+			t.Fatal("the write never started, so nothing was in flight to close against")
+		}
+
+		// Close must not queue behind a write that owns the connection: a
+		// blackholed client holds it for the whole write timeout
+		closeStream(t, s, "while a write was in flight")
+		waitStreamEnd(t, s.Done(), "the stream after Close during a write")
+
+		close(w.gate)
+		select {
+		case <-sent:
+			// whether the in-flight frame lands or fails is the connection's
+			// business; what matters is that it returned
+		case <-time.After(streamDeadline):
+			t.Fatal("the in-flight Send never returned after its write was released")
+		}
+		if err := s.Send("after", 1); !errors.Is(err, ErrStreamClosed) {
+			t.Errorf("Send() after the in-flight one = %v, want %v", err, ErrStreamClosed)
+		}
+	})
+
+	t.Run("after the client is gone", func(t *testing.T) {
+		s, done := servedStream(t)
+		done()
+		waitStreamEnd(t, s.Done(), "the stream after its client disconnected")
+		// the disconnection already fired the latch: Close must find it fired
+		// and say nothing, not close a closed channel
+		closeStream(t, s, "after the client had gone")
+		if err := s.Send("tick", 1); !errors.Is(err, ErrStreamClosed) {
+			t.Errorf("Send() after Close on a disconnected stream = %v, want %v", err, ErrStreamClosed)
+		}
+	})
+
+	t.Run("after Shutdown", func(t *testing.T) {
+		s, _ := servedStream(t)
+		ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
+		defer cancel()
+		if err := srvShutdown(ctx, s.r.Context().Value(http.ServerContextKey).(*http.Server)); err != nil {
+			t.Fatalf("shutting the server down: %v", err)
+		}
+		waitStreamEnd(t, s.Done(), "the stream after Shutdown")
+		closeStream(t, s, "after Shutdown")
+		if err := s.Send("tick", 1); !errors.Is(err, ErrStreamClosed) {
+			t.Errorf("Send() after Close on a shut-down stream = %v, want %v", err, ErrStreamClosed)
+		}
+	})
+
+	t.Run("on a copy", func(t *testing.T) {
+		s, _ := openedStream(t)
+		dup := copyOfStream(s)
+		// the copy is the same stream by every observable measure
+		if dup.Done() != s.Done() {
+			t.Fatal("the copy does not share the original's Done channel, so this is not the copy the defect is about")
+		}
+		closeStream(t, s, "on the original")
+		closeStream(t, dup, "on the copy of an already-closed stream")
+		waitStreamEnd(t, dup.Done(), "the copy after both were closed")
+		if err := dup.Send("tick", 1); !errors.Is(err, ErrStreamClosed) {
+			t.Errorf("Send() on a closed stream's copy = %v, want %v", err, ErrStreamClosed)
+		}
+		// and in the other order, on a fresh pair
+		other, _ := openedStream(t)
+		otherDup := copyOfStream(other)
+		closeStream(t, otherDup, "on the copy first")
+		closeStream(t, other, "on the original of an already-closed copy")
+	})
+
+	t.Run("Done before and after", func(t *testing.T) {
+		s, _ := openedStream(t)
+		before := s.Done()
+		select {
+		case <-before:
+			t.Fatal("Done() was already closed on a stream nobody had closed")
+		default:
+		}
+		closeStream(t, s, "between the two reads of Done()")
+		waitStreamEnd(t, before, "the channel Done() handed out before Close")
+		waitStreamEnd(t, s.Done(), "the channel Done() hands out after Close")
+		if s.Done() != before {
+			t.Error("Done() handed out a different channel after Close: a handler holding the first one would never hear")
+		}
+	})
+}
+
+// countLatches is the whole proof below: one entry pins nothing now, but it
+// used to pin an *http.Server and every closure its handler graph reaches.
+func countLatches() int {
+	n := 0
+	streamLatches.m.Range(func(_, _ any) bool { n++; return true })
+	return n
+}
+
+// latchBaseline settles the map before a test counts against it: entries other
+// tests left behind go on being collected while this one runs, and the counts
+// have to be taken from the same side of that.
+func latchBaseline(t *testing.T) int {
+	t.Helper()
+	runtime.GC()
+	runtime.GC()
+	return countLatches()
+}
+
+// waitLatchesDropTo drives the collector until the map is back to want. The
+// removal is the collector's work, so this polls instead of asserting once -
+// but it fails with the count, because "some entries survived their servers"
+// is the finding and the number is how bad it is.
+func waitLatchesDropTo(t *testing.T, want int, what string) {
+	t.Helper()
+	deadline := time.Now().Add(streamDeadline)
+	for {
+		runtime.GC()
+		n := countLatches()
+		if n <= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %d latch entries still held after %v, want %d - %d server(s) and every closure their handlers reach cannot be collected", what, n, streamDeadline, want, n-want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// oneStreamServer runs one event stream on a fresh server, ends it the way stop
+// says, and returns holding no reference to that server - so whatever the map
+// still has afterwards has outlived the thing it was about. None of the ways
+// the callers stop it is Shutdown, and that is the point: an entry that is only
+// removed by an event the app may never produce is the defect, not the fix.
+func oneStreamServer(t *testing.T, stop func(srv *http.Server, ln net.Listener)) {
+	t.Helper()
+	srv := &http.Server{Handler: http.HandlerFunc(pingStream)}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan struct{})
+	go func() { defer close(served); srv.Serve(ln) }()
+
+	res, err := http.Get("http://" + ln.Addr().String())
+	if err != nil {
+		t.Fatalf("opening a stream: %v", err)
+	}
+	if _, armed := streamLatches.Load(srv); !armed {
+		res.Body.Close()
+		t.Fatal("no latch was armed, so this test is not about removing one")
+	}
+	// the client goes first, so the handler is out before the server is
+	res.Body.Close()
+	stop(srv, ln)
+	// the Serve goroutine holds the server: nothing can be collected until it
+	// has returned, and a test that skipped this would be timing its own
+	// scheduler rather than the map
+	<-served
+	http.DefaultClient.CloseIdleConnections()
+}
+
+// The latch map used to be keyed by the server itself, so it held one alive for
+// every server that had ever served a stream. Only borgo's own servers escaped,
+// because serveContext defers a disarm that runs on every path; lazy arming
+// then handed the same fate to every net/http server an app writes. Nothing
+// below ever calls Shutdown - the one event that used to remove an entry.
+func TestLatchEntriesDoNotOutliveTheirServers(t *testing.T) {
+	t.Run("a server stopped with Close", func(t *testing.T) {
+		base := latchBaseline(t)
+		oneStreamServer(t, func(srv *http.Server, _ net.Listener) { srv.Close() })
+		waitLatchesDropTo(t, base, "a server stopped with Close and never Shutdown")
+	})
+
+	t.Run("a server that is never stopped at all", func(t *testing.T) {
+		base := latchBaseline(t)
+		// neither Shutdown nor Close: the listener goes and the app lets the
+		// server fall out of use, which no hook of ours will ever hear about
+		oneStreamServer(t, func(_ *http.Server, ln net.Listener) { ln.Close() })
+		waitLatchesDropTo(t, base, "a server dropped without ever being stopped")
+	})
+
+	t.Run("many servers with one stream each", func(t *testing.T) {
+		base := latchBaseline(t)
+		for range 8 {
+			oneStreamServer(t, func(srv *http.Server, _ net.Listener) { srv.Close() })
+		}
+		waitLatchesDropTo(t, base, "eight servers with one stream each")
+	})
+}
+
+// The counting design this fix rejected would have dropped the entry whenever
+// the last stream left and rebuilt it for the next one. Rebuilding means
+// another RegisterOnShutdown, and http.Server.onShutdown only ever grows -
+// net/http has no way to remove a hook. A browser's EventSource reconnects for
+// as long as the page is open, so that list would grow once per reconnection
+// for the life of the process. The latch staying the same object across
+// reconnections is how this test sees that it did not happen.
+func TestReconnectingStreamsKeepOneLatchOnOneServer(t *testing.T) {
+	srv := &http.Server{Handler: http.HandlerFunc(pingStream)}
+	base := serveOn(t, srv)
+	defer srv.Close()
+
+	res, err := http.Get(base)
+	if err != nil {
+		t.Fatalf("opening the first stream: %v", err)
+	}
+	res.Body.Close()
+	first := latchOf(t, srv)
+	entries := countLatches()
+
+	for i := range 50 {
+		res, err := http.Get(base)
+		if err != nil {
+			t.Fatalf("reconnection %d: %v", i, err)
+		}
+		res.Body.Close()
+		if got := latchOf(t, srv); got != first {
+			t.Fatalf("reconnection %d was handed a different latch: the entry was dropped and rebuilt, and every rebuild appends an OnShutdown hook that this server can never drop", i)
+		}
+	}
+	if n := countLatches(); n != entries {
+		t.Errorf("51 streams on one server left %d latch entries, want the %d it started with", n, entries)
+	}
+
+	// and the one latch every reconnection shared is still the live one
+	ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
+	defer cancel()
+	if err := srvShutdown(ctx, srv); err != nil {
+		t.Fatalf("shutting down after 51 streams: %v", err)
+	}
+	waitStreamEnd(t, first, "the one latch, after Shutdown")
+}
+
+// The case that matters most: a stream arriving exactly as the last one leaves.
+// Under a scheme that removed the entry when the count reached zero, this is
+// where a new stream either revives an entry the departing one is still
+// deleting, or takes a latch that is on its way out and watches a channel the
+// server's Shutdown no longer knows about. Holding the entry for the server's
+// whole life removes the transition rather than guarding it, and this is what
+// says so: one latch throughout, and the last stream opened still ends.
+func TestAStreamArrivingAsTheLastLeavesSharesTheOneLatch(t *testing.T) {
+	srv := &http.Server{Handler: http.HandlerFunc(pingStream)}
+	base := serveOn(t, srv)
+	defer srv.Close()
+
+	res, err := http.Get(base)
+	if err != nil {
+		t.Fatalf("opening the first stream: %v", err)
+	}
+	res.Body.Close()
+	watched := latchOf(t, srv)
+	entries := countLatches()
+
+	// sixteen callers opening and closing at once: the number of live streams
+	// crosses zero constantly, which is the moment in question
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				res, err := http.Get(base)
+				if err != nil {
+					return
+				}
+				res.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := latchOf(t, srv); got != watched {
+		t.Fatal("the server's latch was replaced while streams were coming and going: whichever streams took the old one are watching a channel Shutdown will not trip")
+	}
+	if n := countLatches(); n != entries {
+		t.Errorf("streams crossing zero left %d latch entries for one server, want %d", n, entries)
+	}
+
+	// the stream opened last must still be reachable by the server's shutdown
+	ended := readingStream(t, base)
+	ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
+	defer cancel()
+	if err := srvShutdown(ctx, srv); err != nil {
+		t.Fatalf("shutting down: %v", err)
+	}
+	waitStreamEnd(t, ended, "the stream opened after all that coming and going")
+}
+
+// servedStream opens a stream through a real server and hands the test the
+// stream itself, so it can be closed from outside its handler. The returned
+// func disconnects the client. httptest.Server is no use here: its Close waits
+// for every connection to go idle, and an open event stream never does.
+func servedStream(t *testing.T) (*SSEStream, func()) {
+	t.Helper()
+	streams := make(chan *SSEStream, 1)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stream, err := SSE(w, r)
+		if err != nil {
+			return
+		}
+		streams <- stream
+		<-stream.Done()
+	})}
+	base := serveOn(t, srv)
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := http.Get(base)
+	if err != nil {
+		t.Fatalf("opening a served stream: %v", err)
+	}
+	disconnect := sync.OnceFunc(func() { res.Body.Close() })
+	t.Cleanup(disconnect)
+	select {
+	case s := <-streams:
+		return s, disconnect
+	case <-time.After(streamDeadline):
+		t.Fatal("the handler never reached its stream")
+		return nil, disconnect
+	}
+}
+
+// gatedWriter holds the first write that follows arming, so a test can call
+// Close while a write really is in flight. The opening comment SSE writes must
+// go through untouched, or the stream would never open.
+type gatedWriter struct {
+	*httptest.ResponseRecorder
+	armed   atomic.Bool
+	entered chan struct{}
+	gate    chan struct{}
+	once    sync.Once
+}
+
+func (g *gatedWriter) Write(p []byte) (int, error) {
+	if g.armed.Load() {
+		g.once.Do(func() { close(g.entered) })
+		<-g.gate
+	}
+	return g.ResponseRecorder.Write(p)
+}
+
+// copyOfStream is the copy go vet's copylocks refuses to let anyone write -
+// `dup := *stream` does not compile past the gate, and that refusal is the
+// defence. This is what the caller who ignores it ends up holding: same
+// connection, same channel, its own mutex. Ending both used to be a `close of
+// closed channel` panic in whichever goroutine got there second.
+func copyOfStream(s *SSEStream) *SSEStream {
+	dup := new(SSEStream)
+	reflect.ValueOf(dup).Elem().Set(reflect.ValueOf(s).Elem())
+	return dup
 }
 
 func BenchmarkHubPublish(b *testing.B) {
