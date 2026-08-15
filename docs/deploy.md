@@ -8,7 +8,9 @@ One wrinkle worth knowing before you read a `ps` listing: bun sizes its outbound
 
 ## borgo deploy init
 
-The command writes this page's blessed config for a target into your project, templated with the app's name (from `package.json`) and ports (`PORT`/`API_PORT`, defaulting to 3000/3501). It never overwrites an existing file unless you pass `--force`, and it prints the next command to run.
+The command writes this page's blessed config for a target into your project, templated with the app's name (from `package.json`) and ports (`PORT`/`API_PORT` **as your `.env` sets them**, defaulting to 3000/3501). It never overwrites an existing file unless you pass `--force`, and it prints the next command to run.
+
+The ports come from the app's `.env`, deliberately, and not from the shell you ran the command in: a `PORT` exported for something else that afternoon would otherwise be baked into the unit file, the compose file and the proxy in front of them, giving you a deployment that works from one terminal with nothing in any of the three files to say why. A `.env` that names no port, or names something that is not one, gets 3000/3501.
 
 ```bash
 bunx borgo deploy init <caddy|nginx|systemd|compose> [--force]
@@ -16,10 +18,10 @@ bunx borgo deploy init <caddy|nginx|systemd|compose> [--force]
 
 | Target | Writes | It is | Then |
 | --- | --- | --- | --- |
-| `caddy` | `Caddyfile` | reverse proxy with automatic TLS, three lines | set your domain, `caddy run --config Caddyfile` |
-| `nginx` | `site.conf` | reverse proxy: websocket upgrades, `proxy_buffering off` for SSE, long read timeout | set domain and certs, link into `sites-enabled/` |
-| `systemd` | `borgo.service` | a unit running `bun run start` with the environment stubbed in | copy to `/etc/systemd/system/`, `systemctl enable --now` |
-| `compose` | `docker-compose.yml` | build, ports, `BUN_CONFIG_MAX_HTTP_REQUESTS`, restart policy, a required `SESSION_SECRET` if the app already signs sessions, and a commented-out `DB_PATH`/volume block | `docker compose up -d` |
+| `caddy` | `Caddyfile` | reverse proxy with automatic TLS, a 1 MiB body cap and the forwarding headers | set your domain, `caddy run --config Caddyfile` |
+| `nginx` | `site.conf` | the same, spelled out: websocket upgrades, `proxy_buffering off` for SSE, long read timeout | set domain and certs, link into `sites-enabled/` |
+| `systemd` | `borgo.service` | a hardened unit running `bun run start`, reading its secrets from the app's `.env` | copy to `/etc/systemd/system/`, `systemctl enable --now` |
+| `compose` | `docker-compose.yml` | build, ports, `BUN_CONFIG_MAX_HTTP_REQUESTS`, restart policy, a `/healthz` healthcheck, a required `SESSION_SECRET` if the app already signs sessions, and a commented-out `DB_PATH`/volume block | `docker compose up -d` |
 
 Which one? **One box, Docker installed** → `compose` and you are done. **One box, no Docker** → `systemd`, plus `caddy` or `nginx` in front for TLS. **A proxy already terminates TLS for other apps** → just `caddy`/`nginx` to add the site. The generated files are a starting point in your repo, not managed state — edit them freely; `deploy init` never touches them again without `--force`.
 
@@ -82,15 +84,24 @@ volumes:
 
 ## Reverse proxy
 
-Only the front server needs to be reachable — it proxies `/api/*` to Go and speaks WebSockets natively. Compression is built-in — static assets are precompressed to `.gz`/`.br` at build time, dynamic responses are gzipped on the fly — so the proxy should not compress again (no `encode` directive in Caddy, `gzip off` is nginx's default). `borgo deploy init caddy` (or `nginx`) writes these configs into your project — `Caddyfile` and `site.conf` respectively — templated with your app's name and port; an existing file is never overwritten unless you pass `--force`. Caddy gives you TLS in three lines:
+Only the front server needs to be reachable — it proxies `/api/*` to Go and speaks WebSockets natively. Compression is built-in — static assets are precompressed to `.gz`/`.br` at build time, dynamic responses are gzipped on the fly — so the proxy should not compress again (no `encode` directive in Caddy, `gzip off` is nginx's default). `borgo deploy init caddy` (or `nginx`) writes these configs into your project — `Caddyfile` and `site.conf` respectively — templated with your app's name and port; an existing file is never overwritten unless you pass `--force`. Caddy gives you TLS in one block, and the rest of it is the policy nginx has to spell out longhand:
 
 ```caddy
 example.com {
-    reverse_proxy localhost:3000
+    # borgo.Bind reads at most 1 MiB; a route that takes more uses
+    # borgo.BindMax, and this line has to be raised with it.
+    request_body {
+        max_size 1MiB
+    }
+    reverse_proxy localhost:3000 {
+        # written from the peer, never from what the client sent
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+    }
 }
 ```
 
-nginx needs the upgrade headers for WebSockets, SSE left unbuffered, and a forwarding header it does not add on its own:
+nginx needs the upgrade headers for WebSockets, SSE left unbuffered, and the forwarding headers it does not add on its own — the same body cap and the same two headers, so that the two files describe one app and not two:
 
 ```nginx
 # at http level, which is where sites-enabled is included from: `Connection:
@@ -105,10 +116,11 @@ map $http_upgrade $connection_upgrade {
 server {
     listen 443 ssl;
     server_name example.com;
+    server_tokens off;
 
-    # borgo's own limit is 32m (BORGO_MAX_BODY); nginx defaults to 1m and
-    # would 413 an upload the app is happy to accept
-    client_max_body_size 32m;
+    # borgo.Bind reads at most 1 MiB; a route that takes more uses
+    # borgo.BindMax, and this line has to be raised with it.
+    client_max_body_size 1m;
 
     location / {
         proxy_pass http://localhost:3000;
@@ -116,7 +128,9 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # written from the peer, never from what the client sent
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;
         proxy_read_timeout 1h;
@@ -124,7 +138,11 @@ server {
 }
 ```
 
-That `X-Forwarded-For` line is not cosmetic. borgo authorizes `/__borgo/publish` as *from loopback and not forwarded*; behind a proxy on the same box every request arrives from loopback, so with no forwarding header the second half of the test never fires and anyone on the internet can broadcast into every subscribed browser. Caddy sets it by default, which is why only nginx needs it spelled out. Set `BORGO_PUSH_KEY` on both halves if you would rather not depend on a proxy header at all — see [realtime](realtime.md).
+**The body cap is the app's, not a number.** `borgo.Bind` reads at most 1 MiB and answers `413` above it (`borgo.BindError` picks the status); a route that legitimately takes more declares it with `borgo.BindMax`, and then the proxy line moves with it. A proxy that lets more through does not make the app accept more — it only moves the refusal one hop later, into a Go handler, where nothing in the proxy's logs explains it. The front server's own `BORGO_MAX_BODY` (32 MB) is a different ceiling: what it will *buffer* while proxying, not what a handler will decode.
+
+**Neither header is the client's to write.** borgo authorizes `/__borgo/publish` as *from loopback and not forwarded*; behind a proxy on the same box every request arrives from loopback, so with no forwarding header the second half of the test never fires and anyone on the internet can broadcast into every subscribed browser. Both generated configs now write `X-Real-IP` and `X-Forwarded-For` from the peer they read the request from — `$remote_addr` in nginx, `{remote_host}` in Caddy — and neither appends to, or passes through, what arrived. An inbound `X-Real-IP` is a header anyone on the internet can send, and nothing downstream can tell it from a real one; `$proxy_add_x_forwarded_for`, which nginx used to use here, keeps the client's invention as the *first* entry of the chain, which is the entry most code reads.
+
+Behind a proxy that is not this one — a CDN, a load balancer, another nginx — `$remote_addr` is that proxy and the headers describe *it*, not the client. Then, and only then, tell your proxy which hop to trust: `set_real_ip_from` plus `real_ip_header` in nginx, `trusted_proxies` in Caddy. Set `BORGO_PUSH_KEY` on both halves if you would rather not depend on a proxy header at all — see [realtime](realtime.md).
 
 Behind https, set `SESSION_SECURE=1` so session cookies carry the `Secure` attribute. Responses marked with `borgo.Cache` carry ordinary `Cache-Control` headers — see [Caching](#caching) below.
 
@@ -181,24 +199,55 @@ ExecStart=/usr/local/bin/bun run start
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=API_PORT=3501
-# generated by borgo deploy init, unique to this file, 32+ characters because
-# anything shorter stops the Go binary from booting at all. shipping a .env
-# instead? delete this line: bun reads .env from the working directory, and a
-# real environment variable would override it.
-Environment=SESSION_SECRET=FdIG2E2GGNmclKN6C_4CEaAh8oaVyKqZ36PeFtVipkiKKQXf
+# secrets stay in the app's gitignored .env and never in this file. the
+# leading dash tolerates its absence; what the file sets wins over the
+# Environment= lines above, which is why the ports come from it too.
+EnvironmentFile=-/srv/my-app/.env
 # bun's outbound fetch pool defaults to 256, which ceilings concurrent
 # proxied requests - event streams above all - see docs/realtime.md
 Environment=BUN_CONFIG_MAX_HTTP_REQUESTS=16384
 Restart=on-failure
 User=www-data
 
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# nothing here needs a capability: not root, and the port is above 1024.
+CapabilityBoundingSet=
+UMask=0077
+# the app writes only under its own directory; anywhere else it writes
+# (a database, a cache) has to be listed here too, or the write fails.
+ReadWritePaths=/srv/my-app
+
 [Install]
 WantedBy=multi-user.target
 ```
 
-That `SESSION_SECRET` is not a placeholder to fill in later, and there is no `change-me` in the file borgo writes: a value under 32 characters is not a weak key but a refusal, and the api exits at startup rather than signing with it — the unit would restart-loop instead of serving. `deploy init` generates a fresh 48-character key from the CSPRNG for this line, unique to the file it just wrote.
+**The unit holds no key.** It used to: with no `SESSION_SECRET` in your `.env`, `deploy init` wrote a real 48-character one straight into `borgo.service`, in your project directory, next to the `.env` that `create-borgo` goes out of its way to gitignore *and* dockerignore — and in neither ignore file itself. One `git add .` commits it; one `docker build` bakes it into a layer; `systemctl show` prints it to anyone who can run it. So the key lives in the `.env` and the unit is told to read that file, which is what `EnvironmentFile=` is for. The leading `-` means "start anyway if it is not there", so an app that signs nothing needs no file at all. `deploy init systemd` also adds `borgo.service` to `.gitignore` and `.dockerignore`, because the file is deployment-local either way — the host's paths, the host's user — and because it is the file you would hand-edit if you ever did want an `Environment=` line of your own.
 
-It writes that line only when it has to. If your project's `.env` already holds a usable `SESSION_SECRET`, the generated unit deliberately sets **no** `Environment=SESSION_SECRET` at all and says so in a comment: bun loads `.env` from the working directory, a real environment variable wins over it, so a unit that sets its own key would override the one `create-borgo` generated and invalidate every session the app had already issued. Copy `.env` to the server instead.
+Nothing else about the unit varies with the machine it was generated on: both branches used to differ by a comment block and a live key, and an artefact that changes with its surroundings is one whose review tells you nothing about the next one.
+
+If the app has no key yet, the command prints one for you to append to `.env` — a terminal is not a file anything commits. It has to be 32 characters or more: shorter is not a weak key but a refusal, and `borgo.Serve` exits at startup rather than signing with it, so the unit would restart-loop instead of serving.
+
+**And it is hardened.** A public service running as `www-data` with no `[Service]` restrictions at all scored **9.0 UNSAFE** under `systemd-analyze security`; the set above brings the same unit to **3.2 OK**. None of it costs the app anything it does — it renders pages, proxies to a local api, and writes only under its own directory. Two lines are worth knowing before you edit:
+
+- `ProtectSystem=strict` makes the entire filesystem read-only, so `ReadWritePaths=` names the one place the app may write. Storing a database or a cache anywhere else? Add that path there, or the write fails with `EROFS`.
+- `MemoryDenyWriteExecute` is deliberately **not** in the list. Bun JITs, and it would stop the service from starting at all.
+
+Check your own edits with `systemd-analyze verify ./borgo.service` and `systemd-analyze security --offline=true ./borgo.service` before you copy the file into `/etc/systemd/system/`.
 
 Do not drop that `BUN_CONFIG_MAX_HTTP_REQUESTS` line when you edit the unit. Without it `borgo start` re-execs itself to set it, which works but gives systemd a supervisor process in front of the server for no reason; with it, the unit is one process tree with the pool already sized.
 
@@ -207,6 +256,21 @@ Do not drop that `BUN_CONFIG_MAX_HTTP_REQUESTS` line when you edit the unit. Wit
 ## Health and metrics
 
 Point the uptime monitor at the front server's `/healthz` — it returns `{status, uptime, api}`, probing the Go server's own `/healthz` (mounted by `borgo.Serve`) with a short timeout. The answer is always HTTP 200: `status` is `"ok"` or `"degraded"` and `api` is `"reachable"` or `"down"`, so a monitor that only checks the status code will never fire — match on the body.
+
+`borgo deploy init compose` writes exactly that check into the file, because `restart: unless-stopped` only ever sees the process *exit*: a front server that is alive and answering `"degraded"` is a container docker considers perfectly fine. These are the values it writes, and they are the values on this page on purpose — two numbers that drift apart are worse than one:
+
+```yaml
+healthcheck:
+  # /healthz answers 200 even when the api is down - the state is in
+  # the body. bun is the runtime image's own binary, so no curl needed.
+  test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>r.text()).then(t=>process.exit(t.includes('\"status\":\"ok\"')?0:1)).catch(()=>process.exit(1))"]
+  interval: 30s
+  timeout: 5s
+  start_period: 20s
+  retries: 3
+```
+
+`start_period` is the app's boot budget: failures inside it do not count against `retries`. Know what this buys and what it does not — docker marks the container **unhealthy** and stops there. It does not restart it, and neither does `restart: unless-stopped`, which reacts to exits only. What the state does do is show up in `docker ps`, gate a `depends_on: {condition: service_healthy}`, and give an orchestrator (Swarm, Kubernetes, a compose-aware watchdog) something true to act on.
 
 Set `BORGO_METRICS=1` and the front server also serves `/metrics` in Prometheus text format, hand-rolled, zero dependencies:
 
