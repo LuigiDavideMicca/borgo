@@ -7,6 +7,9 @@ const opts = (over: Partial<ProxyOptions> = {}): ProxyOptions => ({
   target: "http://api.test/api/x",
   deadlineMs: 50,
   retries: 3,
+  // the default for every test that is not about the body limit: no limit, so
+  // the framing tests below measure framing and nothing else
+  maxBody: 0,
   sleep: async () => {},
   onError: () => {},
   ...over,

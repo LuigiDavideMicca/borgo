@@ -36,6 +36,7 @@ const opts = (over: Partial<ActionOptions> = {}): ActionOptions => ({
   apiUrl: "http://api.test/api",
   serverError: null,
   csrfRejects: async () => false,
+  maxBody: 0,
   apiFor: () => ({}) as never,
   runLoader: async () => ({}),
   renderPage: async () =>

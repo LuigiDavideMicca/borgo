@@ -974,6 +974,7 @@ describe("the response clock: keeping a socket warm", () => {
       target: "http://upstream.test/api/upload",
       deadlineMs: 0,
       retries: 0,
+      maxBody: 0,
       onBodyRead: () => fired.push("body"),
       fetchImpl: async (_url, init) => {
         await new Response((init as { body?: BodyInit }).body ?? null).arrayBuffer();
@@ -1219,6 +1220,7 @@ describe("the response clock: keeping a socket warm", () => {
         target: "http://upstream.test/api/feed",
         deadlineMs: 0,
         retries: 0,
+        maxBody: 0,
         onBodyRead: () => a.warm.hold(req),
         fetchImpl: async (_url, init) => {
           await new Response((init as { body?: BodyInit }).body ?? null).arrayBuffer();

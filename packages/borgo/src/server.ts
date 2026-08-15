@@ -27,6 +27,7 @@ import { overlayHtml } from "./overlay";
 import { matchRoute, safeDecode, type Route } from "./router";
 import {
   apiCsrfRejects,
+  bodyTooLarge,
   createKeepWarm,
   csrfRejects,
   decodeChanged,
@@ -34,6 +35,7 @@ import {
   isForwarded,
   isUpstream,
   keepWarmSeconds,
+  limitRequestBody,
   prepareShell,
   proxyRequest,
   pushAuthorized,
@@ -147,8 +149,17 @@ export async function serve({
   const apiRetries = dev ? 15 : API_RETRIES;
   const apiTimeout = switches.apiTimeout;
   // a body nobody bounded is free memory for anyone who can post: both the
-  // proxy and form actions buffer. BORGO_MAX_BODY (bytes) raises it.
-  const maxRequestBodySize = switches.maxBody;
+  // proxy and form actions buffer. BORGO_MAX_BODY (bytes) raises it, 0 removes
+  // it. It is NOT handed to bun any more - `limitRequestBody` and the proxy's
+  // counting pass-through enforce it, and the doc comment on bodyTooLarge in
+  // util.ts carries the measurements for why a cap on a *declared* length was
+  // never one. Two of those measurements matter here in particular: bun reads
+  // `maxRequestBodySize: 0` as "no body at all" rather than "no limit", so the
+  // documented way to disable the limit disabled every POST instead; and a
+  // declared body large enough to overflow the socket buffer had its
+  // connection dropped with no response written, where a 413 borgo writes
+  // itself was received in every framing up to 100 MiB.
+  const maxBody = switches.maxBody;
 
   // the api client forwards the browser's cookies, so go handlers see the
   // session during ssr and in actions; set-cookie headers coming back from
@@ -231,6 +242,7 @@ export async function serve({
     apiUrl,
     serverError,
     csrfRejects: (req) => csrfRejects(req, { enforced: csrfEnforced }),
+    maxBody,
     apiFor,
     runLoader,
     renderPage,
@@ -261,6 +273,7 @@ export async function serve({
         target: api + url.pathname + url.search,
         deadlineMs: apiTimeout,
         retries: apiRetries,
+        maxBody,
         // the one hop borgo can vouch for, appended to X-Forwarded-For
         clientIp: server.requestIP(req)?.address,
         // the body is entirely in hand by then - streamed or buffered - so
@@ -426,7 +439,13 @@ export async function serve({
 
   const server = await bindRetry(() => Bun.serve<SocketData, never>({
     port,
-    maxRequestBodySize,
+    // bun's ceiling is out of the way and borgo counts instead. Every path in
+    // this process that reads a request body goes through a counter -
+    // `runAction`, `proxyRequest`, and the `/__borgo/publish` read below - and
+    // `every request body borgo reads is counted` in body-limit.test.ts fails
+    // the build if a fourth appears without one. That test is this line's
+    // safety: raising bun's ceiling is only safe while that stays true.
+    maxRequestBodySize: Number.MAX_SAFE_INTEGER,
     // the inbound read deadline, and nothing else - how long bun waits for a
     // *request* to arrive. How long a *response* may live is a different clock
     // that this one is never disarmed for: an in-flight response is kept warm
@@ -593,7 +612,13 @@ export async function serve({
         });
         if (verdict === "half-configured") warnHalfConfiguredPushKey();
         if (verdict !== "ok") return secure(new Response("forbidden", { status: 403 }));
-        const msg = await req.json().catch(() => null);
+        // the third body read in this process, and the one bun's ceiling used
+        // to be the only bound on: `req.json()` buffers whatever arrives, and
+        // an authorized pusher is a process on the box or anything holding the
+        // key - neither of which is a reason to accept an unbounded body
+        const limited = await limitRequestBody(req, maxBody);
+        if (limited === null) return secure(bodyTooLarge(maxBody));
+        const msg = await limited.json().catch(() => null);
         if (!msg || typeof msg.topic !== "string" || typeof msg.event !== "string") {
           return secure(new Response("bad request", { status: 400 }));
         }

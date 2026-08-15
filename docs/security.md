@@ -159,7 +159,7 @@ This defends against **cookie tossing**. A cookie on a sibling subdomain (`blog.
 | Limit | Default | Override |
 | --- | --- | --- |
 | JSON body decoded by `borgo.Bind` | 1 MB | `borgo.BindMax[T](r, bytes)` per route |
-| Body buffered by the front server | 32 MB | `BORGO_MAX_BODY` (bytes) |
+| Request body read by the front server | 32 MB | `BORGO_MAX_BODY` (bytes, `0` for no limit) |
 | Waiting for the Go API's response headers | 30 s | `BORGO_API_TIMEOUT` (ms, `0` disables) |
 | Reading a client's request headers (Go) | 5 s | `BORGO_READ_HEADER_TIMEOUT` |
 | Idle keep-alive connection (Go) | 2 m | `BORGO_IDLE_TIMEOUT` (duration; malformed panics at boot) |

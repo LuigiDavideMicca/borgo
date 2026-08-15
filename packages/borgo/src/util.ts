@@ -1322,11 +1322,146 @@ function parseContentLength(value: string): number | null {
   return length;
 }
 
-export function shouldBufferBody(method: string, contentLength: string | null): boolean {
+export function shouldBufferBody(
+  method: string,
+  contentLength: string | null,
+  transferEncoding: string | null = null,
+): boolean {
   if (method === "GET" || method === "HEAD") return false;
+  // rfc 9112 §6.3: a body framed by Transfer-Encoding is not framed by a
+  // length, whatever length also rides along - so its size is not knowable
+  // before it is read, and it must not be sized off the header pair
+  if (transferEncoding !== null) return false;
   if (contentLength === null) return false;
   const length = parseContentLength(contentLength);
   return length !== null && length <= PROXY_RETRY_MAX_BODY;
+}
+
+/**
+ * THE SIZE A BODY IS ACTUALLY FRAMED BY, or null when nothing frames it.
+ *
+ * Transfer-Encoding wins over Content-Length and the length is then not a
+ * length at all - the classic request-smuggling pair. bun answers that pair
+ * `400` itself before a handler is called (measured on 1.3.14:
+ * `Content-Length: 4` + `Transfer-Encoding: chunked` -> 400, connection
+ * closed), so on the real server this can only be reached by a hand-built
+ * Request; it is written down anyway, because `proxyRequest` and `runAction`
+ * are exported and the caller that reaches them next may not be bun.
+ */
+export function framedLength(headers: Headers): number | null {
+  if (headers.get("transfer-encoding") !== null) return null;
+  const raw = headers.get("content-length");
+  return raw === null ? null : parseContentLength(raw);
+}
+
+/**
+ * BORGO_MAX_BODY COUNTS BYTES, BECAUSE A DECLARATION IS THE CLIENT'S.
+ *
+ * The limit used to be handed straight to bun as `maxRequestBodySize`, and
+ * bun's cap is on a *declared* Content-Length. Measured on bun 1.3.14 over a
+ * real socket at `BORGO_MAX_BODY=64`, with the same handler each time:
+ *
+ *   Content-Length: 200 / 4Ki / 16Ki   413, before the handler runs
+ *   Content-Length: 64Ki / 1Mi         socket closed, NO response at all
+ *   Transfer-Encoding: chunked, 200 B  reaches the handler, read whole
+ *   Transfer-Encoding: chunked, 1 Mi   reaches the handler, read whole
+ *
+ * And the cap never fired at all for a body the handler consumed as a stream
+ * or through `clone()` - measured: chunked 1 MiB read in full under a cap of
+ * 64 by a handler that piped `req.body`, and again by one that called
+ * `req.clone().formData()`. Those are exactly borgo's two buffering paths
+ * (`csrfRejects` clones and parses, the proxy pipes), so the only framing the
+ * cap ever governed was the one nobody is obliged to use. Nothing had to be
+ * circumvented: the limit was skipped by not declaring a length.
+ *
+ * A LIMIT THAT CANNOT COUNT WHAT WAS NOT DECLARED IS NOT A LIMIT. So the count
+ * is taken off the read itself, and it STOPS the read at the limit rather than
+ * discovering the size after buffering it - memory is the whole reason the
+ * limit exists, and a check that runs after the allocation protects nothing.
+ * The refusal is a 413 with a body, written while the socket is still there:
+ * with bun's own cap out of the way a handler-authored 413 was received in
+ * every framing, up to a declared 100 MiB and a chunked 100 MiB (measured).
+ *
+ * `0` is no limit, and it has to be honoured HERE rather than by bun:
+ * `maxRequestBodySize: 0` makes bun refuse EVERY body (measured - a 1000-byte
+ * POST answered 413), the exact inverse of what the variable documents.
+ */
+export const bodyTooLarge = (limit: number) =>
+  new Response(`request body too large (over BORGO_MAX_BODY=${limit})\n`, {
+    status: 413,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+
+/**
+ * The body, or null the moment it goes one byte past `limit`.
+ *
+ * The chunk that crosses the limit is dropped rather than appended and the
+ * source is cancelled, so what is held is never more than `limit` plus the one
+ * chunk bun handed over - the read granularity of the socket, not the size of
+ * the body. A 100 MiB upload under a 64-byte limit ends after bun's first
+ * read.
+ */
+export async function readBodyWithin(
+  body: ReadableStream<Uint8Array>,
+  limit: number,
+): Promise<Uint8Array<ArrayBuffer> | null> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      void reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  // the one-chunk case is handed back without a copy. The cast is only about
+  // the buffer's provenance - a stream's chunk is typed over ArrayBufferLike,
+  // which admits a SharedArrayBuffer no socket read ever produces - and
+  // BodyInit will not take that union
+  if (chunks.length === 1) return chunks[0] as Uint8Array<ArrayBuffer>;
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return out;
+}
+
+/**
+ * The same request over the bytes already in hand, or null when it is too big.
+ *
+ * For the paths that were always going to buffer. A declared length over the
+ * limit is refused on the declaration - no byte is read, nothing upstream is
+ * dialled - and every other framing is counted as it arrives. The request that
+ * comes back shares the original's abort signal rather than copying it, since
+ * `runAction` and `serve()` both ask a request whether the client is still
+ * there; and the body is read once here and parsed twice downstream
+ * (`csrfRejects`' clone, then the action's own `formData()`), which is what
+ * the clone already did.
+ *
+ * A limit of 0 - or a request with no body at all - is handed straight back
+ * untouched, so nothing that does not need bounding acquires a copy.
+ */
+export async function limitRequestBody(req: Request, limit: number): Promise<Request | null> {
+  if (limit <= 0 || req.body === null) return req;
+  const declared = framedLength(req.headers);
+  if (declared !== null && declared > limit) {
+    void req.body.cancel().catch(() => {});
+    return null;
+  }
+  const bytes = await readBodyWithin(req.body, limit);
+  if (bytes === null) return null;
+  return new Request(req.url, {
+    method: req.method,
+    headers: req.headers,
+    body: bytes,
+    signal: req.signal,
+  });
 }
 
 // a head renders for real - status and headers must be what a get would have
@@ -1701,6 +1836,10 @@ export type ActionOptions = {
   serverError: Route | null;
   // serve() has already resolved the enforced flag from the environment
   csrfRejects: (req: Request) => Promise<boolean>;
+  // bytes, 0 for no limit. serve() resolves BORGO_MAX_BODY once; it is not
+  // optional, because a body limit that defaults to absent when a caller
+  // forgets it is a limit that fails open
+  maxBody: number;
   // the api client bound to this request's cookies, collecting set-cookie
   apiFor: (req: Request, onSetCookie?: (cookies: string[]) => void) => ActionContext["api"];
   runLoader: RunLoaderFn;
@@ -1724,7 +1863,7 @@ export type ActionOptions = {
 // never has to guess; anything left unmarked is a custom response it reloads
 // on, which is the documented escape hatch.
 export async function runAction(
-  req: Request,
+  original: Request,
   target: RouteMatch | null,
   options: ActionOptions,
 ): Promise<Response | null> {
@@ -1733,6 +1872,7 @@ export async function runAction(
     apiUrl,
     serverError,
     csrfRejects: rejectsCsrf,
+    maxBody,
     apiFor,
     runLoader,
     renderPage,
@@ -1742,12 +1882,12 @@ export async function runAction(
   } = options;
 
   const action = target?.route.module.action;
-  const wantsJson = req.headers.get("x-borgo-action") === "1";
+  const wantsJson = original.headers.get("x-borgo-action") === "1";
   const actionJson = (value: unknown, init: ResponseInit = {}) => {
     const headers = new Headers(init.headers);
     headers.set("X-Borgo", "action");
     headers.set("Cache-Control", "private, no-store");
-    return sendJson(req, value, { ...init, headers });
+    return sendJson(original, value, { ...init, headers });
   };
   const rawDocument = (doc: Response) => {
     const headers = new Headers(doc.headers);
@@ -1759,6 +1899,15 @@ export async function runAction(
     if (typeof action !== "function") {
       throw new Error(`the action export of pages/${target.route.file} must be a function`);
     }
+    // BEFORE the csrf check, which is the first thing here that reads a body:
+    // it clones and parses the whole of it looking for the token field, so a
+    // limit applied after it is a limit applied after the allocation. Refused
+    // here the request costs one buffer of at most `maxBody`, and an
+    // unparseable-length or chunked body - the framing bun's own cap never
+    // counted - costs exactly as much as a declared one.
+    const limited = await limitRequestBody(original, maxBody);
+    if (limited === null) return bodyTooLarge(maxBody);
+    const req = limited;
     if (await rejectsCsrf(req)) {
       if (wantsJson) return actionJson({ csrf: true }, { status: 403 });
       return new Response("invalid csrf token", { status: 403 });
@@ -1918,6 +2067,8 @@ export type ProxyOptions = {
   deadlineMs: number;
   // connection-refused retries (the api restarting), 0 to never retry
   retries: number;
+  // bytes, 0 for no limit. required for the same reason it is on ActionOptions
+  maxBody: number;
   retryDelayMs?: number;
   // the address borgo actually read this request from, appended to the
   // X-Forwarded-For chain. undefined means "no peer to vouch for", and then no
@@ -1949,6 +2100,7 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
     target,
     deadlineMs,
     retries,
+    maxBody,
     retryDelayMs = 250,
     clientIp,
     onBodyRead,
@@ -1958,13 +2110,33 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
   } = options;
 
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
-  const buffered = shouldBufferBody(req.method, req.headers.get("content-length"));
+  const buffered = shouldBufferBody(
+    req.method,
+    req.headers.get("content-length"),
+    req.headers.get("transfer-encoding"),
+  );
+  // a declared length over the limit is refused on the declaration: no byte is
+  // read, go is never dialled, and the 413 goes out while the client is still
+  // writing. taking the client at its word is only ever safe in this
+  // direction - a forged length can withhold the body's passage, never widen it
+  if (hasBody && maxBody > 0) {
+    const declared = framedLength(req.headers);
+    if (declared !== null && declared > maxBody) {
+      void req.body?.cancel().catch(() => {});
+      return bodyTooLarge(maxBody);
+    }
+  }
+  // set by the counting pass-through below, read after the fetch settles: the
+  // streamed body is refused mid-flight, and what comes back has to be the 413
+  // and not the 502 a broken upstream write otherwise looks like
+  let overLimit = false;
   // may throw when the client hangs up mid-upload; the caller owns that (it
   // is the one holding the request that would answer 499)
   let body: ArrayBuffer | ReadableStream<Uint8Array> | undefined;
   if (!hasBody) {
     body = undefined;
   } else if (buffered) {
+    // bounded by the declaration, which framed the read and was checked above
     body = await req.arrayBuffer();
     // the whole body is here, so the request is in hand and the response is
     // the server's work from now on
@@ -1985,8 +2157,30 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
     // it is read off the stream rather than declared. An upstream that answers
     // before draining the body leaves this unfired - it is the body ending that
     // is the claim, and nothing else may stand in for it.
+    //
+    // THE SAME PASS-THROUGH COUNTS, and this branch is the whole of the hole:
+    // it is where an undeclared body lands - chunked, or a length past
+    // PROXY_RETRY_MAX_BODY - and bun's cap never sees a body a handler pipes,
+    // so `Transfer-Encoding: chunked` reached go unmetered at any size.
+    // Counting does not turn this into a buffering branch: nothing is held,
+    // the tally is one number, and the stream is CUT at the limit rather than
+    // measured after it. `flush` does not run on that cut, so `onBodyRead`
+    // stays unfired - the body did not end, it was refused, and the socket is
+    // still the client's.
+    let read = 0;
     body = req.body.pipeThrough(
-      new TransformStream<Uint8Array, Uint8Array>({ flush: () => onBodyRead?.() }),
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          read += chunk.byteLength;
+          if (maxBody > 0 && read > maxBody) {
+            overLimit = true;
+            controller.error(new Error(`borgo: request body over BORGO_MAX_BODY=${maxBody}`));
+            return;
+          }
+          controller.enqueue(chunk);
+        },
+        flush: () => onBodyRead?.(),
+      }),
     );
   } else {
     body = undefined;
@@ -2062,6 +2256,13 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
         decompress: false,
         signal: abort?.signal,
       } as RequestInit);
+      // an upstream that answers before it has drained the body can beat the
+      // cut to the finish line - go is free to reply to half a request. The
+      // limit decided first, whatever came back after it
+      if (overLimit) {
+        void upstream.body?.cancel().catch(() => {});
+        return bodyTooLarge(maxBody);
+      }
       // the deadline can fire while these headers are still in flight:
       // the abort has already torn the connection down, but fetch still
       // resolves, with a body that ends at zero bytes. returning it would
@@ -2096,6 +2297,12 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
       // the 504s and the 502s below - is borgo's own and carries them
       return markUpstream(upstream);
     } catch (err) {
+      // FIRST, and ahead of the timeout: cutting the request body is what made
+      // this fetch reject, so the error is borgo's own refusal wearing an
+      // upstream failure's clothes. Answered 502 it would read as "the api is
+      // down" in the operator's logs and in the client's hands, for a request
+      // borgo itself refused
+      if (overLimit) return bodyTooLarge(maxBody);
       if (timedOut) return new Response("api timeout", { status: 504 });
       if (retriable && attempt < retries && isConnRefused(err)) {
         await sleep(retryDelayMs);
