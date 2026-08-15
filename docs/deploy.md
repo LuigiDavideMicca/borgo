@@ -18,7 +18,7 @@ bunx borgo deploy init <caddy|nginx|systemd|compose> [--force]
 
 | Target | Writes | It is | Then |
 | --- | --- | --- | --- |
-| `caddy` | `Caddyfile` | reverse proxy with automatic TLS, a 1 MiB body cap and the forwarding headers | set your domain, `caddy run --config Caddyfile` |
+| `caddy` | `Caddyfile` | reverse proxy with a 1 MiB body cap, the forwarding headers, and `tls internal` so it runs offline as written | `caddy run --config Caddyfile`; to go live, set your domain and delete `tls internal` |
 | `nginx` | `site.conf` | the same, spelled out: websocket upgrades, `proxy_buffering off` for SSE, long read timeout | set domain and certs, link into `sites-enabled/` |
 | `systemd` | `borgo.service` | a hardened unit running `bun run start`, reading its secrets from the app's `.env` | copy to `/etc/systemd/system/`, `systemctl enable --now` |
 | `compose` | `docker-compose.yml` | build, ports, `BUN_CONFIG_MAX_HTTP_REQUESTS`, restart policy, a `/healthz` healthcheck, a required `SESSION_SECRET` if the app already signs sessions, and a commented-out `DB_PATH`/volume block | `docker compose up -d` |
@@ -88,6 +88,8 @@ Only the front server needs to be reachable — it proxies `/api/*` to Go and sp
 
 ```caddy
 example.com {
+    # local CA, no ACME, no network. delete when the domain above is real.
+    tls internal
     # borgo.Bind reads at most 1 MiB; a route that takes more uses
     # borgo.BindMax, and this line has to be raised with it.
     request_body {
@@ -137,6 +139,8 @@ server {
     }
 }
 ```
+
+**`tls internal` is why the file runs offline, and it is the line you delete.** Caddy's automatic HTTPS has no local mode to fall back to: a site block naming `example.com` with no `tls` directive is not a placeholder waiting to be filled in, it is a real ACME order placed against Let's Encrypt, for a domain you do not own, from your account — and Caddy retries that failure for thirty days while serving nothing. Rate limits are counted per requesting account, so the bill for trying our example arrives at your name. So the generated `Caddyfile` issues from Caddy's own local CA and reaches no network at all: `caddy run --config Caddyfile` works as written, and the first run offers to add that CA to your trust store (decline it and your browser warns; nothing else changes). Going live is two edits in adjacent lines — your domain in place of `example.com`, and delete `tls internal` — after which Caddy obtains and renews a public certificate on its own. Leave the line in on a real domain and you serve a certificate no browser trusts, which is loud, local and one line from fixed; that is the failure this default prefers. `caddy adapt` shows which of the two you have: with the line, the adapted config carries `"issuers":[{"module":"internal"}]`; without it, no `tls` app at all, which is Caddy's way of saying *the public default*.
 
 **The body cap is the app's, not a number.** `borgo.Bind` reads at most 1 MiB and answers `413` above it (`borgo.BindError` picks the status); a route that legitimately takes more declares it with `borgo.BindMax`, and then the proxy line moves with it. A proxy that lets more through does not make the app accept more — it only moves the refusal one hop later, into a Go handler, where nothing in the proxy's logs explains it. The front server's own `BORGO_MAX_BODY` (32 MB) is a different ceiling: what it will *buffer* while proxying, not what a handler will decode.
 

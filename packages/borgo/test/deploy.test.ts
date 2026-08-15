@@ -95,6 +95,14 @@ function validator(envVar: string, exe: string): { path: string } | { skip: stri
   return path ? { path } : { skip: `${exe} not found - set ${envVar} to run this` };
 }
 
+// bun's 5s default is a budget for our own code, not for spawning somebody
+// else's binary: `caddy adapt` alone takes ~10s cold on a machine whose
+// antivirus scans a 49 MB unsigned exe on every launch, and docker's client
+// waits on a daemon that may not be up. Every test below that shells out to a
+// real tool gets this instead - a timeout that fires here is the tool being
+// missing or wedged, never the config being wrong.
+const EXTERNAL_TOOL_TIMEOUT = 120_000;
+
 // stdout kept apart from stderr: caddy logs to stderr even when it succeeds,
 // and `caddy adapt`'s stdout is json that must parse on its own
 async function run(cmd: string[], cwd?: string): Promise<{ code: number; out: string; text: string }> {
@@ -597,7 +605,7 @@ describe("the systemd unit is hardened", () => {
     expect(score).toBeGreaterThan(0);
     // it was 9.0 UNSAFE. anything at or above 6.5 means the set was gutted
     expect(score).toBeLessThan(6.5);
-  });
+  }, EXTERNAL_TOOL_TIMEOUT);
 });
 
 // RESTART=UNLESS-STOPPED ONLY EVER SEES THE PROCESS EXIT.
@@ -644,7 +652,7 @@ describe("the container artefacts have a healthcheck", () => {
 
     await server.stop(true);
     expect(await probe()).toBe(1);
-  });
+  }, EXTERNAL_TOOL_TIMEOUT);
 
   test("docker compose parses the file, healthcheck included", async () => {
     const docker = validator("BORGO_TEST_DOCKER", "docker");
@@ -657,7 +665,7 @@ describe("the container artefacts have a healthcheck", () => {
     expect(code).toBe(0);
     // the probe survived compose's own parse, quoting and all
     expect(text).toContain("t.includes('\"status\":\"ok\"')");
-  });
+  }, EXTERNAL_TOOL_TIMEOUT);
 });
 
 // X-REAL-IP WAS FORGEABLE THROUGH BOTH GENERATED PROXIES, AND THE TWO DID NOT
@@ -705,7 +713,7 @@ describe("the forwarding headers are the proxy's, not the client's", () => {
 
     const body = handlers.find((h) => h.handler === "request_body")!;
     expect(body.max_size).toBe(BODY_LIMIT);
-  });
+  }, EXTERNAL_TOOL_TIMEOUT);
 
   test("caddy validate accepts the file as written", async () => {
     const caddy = validator("BORGO_TEST_CADDY", "caddy");
@@ -717,7 +725,7 @@ describe("the forwarding headers are the proxy's, not the client's", () => {
     const { code, text } = await run([caddy.path, "validate", "--config", path, "--adapter", "caddyfile"]);
     expect(text).toContain("Valid configuration");
     expect(code).toBe(0);
-  });
+  }, EXTERNAL_TOOL_TIMEOUT);
 
   // a `toContain` on a directive cannot tell a config nginx loads from one it
   // refuses. This one is loaded, from the http block sites-enabled lives in.
@@ -736,7 +744,7 @@ describe("the forwarding headers are the proxy's, not the client's", () => {
     expect(text).toContain("syntax is ok");
     expect(text).toContain("test is successful");
     expect(code).toBe(0);
-  });
+  }, EXTERNAL_TOOL_TIMEOUT);
 });
 
 // THE OPERATOR'S SHELL IS NOT THE APP'S CONFIGURATION.
@@ -842,6 +850,81 @@ describe("across every scaffold deploy init can meet", () => {
       expect(parsed.services.app.healthcheck).toBeDefined();
     }
   });
+});
+
+// AN EXAMPLE CONFIG NEVER CONTACTS AN OUTSIDE SERVICE IN THE NAME OF WHOEVER
+// TRIES IT.
+//
+// `example.com { ... }` with no tls directive is not an unfinished config: it
+// is a real ACME order against Let's Encrypt for a domain the operator does
+// not own, placed from the operator's own account, retried for thirty days.
+// The absence of an issuer in the adapted json is exactly the defect, so none
+// of this may be asserted as an absence - `not.toContain("acme")` passed on
+// the broken file, because the broken file named no issuer at all. Every
+// assertion below names the issuer it wants.
+describe("the example Caddyfile issues from a local CA, not from Let's Encrypt", () => {
+  test("the file carries tls internal, and says which line goes when the domain is real", () => {
+    const out = caddyfile(ctx);
+    const tls = out.split("\n").find((l) => l.trim().startsWith("tls "))!;
+    // uncommented: a safe line an operator has to uncomment is the unsafe
+    // file plus a note, and the file nobody reads is the one that must be safe
+    expect(tls.trim()).toBe("tls internal");
+    expect(out).toContain("delete");
+    expect(out).toContain("example.com {");
+    expect(balanced(out)).toBe(true);
+  });
+
+  // through caddy's own adapter: the issuer the running server would use
+  test("caddy adapt names the internal issuer for every site in the file", async () => {
+    const caddy = validator("BORGO_TEST_CADDY", "caddy");
+    if ("skip" in caddy) return void console.log(`skipped: ${caddy.skip}`);
+
+    const dir = mkdtempSync(join(tmpdir(), "borgo-deploy-"));
+    const path = join(dir, "Caddyfile");
+    writeFileSync(path, caddyfile(ctx));
+    const { code, out } = await run([caddy.path, "adapt", "--config", path, "--adapter", "caddyfile"]);
+    expect(code).toBe(0);
+
+    const json = JSON.parse(out) as {
+      apps: { tls?: { automation?: { policies?: Array<{ subjects?: string[]; issuers?: Array<{ module: string }> }> } } };
+    };
+    const policies = json.apps.tls?.automation?.policies;
+    // a config with no tls app is the broken one: caddy's unstated default is
+    // the public ACME issuers, so an absent policy is not a passing test
+    expect(policies).toBeDefined();
+    expect(policies!.length).toBeGreaterThan(0);
+    for (const policy of policies!) {
+      expect(policy.subjects).toContain("example.com");
+      expect(policy.issuers).toBeDefined();
+      expect(policy.issuers!.length).toBeGreaterThan(0);
+      // `internal` is caddy's local CA and speaks to nothing; `acme` and
+      // `zerossl` are the two that would order a certificate for real
+      for (const issuer of policy.issuers!) expect(issuer.module).toBe("internal");
+    }
+  }, EXTERNAL_TOOL_TIMEOUT);
+
+  // the discriminator: without that one line the adapted config names no
+  // issuer at all, which is how caddy spells "the public default". If this
+  // ever stops holding, the test above has stopped proving anything.
+  test("dropping the line is what puts the public issuer back", async () => {
+    const caddy = validator("BORGO_TEST_CADDY", "caddy");
+    if ("skip" in caddy) return void console.log(`skipped: ${caddy.skip}`);
+
+    const dir = mkdtempSync(join(tmpdir(), "borgo-deploy-"));
+    const path = join(dir, "Caddyfile");
+    // the documented way live: the real domain, and the tls line gone
+    writeFileSync(
+      path,
+      caddyfile(ctx)
+        .split("\n")
+        .filter((l) => l.trim() !== "tls internal")
+        .join("\n")
+        .replace("example.com {", "live.example.org {"),
+    );
+    const { code, out } = await run([caddy.path, "adapt", "--config", path, "--adapter", "caddyfile"]);
+    expect(code).toBe(0);
+    expect((JSON.parse(out) as { apps: { tls?: unknown } }).apps.tls).toBeUndefined();
+  }, EXTERNAL_TOOL_TIMEOUT);
 });
 
 // THE GUIDE AND THE GENERATOR ARE ONE ARTEFACT.
