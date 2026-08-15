@@ -30,6 +30,9 @@ import {
   UNKNOWN_CHANGE,
   csrfEnabled,
   sessionSecure,
+  cspSetting,
+  devMode,
+  reloadBanner,
 } from "../src/util";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -519,9 +522,17 @@ describe("metricsEnabled", () => {
     expect(metricsEnabled({})).toBe(false);
   });
 
-  test("only 1 counts", () => {
-    for (const value of ["0", "true", "yes", "", " 1"]) {
-      expect(metricsEnabled({ BORGO_METRICS: value })).toBe(false);
+  // it tested === "1", so this used to be `only 1 counts` and asserted that
+  // "true" was off: the operator who spelled the switch the way go spells it
+  // got a 404 on the endpoint they had just enabled, and nothing said so. The
+  // spellings that are NOT boolean go on being off - by refusing, now, since
+  // "yes" is an intent nobody can read either way.
+  test("=true enables it, exactly as =1 does", () => {
+    expect(metricsEnabled({ BORGO_METRICS: "true" })).toBe(true);
+    expect(metricsEnabled({ BORGO_METRICS: "0" })).toBe(false);
+    expect(metricsEnabled({ BORGO_METRICS: "false" })).toBe(false);
+    for (const value of ["yes", " 1", "2"]) {
+      expect(() => metricsEnabled({ BORGO_METRICS: value })).toThrow(/BORGO_METRICS/);
     }
   });
 
@@ -1291,6 +1302,250 @@ describe("csrfEnabled", () => {
   });
 });
 
+// EVERY BOOLEAN SWITCH, PUT THROUGH THE SAME ALPHABET.
+//
+// BORGO_CSRF was repaired one switch at a time and the repair did not hold,
+// because the disease was never in that variable: five more switches read their
+// own private grammar, and one of them - BORGO_DEV - decided the very default
+// BORGO_CSRF was being repaired to respect. Fixing them one at a time is how a
+// sixth arrives. So the alphabet is written once, every switch is run through
+// all of it, and a switch added later without an entry here is a switch whose
+// author has to come and read this.
+//
+// The list is not a sample. Each entry is a spelling somebody actually writes:
+// go's own ParseBool set both ways; the english words a person reaches for
+// (`yes`, `on`, `off`); numbers that look boolean and are not (`2`, `-1`); a
+// value with whitespace either side, which is what a shell heredoc or a padded
+// compose file yields; a trailing \r, which is what EVERY line of a .env file
+// authored on windows carries; and mixed case, which ParseBool refuses and a
+// case-insensitive reader would silently accept.
+const TRUE_SPELLINGS = ["1", "t", "T", "true", "TRUE", "True"];
+const FALSE_SPELLINGS = ["0", "f", "F", "false", "FALSE", "False"];
+const UNREADABLE = ["yes", "on", "off", "2", "-1", " 1", "1 ", "1\r", "0\r", "TrUe", "FaLsE"];
+
+// each switch as one question - "is the thing this variable governs on?" - so
+// the table can ask all of them the same way. `undefined` is the variable unset.
+const SWITCHES: Array<{
+  name: string;
+  read: (value: string | undefined) => boolean;
+  unset: boolean;
+}> = [
+  { name: "BORGO_DEV", read: (v) => devMode({ BORGO_DEV: v }), unset: false },
+  {
+    name: "BORGO_SECURITY_HEADERS",
+    read: (v) => createSecurity(false, { headers: v }) !== null,
+    unset: true,
+  },
+  { name: "BORGO_CSP", read: (v) => cspSetting(v) !== false, unset: true },
+  { name: "BORGO_METRICS", read: (v) => metricsEnabled({ BORGO_METRICS: v }), unset: false },
+  { name: "BORGO_RELOAD", read: (v) => reloadBanner({ BORGO_RELOAD: v }), unset: false },
+  { name: "BORGO_CSRF", read: (v) => csrfEnabled(false, { BORGO_CSRF: v }), unset: true },
+  { name: "SESSION_SECURE", read: (v) => sessionSecure({ SESSION_SECURE: v }), unset: false },
+];
+
+describe("every boolean env switch reads one grammar", () => {
+  for (const { name, read, unset } of SWITCHES) {
+    test(`${name}: unset and empty both mean ${unset}`, () => {
+      expect(read(undefined)).toBe(unset);
+      expect(read("")).toBe(unset);
+    });
+
+    test(`${name}: every spelling go's ParseBool takes, both ways`, () => {
+      for (const v of TRUE_SPELLINGS) expect(read(v)).toBe(true);
+      for (const v of FALSE_SPELLINGS) expect(read(v)).toBe(false);
+    });
+
+    // the direction that produced all of this: an unreadable value must not
+    // fall through to a side. Named in the message, or an operator staring at
+    // a boot failure cannot tell which of their variables it is about.
+    test(`${name}: refuses what it cannot read, and says which variable`, () => {
+      for (const v of UNREADABLE) {
+        expect(() => read(v)).toThrow(new RegExp(name));
+      }
+    });
+
+    // \r and a leading space are invisible in a terminal. The refusal has to
+    // show the bytes, or the operator reads their own value back and sees
+    // nothing wrong with it - and a CR would otherwise return the cursor and
+    // overwrite the half of the line naming the variable.
+    test(`${name}: the refusal shows an invisible character rather than printing it`, () => {
+      expect(() => read("1\r")).toThrow(/\\r/);
+      expect(() => read(" 1")).toThrow(/" 1"/);
+    });
+  }
+});
+
+// BORGO_DEV: THE ONE THAT WAS WORSE THAN THE DEFECT IT SURVIVED.
+//
+// Read as `!!process.env.BORGO_DEV`, so it answered the presence of the
+// variable and never its value. `BORGO_DEV=0` on a production build therefore
+// bought: csrf off by default, the csp relaxed to 'unsafe-inline', the dev
+// websocket channel open, and __BORGO_DEV__ injected into the page. It is also
+// the switch that decides the default BORGO_CSRF was just repaired to honour,
+// which is why repairing that variable alone repaired nothing.
+describe("devMode", () => {
+  test("=0 is production, which is the whole defect", () => {
+    expect(devMode({ BORGO_DEV: "0" })).toBe(false);
+    expect(devMode({ BORGO_DEV: "false" })).toBe(false);
+    expect(devMode({ BORGO_DEV: "1" })).toBe(true);
+  });
+
+  // the boolean is not the finding: what it BUYS is. Asserted through the two
+  // things serve() derives from it, in the composition serve-entry performs -
+  // a boolean that is right on its own and wrong once composed is the shape of
+  // every bug in this file.
+  test("what =0 used to buy: the csp and the csrf default it decides", () => {
+    const dev = devMode({ BORGO_DEV: "0" });
+    const security = createSecurity(dev, {})!;
+    expect(security.needsNonce).toBe(true);
+    expect(security.cspFor("n1")).toContain("'nonce-n1'");
+    expect(security.cspFor("n1")).not.toContain("script-src 'self' 'unsafe-inline'");
+    // and the switch the BORGO_CSRF fix was about, which this one overrides
+    expect(csrfEnabled(dev, {})).toBe(true);
+    // the same three, the other way round, so the assertions above are known
+    // to be discriminating rather than true of both modes
+    const on = devMode({ BORGO_DEV: "1" });
+    expect(createSecurity(on, {})!.needsNonce).toBe(false);
+    expect(csrfEnabled(on, {})).toBe(false);
+  });
+
+  // the enumeration above proves devMode is one honest answer. This proves the
+  // entry point asks it ONCE - the boot and the catch that decides whether a
+  // build error kills the process or is served as a page used to read
+  // process.env separately, and two readings of one intent is the next defect
+  // waiting. It is also asserted to sit ABOVE the try: a refusal re-thrown from
+  // inside the handler meant to serve failures would be handled as a build
+  // failure, and answered on a port it never bound.
+  // the catch below binds a port, so a value borgo refuses has to fail the boot
+  // rather than be re-read from inside the handler that exists to serve
+  // failures - which answered from a listening socket with fewer security
+  // headers than a server that had accepted it
+  test("serve-entry resolves every switch once, above the try", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/serve-entry.ts"), "utf8");
+    const calls = [...src.matchAll(/resolveSwitches\(/g)];
+    expect(calls).toHaveLength(1);
+    expect(src.indexOf("resolveSwitches(")).toBeLessThan(src.indexOf("try {"));
+    // no switch is read a second time here, under any name
+    for (const name of [
+      "BORGO_DEV",
+      "BORGO_CSP",
+      "BORGO_CSRF",
+      "BORGO_METRICS",
+      "BORGO_RELOAD",
+      "BORGO_SECURITY_HEADERS",
+      "SESSION_SECURE",
+    ]) {
+      expect(src).not.toContain(`process.env.${name}`);
+    }
+    // and the one answer is what both the boot and the catch read
+    expect(src).toContain("await serve({ dev, switches })");
+    expect(src).toContain("if (!dev) throw error");
+  });
+
+  // the guard is worth nothing if the reader silently finds nothing: a rename
+  // would leave every assertion above vacuously true
+  test("the switch names this test looks for are the ones resolveSwitches reads", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/util.ts"), "utf8");
+    for (const name of ["BORGO_DEV", "BORGO_CSP", "BORGO_CSRF", "BORGO_METRICS"]) {
+      expect(src).toContain(name);
+    }
+  });
+});
+
+// BORGO_CSP IS A SWITCH AND A VALUE IN ONE VARIABLE.
+//
+// `env.csp !== "0"` meant every other spelling of "off" was taken for the text
+// of the policy: `BORGO_CSP=false` served `Content-Security-Policy: false`. No
+// browser knows a directive called `false`, so the policy enforces nothing -
+// while a csp header sits in the response, in the logs, and in every scanner's
+// report saying the opposite. That is worse than no header at all.
+describe("cspSetting", () => {
+  const html = () =>
+    new Response("<p>x</p>", { headers: { "Content-Type": "text/html; charset=utf-8" } });
+
+  test("every spelling of off drops the header instead of becoming one", () => {
+    for (const v of FALSE_SPELLINGS) {
+      expect(cspSetting(v)).toBe(false);
+      const res = createSecurity(false, { csp: v })!.apply(html());
+      expect(res.headers.get("Content-Security-Policy")).toBeNull();
+      // the static headers are BORGO_SECURITY_HEADERS' business, not this one
+      expect(res.headers.get("X-Frame-Options")).toBe("DENY");
+    }
+  });
+
+  test("every spelling of on asks for borgo's own policy", () => {
+    for (const v of TRUE_SPELLINGS) {
+      expect(cspSetting(v)).toBeNull();
+      expect(createSecurity(false, { csp: v })!.cspFor("n1")).toContain("'nonce-n1'");
+    }
+  });
+
+  // the two cases where the switch and the value nearly touch
+  test("a real policy that merely contains the word false stays a policy", () => {
+    const policy = "default-src 'self'; report-uri /csp/false; script-src 'self' {nonce}";
+    expect(cspSetting(policy)).toBe(policy);
+    expect(createSecurity(false, { csp: policy })!.needsNonce).toBe(true);
+  });
+
+  test("a policy of exactly 0 is the documented way to drop it, not a policy", () => {
+    expect(cspSetting("0")).toBe(false);
+  });
+
+  // the rule that separates them: a header a browser will not act on must never
+  // be installed as though it were protection
+  // a single bare word is the one shape a mistyped switch and a valueless
+  // directive share, so borgo cannot tell them apart and refuses rather than
+  // guessing. Guessing "policy" is how `BORGO_CSP=false` came to be served as
+  // one; guessing "switch" would silently drop a policy the operator wrote
+  test("a bare word is refused, naming both readings", () => {
+    for (const v of ["yes", "on", "off", "nonsense", "'self'", "0\r"]) {
+      expect(() => cspSetting(v)).toThrow(/BORGO_CSP/);
+    }
+    // and the refusal has to be usable: it must offer the two ways out
+    expect(() => cspSetting("upgrade-insecure-requests")).toThrow(/upgrade-insecure-requests;/);
+    expect(() => cspSetting("upgrade-insecure-requests")).toThrow(/"0"/);
+    // the boolean spellings are the switch, not a policy
+    for (const v of ["false", "FALSE", "f", "0", "true", "1"]) {
+      expect(() => cspSetting(v)).not.toThrow();
+    }
+  });
+
+  // shape, not a list of names: a directive borgo has never heard of has to
+  // work, or every future csp directive is a server that will not start
+  test("anything shaped like a policy is served exactly as written", () => {
+    expect(cspSetting("Frame-Ancestors 'none'")).toBe("Frame-Ancestors 'none'");
+    expect(cspSetting("upgrade-insecure-requests;")).toBe("upgrade-insecure-requests;");
+    expect(cspSetting("weird-src 'self'; frame-ancestors 'none'")).toBe(
+      "weird-src 'self'; frame-ancestors 'none'",
+    );
+    // directives that did not exist when this was written
+    expect(cspSetting("fenced-frame-src 'none'")).toBe("fenced-frame-src 'none'");
+    expect(cspSetting("webrtc 'block'")).toBe("webrtc 'block'");
+    // a misspelt directive is still a policy: borgo cannot know, and a header
+    // the browser ignores is the operator's mistake to see, not ours to hide
+    expect(cspSetting("default_src 'self'")).toBe("default_src 'self'");
+  });
+});
+
+// BORGO_RELOAD only shapes the banner, so the cost of getting it wrong is a
+// line of output - but a variable that ignores what the operator wrote is a
+// variable they stop believing. Read for presence, `=0` meant "yes".
+describe("reloadBanner", () => {
+  test("=0 prints the full banner", () => {
+    expect(reloadBanner({ BORGO_RELOAD: "0" })).toBe(false);
+    expect(reloadBanner({ BORGO_RELOAD: "1" })).toBe(true);
+  });
+
+  // resolved with the other env at the top of serve(), not at its one use after
+  // Bun.serve has already bound the port: a refusal arriving from a server that
+  // is already answering requests is not a refusal
+  test("server.ts reads it through this function, before the listen", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
+    expect(src).not.toContain("process.env.BORGO_RELOAD");
+    expect(src.indexOf("reloadBanner(")).toBeLessThan(src.indexOf("Bun.serve"));
+  });
+});
+
 // BORGO_PUSH_KEY HAS TO HOLD ON BOTH HALVES.
 //
 // /__borgo/publish relays whatever it is handed to every browser subscribed to
@@ -1372,5 +1627,27 @@ describe("pushAuthorized: the two halves must agree that key auth is on", () => 
     expect(src).toContain('if (verdict === "half-configured") warnHalfConfiguredPushKey();');
     // the old shape read the key and fell through to the loopback test
     expect(src).not.toContain("isLoopback(server.requestIP(req)?.address) && !forwarded");
+  });
+});
+
+// The refusal for a bare word suggests adding a semicolon to make it a policy.
+// Measured on the socket before this: `BORGO_CSP=false;` was then served as
+// `Content-Security-Policy: false;` - the original fail-open, reached by
+// following our own advice. No csp directive is named after a switch.
+describe("cspSetting punctuation is not a way back into the defect", () => {
+  // refused, not quietly read as "off": one rule, and the message already says
+  // how to spell off. What must never happen is serving it as a policy
+  test("a switch word is never a policy, however it is punctuated", () => {
+    for (const v of ["false;", "0;", "off;", "no;", "disabled;", " false ; ", "FALSE;"]) {
+      expect(() => cspSetting(v)).toThrow(/BORGO_CSP/);
+    }
+    // the plain spellings still work, so the way out the message names is real
+    expect(cspSetting("false")).toBe(false);
+    expect(cspSetting("0")).toBe(false);
+  });
+
+  test("and a real single directive still gets through with its semicolon", () => {
+    expect(cspSetting("upgrade-insecure-requests;")).toBe("upgrade-insecure-requests;");
+    expect(cspSetting("block-all-mixed-content;")).toBe("block-all-mixed-content;");
   });
 });

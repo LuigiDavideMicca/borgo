@@ -27,13 +27,11 @@ import { matchRoute, safeDecode, type Route } from "./router";
 import {
   apiCsrfRejects,
   createKeepWarm,
-  createSecurity,
   csrfRejects,
   decodeChanged,
   envInt,
   headResponse,
   keepWarmSeconds,
-  metricsEnabled,
   prepareShell,
   proxyRequest,
   pushAuthorized,
@@ -41,13 +39,13 @@ import {
   readTimeoutNotice,
   renderPage as renderDocument,
   requestFullyRead,
+  resolveSwitches,
   runAction,
   runPropsRequest,
   type ActionOptions,
   type PropsOptions,
   type RenderPageOptions,
-  csrfEnabled,
-  sessionSecure,
+  type Switches,
 } from "./util";
 
 // resolve react from the app, not from this package: with a linked borgo
@@ -71,7 +69,16 @@ function composeElement(route: Route, props: Record<string, unknown>) {
   return element;
 }
 
-export async function serve({ dev = false } = {}) {
+// `switches` is resolved by whoever called us when there is a caller that can
+// resolve it earlier - serve-entry does, above the try whose catch would
+// otherwise serve a refused value from a bound port. The default is for the
+// entry points with no fallback (`borgo start`, `borgo export`); it still runs
+// before anything here binds, and resolveSwitches in util.ts carries the
+// argument for why "before a port is bound" has to mean every switch.
+export async function serve({
+  dev = false,
+  switches = resolveSwitches(process.env, dev),
+}: { dev?: boolean; switches?: Switches } = {}) {
   const started = performance.now();
   let chunkMap: Record<string, string> = {};
   // every name the last build recorded, not a fixed one: a production build
@@ -146,11 +153,10 @@ export async function serve({ dev = false } = {}) {
       ? route.module.loader({ request: req, params, api: apiFor(req, onSetCookie), apiUrl })
       : Promise.resolve({});
 
-  // the exact defaults, and the env switches, are documented on createSecurity
-  const security = createSecurity(dev, {
-    headers: process.env.BORGO_SECURITY_HEADERS,
-    csp: process.env.BORGO_CSP,
-  });
+  // the exact defaults, and the env switches, are documented on createSecurity;
+  // resolveSwitches in util.ts owns WHEN they are read, which is before this
+  // function - and before serve-entry's try - could bind anything
+  const security = switches.security;
   const secure = (res: Response) => (security ? security.apply(res) : res);
 
   // csrf: one double-submit token, issued as a cookie on rendered pages and
@@ -159,8 +165,14 @@ export async function serve({ dev = false } = {}) {
   // cross-site post can read neither the cookie nor set the header. one flag
   // governs both: on by default in production, off by default in dev, and
   // BORGO_CSRF decides either way.
-  const csrfEnforced = csrfEnabled(dev, process.env);
-  const csrfCookieAttrs = `Path=/; SameSite=Lax${sessionSecure(process.env) ? "; Secure" : ""}`;
+  const csrfEnforced = switches.csrfEnforced;
+  // taken from the resolved set rather than read at its one use below the
+  // listen: it is only the shape of the banner, but refusing a value it cannot
+  // read has to happen before a port is bound, or the refusal arrives from a
+  // server already serving. That was true of this one variable and false of the
+  // other five, which is the defect resolveSwitches closes.
+  const reloading = switches.reloading;
+  const csrfCookieAttrs = switches.csrfCookieAttrs;
 
   const renderOptions: RenderPageOptions = {
     dev,
@@ -294,7 +306,7 @@ export async function serve({ dev = false } = {}) {
   // short timeout), /metrics appears with BORGO_METRICS=1. both stay out of
   // the request log, the metrics themselves and any compression.
   const bootTime = Date.now();
-  const metrics = metricsEnabled(process.env) ? createMetrics(bootTime) : null;
+  const metrics = switches.metrics ? createMetrics(bootTime) : null;
 
   // /healthz answers anyone: a flood of probes must not become a flood of
   // probes against the api, so the result is shared for a second - the promise
@@ -612,7 +624,7 @@ export async function serve({ dev = false } = {}) {
   }));
 
   const ready = performance.now() - started;
-  if (process.env.BORGO_RELOAD) {
+  if (reloading) {
     console.log(`  ${c.sage(g.ok)} rebuilt in ${fmtMs(ready)}`);
     return;
   }

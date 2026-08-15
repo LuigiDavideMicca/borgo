@@ -1,4 +1,20 @@
 import { serve } from "./server";
+import { resolveSwitches } from "./util";
+
+// EVERY SWITCH, ONCE, ABOVE THE TRY - not just BORGO_DEV.
+//
+// One reading is used by the boot and by the catch alike: a process that starts
+// in one mode and then decides whether a build error kills it or is served as a
+// page in the other is a defect of its own. And it happens HERE because the
+// catch below deliberately BINDS A PORT: a value borgo refuses must fail the
+// boot, not be re-thrown from inside the handler that exists to serve failures
+// and answered from a listening socket with fewer security headers than a
+// server that had accepted it. That held for BORGO_DEV alone while BORGO_CSP,
+// BORGO_CSRF, BORGO_METRICS, BORGO_RELOAD, BORGO_SECURITY_HEADERS and
+// SESSION_SECURE were all read inside serve(). resolveSwitches has the measured
+// account.
+const switches = resolveSwitches(process.env);
+const dev = switches.dev;
 
 // die with the watcher: a force-killed dev session delivers no signal on
 // windows, and an orphaned front server would hold the port forever
@@ -14,9 +30,9 @@ if (parentPid > 1) {
 }
 
 try {
-  await serve({ dev: !!process.env.BORGO_DEV });
+  await serve({ dev, switches });
 } catch (error) {
-  if (!process.env.BORGO_DEV) throw error;
+  if (!dev) throw error;
   // a broken build must not take the port down: serve the error instead, keep
   // the dev channel alive, and the next successful rebuild reloads the browser
   console.error(error);

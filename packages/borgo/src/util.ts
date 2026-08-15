@@ -52,8 +52,9 @@ export function headHtml(head: Head): string {
 // connect-src 'self' covers same-origin ws:// per csp level 3. dev swaps the
 // nonce for 'unsafe-inline': the error overlay and the zero-js reload client
 // are inline scripts built outside the render.
-// BORGO_SECURITY_HEADERS=0 drops all of it; BORGO_CSP=0 drops the csp alone
-// and BORGO_CSP=<policy> replaces it, with {nonce} substituted per request.
+// BORGO_SECURITY_HEADERS=0 (or false) drops all of it; BORGO_CSP=0 (or false)
+// drops the csp alone and BORGO_CSP=<policy> replaces it, with {nonce}
+// substituted per request. see cspSetting for why "off" cannot be a policy.
 export const CSP_DEFAULT =
   "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; " +
   "form-action 'self'; img-src 'self' data: blob:; font-src 'self' data:; " +
@@ -71,14 +72,150 @@ export type Security = {
   apply: (res: Response) => Response;
 };
 
+/**
+ * WHETHER A VALUE IS SHAPED LIKE A POLICY - ASKED OF ITS SHAPE, NEVER OF A LIST
+ * OF DIRECTIVE NAMES.
+ *
+ * This used to be a set of every directive a browser acts on, and a policy
+ * naming none of them was refused. That set was wrong the day it was written
+ * and gets wronger: `fenced-frame-src 'none'`, `webrtc 'block'`, `plugin-types
+ * application/pdf` and `referrer no-referrer` are all real policies real
+ * operators write, and every one of them was a front server that would not
+ * start. A list of names is always behind the specification, so EVERY DIRECTIVE
+ * ADDED TO CSP AFTER TODAY WOULD HAVE BEEN A BOOT FAILURE - and the operator's
+ * only remedy was to patch borgo. That is a worse failure than the one the list
+ * was built to prevent, because it has no operator-side fix at all.
+ *
+ * What actually has to be told apart is narrower than "is this a valid policy":
+ * it is "did the operator mean to TURN THE HEADER OFF, or did they write a
+ * POLICY". The switch spellings are a closed set of twelve (go's ParseBool),
+ * and everything a person reaches for instead - `yes`, `on`, `off`, `no`, `2`,
+ * `enabled` - shares exactly one shape: ONE BARE WORD, no value, no separator.
+ * That is also the shape of a valueless directive (`upgrade-insecure-requests`),
+ * and the two are genuinely indistinguishable without knowing the directive
+ * names. So one bare word is the only thing refused, and everything else is a
+ * policy:
+ *
+ *   - two or more tokens: `webrtc 'block'`, `fenced-frame-src 'none'`, and any
+ *     directive invented next year. A misspelling like `default_src 'self'`
+ *     rides through, which is the price of not holding a list - and it is the
+ *     cheap direction, because the operator wrote a policy and gets one.
+ *   - anything containing `;`, which no switch spelling has. This is also the
+ *     escape hatch for a genuinely valueless directive: `upgrade-insecure-
+ *     requests;` is valid serialized csp (the grammar admits a trailing
+ *     separator) and every browser takes it, so no policy in the language is
+ *     unreachable - the worst case costs one character, which is the whole
+ *     difference from the list this replaces.
+ *
+ * A single trailing space cannot smuggle `yes ` through as two tokens: empty
+ * tokens are dropped before counting.
+ */
+const looksLikeAPolicy = (value: string): boolean => {
+  // the punctuation the refusal below suggests must not be a way back into the
+  // defect: `false;` was served as `Content-Security-Policy: false;`, and the
+  // operator who added that semicolon did it because we told them to. No csp
+  // directive is ever named after a switch, so a word that is one is the switch
+  // however it is punctuated - a deny-list of english words, not the allow-list
+  // of directive names that would lag the spec
+  const bare = value.replace(/[\s;]+/g, " ").trim();
+  if (SWITCH_WORDS.includes(bare.toLowerCase())) return false;
+  return value.includes(";") || value.split(/\s+/).filter(Boolean).length > 1;
+};
+
+const SWITCH_WORDS = [
+  "0", "1", "t", "f", "true", "false", "yes", "no", "on", "off", "enable",
+  "disable", "enabled", "disabled", "none", "null", "nil", "unset", "default",
+];
+
+/**
+ * WHETHER `Headers.set` WOULD REFUSE THIS, ASKED OF Headers ITSELF.
+ *
+ * `createSecurity().apply` calls `headers.set("Content-Security-Policy", ...)`
+ * on every document. A policy carrying a newline passed every check at boot and
+ * then THREW ON EVERY SINGLE REQUEST: measured on the socket, the server
+ * announced ready and answered 500 to the page, to /metrics and to a 404 alike,
+ * with X-Frame-Options, nosniff and Referrer-Policy present (they are set before
+ * the throw) and no csp at all. That is the same "the operator has a server that
+ * does not work" as a failed boot, moved to where it is harder to attribute.
+ *
+ * The rule is bun's and is not restated here: a hard-coded character class is a
+ * guess that goes stale the day bun changes what it takes. So the value is
+ * offered to a throwaway Headers and the refusal is caught. Bun's own message is
+ * NOT propagated - it embeds the offending value raw, newline and all, which
+ * would put a CR back into a boot error whose whole job is to be readable.
+ */
+const headersRefuses = (value: string): boolean => {
+  try {
+    new Headers().set("Content-Security-Policy", value);
+    return false;
+  } catch {
+    return true;
+  }
+};
+
+/**
+ * BORGO_CSP, which is a switch and a value in one variable - and so the one
+ * place the boolean grammar cannot simply be applied.
+ *
+ * It tested `!== "0"`, so every other spelling of "off" was taken for the TEXT
+ * OF THE POLICY: `BORGO_CSP=false` shipped `Content-Security-Policy: false`, a
+ * header holding no directive any browser knows. The browser discards it, so
+ * the csp is absent - while a csp header sits in the response, in the logs and
+ * in every scanner's report. Fail-open wearing the costume of the control.
+ *
+ * The two roles are separated by grammar, not by guessing: a value spelled as a
+ * boolean IS the switch and can never be a policy, a value shaped like a policy
+ * is one (see looksLikeAPolicy - shape, not a list of names), and a bare word,
+ * which is the one shape the two share, is refused at boot naming BOTH readings.
+ * So `false`/`FALSE`/`f` drop the header exactly as `0` always did, `true` asks
+ * for the default policy, and `yes`, `on` and `2` name an intent nobody can
+ * read - which is a boot failure, not a policy.
+ *
+ * Returns `false` to drop the header, `null` for the built-in default, or the
+ * operator's policy.
+ */
+export function cspSetting(value: string | undefined): string | false | null {
+  const raw = envText("BORGO_CSP", value);
+  if (raw === undefined) return null;
+  const asSwitch = boolish(raw);
+  if (asSwitch !== undefined) return asSwitch && null;
+  if (!looksLikeAPolicy(raw)) {
+    throw new Error(
+      `borgo: BORGO_CSP: ${JSON.stringify(raw)} is a single bare word, which is the one shape a ` +
+        `mistyped switch and a valueless directive share - so borgo cannot tell which you meant. ` +
+        `If you wanted the header off, write "0" or "false" ("1"/"true" asks for borgo's own ` +
+        `policy, unset means the same). If it was a policy, it is missing the punctuation that ` +
+        `makes it one: give the directive a value (${JSON.stringify(raw + " 'none'")}) or end it ` +
+        `with a semicolon (${JSON.stringify(raw + ";")}), both of which are valid csp. ` +
+        `Serving it as written would put a header on every document that no browser enforces`,
+    );
+  }
+  // both forms the policy takes at request time, since {nonce} is substituted
+  // after this point - and a boot that accepts what a request cannot write is
+  // a server that starts and then answers 500 to everything
+  for (const form of [raw.replaceAll("{nonce}", ""), raw.replaceAll("{nonce}", " 'nonce-probe'")]) {
+    if (!headersRefuses(form)) continue;
+    throw new Error(
+      `borgo: BORGO_CSP: ${JSON.stringify(raw)} is a value Headers.set refuses, so writing it ` +
+        `onto a response throws. Accepted here it would boot a server that answers 500 to every ` +
+        `request, with the csp missing and the other security headers present - refused at boot ` +
+        `instead, before a port is bound`,
+    );
+  }
+  return raw;
+}
+
 export function createSecurity(
   dev: boolean,
   env: { headers?: string; csp?: string } = {},
 ): Security | null {
-  if (env.headers === "0") return null;
-  const enabled = env.csp !== "0";
+  // fails towards the headers being on: unset, empty and unreadable all keep
+  // them, and the last of the three refuses out loud rather than dropping them
+  if (envBool("BORGO_SECURITY_HEADERS", env.headers, "every header on") === false) return null;
+  const csp = cspSetting(env.csp);
+  const enabled = csp !== false;
   const template =
-    env.csp && enabled ? env.csp : CSP_DEFAULT + (dev ? " 'unsafe-inline'" : "{nonce}");
+    typeof csp === "string" ? csp : CSP_DEFAULT + (dev ? " 'unsafe-inline'" : "{nonce}");
   const withoutNonce = template.replaceAll("{nonce}", "");
   return {
     needsNonce: enabled && template.includes("{nonce}"),
@@ -702,8 +839,41 @@ export function requestFullyRead(req: Request): boolean {
  * keeps the collision alive.
  */
 export function metricsEnabled(env: Record<string, string | undefined>): boolean {
-  return env.BORGO_METRICS === "1";
+  // it tested === "1", so BORGO_METRICS=true served 404 on the endpoint it
+  // names. not a fail-open, but an explicit instruction the server dropped in
+  // silence - and the operator debugs a scrape, not a variable
+  return envBool("BORGO_METRICS", env.BORGO_METRICS, "off") ?? false;
 }
+
+/**
+ * Dev mode, resolved once for the whole process.
+ *
+ * `!!process.env.BORGO_DEV` tested the variable's PRESENCE, not its value, so
+ * BORGO_DEV=0 turned dev ON: csrf off by default, the csp relaxed to
+ * 'unsafe-inline', the dev websocket channel open and __BORGO_DEV__ injected
+ * into every page - measured on a production build. Whoever writes `=0` means
+ * the exact opposite of what they got, and this is the switch that OVERRIDES
+ * the csrf default the BORGO_CSRF fix just repaired: mending the variable and
+ * leaving in place the flag that decides its default is mending nothing.
+ *
+ * It refuses a value it cannot read rather than picking a side, and here the
+ * refusal is worth more than elsewhere. Nothing outside borgo sets this - the
+ * dev loop writes "1" (dev.ts) and no one else is meant to - so a value it
+ * cannot read did not come from borgo, and both readings of it are bad in a
+ * way nobody would notice: guessing "dev" weakens a production server, guessing
+ * "production" hands a developer a session with no reload channel and a
+ * confusing service worker. Refusing names the variable, at boot, before a port
+ * is bound. An unset variable still means production, because the absence of a
+ * decision must never be the weaker of the two.
+ */
+export const devMode = (env: Record<string, string | undefined>): boolean =>
+  envBool("BORGO_DEV", env.BORGO_DEV, "production") ?? false;
+
+// BORGO_RELOAD marks a restart so the banner prints its short form. Tested for
+// presence, so `=0` read as "yes". Cosmetic on its own; a switch that ignores
+// what the operator wrote teaches them the variable does not work.
+export const reloadBanner = (env: Record<string, string | undefined>): boolean =>
+  envBool("BORGO_RELOAD", env.BORGO_RELOAD, "the full banner") ?? false;
 
 // SESSION_SECURE decides whether the session and csrf cookies carry Secure,
 // and the two halves have to agree on what it says. Go parses it with
@@ -711,18 +881,72 @@ export function metricsEnabled(env: Record<string, string | undefined>): boolean
 // so SESSION_SECURE=true gave the session cookie Secure and left the csrf
 // cookie without it - one variable, one intent, two answers, silently, in the
 // direction that downgrades. Same grammar as ParseBool, same refusal.
+const BOOL_TRUE = ["1", "t", "T", "true", "TRUE", "True"];
+const BOOL_FALSE = ["0", "f", "F", "false", "FALSE", "False"];
+
+// the same grammar as a question rather than a decision. BORGO_CSP is a switch
+// AND a value, so it has to be able to ask "is this spelled like a boolean"
+// without refusing every policy that is not one.
+export const boolish = (v: string): boolean | undefined =>
+  BOOL_TRUE.includes(v) ? true : BOOL_FALSE.includes(v) ? false : undefined;
+
+/**
+ * THE ONE RULE, FOR ALL SEVEN VARIABLES: A CONTROL CHARACTER IS REFUSED AT
+ * BOOT, NAMING THE VARIABLE AND SHOWING THE BYTE.
+ *
+ * It was one rule in six places and a different one in the seventh. `\r` - what
+ * every line of a .env file authored on windows carries - made `BORGO_DEV=0\r` a
+ * boot failure, while `BORGO_CSP=default-src 'self'\r` was ACCEPTED and bun
+ * trimmed the CR in silence (measured: Headers.set stores a trailing CR, LF and
+ * CRLF alike, dropping them, and stores VT, FF and BEL verbatim). One byte,
+ * fatal in six variables and invisible in the seventh, is a rule the operator
+ * cannot learn.
+ *
+ * The direction is the one the rest of this file already takes: refuse rather
+ * than normalise. A value borgo silently repaired is a value the operator goes
+ * on believing they wrote, and the repair is only ever obvious to whoever wrote
+ * the repair. Refusing costs one boot and names the character; trimming costs
+ * nothing today and hides whatever arrives in that byte tomorrow.
+ *
+ * Returns the value, or undefined when the variable was never set - "" is unset,
+ * uniformly, because a variable exported empty is a variable nobody assigned.
+ */
+export function envText(name: string, v: string | undefined): string | undefined {
+  if (v === undefined || v === "") return undefined;
+  // C0 and DEL. JSON.stringify below is what makes them visible; the message
+  // must never carry the raw byte, or a CR returns the cursor and overwrites
+  // the half of the line naming the variable
+  const at = v.search(/[\u0000-\u001f\u007f]/);
+  if (at === -1) return v;
+  throw new Error(
+    `borgo: ${name}: invalid value ${JSON.stringify(v)} ` +
+      `(a control character at position ${at}; a trailing \\r is what a .env file ` +
+      `authored on windows puts on every line - strip it rather than letting borgo guess)`,
+  );
+}
+
 /**
  * A boolean switch as go's strconv.ParseBool reads it, or undefined when it was
  * never set. Refuses what it cannot read rather than picking a side: a value
  * nobody can parse is a value whose author had an intent, and guessing it wrong
  * is how `=true` came to mean off.
+ *
+ * Every switch borgo reads goes through here, and `every boolean env switch
+ * reads one grammar` in util.test.ts enumerates all of them against one
+ * alphabet - because repairing BORGO_CSRF alone left five others, one of which
+ * (BORGO_DEV) decided BORGO_CSRF's own default.
  */
 export function envBool(name: string, v: string | undefined, unsetMeans: string): boolean | undefined {
-  if (v === undefined || v === "") return undefined;
-  if (["1", "t", "T", "true", "TRUE", "True"].includes(v)) return true;
-  if (["0", "f", "F", "false", "FALSE", "False"].includes(v)) return false;
+  if (envText(name, v) === undefined) return undefined;
+  const parsed = boolish(v as string);
+  if (parsed !== undefined) return parsed;
+  // JSON.stringify, not quotes: the value that reaches here is most often a
+  // .env line read on windows, whose trailing \r would otherwise return the
+  // cursor to the start of the message and overwrite the half naming the
+  // variable. an operator has to be able to SEE the character that was refused
   throw new Error(
-    `borgo: ${name}: invalid value "${v}" (want "1"/"true" or "0"/"false"; unset means ${unsetMeans})`,
+    `borgo: ${name}: invalid value ${JSON.stringify(v)} ` +
+      `(want "1"/"true" or "0"/"false"; unset means ${unsetMeans})`,
   );
 }
 
@@ -734,6 +958,54 @@ export function sessionSecure(env: Record<string, string | undefined>): boolean 
 // === "1" once, so BORGO_CSRF=true turned off the check it names
 export const csrfEnabled = (dev: boolean, env: Record<string, string | undefined>): boolean =>
   envBool("BORGO_CSRF", env.BORGO_CSRF, dev ? "off in dev" : "on") ?? !dev;
+
+export type Switches = {
+  dev: boolean;
+  security: Security | null;
+  csrfEnforced: boolean;
+  csrfCookieAttrs: string;
+  metrics: boolean;
+  reloading: boolean;
+};
+
+/**
+ * EVERY SWITCH, RESOLVED IN ONE PLACE, BEFORE ANY PORT CAN BE BOUND.
+ *
+ * A REFUSAL THAT ARRIVES FROM A SERVER ALREADY LISTENING IS NOT A REFUSAL. That
+ * argument was written on server.ts's BORGO_RELOAD read and was true of exactly
+ * one variable: BORGO_DEV was resolved above serve-entry's `try`, and every
+ * other switch was read INSIDE `serve()`, whose throw the catch turns into a
+ * fallback server. Measured on the socket with `BORGO_DEV=1 BORGO_CSP=yes`: port
+ * bound, process alive, and every request answered 500 with `x-borgo-fallback:
+ * 1` and NO csp, NO X-Frame-Options, NO nosniff, NO Referrer-Policy - a value
+ * borgo refused, serving on the port it refused to serve on, with strictly fewer
+ * security headers than a server that had accepted it.
+ *
+ * So this is the whole class, not the one variable: an unreadable value cannot
+ * reach the fallback path if it was already read before the try. serve-entry
+ * calls this above its `try` and hands the answers to `serve()`; `serve()` falls
+ * back to calling it itself for the entry points that have no fallback at all
+ * (`borgo start`, `borgo export`), so there is one resolution either way and
+ * never two readings of one intent.
+ *
+ * `dev` is a parameter rather than a read because it is the one switch a caller
+ * overrides: `borgo start` and `borgo export` serve production whatever
+ * BORGO_DEV says. Everything derived from dev - the csp's nonce-vs-unsafe-inline
+ * and the csrf default - is derived from that same answer.
+ */
+export function resolveSwitches(
+  env: Record<string, string | undefined>,
+  dev: boolean = devMode(env),
+): Switches {
+  return {
+    dev,
+    security: createSecurity(dev, { headers: env.BORGO_SECURITY_HEADERS, csp: env.BORGO_CSP }),
+    csrfEnforced: csrfEnabled(dev, env),
+    csrfCookieAttrs: `Path=/; SameSite=Lax${sessionSecure(env) ? "; Secure" : ""}`,
+    metrics: metricsEnabled(env),
+    reloading: reloadBanner(env),
+  };
+}
 
 /**
  * Who may POST /__borgo/publish.
