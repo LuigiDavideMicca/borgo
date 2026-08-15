@@ -31,11 +31,11 @@ If you are developing against a local borgo checkout, uncomment the `replace` di
 - `bun run export` — prerender the statically exportable pages into `dist/site/`
 - `bun run doctor` — diagnose the environment (bun, go, ports, stale processes, generated types) with a fix per failing check
 
-The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the blessed deploy configs) and `pwa init` (manifest and service worker) — run them with `bunx borgo <cmd>`.
+The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the blessed deploy configs) and `pwa init` (manifest and service worker) — run them with `bunx borgo <cmd>`. The [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) covers reverse proxy samples, systemd, and split-service setups.
 
 ## Deploy
 
-`docker compose up -d` builds the multi-stage `Dockerfile` (small `oven/bun:slim` runtime, static Go binary) and serves the app on port 3000. The compose file is deliberately bare, because this app is: everything it shows off keeps its state in memory, so there is no database to mount a volume for and no sessions to sign. Both are commented into `docker-compose.yml` for the day you add one. See the [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) for reverse proxy samples, systemd, and split-service setups.
+`docker compose up -d` builds the multi-stage `Dockerfile` (small `oven/bun:slim` runtime, static Go binary) and serves the app on port 3000. The compose file is deliberately bare, because this app is: everything it shows off keeps its state in memory, so there is no database to mount a volume for and no sessions to sign. Both are commented into `docker-compose.yml` for the day you add one.
 
 ## Layout
 

@@ -19,6 +19,8 @@ bun run dev
 
 Open http://localhost:3000.
 
+This template signs session cookies, so it cannot run without `SESSION_SECRET`. `create-borgo` generated a random one into `.env` when it scaffolded this app — nothing to fill in, and nothing to commit: `.env` is gitignored, and it is the one file worth copying to the server by hand, whichever way you deploy. Replacing the key invalidates every session it signed, so everyone logged in is logged out; regenerate it on purpose with `openssl rand -base64 48`.
+
 If you are developing against a local borgo checkout, uncomment the `replace` directive in `go.mod` and point it at the checkout; drop it again once you depend on the published module.
 
 > **`error: bun is not installed in %PATH%`?** Start the app with `bun run dev` — Bun resolves its own bin shims even when `bun` is not on `PATH`. The error appears when the shim is spawned by something else (`npm run dev`, or `node_modules/.bin/borgo` directly). To call the shim from anywhere, install Bun with the [official installer](https://bun.sh).
@@ -31,15 +33,15 @@ If you are developing against a local borgo checkout, uncomment the `replace` di
 - `bun run export` — prerender the statically exportable pages into `dist/site/`
 - `bun run doctor` — diagnose the environment (bun, go, ports, stale processes, generated types) with a fix per failing check
 
-The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the blessed deploy configs) and `pwa init` (manifest and service worker) — run them with `bunx borgo <cmd>`.
+The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the blessed deploy configs) and `pwa init` (manifest and service worker) — run them with `bunx borgo <cmd>`. The [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) covers reverse proxy samples, systemd, and split-service setups.
 
 ## Deploy
 
 `docker compose up -d` builds the multi-stage `Dockerfile` (small `oven/bun:slim` runtime, static Go binary) and serves the app on port 3000.
 
-This template signs session cookies, so it cannot run without `SESSION_SECRET`. `create-borgo` generated a random one into `.env` when it scaffolded this app, and the compose file reads it from there — nothing to fill in, and nothing to commit: `.env` is gitignored, and it is the one file worth copying to the server by hand. The compose file declares the variable as *required*, so a missing key stops `docker compose up` with a message instead of producing an app whose every login answers 500. Serving over https? Uncomment `SESSION_SECURE: "1"` so the session and CSRF cookies carry `Secure`.
+The compose file reads `SESSION_SECRET` from the `.env` described under [Setup](#setup) and declares the variable *required*, so a missing key stops `docker compose up` with a message instead of producing an app whose every login answers 500. Serving over https? Uncomment `SESSION_SECURE: "1"` so the session and CSRF cookies carry `Secure`.
 
-The users and notes stores are in memory, so there is no volume here yet; swap them for a real database and `docker-compose.yml` has the two lines commented in. See the [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) for reverse proxy samples, systemd, and split-service setups.
+The users and notes stores are in memory, so there is no volume here yet; swap them for a real database and `docker-compose.yml` has the two lines commented in.
 
 ## Layout
 

@@ -73,9 +73,23 @@ let yes = false;
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
-  if (arg === "--template" || arg === "-t") template = args[++i];
+  // `--template x` and `--template=x` are one flag with two spellings, so a
+  // missing value has to be refused the same way in both: "" reaches the same
+  // unknown-value message the `=` form already produced, instead of reading as
+  // undefined and quietly taking the default.
+  // The next argument is only consumed when the user actually wrote a value.
+  // Neither a template nor a linter name starts with "-", so a flag after
+  // `--template` is the user's next flag and stays one - swallowed as a value
+  // it would be silently dropped, which is the same defect wearing a value.
+  const value = (): string => {
+    const next = args[i + 1];
+    if (next === undefined || next.startsWith("-")) return "";
+    i++;
+    return next;
+  };
+  if (arg === "--template" || arg === "-t") template = value();
   else if (arg.startsWith("--template=")) template = arg.slice("--template=".length);
-  else if (arg === "--linter") linter = args[++i];
+  else if (arg === "--linter") linter = value();
   else if (arg.startsWith("--linter=")) linter = arg.slice("--linter=".length);
   else if (arg === "--no-linter") linter = "none";
   else if (arg === "--tailwind") tailwind = true;
@@ -262,22 +276,35 @@ if (vscode === undefined) vscode = shouldAsk ? await askYesNo("vscode settings",
 // without a server that never exits has no other way to say so.
 // The default is off without a terminal: a scaffold step in CI that ends with
 // a dev server would hang the pipeline rather than finish it.
+// --no-install already answers the starting half: without dependencies the run
+// prints the manual steps and exits before start is ever consulted, so asking
+// would be a question whose answer is thrown away - and an explicit flag must
+// never produce one.
+if (install === false) start ??= false;
+
 if (install === undefined || start === undefined) {
   // the default keys off a real terminal, not off `interactive`, which
   // BORGO_FORCE_PROMPT also turns on: a test driving the prompts over a pipe
   // must not inherit "there is a human here, install things"
   const terminal = process.stdin.isTTY === true && process.stdout.isTTY === true;
+  // the question names only what is still open, so a run that already carries
+  // --install or --no-start is not asked to answer it a second time
+  const label = [
+    install === undefined ? "install dependencies" : null,
+    start === undefined ? "start the dev server" : null,
+  ]
+    .filter(Boolean)
+    .join(" and ");
   // the prompt's default is the terminal's default, so the (Y/n) the user
   // reads is always the answer enter actually gives
-  const both = shouldAsk
-    ? await askYesNo("install dependencies and start the dev server", terminal)
-    : terminal;
-  install ??= both;
-  start ??= both;
+  const answer = shouldAsk ? await askYesNo(label, terminal) : terminal;
+  install ??= answer;
+  start ??= answer;
 }
-// no `start && !install` guard here: without install the run reports the
-// manual steps and exits before start is ever consulted, so a guard would be
-// a line no test could ever fail on
+// the `install === false` line above settles start for the question's sake
+// alone: the run below reports the manual steps and exits before start is ever
+// consulted, so nothing downstream reads it. What a test can see is not a
+// changed outcome but a question that is no longer asked.
 
 // every question is answered: let go of the terminal, or the process sits
 // there after printing its summary and the user has to interrupt it

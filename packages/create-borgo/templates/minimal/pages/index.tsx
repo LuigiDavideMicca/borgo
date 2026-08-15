@@ -10,6 +10,10 @@ export async function loader({ api }: LoaderContext) {
   return { message };
 }
 
+// the loader is allowed to run once at export time, which is what makes
+// `bun run export` able to prerender this page instead of skipping it
+export const prerender = true;
+
 export default function Home({ message }: { message: string }) {
   return (
     <main className="hero">

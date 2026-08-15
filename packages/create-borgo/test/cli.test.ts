@@ -6,11 +6,12 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // the scaffolder is a script, so it is tested the way a user runs it: spawned
 // in a scratch directory, asserted on the tree it leaves behind
@@ -1255,6 +1256,228 @@ describe("the scaffolded tree", () => {
   });
 });
 
+// A COMMAND THE README ADVERTISES HAS TO BE ABLE TO RUN.
+//
+// Every template lists `bun run export` in its Commands section and ships the
+// script. `borgo export` exits 1 with "nothing is exportable" unless at least
+// one routed page is exportable, and the minimal template - one page, with a
+// loader and no `prerender` - had none: a quarter of all scaffolds shipped a
+// documented command whose only possible outcome was a non-zero exit.
+//
+// The pages are IMPORTED here, never read as text. A regex over the source
+// cannot tell `export const prerender = true` from the same characters inside a
+// comment or a string, and a test in this repository once asserted a string
+// that matched only a commented-out line.
+describe("the export script every template advertises", () => {
+  const framework = fileURLToPath(new URL("../../borgo", import.meta.url));
+  // wherever the install layout put them, rather than a guessed node_modules path
+  const packageDir = (name: string) => dirname(Bun.resolveSync(name, framework));
+
+  // a scaffolded app resolves these only after `bun install`, and the pages
+  // cannot be imported without them. Linked rather than installed: rmSync
+  // unlinks a junction instead of following it, so the afterEach cleanup can
+  // never reach into the repository these point at.
+  const linkDeps = (app: string) => {
+    const nm = join(cwd, app, "node_modules");
+    mkdirSync(nm, { recursive: true });
+    const type = process.platform === "win32" ? "junction" : "dir";
+    symlinkSync(framework, join(nm, "borgo-framework"), type);
+    symlinkSync(packageDir("react"), join(nm, "react"), type);
+    symlinkSync(packageDir("react-dom"), join(nm, "react-dom"), type);
+  };
+
+  type PageModule = { loader?: unknown; prerender?: unknown; prerenderPaths?: unknown };
+
+  // exactly the partition planExport() makes in packages/borgo/src/export.ts:
+  // exportable is "no loader, or prerender === true", and a dynamic route also
+  // has to list its param sets
+  const exportablePages = async (app: string) => {
+    const dir = join(cwd, app, "pages");
+    const exportable: string[] = [];
+    for (const entry of new Bun.Glob("**/*.tsx").scanSync({ cwd: dir })) {
+      const rel = entry.replaceAll("\\", "/");
+      // a "_" prefix is never routed, so it is never exported either
+      if (rel.split("/").some((part) => part.startsWith("_"))) continue;
+      const page = (await import(pathToFileURL(join(dir, entry)).href)) as PageModule;
+      const dynamic = rel.includes("[");
+      if (page.loader && page.prerender !== true) continue;
+      if (dynamic && typeof page.prerenderPaths !== "function") continue;
+      exportable.push(rel);
+    }
+    return exportable;
+  };
+
+  for (const template of ["minimal", "base", "full"] as const) {
+    test(`${template} advertises export and ships a page export can prerender`, async () => {
+      expect(run([template, "--template", template, NG]).code).toBe(0);
+      linkDeps(template);
+      // the promise, in both places it is made
+      expect(pkg(template).scripts.export).toContain("borgo export");
+      expect(readFileSync(join(cwd, template, "README.md"), "utf8")).toContain("bun run export");
+      // and the pages that make it good. an empty list here is the exact
+      // condition behind "nothing is exportable", exit 1
+      expect(`${template}: ${(await exportablePages(template)).length > 0}`).toBe(`${template}: true`);
+    }, 60_000);
+  }
+
+  // minimal has one page and that page has a loader, so it can only be
+  // exportable by opting in - there is no second page to carry the export
+  test("minimal's only page opts in, because its loader would otherwise skip it", async () => {
+    run(["app", "--template", "minimal", NG]);
+    linkDeps("app");
+    const page = (await import(
+      pathToFileURL(join(cwd, "app", "pages", "index.tsx")).href
+    )) as PageModule;
+    expect(typeof page.loader).toBe("function");
+    expect(page.prerender).toBe(true);
+    expect(await exportablePages("app")).toEqual(["index.tsx"]);
+  }, 60_000);
+});
+
+// WHAT IS ALWAYS TRUE MUST NOT LIVE IN A SECTION A FLAG DELETES.
+//
+// --no-docker removes the whole `## Deploy` section, and the paragraph naming
+// the generated SESSION_SECRET lived inside it - so `-t full --no-docker`
+// documented the key in no file at all, while the key is what the app needs to
+// serve a single request, in dev as much as on a server. It now lives under
+// Setup, which no flag touches; only the compose-specific half stayed behind.
+describe("the readme keeps what no flag can make untrue", () => {
+  const readme = (app: string) => readFileSync(join(cwd, app, "README.md"), "utf8");
+
+  const combos = [
+    [],
+    ["--no-docker"],
+    ["--no-docker", "--tailwind"],
+    ["--no-docker", "--no-vscode", "--linter", "biome"],
+    ["--tailwind"],
+    ["--no-docker", "--no-tailwind", "--no-vscode", "--no-linter"],
+  ];
+  for (const [i, flags] of combos.entries()) {
+    test(`full documents its signing key with [${flags.join(" ")}]`, () => {
+      const app = `full-${i}`;
+      expect(run([app, "--template", "full", ...flags, NG]).code).toBe(0);
+      const text = readme(app);
+      expect(`${app}: ${text.includes("SESSION_SECRET")}`).toBe(`${app}: true`);
+      expect(text).toContain(".env");
+      // the consequence, not only the name: a key that exists in one gitignored
+      // file is a key the operator loses on the first deploy unless told
+      expect(text).toContain("copying to the server");
+      // and the file really does hold the key the readme is describing
+      expect(readFileSync(join(cwd, app, ".env"), "utf8")).toContain("SESSION_SECRET=");
+    });
+  }
+
+  test("the key survives the very cut that hid it: no Deploy section, still documented", () => {
+    run(["app", "--template", "full", "--no-docker", NG]);
+    const text = readme("app");
+    expect(text).not.toContain("## Deploy");
+    expect(text).not.toContain("docker compose up");
+    expect(text).toContain("SESSION_SECRET");
+    // it is above Commands, in the section every flag combination keeps
+    expect(text.indexOf("SESSION_SECRET")).toBeLessThan(text.indexOf("## Commands"));
+  });
+
+  // the other thing the same cut used to take with it: how to deploy without
+  // docker at all, which is precisely what a --no-docker scaffold needs
+  test("every template keeps its deploy guide when docker goes", () => {
+    for (const template of ["minimal", "base", "full"] as const) {
+      const app = `dep-${template}`;
+      run([app, "--template", template, "--no-docker", NG]);
+      const text = readme(app);
+      expect(`${app}: ${text.includes("docs/deploy.md")}`).toBe(`${app}: true`);
+      expect(text).not.toContain("## Deploy");
+    }
+  }, 30_000);
+});
+
+// TWO SPELLINGS OF ONE FLAG, ONE BEHAVIOUR.
+//
+// `--template=` protested about an empty value and `--template` did not:
+// args[++i] past the end of the arguments is undefined, which read as "the flag
+// was never passed" and fell through to the default. So the user typed a flag,
+// got a template they did not ask for, and was told nothing. A flag the user
+// wrote is never ignored - and the flag AFTER a valueless one is still a flag,
+// not the value that was missing.
+describe("a flag written without a value", () => {
+  for (const [flag, twin, noun] of [
+    ["--template", "--template=", "template"],
+    ["-t", "--template=", "template"],
+    ["--linter", "--linter=", "linter"],
+  ] as const) {
+    test(`${flag} with nothing after it is refused exactly as ${twin} is`, () => {
+      const spaced = run(["app", flag]);
+      const equals = run(["app", twin]);
+      expect(spaced.code).toBe(1);
+      expect(equals.code).toBe(1);
+      // the same words, not merely the same exit code
+      expect(spaced.out).toBe(equals.out);
+      expect(spaced.out).toContain(`unknown ${noun} ""`);
+      // and the default it used to take silently is never reached
+      expect(existsSync(join(cwd, "app"))).toBe(false);
+    });
+  }
+
+  test("an explicitly empty value is refused too", () => {
+    expect(run(["app", "--template", ""]).code).toBe(1);
+    expect(existsSync(join(cwd, "app"))).toBe(false);
+    expect(run(["b", "--linter", ""]).code).toBe(1);
+    expect(existsSync(join(cwd, "b"))).toBe(false);
+  });
+
+  // the flag that follows must survive as a flag: swallowed as a value it is a
+  // flag the user typed and the run discarded
+  test("the next flag is not eaten as the value that was missing", () => {
+    const { code, out } = run(["app", "--template", "--turbo"]);
+    expect(code).toBe(1);
+    expect(out).toContain(`unknown argument "--turbo"`);
+    expect(out).not.toContain("unknown template");
+  });
+
+  test("`--` is not a value either", () => {
+    const { code, out } = run(["app", "--template", "--"]);
+    expect(code).toBe(1);
+    expect(out).toContain(`unknown argument "--"`);
+  });
+
+  test("a known flag after a valueless one is read as itself", () => {
+    const { code, out } = run(["app", "--template", "--no-git"]);
+    expect(code).toBe(1);
+    // the message is about the missing value, and names no flag: --no-git was
+    // parsed as the flag it is rather than becoming a template name
+    expect(out).toContain(`unknown template ""`);
+    expect(out).not.toContain("--no-git");
+  });
+
+  test("a repeated flag takes the last value written", () => {
+    expect(run(["app", "--template", "minimal", "--template", "full", NG]).code).toBe(0);
+    expect(existsSync(join(cwd, "app", "pages", "login.tsx"))).toBe(true);
+    expect(existsSync(join(cwd, "app", "islands"))).toBe(false);
+  });
+
+  test("a second, valueless spelling does not inherit the first value", () => {
+    const { code, out } = run(["app", "--template", "full", "--template"]);
+    expect(code).toBe(1);
+    expect(out).toContain(`unknown template ""`);
+    expect(existsSync(join(cwd, "app"))).toBe(false);
+  });
+
+  test("a value that does not exist is still refused by name", () => {
+    const { code, out } = run(["app", "--linter", "standard"]);
+    expect(code).toBe(1);
+    expect(out).toContain("standard");
+  });
+
+  // the whole property in one line: no flag written without a value ever
+  // produces a scaffold
+  test("nothing is scaffolded on a default the user never asked for", () => {
+    for (const [i, flag] of ["--template", "-t", "--linter"].entries()) {
+      const app = `app-${i}`;
+      expect(run([app, flag]).code).toBe(1);
+      expect(`${flag}: ${existsSync(join(cwd, app))}`).toBe(`${flag}: false`);
+    }
+  });
+});
+
 describe("refusals", () => {
   test("an invalid project name is rejected before anything is written", () => {
     const { code, out } = run(["Not Valid"]);
@@ -1488,6 +1711,103 @@ describe("installing and starting", () => {
     expect(withoutToolchain(["app", "--start"]).code).toBe(1);
     rmSync(join(cwd, "app"), { recursive: true, force: true });
     expect(withoutToolchain(["app"]).code).toBe(0);
+  });
+
+  // AN EXPLICIT FLAG NEVER PRODUCES A QUESTION.
+  //
+  // The install/start question was asked before --no-install was consulted, and
+  // the answer was then discarded: `install ??= answer` kept the false the flag
+  // had already set, and without an install the run prints the manual steps and
+  // exits before `start` is ever looked at. So a user who had already typed the
+  // flag was asked anyway, and whatever they answered changed nothing.
+  //
+  // stdin stays open here on purpose. A question nobody answers blocks on a
+  // pipe with nothing left in it, so an extra question is a hang and not a
+  // wrong assertion - which is the only way to prove a question was NOT asked.
+  const prompted = async (args: string[], answers: string, env: Record<string, string> = {}) => {
+    const proc = Bun.spawn([process.execPath, cli, ...args], {
+      cwd,
+      env: { ...process.env, ...IDENTITY, BORGO_FORCE_PROMPT: "1", ...env } as Record<string, string>,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    proc.stdin.write(answers);
+    proc.stdin.flush();
+    const finished = await Promise.race([
+      (async () => {
+        const [out, err] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        return { code: await proc.exited, out: out + err };
+      })(),
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 20_000)),
+    ]);
+    if (finished === "timeout") {
+      proc.kill();
+      throw new Error("the cli asked a question the flags had already answered");
+    }
+    return finished;
+  };
+
+  // template, tailwind, linter, git, docker, vscode - and nothing after them
+  const SIX_ANSWERS = "2\nn\n3\nn\nn\nn\n";
+
+  test("--no-install asks nothing about installing, and reads no answer for it", async () => {
+    const { code, out } = await prompted(["app", "--no-install"], SIX_ANSWERS);
+    expect(code).toBe(0);
+    // the question that used to be asked and thrown away
+    expect(out).not.toContain("install dependencies and start");
+    expect(out).not.toContain("install dependencies (");
+    // and the flag still means what it says
+    expect(existsSync(join(cwd, "app", "node_modules"))).toBe(false);
+    expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
+    expect(out).toContain("next steps");
+  }, 40_000);
+
+  test("--no-install with --start still asks nothing: both halves are written", async () => {
+    const { code, out } = await prompted(["app", "--no-install", "--start"], SIX_ANSWERS);
+    expect(code).toBe(0);
+    expect(out).not.toContain("install dependencies");
+    expect(existsSync(join(cwd, "app", "node_modules"))).toBe(false);
+  }, 40_000);
+
+  // the half that is still open is a fair question, and it names only itself
+  test("--install asks about the dev server alone, not about installing again", async () => {
+    const empty = join(cwd, ".no-tools");
+    mkdirSync(empty, { recursive: true });
+    // seven answers: the six above plus the start question this run may ask
+    const { out } = await prompted(["app", "--install"], `${SIX_ANSWERS}n\n`, {
+      PATH: empty,
+      Path: empty,
+    });
+    expect(out).toContain("start the dev server");
+    expect(out).not.toContain("install dependencies and start");
+    expect(out).not.toContain("install dependencies (");
+  }, 40_000);
+
+  test("the last of --install and --no-install wins, and only it decides", async () => {
+    // --install last: installing is settled, starting is still open
+    const on = await prompted(["a", "--no-install", "--install"], `${SIX_ANSWERS}n\n`, {
+      PATH: join(cwd, ".no-tools"),
+      Path: join(cwd, ".no-tools"),
+    });
+    expect(on.out).toContain("start the dev server");
+    expect(on.out).not.toContain("install dependencies and start");
+
+    // --no-install last: nothing is open, so nothing is asked
+    const off = await prompted(["b", "--install", "--no-install"], SIX_ANSWERS);
+    expect(off.code).toBe(0);
+    expect(off.out).not.toContain("install dependencies");
+    expect(existsSync(join(cwd, "b", "node_modules"))).toBe(false);
+  }, 60_000);
+
+  test("outside a terminal --no-install is silent about it and still exits 0", () => {
+    const { code, out } = run(["app", "--no-install", NG]);
+    expect(code).toBe(0);
+    expect(out).not.toContain("install dependencies");
+    expect(existsSync(join(cwd, "app", "node_modules"))).toBe(false);
   });
 
   test("--no-install cancels a --start in either order", () => {
