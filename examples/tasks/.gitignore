@@ -1,1 +1,5 @@
 docsnippets/
+# scratch apps the test suite scaffolds here, so module resolution finds the
+# workspace node_modules. tsconfig.json already excludes the prefix; git did
+# not, so a killed run left a whole app that `git add .` would have committed
+borgo-*/
