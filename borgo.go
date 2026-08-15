@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -680,6 +681,57 @@ func shutdown(srv *http.Server, grace time.Duration) {
 // refusal frozen at init outlives the correction and leaves ServeContext dead
 // for the life of the process - and says so when a corrected value arrives too
 // late to size a semaphore that exists before main does.
+// checkPushEnv says at boot what Push would otherwise only reveal on the first
+// publish. Every input is environment, so the verdict is settled before a port
+// is bound - and a key crossing the network in clear is exactly the event that
+// leaves no other trace, hours after the deploy that caused it. It lives here
+// rather than beside Push so that publishing stays free of logging.
+func checkPushEnv() error {
+	// before the key check, not after: a destination no push could reach is
+	// broken whether or not a secret is involved, and reading the key first is
+	// what left it to be discovered on the first publish instead
+	var endpoint *url.URL
+	base, from, err := pushBase()
+	if err == nil {
+		endpoint, err = pushEndpoint(base, from)
+	}
+	if err != nil {
+		// an explicit FRONT_URL is a declared intent, so a broken one stops the
+		// boot. A broken default comes from PORT, which the front server reads
+		// for itself and may well be fine with - and the message names whichever
+		// of the two the operator actually set, never the other
+		if from == "FRONT_URL" {
+			return err
+		}
+		log.Printf("borgo: every borgo.Push will fail: %v", err)
+		return nil
+	}
+	if os.Getenv("BORGO_PUSH_KEY") == "" {
+		return nil
+	}
+	if travel := pushKeyMayTravel(endpoint); travel != nil {
+		// an unreadable switch is refused here rather than at the first push,
+		// the same way SESSION_SECURE is: nobody carries a security setting
+		// they cannot read into a running process
+		if v := os.Getenv("BORGO_PUSH_INSECURE"); v != "" {
+			if _, perr := strconv.ParseBool(v); perr != nil {
+				return travel
+			}
+		}
+		log.Printf("borgo: every borgo.Push will fail: %s is not this machine and FRONT_URL is http://, so BORGO_PUSH_KEY would cross the network in clear. Use https, or BORGO_PUSH_INSECURE=1 if that network is one you control", endpoint.Host)
+		return nil
+	}
+	if endpoint.Scheme == "https" || loopbackHost(endpoint.Hostname()) {
+		return nil
+	}
+	// the loophole is open and the key really is leaving in clear. This is the
+	// line that has to read worse than the one above it - the refusal is the
+	// safe state, and a log that gets skimmed must not have them the wrong way
+	// round
+	log.Printf("borgo: BORGO_PUSH_KEY crosses the network in clear to %s on every push, because BORGO_PUSH_INSECURE is set", endpoint.Host)
+	return nil
+}
+
 func CheckEnv() error {
 	slots, err := hashSlotCount()
 	if err != nil {
@@ -692,6 +744,9 @@ func CheckEnv() error {
 		log.Printf("borgo: the hash-slot cap is fixed at %d for the life of this process; the environment now asks for %d (BORGO_HASH_SLOTS is read once, at package init)", cap(hashSlots), slots)
 	}
 	if _, err := sessionSecure(); err != nil {
+		return err
+	}
+	if err := checkPushEnv(); err != nil {
 		return err
 	}
 	secret := os.Getenv("SESSION_SECRET")

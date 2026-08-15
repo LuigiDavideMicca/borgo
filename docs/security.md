@@ -194,6 +194,8 @@ Go pushes to browsers through `/__borgo/publish` on the front server. Without a 
 BORGO_PUSH_KEY=$(openssl rand -hex 32)
 ```
 
+The key is only worth what the connection carrying it is worth, so Go will not send it over `http://` to another host: use `https://`, or `BORGO_PUSH_INSECURE=1` to say the network between them is one you control. See [the key and cleartext](deploy.md#the-key-and-cleartext).
+
 ## What borgo does not do
 
 Deliberate omissions. Each is a policy decision that belongs to your app or your infrastructure, and pretending otherwise would be worse than the gap:
@@ -210,7 +212,7 @@ Deliberate omissions. Each is a policy decision that belongs to your app or your
 
 - `SESSION_SECRET` set, 32+ random bytes, out of version control — confirmed by the *absence* of the startup warning, since nothing else stops a secretless boot.
 - `SESSION_SECURE=1`, and TLS terminating in front of the app.
-- `BORGO_PUSH_KEY` set on both processes if they are not on the same loopback.
+- `BORGO_PUSH_KEY` set on both processes if they are not on the same loopback, and `FRONT_URL` on `https://` — or `BORGO_PUSH_INSECURE=1` if the network between them is private and yours.
 - CSRF left on (`BORGO_CSRF` unset in production), `<CsrfField />` in every `<form method="post">`, and `apiFetch` — not bare `fetch` — behind every browser `POST`/`PUT`/`PATCH`/`DELETE` to `/api/*`.
 - The default CSP kept, or a custom one that still nonces or allows your own scripts — load a page and check the browser console for violations.
 - Rate limiting configured in the proxy for `/login`, `/register` and anything expensive.

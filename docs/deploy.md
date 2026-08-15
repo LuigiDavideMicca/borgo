@@ -78,7 +78,7 @@ volumes:
   data:
 ```
 
-`borgo.Push` needs the reverse direction across containers: set `FRONT_URL=http://front:3000` on the api service and the same `BORGO_PUSH_KEY` on both.
+`borgo.Push` needs the reverse direction across containers: set `FRONT_URL=http://front:3000` on the api service and the same `BORGO_PUSH_KEY` on both — plus `BORGO_PUSH_INSECURE=1`, because that URL is cleartext to another host and borgo refuses to put the key on it otherwise. On a compose network that refusal is the wrong answer, and saying so is how you tell borgo the network is yours. See [the key and cleartext](#the-key-and-cleartext) below.
 
 ## Reverse proxy
 
@@ -216,6 +216,24 @@ Set `BORGO_METRICS=1` and the front server also serves `/metrics` in Prometheus 
 
 Route labels are the matched route *pattern*, not each concrete URL — and the pattern is the router's colon form, so `pages/tasks/[id].tsx` is labelled `route="/tasks/:id"`, never `/tasks/[id]` and never `/tasks/7`. After 100 distinct routes new ones fold into `route="other"`, so cardinality stays bounded.
 
+## The key and cleartext
+
+`BORGO_PUSH_KEY` authenticates `borgo.Push` to the front server. Go sends it as a header, so whoever can read the connection can read the key — and a key that leaks authenticates the leaker.
+
+Go therefore refuses to send it when it cannot establish that the connection protects it. `https://` is fine. So is any address that is this machine — `127.0.0.1`, `localhost`, `::1` — because `borgo start` puts both halves on one box and nothing leaves it. What is refused is cleartext to a *different* host:
+
+```
+push refused: FRONT_URL is http:// to a host that is not this machine,
+so BORGO_PUSH_KEY would cross the network in clear. Use https://, or set
+BORGO_PUSH_INSECURE=1 if that network is one you control.
+```
+
+`BORGO_PUSH_INSECURE=1` is the answer when the network really is yours: a compose network, a private VPC, two containers on one host. It is not a workaround for a missing certificate on the public internet — there the key is readable by anyone on the path, and so is everything else you push.
+
+A push is also refused when the front server **redirects** it, whatever the escape hatch says. A redirect is the destination choosing where the key goes next, and the check that cleared the first hop knows nothing about the second — `https://front` answering `307` towards somewhere else would hand the key over encrypted and still hand it over. So if your front server sits behind a proxy that redirects `http` to `https`, point `FRONT_URL` at the front server itself rather than at the proxy; the push is an internal call and has no reason to travel through the redirect.
+
+The refusal is deliberate and it is new in 0.21: before, the key went out over whatever `FRONT_URL` named. If your deployment worked yesterday and pushes fail today, this is why, and the fix is one line in your environment.
+
 ## Environment reference
 
 | Variable | Default | Meaning |
@@ -224,7 +242,8 @@ Route labels are the matched route *pattern*, not each concrete URL — and the 
 | `API_PORT` | `3501` | go api port; a value that is not 0-65535 is refused before the server binds |
 | `API_URL` | `http://localhost:$API_PORT` | where the front server reaches the api (split deployments) |
 | `FRONT_URL` | `http://localhost:$PORT` | where `borgo.Push` reaches the front server |
-| `BORGO_PUSH_KEY` | unset | shared secret for `borgo.Push` across hosts — once set it *replaces* the loopback check, so set it on both halves or neither |
+| `BORGO_PUSH_KEY` | unset | shared secret for `borgo.Push` across hosts — on the front server it *replaces* the loopback check, so set it on both halves or neither. Go refuses to send it over cleartext to another host unless `BORGO_PUSH_INSECURE` says so |
+| `BORGO_PUSH_INSECURE` | unset | `1`/`true` lets `BORGO_PUSH_KEY` travel over `http://` to a host that is not this one. For a private network you control — a compose network, a VPC. A value it cannot parse is refused, not read as "no" |
 | `SESSION_SECRET` | unset | HMAC key for signed-cookie sessions, **32 bytes minimum**. Unset warns and boots anyway — session routes then fail per request, closed in both directions. Set but shorter than 32 is fatal at startup: `borgo.Serve` refuses to bind |
 | `SESSION_SECURE` | unset | `1`/`true` adds `Secure` to the session and csrf cookies; `0`/`false` and unset do not. A value that is neither is refused at startup by both halves, rather than read as "not secure" |
 | `BORGO_CSRF` | unset | `0` disables both csrf checks (form actions, and unsafe requests to proxied `/api/*` routes), `1` forces them in dev |

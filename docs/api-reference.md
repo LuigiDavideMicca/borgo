@@ -214,7 +214,8 @@ Read at runtime unless noted. Defaults in parentheses.
 | `API_PORT` (`3501`) | Go server; front server, to build the proxy target | Go API port. A value that is not a port number (0-65535, digits only) is refused before the Go server binds. | stable |
 | `SESSION_SECRET` | Go | HMAC key for signed-cookie sessions. At least 32 bytes. Missing is logged at startup and fails session routes per request; **shorter than 32 bytes is fatal at startup** — see [sessions](auth-and-sessions.md#sessions). | stable |
 | `SESSION_SECURE` | Go and front server | `1`/`true` adds `Secure` to the session and CSRF cookies; `0`/`false` and unset do not. Both halves parse it with the same grammar and **refuse a value that is neither** at startup, rather than reading it as "not secure". | stable |
-| `BORGO_PUSH_KEY` | Go and front server | Shared secret for `Push` across hosts. Once set it *replaces* the loopback check. | stable |
+| `BORGO_PUSH_KEY` | Go and front server | Shared secret for `Push` across hosts. On the front server it *replaces* the loopback check. On the Go side it is held back rather than sent over cleartext to another machine — see `BORGO_PUSH_INSECURE`. | stable |
+| `BORGO_PUSH_INSECURE` | Go | `1`/`true` lets `BORGO_PUSH_KEY` travel over `http://` to a host that is not this one, for a private network you control. Unset, or anything it cannot parse, means no — a value it cannot read is refused rather than treated as absent. | stable |
 | `NO_COLOR` | Go and front server | Any value disables ANSI colour. | stable |
 
 ### Front server only
@@ -239,7 +240,7 @@ Read at runtime unless noted. Defaults in parentheses.
 
 | Variable | What it does | Stability |
 | --- | --- | --- |
-| `FRONT_URL` (`http://localhost:$PORT`) | Where `Push` reaches the front server. | stable |
+| `FRONT_URL` (`http://localhost:$PORT`) | Where `Push` reaches the front server. An `http://` URL naming another machine holds the push key back unless `BORGO_PUSH_INSECURE` is set. | stable |
 | `BORGO_READ_HEADER_TIMEOUT` (`5s`) | Cap on reading request headers. | stable |
 | `BORGO_IDLE_TIMEOUT` (`2m`) | Idle keep-alive reclaim. Go only — the front server stopped reading this name in 0.21. | stable |
 | `BORGO_READ_TIMEOUT` (`0`, off) | Whole-request read deadline. Go only — the front server's own read deadline is `BORGO_FRONT_READ_TIMEOUT`. | stable |
