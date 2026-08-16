@@ -75,6 +75,50 @@ function composeElement(route: Route, props: Record<string, unknown>) {
   return element;
 }
 
+// each topic is a subscription table entry held for the life of the socket:
+// unbounded counts or names are cheap resident memory for anyone who can open
+// one.
+export const MAX_WS_TOPICS = 32;
+export const MAX_WS_TOPIC_LENGTH = 128;
+
+/**
+ * WHY THE UPGRADE IS REFUSED, IN THE ONLY WORDS THE CALLER WILL EVER GET.
+ *
+ * Both caps used to be refused under one sentence - "too many topics" - which
+ * was false for the length one: a single 129-character topic was blamed for a
+ * count the request did not have. Neither said anything to the log, unlike the
+ * comma refusal beside it. A refused handshake does not carry its status to the
+ * client that asked for it: measured against this server with a bun client, a
+ * non-101 answer arrives as close code 1002 "Expected 101 status code" and
+ * nothing else - no status, no body - and the spec gives a browser 1006 with an
+ * empty reason for the same shape. So this sentence and the log line beside it
+ * are the only two places the cause exists at all.
+ *
+ * Both are named when both hold: fixing the length alone would come straight
+ * back on the count, and the second round trip is the whole cost of one bad
+ * sentence. The topic is truncated because it is the client's own string - a
+ * megabyte of it goes into a log line otherwise - and the exact length is
+ * stated beside it, which is the number the caller has to measure against.
+ */
+export function wsTopicRefusal(topics: string[]): string | null {
+  const refusals: string[] = [];
+  const overlong = topics.find((t) => t.length > MAX_WS_TOPIC_LENGTH);
+  if (overlong !== undefined) {
+    const shown = overlong.slice(0, 40);
+    refusals.push(
+      `topic ${JSON.stringify(shown)}${overlong.length > shown.length ? "..." : ""} is ` +
+        `${overlong.length} characters, over the ${MAX_WS_TOPIC_LENGTH} a topic may have - shorten the name`,
+    );
+  }
+  if (topics.length > MAX_WS_TOPICS) {
+    refusals.push(
+      `${topics.length} topics on one socket, over the ${MAX_WS_TOPICS} it accepts - ` +
+        `subscribe to fewer, or spread them over more sockets`,
+    );
+  }
+  return refusals.length ? refusals.join("; ") : null;
+}
+
 // `switches` is resolved by whoever called us when there is a caller that can
 // resolve it earlier - serve-entry does, above the try whose catch would
 // otherwise serve a refused value from a bound port. The default is for the
@@ -387,8 +431,6 @@ export async function serve({
     new Response(why, { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 
   type SocketData = { kind: "dev" } | { kind: "app"; topics: string[] };
-  const MAX_WS_TOPICS = 32;
-  const MAX_WS_TOPIC_LENGTH = 128;
   const wsTopic = (topic: string) => "borgo:ws:" + topic;
   const publishCount = (topic: string) => {
     server.publish(
@@ -572,7 +614,11 @@ export async function serve({
           try {
             topic = decodeURIComponent(part.replaceAll("+", " ")).trim();
           } catch {
-            return secure(badRequest("topics is not a decodable query value"));
+            // the part itself, truncated: the sentence alone says nothing about
+            // WHICH of the topics on the wire would not decode
+            const why = `topics is not a decodable query value: ${JSON.stringify(part.slice(0, 40))}`;
+            console.error(`  ${c.red(g.err)} /ws refused: ${why}`);
+            return secure(badRequest(why));
           }
           if (!topic) continue;
           const rejected = topicRejection(topic);
@@ -585,11 +631,15 @@ export async function serve({
           }
           topics.push(topic);
         }
-        // each topic is a subscription table entry held for the life of the
-        // socket: unbounded counts or names are cheap resident memory for
-        // anyone who can open a socket
-        if (topics.length > MAX_WS_TOPICS || topics.some((t) => t.length > MAX_WS_TOPIC_LENGTH)) {
-          return secure(new Response("too many topics", { status: 400 }));
+        // the caps, said out loud and by their true cause - wsTopicRefusal
+        // above carries the account. Logged like the comma refusal: a refused
+        // handshake reaches the browser as "connection closed" with no status
+        // and no body, so a silent 400 here is a cause nobody can read from
+        // either end
+        const refusal = wsTopicRefusal(topics);
+        if (refusal) {
+          console.error(`  ${c.red(g.err)} /ws refused: ${refusal}`);
+          return secure(badRequest(refusal));
         }
         if (server.upgrade(req, { data: { kind: "app", topics } })) return undefined as never;
         return secure(new Response("upgrade required", { status: 426 }));

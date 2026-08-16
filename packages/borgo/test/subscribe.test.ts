@@ -150,6 +150,38 @@ describe("subscribe", () => {
     }
   });
 
+  // WHAT THE REDIAL DELIBERATELY DOES NOT TRY TO BE CLEVER ABOUT.
+  //
+  // A handshake the server refuses and a server that is not there arrive here
+  // as the same event: onclose, with nothing opened, and no status to read
+  // (measured on a live front server with a bun client - close code 1002 and an
+  // empty-handed reason; 1006 in a browser). The refusals a CALL can cause are settled
+  // before the dial instead, above; what is left is a close this code cannot
+  // classify, and the safe reading of an unclassifiable close is "the server
+  // will be back". A channel that guessed "permanent" and stopped would be a
+  // page that never reconnects after a deploy.
+  test("a handshake that never opened keeps being retried, so a server that comes back is picked up", () => {
+    const dial = withFakeTimers();
+    try {
+      const channel = subscribe("chat", () => {});
+      // four refusals in a row, none of which ever reached open()
+      for (let i = 0; i < 4; i++) {
+        FakeWS.instances.at(-1)!.drop();
+        expect(dial.pending.length).toBe(i + 1);
+        dial.pending.at(-1)!.fn();
+      }
+      expect(FakeWS.instances.length).toBe(5);
+      // and the server comes back: the redial that was still coming connects
+      FakeWS.instances.at(-1)!.open();
+      const healthy = FakeWS.instances.at(-1)!;
+      healthy.onmessage?.({ data: JSON.stringify({ topic: "chat", event: "msg", data: 1 }) });
+      expect(healthy.readyState).toBe(FakeWS.OPEN);
+      channel.close();
+    } finally {
+      dial.restore();
+    }
+  });
+
   test("close during the reconnect backoff cancels the redial for good", () => {
     const dial = withFakeTimers();
     try {
@@ -186,6 +218,8 @@ describe("subscribe", () => {
       ["whitespace only", "   ", "is empty"],
       ["a leading space the relay would strip", " chat", "padded with whitespace"],
       ["a trailing newline the relay would strip", "chat\n", "padded with whitespace"],
+      ["one character over the relay's length cap", "x".repeat(129), "is 129 characters"],
+      ["far over it", "x".repeat(5_000), "is 5000 characters"],
     ];
 
     for (const [label, topic, says] of refused) {
@@ -218,16 +252,51 @@ describe("subscribe", () => {
       lines.close();
     });
 
-    test("an over-long name is the server's call, and it still dials", () => {
-      // MAX_WS_TOPIC_LENGTH (128) and MAX_WS_TOPICS (32) live in server.ts and
-      // are not exported; duplicating them here would be a second source of
-      // truth that drifts silently. So a 129-character topic is dialled, the
-      // server answers 400, and the browser sees the connection close - the
-      // hole this guard does NOT close, recorded rather than guessed at
+    // AN OVER-LONG NAME USED TO BE DIALLED FOREVER.
+    //
+    // The relay answers 400 to it, and a refused handshake reaches the client
+    // as a closed connection with no status attached (measured against a live
+    // front server with a bun client: close code 1002 "Expected 101 status
+    // code", nothing else; a browser gets 1006 with an empty reason by spec -
+    // the same shape a server that is simply down produces). onclose cannot
+    // tell those apart, so it did
+    // what it does for a server that is down: redialled, backing off to thirty
+    // seconds, for as long as the tab stayed open. A refusal that will be
+    // identical every time, retried forever, for a cause nobody could read.
+    //
+    // It is settled before the first dial now, at the call, where the topic's
+    // length IS knowable. The cap is duplicated in index.ts to do it - and
+    // pinned to server.ts's by the coupling test below rather than trusted.
+    test("an over-long name never reaches the wire, and says why", () => {
       const long = "x".repeat(129);
-      const channel = subscribe(long, () => {});
-      expect(FakeWS.instances[0].url).toBe(`ws://app.test/ws?topics=${long}`);
+      expect(() => subscribe(long, () => {})).toThrow("is 129 characters");
+      expect(() => subscribe(long, () => {})).toThrow("redialled forever");
+      expect(FakeWS.instances.length).toBe(0);
+    });
+
+    test("exactly at the cap is the relay's business as usual: it dials", () => {
+      // the boundary belongs to the server, and 128 is accepted there (measured
+      // on a live /ws: 128 upgrades, 129 is a 400). A guard that took the
+      // boundary with it would refuse a topic that works
+      const exact = "x".repeat(128);
+      const channel = subscribe(exact, () => {});
+      expect(FakeWS.instances[0].url).toBe(`ws://app.test/ws?topics=${exact}`);
       channel.close();
+    });
+
+    test("the client's cap and the relay's are the same number", async () => {
+      // index.ts is browser code and cannot import the server to ask, so it
+      // carries a copy. This is what keeps the copy honest: the two sources are
+      // read and compared, and a change to either one alone fails here rather
+      // than in a page that stops connecting.
+      const dir = import.meta.dir;
+      const client = await Bun.file(`${dir}/../src/index.ts`).text();
+      const server = await Bun.file(`${dir}/../src/server.ts`).text();
+      const clientCap = /const MAX_TOPIC_LENGTH = (\d+);/.exec(client)?.[1];
+      const serverCap = /export const MAX_WS_TOPIC_LENGTH = (\d+);/.exec(server)?.[1];
+      expect(clientCap).toBeDefined();
+      expect(serverCap).toBeDefined();
+      expect(clientCap).toBe(serverCap!);
     });
 
     test("one call is one topic, so the 32-topic cap is unreachable from here", () => {

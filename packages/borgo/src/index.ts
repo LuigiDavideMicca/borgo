@@ -75,6 +75,13 @@ export type PublishArgs<T extends string> = string extends T
     ? [event: string, data?: unknown]
     : EventPairs<EventsFor<T>>;
 
+// the relay's cap on one topic name (MAX_WS_TOPIC_LENGTH in src/server.ts).
+// Duplicated rather than imported: that file is the server and importing it
+// here would drag the whole front server into every page's bundle. The pair is
+// pinned instead - subscribe.test.ts reads both sources and fails the build the
+// moment the two numbers stop agreeing, which is the drift this copy risks.
+const MAX_TOPIC_LENGTH = 128;
+
 // the second overload keeps single-parameter callbacks compiling: tsc does
 // not accept them against a rest signature made of a tuple union
 export function subscribe<T extends string>(
@@ -98,13 +105,29 @@ export function subscribe(
   // Both open, count, and deliver nothing. Not imported from util.ts, whose
   // topicRejection says the same about the comma: that file is server-only and
   // importing it here would put it in every page's bundle.
+  //
+  // The length is here for a second reason, on top of naming what "connection
+  // closed" would not. A refused handshake reaches onclose, and onclose redials
+  // with backoff - so a topic the relay answers 400 to was dialled again every
+  // thirty seconds for as long as the tab stayed open, forever, for a refusal
+  // that was going to be identical every time. The status is not readable from
+  // here to tell the two apart: measured against a live relay with a bun client,
+  // a non-101 answer arrives as close code 1002 "Expected 101 status code" and
+  // nothing else, and the spec gives a browser 1006 with an empty reason - the
+  // same shape a server that is simply down produces. So the one refusal a call
+  // can provoke is settled where it IS knowable: before the first dial. The redial is
+  // deliberately left alone - it cannot tell a permanent refusal from a server
+  // that is restarting, and a channel that stops on the wrong guess is worse
+  // than one that retries.
   const unusable = topic.includes(",")
     ? `contains "," which separates topics on the wire (/ws?topics=a,b), so it would subscribe to the parts and receive none of them - rename the topic`
     : !topic.trim()
       ? "is empty, so there is nothing to subscribe to - name the topic"
       : topic !== topic.trim()
         ? `is padded with whitespace the relay strips, so it would subscribe as ${JSON.stringify(topic.trim())} and receive nothing under this name - trim it`
-        : "";
+        : topic.length > MAX_TOPIC_LENGTH
+          ? `is ${topic.length} characters, over the ${MAX_TOPIC_LENGTH} the relay accepts, so the handshake would be refused and redialled forever - shorten the name`
+          : "";
   if (unusable) throw new Error(`subscribe: topic ${JSON.stringify(topic)} ${unusable}`);
 
   let ws: WebSocket | null = null;
