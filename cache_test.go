@@ -2,7 +2,9 @@ package borgo
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -845,3 +847,152 @@ func TestPrivateIfCookiesOnlyNarrows(t *testing.T) {
 		})
 	}
 }
+
+// wireHeaderLines returns the header block a real server put on the wire, read
+// off a raw connection.
+//
+// Not http.Client: its parser canonicalises every key it reads, which is
+// precisely the distinction under test here - a `cache-control` entry and a
+// `Cache-Control` entry are the same key by the time res.Header holds them, so
+// a client-side assertion cannot tell a guarded response from a leaking one.
+// The bytes can.
+func wireHeaderLines(t *testing.T, h http.Handler) []string {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n", srv.Listener.Addr())
+	b, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, _, ok := strings.Cut(string(b), "\r\n\r\n")
+	if !ok {
+		t.Fatalf("no header block on the wire: %q", b)
+	}
+	return strings.Split(head, "\r\n")[1:]
+}
+
+// THE KEY A HEADER WAS SPELLED WITH DOES NOT DECIDE WHETHER THE GUARD SEES IT.
+//
+// h.Values canonicalises the key it looks up; net/http's writer canonicalises
+// nothing and emits the map as it finds it. So a handler that assigns through
+// the map - w.Header()["cache-control"] = - puts a line on the wire that every
+// cache obeys, because RFC 9110 5.1 makes field names case-insensitive, and
+// that the guard's lookup did not see. This was a declared limit rather than a
+// defect, and the declaration understated it twice over.
+//
+// First, it read as symmetric blindness with a symmetric consequence: if the
+// guard sees neither header it does nothing, which sounds coherent. On the wire
+// it is not. Every row here except both-canonical shipped `public,
+// s-maxage=600` beside a Set-Cookie - the all-lowercase response leaks exactly
+// as hard as the mixed one, because the leak is what the handler wrote and the
+// guard's silence is not a mitigation.
+//
+// Second, and worse than any blind spot: with a cookie the guard can see and a
+// Cache-Control present under both spellings, the guard ran, narrowed the half
+// it could read, and emitted `Cache-Control: private, max-age=60` next to a
+// surviving `cache-control: public, s-maxage=600`. Those are one field to the
+// cache that joins them, so the response the guard produced carried the
+// authorisation the guard exists to remove.
+//
+// The axes are both keys' spelling, one value per key against several, and a
+// field present under two spellings at once. The assertion is on the bytes.
+func TestTheGuardReadsAHeaderUnderEverySpellingOfItsKey(t *testing.T) {
+	type staging struct {
+		name string
+		set  func(h http.Header)
+	}
+	cookies := []staging{
+		{"canonical", func(h http.Header) { h["Set-Cookie"] = []string{"sid=abc; Path=/"} }},
+		{"lowercase", func(h http.Header) { h["set-cookie"] = []string{"sid=abc; Path=/"} }},
+		{"uppercase", func(h http.Header) { h["SET-COOKIE"] = []string{"sid=abc; Path=/"} }},
+		{"two canonical", func(h http.Header) { h["Set-Cookie"] = []string{"a=1", "sid=abc"} }},
+		{"two lowercase", func(h http.Header) { h["set-cookie"] = []string{"a=1", "sid=abc"} }},
+		{"both spellings", func(h http.Header) {
+			h["Set-Cookie"] = []string{"a=1"}
+			h["set-cookie"] = []string{"sid=abc"}
+		}},
+	}
+	controls := []staging{
+		{"canonical", func(h http.Header) { h["Cache-Control"] = []string{"public, s-maxage=600"} }},
+		{"lowercase", func(h http.Header) { h["cache-control"] = []string{"public, s-maxage=600"} }},
+		{"uppercase", func(h http.Header) { h["CACHE-CONTROL"] = []string{"public, s-maxage=600"} }},
+		{"two canonical", func(h http.Header) { h["Cache-Control"] = []string{"public", "s-maxage=600"} }},
+		{"two lowercase", func(h http.Header) { h["cache-control"] = []string{"public", "s-maxage=600"} }},
+		// the row the guard used to get wrong rather than miss
+		{"both spellings", func(h http.Header) {
+			h["Cache-Control"] = []string{"max-age=60"}
+			h["cache-control"] = []string{"public, s-maxage=600"}
+		}},
+	}
+
+	for _, ck := range cookies {
+		for _, cc := range controls {
+			t.Run(ck.name+" cookie/"+cc.name+" control", func(t *testing.T) {
+				lines := wireHeaderLines(t, recoverMiddleware(gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					ck.set(w.Header())
+					cc.set(w.Header())
+					w.Write([]byte("body"))
+				}))))
+
+				var cookie, control []string
+				for _, l := range lines {
+					k, v, _ := strings.Cut(l, ":")
+					switch {
+					case strings.EqualFold(k, "set-cookie"):
+						cookie = append(cookie, v)
+					case strings.EqualFold(k, "cache-control"):
+						control = append(control, v)
+					}
+				}
+				if len(cookie) == 0 {
+					t.Fatal("no Set-Cookie reached the wire under any spelling; the case proves nothing")
+				}
+				if len(control) == 0 {
+					t.Fatal("no Cache-Control reached the wire under any spelling; the case proves nothing")
+				}
+				// every line, whatever key it arrived under: a cache reads
+				// them case-insensitively and joins them into one value
+				for _, bad := range []string{"public", "s-maxage"} {
+					if hasForbiddenDirective(control, bad) {
+						t.Fatalf("Cache-Control = %q ships %s on a response carrying Set-Cookie: a shared cache may store it and hand this session to the next requester", control, bad)
+					}
+				}
+				if !hasBareDirective(control, "private") {
+					t.Fatalf("Cache-Control = %q carries no bare private on a response carrying Set-Cookie", control)
+				}
+			})
+		}
+	}
+}
+
+// The scan the fold costs is paid on every response, so it is measured rather
+// than asserted to be small. It is proportional to the number of header keys
+// and independent of the matcher: a matcher that returns false without looking
+// at anything benchmarks the same, because the whole of it is the map range.
+//
+// For scale, the gzip path this runs on clones the same map at WriteHeader and
+// clears and re-copies it at commit, both of which are the same order of work.
+func benchmarkGuard(b *testing.B, keys int) {
+	h := http.Header{}
+	filler := []string{"Content-Type", "Content-Length", "Date", "Vary", "Etag", "Last-Modified", "Server", "X-Request-Id", "X-Frame-Options", "Content-Security-Policy", "Referrer-Policy", "X-Content-Type-Options", "Strict-Transport-Security", "Accept-Ranges", "Age", "Link", "X-A", "X-B", "X-C", "X-D", "X-E", "X-F", "X-G", "X-H", "X-I", "X-J", "X-K", "X-L", "X-M", "X-N"}
+	for i := 0; i < keys && i < len(filler); i++ {
+		h.Set(filler[i], "v")
+	}
+	h.Set("Cache-Control", "public, max-age=60")
+	// no cookie: the common path, and the one that leaves the map untouched
+	// so the benchmark measures the guard rather than a reset beside it
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		privateIfCookies(h)
+	}
+}
+
+func BenchmarkPrivateIfCookiesSmallResponse(b *testing.B) { benchmarkGuard(b, 3) }
+func BenchmarkPrivateIfCookiesLargeResponse(b *testing.B) { benchmarkGuard(b, 30) }

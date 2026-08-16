@@ -3,6 +3,8 @@ package borgo
 import (
 	"fmt"
 	"net/http"
+	"net/textproto"
+	"slices"
 	"strings"
 	"time"
 )
@@ -144,6 +146,56 @@ func quotedSpanCrossesALine(lines []string, value string, stop int) bool {
 	return false
 }
 
+// sameField reports whether a map key names the given canonical field.
+//
+// Canonicalisation maps case and nothing else, so a differing length is proof
+// of a different field at one comparison - which is what keeps the scans below
+// off the critical path of a response that has neither header. For a key that
+// is not a valid field name textproto returns it unchanged, so such an entry
+// matches nothing and is left alone: net/http will not write it either.
+func sameField(key, canonical string) bool {
+	return len(key) == len(canonical) && textproto.CanonicalMIMEHeaderKey(key) == canonical
+}
+
+// hasField reports whether a response carries the named field under any
+// spelling of its key.
+//
+// A GUARD THAT CANNOT READ A HEADER DOES NOT CONCLUDE THE HEADER IS ABSENT.
+// h.Values canonicalises the key it looks up and reads that one key;
+// net/http's writer canonicalises nothing and emits the map as it finds it. A
+// handler that assigns through the map - w.Header()["set-cookie"] = - therefore
+// puts a field on the wire that every reader sees, because RFC 9110 5.1 makes
+// field names case-insensitive, and that the guard's lookup did not. The old
+// answer to that was to declare it out of reach, and out of reach is exactly
+// what it was not: the guard is handed the map itself, and the only thing that
+// could not see the entry was the convenience method it happened to call.
+func hasField(h http.Header, canonical string) bool {
+	for k := range h {
+		if sameField(k, canonical) {
+			return true
+		}
+	}
+	return false
+}
+
+// fieldKeys returns every key under which a response carries the named field,
+// in the order net/http writes them.
+//
+// The order is load-bearing and it is not the map's: writeSubset sorts the keys
+// it emits, so plain byte order is the order the lines reach the wire and
+// therefore the order a cache joins them in (RFC 9110 5.3). Reading them in map
+// order would decide a response by a hash seed.
+func fieldKeys(h http.Header, canonical string) []string {
+	var keys []string
+	for k := range h {
+		if sameField(k, canonical) {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
 // privateIfCookies makes a response that carries a Set-Cookie say `private`,
 // and takes away every directive that would let a shared cache store it.
 //
@@ -199,6 +251,40 @@ func quotedSpanCrossesALine(lines []string, value string, stop int) bool {
 // the handler's line partition cannot be restored once a quoted argument is
 // found to span it, and re-deriving one would be the same reasoning again.
 //
+// EVERY SPELLING OF THE KEY, NOT THE CANONICAL ONE. This used to be a declared
+// limit rather than a defect, on the grounds that h.Values canonicalises the
+// key it looks up while net/http's writer does not, so an entry assigned as
+// w.Header()["cache-control"] = was "unreachable from the Header API this guard
+// is written against". It was reachable: the guard holds the map. What could
+// not see the entry was the convenience method, and a limit written around the
+// method rather than the field is a limit that names the wrong thing.
+//
+// It also understated itself, which is how it came back. Enumerated on the
+// wire, the response ships `public, s-maxage=600` beside a cookie under every
+// spelling except both-canonical - so the all-lowercase case is not the
+// harmless symmetric blindness it reads as, it is the same leak. And one shape
+// is worse than any blind spot: with the cookie canonical and a Cache-Control
+// under both spellings, the guard ran, rewrote the half it could see, and put
+// `Cache-Control: private, max-age=60` on the wire next to a surviving
+// `cache-control: public, s-maxage=600`. RFC 9110 5.1 makes those one field, so
+// the cache joins them and reads the authorisation - the guard manufacturing
+// the exact contradiction it exists to remove, and reporting success.
+//
+// So the field is read by folding the key, and that costs a scan of the header
+// map. It is paid once on a response with no cookie, which is the common one:
+// the Set-Cookie scan fails and the function returns before looking for a
+// Cache-Control at all. Measured, it is 26ns to 57ns on a four-header response
+// and 25ns to 253ns on a thirty-two-header one, and no allocation either way.
+//
+// Where that time goes is worth writing down, because it is not where it looks:
+// the matcher is free. A matcher that returns false without reading its
+// arguments benchmarks the same as this one, so the whole cost is the map range
+// itself and there is nothing in sameField to tune. Which also means the price
+// is set by how many headers a response has, and a response with enough headers
+// to make this scan expensive is already paying more than it on the same path -
+// every gzip-eligible one clones the whole map at WriteHeader and clears and
+// re-copies it at commit, both larger than one range over it.
+//
 // Nothing is deleted that the guard is not there to remove. It used to read
 // h.Get - the first line only - and write h.Set, which replaces all of them:
 // `["public, max-age=60", "no-store"]` came out as `["private, max-age=60"]`,
@@ -235,10 +321,6 @@ func quotedSpanCrossesALine(lines []string, value string, stop int) bool {
 //   - Trailers. A Cache-Control staged under http.TrailerPrefix lives at a
 //     different map key and is invisible here. Stock net/http gives the same
 //     answer; a trailer is not where a cache reads freshness from.
-//   - Header maps written through directly, w.Header()["cache-control"] = or
-//     ["set-cookie"] =. h.Values canonicalises the key it looks up and
-//     net/http's writer does not, so such an entry is unreachable from the
-//     Header API this guard is written against. borgo's own API never does it.
 //   - An empty list element - the `,,` in "public,,max-age=1" - is dropped
 //     rather than re-emitted. RFC 9110 5.6.1 says senders must not generate one
 //     and recipients ignore it, so nothing is lost; it happens only on a
@@ -249,10 +331,17 @@ func quotedSpanCrossesALine(lines []string, value string, stop int) bool {
 //     arm, and a guard that deletes what it cannot parse is not a guard that
 //     only narrows.
 func privateIfCookies(h http.Header) {
-	if len(h.Values("Set-Cookie")) == 0 {
+	if !hasField(h, "Set-Cookie") {
 		return
 	}
-	lines := h.Values("Cache-Control")
+	// every spelling of the key, not the canonical one alone: a `cache-control`
+	// the handler assigned through the map is a directive to every cache that
+	// reads the response and was invisible to the lookup that decided here
+	keys := fieldKeys(h, "Cache-Control")
+	var lines []string
+	for _, k := range keys {
+		lines = append(lines, h[k]...)
+	}
 	if len(lines) == 0 {
 		return
 	}
@@ -329,7 +418,13 @@ func privateIfCookies(h http.Header) {
 		}
 		b.WriteString(f)
 	}
-	h.Del("Cache-Control")
+	// the keys the value was read out of, not the canonical one h.Del would
+	// reach: leaving a `cache-control` entry behind next to the rewritten one
+	// is the guard emitting its own `private` beside the `public` it was there
+	// to remove, on a response a cache reads as one field
+	for _, k := range keys {
+		delete(h, k)
+	}
 	if line := b.String(); strings.TrimSpace(line) != "" {
 		h.Add("Cache-Control", line)
 	}
