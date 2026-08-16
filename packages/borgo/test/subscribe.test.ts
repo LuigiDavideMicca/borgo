@@ -166,6 +166,81 @@ describe("subscribe", () => {
     }
   });
 
+  // THE RELAY'S REFUSAL NEVER REACHES THE PERSON WHO CAUSED IT.
+  //
+  // /ws?topics=a,b packs topics into one query parameter, so the server splits
+  // on the comma and trims each part. A topic carrying a comma became two
+  // subscriptions; a padded one became a subscription under a name the
+  // onmessage filter (msg.topic === topic) never matches. Both open, both count,
+  // neither delivers. The server refuses the comma by name now - into its own
+  // log, where nobody developing a page is looking, while the browser is told
+  // only that the connection closed. The name is known at the call, so it is
+  // said at the call, before any socket is dialled.
+  describe("a topic the wire cannot carry is refused here, by name", () => {
+    const refused: Array<[label: string, topic: string, says: string]> = [
+      ["a single comma", "chat,news", '","'],
+      ["a comma between what the caller meant as two topics", "room:1,room:2", '","'],
+      ["a trailing comma", "chat,", '","'],
+      ["commas and nothing else", ",,,", '","'],
+      ["empty", "", "is empty"],
+      ["whitespace only", "   ", "is empty"],
+      ["a leading space the relay would strip", " chat", "padded with whitespace"],
+      ["a trailing newline the relay would strip", "chat\n", "padded with whitespace"],
+    ];
+
+    for (const [label, topic, says] of refused) {
+      test(`${label}: throws, names the topic, and dials nothing`, () => {
+        // the topic itself is in the message: a caller staring at "connection
+        // closed" had no way to know which of a page's channels it was
+        expect(() => subscribe(topic, () => {})).toThrow(`subscribe: topic ${JSON.stringify(topic)}`);
+        expect(() => subscribe(topic, () => {})).toThrow(says);
+        expect(FakeWS.instances.length).toBe(0);
+      });
+    }
+
+    test("the guard is the whole reason: a comma used to reach the wire", () => {
+      // what the old code sent, and what the server did with it: one parameter
+      // whose percent-encoded comma decodes back to a separator
+      expect(encodeURIComponent("chat,news")).toBe("chat%2Cnews");
+      expect(decodeURIComponent("chat%2Cnews").split(",")).toEqual(["chat", "news"]);
+    });
+
+    // what is NOT refused here, and what the caller gets instead
+    test("a space or a control character inside a name is carried intact", () => {
+      const channel = subscribe("my topic", () => {});
+      expect(FakeWS.instances[0].url).toBe("ws://app.test/ws?topics=my%20topic");
+      channel.close();
+      const lines = subscribe("a\nb", () => {});
+      expect(FakeWS.instances[1].url).toBe("ws://app.test/ws?topics=a%0Ab");
+      // the relay trims the ends only, so an interior one survives the round
+      // trip and the filter matches
+      expect(decodeURIComponent("a%0Ab").trim()).toBe("a\nb");
+      lines.close();
+    });
+
+    test("an over-long name is the server's call, and it still dials", () => {
+      // MAX_WS_TOPIC_LENGTH (128) and MAX_WS_TOPICS (32) live in server.ts and
+      // are not exported; duplicating them here would be a second source of
+      // truth that drifts silently. So a 129-character topic is dialled, the
+      // server answers 400, and the browser sees the connection close - the
+      // hole this guard does NOT close, recorded rather than guessed at
+      const long = "x".repeat(129);
+      const channel = subscribe(long, () => {});
+      expect(FakeWS.instances[0].url).toBe(`ws://app.test/ws?topics=${long}`);
+      channel.close();
+    });
+
+    test("one call is one topic, so the 32-topic cap is unreachable from here", () => {
+      // the only way a single socket ever carried more than one topic was the
+      // comma - which is refused above. Thirty-three subscriptions are
+      // thirty-three sockets of one topic each, and the cap is per socket
+      const channels = Array.from({ length: 33 }, (_, i) => subscribe(`t${i}`, () => {}));
+      expect(FakeWS.instances.length).toBe(33);
+      expect(new Set(FakeWS.instances.map((ws) => ws.url)).size).toBe(33);
+      for (const channel of channels) channel.close();
+    });
+  });
+
   test("publish after close is dropped, not queued forever", () => {
     const channel = subscribe("chat", () => {});
     const ws = FakeWS.instances[0];

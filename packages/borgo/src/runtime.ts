@@ -151,6 +151,46 @@ export const asProps = (value: unknown): Record<string, unknown> =>
     ? (value as Record<string, unknown>)
     : {};
 
+/**
+ * WHAT AN ENHANCED SUBMIT GOT BACK, AND A 413 IS NOT AN "UNKNOWN RESPONSE".
+ *
+ * Every answer the action path authors is marked `X-Borgo` (action = the json
+ * envelope, raw = a document to swap in) and anything unmarked is a custom
+ * response the runtime reloads on - which is the documented escape hatch, and
+ * was also the road a `413` took. The body limit refuses BEFORE the action runs
+ * (`bodyTooLarge` in util.ts, no marker to set, because there is no envelope
+ * yet), so an oversized submit reloaded the page: the form emptied, nothing was
+ * saved, and the one thing the server had said - that the body was too large -
+ * was thrown away with the document. A reverse proxy's own `413`
+ * (`client_max_body_size`) arrives the same way and means the same thing.
+ *
+ * The status is read FIRST, ahead of the markers: a refusal is a refusal
+ * whatever it is labelled, and if the 413 ever gains a marker this must not
+ * quietly go back to reloading - the `action` branch would hand its text body to
+ * `res.json()`, which throws, and the catch there is `location.reload()`.
+ */
+export type ActionOutcome = "too-large" | "raw" | "action" | "unknown";
+
+export const actionOutcome = (res: Response): ActionOutcome => {
+  if (res.status === 413) return "too-large";
+  const marker = res.headers.get("X-Borgo");
+  return marker === "raw" ? "raw" : marker === "action" ? "action" : "unknown";
+};
+
+const REFUSED_TOO_LARGE =
+  "the server refused this submission before the action ran: the request body is over the size limit.\n" +
+  "nothing was saved, and nothing you typed was lost - shrink it (a smaller file, less text) and submit again.";
+
+// what to show for a 413. The server's own text names the limit
+// (BORGO_MAX_BODY), which is the whole reason to show it; a proxy in front
+// answers with a whole html error page instead, and dumping that into a <pre>
+// tells nobody anything, so only prose is passed on, capped.
+export async function tooLargeDetail(res: Response): Promise<string> {
+  const said = (await res.text().catch(() => "")).trim();
+  const prose = said && !said.startsWith("<") ? said.slice(0, 500) : "";
+  return prose ? `${REFUSED_TOO_LARGE}\n\n${prose}` : REFUSED_TOO_LARGE;
+}
+
 export type MountOptions = {
   createElement: typeof CreateElement;
   hydrateRoot: typeof HydrateRoot;
@@ -491,8 +531,14 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
     }
     if (seq !== navSeq) return;
 
-    const marker = res.headers.get("X-Borgo");
-    if (marker === "raw") {
+    const outcome = actionOutcome(res);
+    if (outcome === "too-large") {
+      // no reload: the page on screen still holds what was typed, and the
+      // overlay says why the submit did not happen
+      showOverlay("submission too large", await tooLargeDetail(res));
+      return;
+    }
+    if (outcome === "raw") {
       // a full document (the error overlay, the 500 page, a custom html
       // response): swap it in wholesale, exactly like a native submit
       // a truncated body would blank the document instead of showing the error
@@ -508,7 +554,7 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
       document.close();
       return;
     }
-    if (marker !== "action") {
+    if (outcome === "unknown") {
       // the action ran but answered with something the runtime cannot
       // interpret (a custom response): a plain reload shows the new state
       location.reload();

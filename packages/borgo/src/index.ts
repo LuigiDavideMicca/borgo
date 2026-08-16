@@ -89,6 +89,24 @@ export function subscribe(
   topic: string,
   onEvent: (...args: any[]) => void,
 ): Channel {
+  // THE RELAY REFUSES THESE, AND ITS REFUSAL REACHES THE BROWSER AS "connection
+  // closed" - a message that names nothing. The name is known here, at the call,
+  // so it is said here. /ws?topics=a,b packs topics into one parameter and the
+  // server splits on the comma and trims each part: a topic carrying one becomes
+  // two subscriptions, and one the trim rewrites becomes a subscription under a
+  // name this channel's onmessage filter (msg.topic === topic) will never match.
+  // Both open, count, and deliver nothing. Not imported from util.ts, whose
+  // topicRejection says the same about the comma: that file is server-only and
+  // importing it here would put it in every page's bundle.
+  const unusable = topic.includes(",")
+    ? `contains "," which separates topics on the wire (/ws?topics=a,b), so it would subscribe to the parts and receive none of them - rename the topic`
+    : !topic.trim()
+      ? "is empty, so there is nothing to subscribe to - name the topic"
+      : topic !== topic.trim()
+        ? `is padded with whitespace the relay strips, so it would subscribe as ${JSON.stringify(topic.trim())} and receive nothing under this name - trim it`
+        : "";
+  if (unusable) throw new Error(`subscribe: topic ${JSON.stringify(topic)} ${unusable}`);
+
   let ws: WebSocket | null = null;
   let closed = false;
   let attempts = 0;
