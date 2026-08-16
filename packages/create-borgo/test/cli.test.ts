@@ -460,6 +460,101 @@ describe("git", () => {
     expect(existsSync(join(cwd, "app", "package.json"))).toBe(true);
   });
 
+  // WHOSE WORDS ARE THESE.
+  //
+  // FAILURE DIRECTION: a sentence this program wrote is attributed to git.
+  // `git said:` is a claim about authorship and the only thing that makes it
+  // worth printing is that it holds; stretched over our own advice and our own
+  // reading of an exit status it becomes a lie told in the one place the reader
+  // has no way to check it. Both halves are asserted every time - what is
+  // inside the quotation AND what stayed out of it - because the defect was
+  // never a missing sentence, it was a true sentence under the wrong name.
+  //
+  // The sixth case - our diagnosis with no git words at all, `git init`
+  // exiting 0 on something isRepo() rejects - has no test because the
+  // REDIRECTING_ENV guard turns away every environment known to reach it. It
+  // is held by the type instead: that branch returns report(), which has no
+  // way to reach `said` without being handed a git run.
+  const saidLines = (out: string) =>
+    out
+      .split("\n")
+      .filter((l) => l.includes("git said:"))
+      .map((l) => l.slice(l.indexOf("git said:") + "git said:".length).trim());
+
+  // a hook is the only way to choose exactly what crosses git's stderr,
+  // including choosing that nothing does
+  const failingHook = (label: string, body: string) => {
+    const hooks = join(cwd, `hooks-${label}`);
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(hooks, "pre-commit"), ["#!/bin/sh", body, "exit 1", ""].join("\n"));
+    return gitConfig(
+      label,
+      `[core]\n\thooksPath = ${hooks.replaceAll("\\", "/")}\n${IDENTITY_CONFIG}`,
+    );
+  };
+
+  // git failed with a message of its own, and we have advice to add: the two
+  // used to be concatenated into one string and printed under the one label
+  test("our advice about the partial .git is not printed as git's words", () => {
+    const env = gitConfig(
+      "badbranch-quoted",
+      `[init]\n\tdefaultBranch = "bad name"\n${IDENTITY_CONFIG}`,
+    );
+    const { out } = run(["app"], env);
+    expect(existsSync(join(cwd, "app", ".git"))).toBe(true);
+    onlyGitLine(out, "init-failed");
+    expect(saidLines(out)).toHaveLength(1);
+    expect(saidLines(out)[0]).toContain("invalid branch name");
+    // ours is on our line, and nowhere inside the quotation
+    expect(saidLines(out)[0]).not.toContain("remove the partial .git");
+    expect(ourSentence(out)).toContain("remove the partial .git first");
+  });
+
+  // git failed and said nothing: an exit status is our reading of the run
+  test("a git that fails without a word is not quoted at all", () => {
+    const { code, out } = run(["app"], failingHook("silent", ":"));
+    expect(code).toBe(0);
+    // the disk agrees the failure is real, so the silence is git's and not a
+    // test that arranged nothing
+    const disk = onDisk("app");
+    expect(disk.commits).toBe(0);
+    expect(disk.staged).toBeGreaterThan(0);
+    onlyGitLine(out, "commit-failed");
+    expect(saidLines(out)).toEqual([]);
+    expect(out).not.toContain("git said:");
+    expect(ourSentence(out)).toContain("git exited 1");
+  });
+
+  // git's stream was not empty, but it holds nothing git said about this
+  // failure - and a warning quoted as the reason is a reason that is not one
+  test("a stderr of nothing but warnings is not a message about the failure", () => {
+    const { out } = run(["app"], failingHook("warnonly", 'printf "warning: unrelated\\n" >&2'));
+    expect(onDisk("app").commits).toBe(0);
+    onlyGitLine(out, "commit-failed");
+    expect(saidLines(out)).toEqual([]);
+    expect(out).not.toContain("warning: unrelated");
+    expect(ourSentence(out)).toContain("git exited 1");
+  });
+
+  // several lines from git: one labelled line carries git's first, and the
+  // rest are dropped rather than folded into a line we then sign as git's
+  test("a message of several lines is quoted as one labelled line", () => {
+    const body = 'printf "first refusal line\\nsecond refusal line\\n" >&2';
+    const { out } = run(["app"], failingHook("multiline", body));
+    expect(onDisk("app").commits).toBe(0);
+    onlyGitLine(out, "commit-failed");
+    expect(saidLines(out)).toEqual(["first refusal line"]);
+    expect(out).not.toContain("second refusal line");
+  });
+
+  // git never ran, so there is no stream and nothing may be attributed to it
+  test("a git that is not there is quoted nowhere", () => {
+    const { out } = withoutToolchain(["app", "--no-install"]);
+    onlyGitLine(out, "unavailable");
+    expect(saidLines(out)).toEqual([]);
+    expect(out).not.toContain("git said:");
+  });
+
   // `subst` is ordinary practice for shortening source paths and needs no
   // unusual configuration at all. rev-parse --show-toplevel answers with the
   // physical path while the target keeps the virtual drive letter, so a string

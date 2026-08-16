@@ -629,13 +629,38 @@ const runGitWithin = (ms: number, ...argv: string[]): GitRun => {
 
 const runGit = (...argv: string[]): GitRun => runGitWithin(GIT_TIMEOUT, ...argv);
 
-const gitSays = (run: { code: number; err: string }) => {
+// Empty when git printed nothing quotable - a stream that was silent, blank, or
+// all warnings. An exit status is this program's reading of the run and not a
+// sentence git wrote, so it is never returned from here.
+const gitSays = (run: { err: string }) => {
   const line = run.err
     .split("\n")
     .map((l) => printable(l).trim())
     .find((l) => l.length > 0 && !/^warning:/i.test(l));
-  if (!line) return `git exited ${run.code}`;
+  if (!line) return "";
   return line.length > 110 ? `${line.slice(0, 107)}...` : line;
+};
+
+// A FAILURE SPEAKS WITH TWO VOICES, AND THEY DO NOT SHARE A LINE.
+//
+// FAILURE DIRECTION: a sentence this program wrote is never attributed to
+// another program. `said` holds what came off git's stderr and nothing else;
+// `note` holds ours - the advice, and the exit status of a git that failed
+// without a word. They were one string, concatenated, and the whole of it went
+// out under `git said:`, so "remove the partial .git first" and "git init left
+// no usable repository in the scaffold" were both printed as git's own words.
+// The label exists so a reader can tell whose words these are; one that also
+// covers ours answers that question wrongly, which is worse than not asking it.
+type GitReport = { result: GitResult; note: string; said: string };
+
+const report = (result: GitResult, note = "", said = ""): GitReport => ({ result, note, said });
+
+// git's words when there are any, and our own reading of the exit status when
+// there are not: the two never merge into one quotable string.
+const failed = (result: GitResult, run: { code: number; err: string }, note = ""): GitReport => {
+  const said = gitSays(run);
+  const ours = [said ? "" : `git exited ${run.code}`, note].filter(Boolean).join(` ${dot} `);
+  return report(result, ours, said);
 };
 
 // git's own answer to "is there a repository here", applied to the scaffold's
@@ -768,7 +793,7 @@ const REDIRECTING_ENV = [
 // repository that would have been correct. The other six have no config twin.
 const REDIRECTING_CONFIG = ["init.templateDir"] as const;
 
-const initGit = (): [GitResult, string] => {
+const initGit = (): GitReport => {
   // git exports these to hooks, `rebase --exec`, `bisect run` and !-aliases, so
   // a scaffolder invoked from any of those inherits an environment that points
   // git's state somewhere else entirely. Skipping is right and is what keeps
@@ -776,21 +801,21 @@ const initGit = (): [GitResult, string] => {
   // member of a family: GIT_OBJECT_DIRECTORY sent every object elsewhere while
   // the summary reported an initial commit that no git command could find.
   const redirected = REDIRECTING_ENV.find((key) => process.env[key]);
-  if (redirected) return ["git-env", redirected];
+  if (redirected) return report("git-env", redirected);
 
   const inRepo = runGit("rev-parse", "--is-inside-work-tree");
   if (!inRepo.ran) {
-    if (inRepo.reason === "missing") return ["unavailable", ""];
-    return inRepo.reason === "unrunnable" ? ["unrunnable", inRepo.why] : ["unresponsive", ""];
+    if (inRepo.reason === "missing") return report("unavailable");
+    return inRepo.reason === "unrunnable" ? report("unrunnable", inRepo.why) : report("unresponsive");
   }
   // already tracked by an enclosing repo: that repo is the undo history
-  if (inRepo.code === 0 && inRepo.out === "true") return ["nested", ""];
+  if (inRepo.code === 0 && inRepo.out === "true") return report("nested");
 
   // after the reachability checks, so a missing or unrunnable git is still
   // reported as itself rather than as a configuration problem
   for (const key of REDIRECTING_CONFIG) {
     const set = runGit("config", "--get", key);
-    if (set.ran && set.code === 0 && set.out.length > 0) return ["git-env", key];
+    if (set.ran && set.code === 0 && set.out.length > 0) return report("git-env", key);
   }
 
   const init = runGit("init", "-q");
@@ -801,28 +826,31 @@ const initGit = (): [GitResult, string] => {
   // real repository was reported as no git at all. What has to be true is that
   // the scaffold owns the repository `add -A` will stage into: a fact about
   // the filesystem, which has no second spelling.
-  if (!init.ran) return ["unresponsive", repoState()];
+  if (!init.ran) return report("unresponsive", repoState());
   // a refused init still leaves a half-written .git behind, and that .git then
-  // breaks the user's own `git init` and `git status` until it is removed
+  // breaks the user's own `git init` and `git status` until it is removed. The
+  // advice is ours, so it travels as a note and never inside git's message.
   if (init.code !== 0) {
-    const partial = existsSync(join(target, ".git")) ? ` ${dot} remove the partial .git first` : "";
-    return ["init-failed", gitSays(init) + partial];
+    const partial = existsSync(join(target, ".git")) ? "remove the partial .git first" : "";
+    return failed("init-failed", init, partial);
   }
-  if (!isRepo()) return ["init-failed", "git init left no usable repository in the scaffold"];
+  // git exited 0 and said nothing; the disagreement with the disk is ours to
+  // report, and there is no git sentence to quote alongside it
+  if (!isRepo()) return report("init-failed", "git init left no usable repository in the scaffold");
 
   const add = runGit("add", "-A");
-  if (!add.ran) return ["unresponsive", repoState()];
-  if (add.code !== 0) return ["stage-failed", gitSays(add)];
+  if (!add.ran) return report("unresponsive", repoState());
+  if (add.code !== 0) return failed("stage-failed", add);
 
   const commit = runGit("commit", "-q", "-m", "initial commit");
-  if (!commit.ran) return ["unresponsive", repoState()];
-  if (commit.code === 0) return ["created", ""];
+  if (!commit.ran) return report("unresponsive", repoState());
+  if (commit.code === 0) return report("created");
   // the repo and the staged tree survive either way; only the reason differs,
   // and only one of the reasons is fixed by identifying yourself
-  return identityMissing() ? ["no-identity", ""] : ["commit-failed", gitSays(commit)];
+  return identityMissing() ? report("no-identity") : failed("commit-failed", commit);
 };
 
-const [gitResult, gitDetail]: [GitResult, string] = git ? initGit() : ["unavailable", ""];
+const { result: gitResult, note: gitNote, said: gitSaid } = git ? initGit() : report("unavailable");
 
 const style = tailwind ? "style.css " : "style.scss";
 const layouts: Record<TemplateName, string> = {
@@ -843,33 +871,36 @@ const layouts: Record<TemplateName, string> = {
 
 // the summary reports what is on disk, not what was asked for: a git init
 // that could not run says so here rather than leaving the user to find out.
-// The lines that carry a detail carry git's own message or a fact read back
-// off the filesystem, so the ones that stay fixed sentences are only the
-// outcomes that can be named with certainty.
+// The lines that carry a detail carry this program's own words - advice, a
+// variable name, an exit status, or a fact read back off the filesystem - so
+// the ones that stay fixed sentences are only the outcomes that can be named
+// with certainty. Nothing git wrote reaches this line; it goes to quoted().
 // The GIT_DIR line names the variable and stops there: whether there is a
 // repository at the other end of it is not something this knows, and
 // "points at another repository" was false for a path with nothing there.
-const detail = gitDetail ? ` ${dot} ${gitDetail}` : "";
-// git's words go on their own line, under ours. A hook chooses this text and
-// may choose text that reads exactly like a summary line; it cannot choose a
-// line break, because printable() removes every character any consumer treats
-// as one. So the boundary is structural rather than a delimiter it can type:
-// nothing it writes can start a line, and this line is already labelled.
-const quoted = (text: string) => `\n${" ".repeat(18)}${dim(`git said: ${text}`)}`;
+const detail = gitNote ? ` ${dot} ${gitNote}` : "";
+// git's words go on their own line, under ours, and only ever git's words: a
+// git that failed silently has none, and gets no quoted line at all. A hook
+// chooses this text and may choose text that reads exactly like a summary line;
+// it cannot choose a line break, because printable() removes every character
+// any consumer treats as one. So the boundary is structural rather than a
+// delimiter it can type: nothing it writes can start a line, and this line is
+// already labelled.
+const quoted = (text: string) => (text ? `\n${" ".repeat(18)}${dim(`git said: ${text}`)}` : "");
 const gitLine: Record<GitResult, string> = {
   created: `${sage(ok)} git         ${dim("repository initialised " + dot + " initial commit")}`,
   nested: `${dim(dot)} git         ${dim("skipped " + dot + " already inside a repository")}`,
   // true of every member of the family, whether it relocates git's state or
   // decides what goes into the new repository: the only claim is that the
   // variable is set, which is a fact about this process and nothing else
-  "git-env": `${dim(dot)} git         ${dim(`skipped ${dot} ${gitDetail} is set ${dot} unset it for a repository in the scaffold itself`)}`,
+  "git-env": `${dim(dot)} git         ${dim(`skipped ${dot} ${gitNote} is set ${dot} unset it for a repository in the scaffold itself`)}`,
   "no-identity": `${dim(dot)} git         ${dim("initialised, files staged " + dot + " set user.name/user.email, then commit")}`,
   unavailable: `${dim(dot)} git         ${dim("skipped " + dot + " git is not available here")}`,
-  unrunnable: `${terracotta(err)} git         ${dim(`git could not be run ${dot} ${gitDetail}`)}`,
+  unrunnable: `${terracotta(err)} git         ${dim(`git could not be run ${dot} ${gitNote}`)}`,
   unresponsive: `${terracotta(err)} git         ${dim(`git did not finish in ${asSeconds(GIT_TIMEOUT)}${detail}`)}`,
-  "init-failed": `${terracotta(err)} git         ${dim("not initialised")}${quoted(gitDetail)}`,
-  "stage-failed": `${terracotta(err)} git         ${dim("initialised, nothing staged")}${quoted(gitDetail)}`,
-  "commit-failed": `${terracotta(err)} git         ${dim(`initialised, files staged ${dot} not committed`)}${quoted(gitDetail)}`,
+  "init-failed": `${terracotta(err)} git         ${dim(`not initialised${detail}`)}${quoted(gitSaid)}`,
+  "stage-failed": `${terracotta(err)} git         ${dim(`initialised, nothing staged${detail}`)}${quoted(gitSaid)}`,
+  "commit-failed": `${terracotta(err)} git         ${dim(`initialised, files staged ${dot} not committed${detail}`)}${quoted(gitSaid)}`,
 };
 const linterLine: Record<LinterName, string> = {
   biome: `${sage(ok)} linter      ${dim("biome " + dot + " biome.json " + dot + " bun run lint / format")}`,
