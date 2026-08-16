@@ -88,6 +88,43 @@ export function probeWriteWith(
   }
 }
 
+// what the probe writes, so a residue can be identified by reading it rather
+// than by trusting its name
+export const PROBE_MARK = "borgo doctor write probe\n";
+
+const PROBE_NAME = /^\.borgo-doctor-[0-9]+$/;
+
+/**
+ * Residues of runs killed between the write and the removal. The window is two
+ * adjacent syscalls - 333 us against a 679 ms doctor - but a residue never
+ * heals, because the name carries the pid. Measured for one left in
+ * public/assets: buildAssetIndex serves it at a public url, and `borgo export`
+ * copies it into dist/site and counts it as an asset.
+ *
+ * A diagnostic removes only what it can prove it wrote, and this one runs in
+ * the user's project: exact name, whole content equal to the mark, and only in
+ * a directory doctor was already writing into. Anything else is left alone,
+ * including the empty residues older versions wrote.
+ */
+export function sweepProbes(
+  dir: string,
+  names: string[],
+  read: (path: string) => string | null,
+  remove: (path: string) => void,
+): string[] {
+  const swept: string[] = [];
+  for (const name of names) {
+    if (!PROBE_NAME.test(name)) continue;
+    const path = join(dir, name);
+    if (read(path) !== PROBE_MARK) continue;
+    try {
+      remove(path);
+      swept.push(path);
+    } catch {}
+  }
+  return swept;
+}
+
 export const realEnv = (): DoctorEnv => ({
   platform: process.platform,
   env: process.env,
@@ -138,12 +175,37 @@ export const realEnv = (): DoctorEnv => ({
       return null;
     }
   },
-  probeWrite: (dir) =>
-    probeWriteWith(
-      join(probeTarget(dir, existsSync), `.borgo-doctor-${process.pid}`),
-      (path) => writeFileSync(path, ""),
+  // the pid stays in the name: measured on windows, two doctors sharing one
+  // fixed name collide on the write with EPERM - the same code a real denial
+  // raises - 96 times in 3000, which is a read-only checkout reported for a
+  // directory that writes perfectly well
+  probeWrite: (dir) => {
+    const target = probeTarget(dir, existsSync);
+    const answer = probeWriteWith(
+      join(target, `.borgo-doctor-${process.pid}`),
+      (path) => writeFileSync(path, PROBE_MARK),
       unlinkSync,
-    ),
+    );
+    sweepProbes(
+      target,
+      (() => {
+        try {
+          return readdirSync(target);
+        } catch {
+          return [];
+        }
+      })(),
+      (path) => {
+        try {
+          return readFileSync(path, "utf8");
+        } catch {
+          return null;
+        }
+      },
+      unlinkSync,
+    );
+    return answer;
+  },
   diskFree: (path) => {
     try {
       const fs = statfsSync(path);

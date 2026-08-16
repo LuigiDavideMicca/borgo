@@ -22,15 +22,25 @@ import {
   parseNetstatPid,
   parseVersion,
   portHolder,
+  PROBE_MARK,
   probeTarget,
   probeWriteWith,
   realEnv,
+  sweepProbes,
   resolvePort,
   runChecks,
   versionAtLeast,
   type DoctorEnv,
 } from "../src/doctor";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -950,5 +960,169 @@ describe("probeWrite", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// A KILLED DOCTOR'S PROBE FILE, WHICH NOTHING EVER REMOVED.
+//
+// The window is two adjacent syscalls of a synchronous try/finally - 333 us
+// per write+unlink pair against a 679 ms `borgo doctor` on examples/tasks - so
+// a hard kill rarely lands in it, but the residue never heals: the name
+// carries the pid and the next run writes a different one. Measured with
+// taskkill /F held inside the window: the file is still there afterwards.
+//
+// It is not inert. Measured: a `.borgo-doctor-4242` in public/assets is
+// indexed by buildAssetIndex and answered by findAsset, so it is served at a
+// public url, and `borgo export` copies public/ wholesale into dist/site where
+// countAssets counts it. In a project that has not built yet none of the three
+// targets exist, so the probe lands in the project root or in public/ - which
+// no template gitignore covers.
+//
+// The sweep reads ownership off the disk instead of inferring it from a name.
+// Keeping the pid in that name is not decoration: two concurrent doctors
+// sharing one fixed name collide on the write with EPERM, the code a real
+// denial raises, 96 times in 3000 - bfaa0b4's false "denied" all over again.
+describe("residues of a doctor that was killed", () => {
+  const reads = (contents: Record<string, string>) => (path: string) =>
+    contents[path.replaceAll("\\", "/")] ?? null;
+
+  test("removes a residue whose content proves borgo wrote it", () => {
+    const removed: string[] = [];
+    const swept = sweepProbes(
+      "/p",
+      [".borgo-doctor-4242", ".borgo-doctor-9"],
+      reads({ "/p/.borgo-doctor-4242": PROBE_MARK, "/p/.borgo-doctor-9": PROBE_MARK }),
+      (path) => removed.push(path),
+    );
+    expect(removed.map((p) => p.replaceAll("\\", "/"))).toEqual([
+      "/p/.borgo-doctor-4242",
+      "/p/.borgo-doctor-9",
+    ]);
+    expect(swept.length).toBe(2);
+  });
+
+  // the whole point: the name is not the evidence. Everything here is named
+  // exactly like a probe and is not one.
+  test("leaves every file whose content is not the mark", () => {
+    const removed: string[] = [];
+    const names = [".borgo-doctor-1", ".borgo-doctor-2", ".borgo-doctor-3", ".borgo-doctor-4"];
+    sweepProbes(
+      "/p",
+      names,
+      reads({
+        // an empty residue from a borgo that predates the mark
+        "/p/.borgo-doctor-1": "",
+        // the mark with something appended
+        "/p/.borgo-doctor-2": PROBE_MARK + "x",
+        // a user's file that happens to wear the name
+        "/p/.borgo-doctor-3": "le mie note",
+        // unreadable, or a directory: read returns null
+        "/p/.borgo-doctor-4": undefined as unknown as string,
+      }),
+      (path) => removed.push(path),
+    );
+    expect(removed).toEqual([]);
+  });
+
+  test("leaves every name that is not exactly the probe's", () => {
+    const removed: string[] = [];
+    const names = [
+      "borgo-doctor-42",
+      ".borgo-doctor-",
+      ".borgo-doctor-4242.txt",
+      "x.borgo-doctor-42",
+      ".borgo-doctor-abc",
+      ".borgo-doctor-4242 ",
+      ".borgo-doctor-4/../../secret",
+      "package.json",
+      ".borgo",
+    ];
+    // every one of them reads back as the mark, so only the name can save them
+    sweepProbes("/p", names, () => PROBE_MARK, (path) => removed.push(path));
+    expect(removed).toEqual([]);
+  });
+
+  // it runs after the answer exists, so a refusal cannot turn "ok" into
+  // "denied" the way the removal used to
+  test("a refusal to remove is not the diagnosis", () => {
+    expect(() =>
+      sweepProbes("/p", [".borgo-doctor-1"], () => PROBE_MARK, () => {
+        throw new Error("EPERM");
+      }),
+    ).not.toThrow();
+    expect(
+      sweepProbes("/p", [".borgo-doctor-1"], () => PROBE_MARK, () => {
+        throw new Error("EPERM");
+      }),
+    ).toEqual([]);
+  });
+
+  test("the real probeWrite sweeps what a killed run left, and nothing else", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-sweep-"));
+    try {
+      // what a killed doctor leaves now
+      writeFileSync(join(dir, ".borgo-doctor-4242"), PROBE_MARK);
+      // and three files it did not write
+      writeFileSync(join(dir, ".borgo-doctor-7"), "");
+      writeFileSync(join(dir, ".borgo-doctor-nota"), PROBE_MARK);
+      writeFileSync(join(dir, "app.js"), PROBE_MARK);
+      expect(realEnv().probeWrite(dir)).toBe("ok");
+      expect(readdirSync(dir).sort()).toEqual([".borgo-doctor-7", ".borgo-doctor-nota", "app.js"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // a residue in the parent is swept when the probe lands in the parent, and
+  // never a directory doctor was not already writing into
+  test("sweeps only the directory the probe itself lands in", () => {
+    const root = mkdtempSync(join(tmpdir(), "borgo-sweep-scope-"));
+    try {
+      const near = join(root, "near");
+      mkdirSync(near);
+      writeFileSync(join(root, ".borgo-doctor-11"), PROBE_MARK);
+      writeFileSync(join(near, ".borgo-doctor-22"), PROBE_MARK);
+      // probing a directory borgo has not made yet lands in root, not in near
+      expect(realEnv().probeWrite(join(root, "dist"))).toBe("ok");
+      expect(existsSync(join(root, ".borgo-doctor-11"))).toBe(false);
+      expect(existsSync(join(near, ".borgo-doctor-22"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // the probe the real env writes has to be the one the sweep recognises, or a
+  // killed run's residue is indistinguishable from a file borgo did not write.
+  // A removal that is refused is exactly what a kill inside the window leaves.
+  test("what a killed run leaves is what the sweep recognises", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-mark-"));
+    try {
+      const probe = join(dir, `.borgo-doctor-${process.pid}`);
+      expect(
+        probeWriteWith(probe, (path) => writeFileSync(path, PROBE_MARK), () => {
+          throw new Error("killed before this ran");
+        }),
+      ).toBe("ok");
+      expect(readFileSync(probe, "utf8")).toBe(PROBE_MARK);
+      expect(realEnv().probeWrite(dir)).toBe("ok");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The structural guard, because neither property can be watched from
+  // outside: realEnv removes its own probe, so a probe that wrote anything but
+  // the mark would make the sweep a no-op that every test above still passes.
+  // And the answer has to exist before the sweep runs, or a refusal in there
+  // becomes the diagnosis - which is the defect bfaa0b4 closed.
+  test("the probe writes the mark, and the sweep runs after the answer", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/doctor.ts"), "utf8");
+    expect(source).toContain("writeFileSync(path, PROBE_MARK)");
+    const answered = source.indexOf("const answer = probeWriteWith(");
+    expect(answered).toBeGreaterThan(-1);
+    const swept = source.indexOf("sweepProbes(", answered);
+    expect(swept).toBeGreaterThan(answered);
+    expect(source.indexOf("return answer;", swept)).toBeGreaterThan(swept);
   });
 });
