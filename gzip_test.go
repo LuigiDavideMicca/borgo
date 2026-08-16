@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1246,6 +1247,26 @@ func TestContentLengthMismatchIsLoggedWhateverTheEncoding(t *testing.T) {
 			declare(w, 0)
 			w.WriteHeader(http.StatusOK)
 		}, ""},
+		// the plainest form of the bug, and the one that went unreported
+		// longest: the length is read at WriteHeader, and a handler that
+		// declares one and returns without writing never reaches it. net/http
+		// ships the header under an implicit 200 and the client waits for a
+		// body that was never coming
+		{"declared, then neither writes nor commits", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+		}, "borgo: Content-Length 4000 but wrote 0 bytes"},
+		{"zero declared, neither writes nor commits", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, 0)
+		}, ""},
+		// the same uncommitted response on a HEAD and after a panic: both
+		// guards have to hold on the path that never reached WriteHeader too
+		{"declared on a HEAD, neither writes nor commits", http.MethodHead, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+		}, ""},
+		{"declared, then panic before the first byte", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+			declare(w, size)
+			panic("boom")
+		}, ""},
 		{"declared, then flushed half way", http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 			declare(w, size)
 			w.Write([]byte(body[:size/2]))
@@ -1425,5 +1446,90 @@ func TestGzipWriteAfterFinishAddsNothing(t *testing.T) {
 				t.Errorf("Content-Encoding = %q, want none", got)
 			}
 		})
+	}
+}
+
+// serveAndDiagnose runs one request over a real connection and returns both
+// halves of the server's voice: what borgo logged, and what net/http logged
+// through the server's own ErrorLog. A recorder cannot answer this question at
+// all - it has no stdlib writer behind it, so the half of the diagnosis this
+// test is about would be missing exactly where it looks for it.
+//
+// The buffers are read after Close, which waits for the handler and is what
+// puts its writes before this goroutine's reads.
+func serveAndDiagnose(t *testing.T, acceptEncoding string, h http.Handler) (borgoSaid, stdlibSaid, wire string) {
+	t.Helper()
+	var borgoOut, stdlibOut bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&borgoOut)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(flags)
+	}()
+
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config.ErrorLog = log.New(&stdlibOut, "", 0)
+	srv.Start()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		srv.Close()
+		t.Fatal(err)
+	}
+	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\nAccept-Encoding: %s\r\nConnection: close\r\n\r\n",
+		srv.Listener.Addr(), acceptEncoding)
+	raw, err := io.ReadAll(conn)
+	conn.Close()
+	srv.Close()
+	if err != nil {
+		t.Fatalf("reading the response: %v", err)
+	}
+	return borgoOut.String(), stdlibOut.String(), string(raw)
+}
+
+// A CONTENT-LENGTH TOO MALFORMED TO COMPARE WAS NAMED FOR HALF THE CLIENTS.
+//
+// A Content-Length that is not a number is the same handler bug as one that is
+// merely wrong, and net/http names it - `http: invalid Content-Length of "..."`
+// - for as long as it still holds the header. Past the buffer startGzip deletes
+// it first, so on the compressed path stdlib had nothing left to complain about,
+// and borgo, deferring to a complaint that was no longer being made, said
+// nothing either. Below the buffer nothing is deleted and stdlib speaks on both
+// paths, so the silence started exactly where the body outgrew gzipMinBytes:
+// the mismatch defect this file already reports, in the one spelling that
+// slipped past the comparison because it could not be compared.
+//
+// The assertion is not who speaks but that somebody does. On identity that is
+// stdlib and on gzip past the buffer it can only be borgo, and a response whose
+// diagnosis depends on Accept-Encoding is the defect itself.
+func TestGzipInvalidContentLengthIsNamedOnEitherEncoding(t *testing.T) {
+	for _, size := range []int{gzipMinBytes / 2, gzipMinBytes * 4} {
+		for _, value := range []string{"banana", "-5", "1e3", " 4000"} {
+			for _, ae := range []string{"identity", "gzip"} {
+				t.Run(fmt.Sprintf("%dB/%q/%s", size, value, ae), func(t *testing.T) {
+					borgoSaid, stdlibSaid, wire := serveAndDiagnose(t, ae,
+						gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							w.Header().Set("Content-Length", value)
+							w.Write(bytes.Repeat([]byte("x"), size))
+						})))
+
+					if !strings.Contains(borgoSaid+stdlibSaid, value) {
+						t.Errorf("nothing named the invalid Content-Length %q\n borgo:    %q\n net/http: %q",
+							value, borgoSaid, stdlibSaid)
+					}
+					// whoever names it, it must not reach the client: a length
+					// net/http refuses to parse is one no cache can trust either
+					head, _, _ := strings.Cut(wire, "\r\n\r\n")
+					for _, line := range strings.Split(head, "\r\n") {
+						if !strings.HasPrefix(strings.ToLower(line), "content-length:") {
+							continue
+						}
+						if strings.TrimSpace(line[len("content-length:"):]) == value {
+							t.Errorf("the invalid length went out on the wire: %q", line)
+						}
+					}
+				})
+			}
+		}
 	}
 }

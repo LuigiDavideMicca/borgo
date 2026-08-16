@@ -251,7 +251,9 @@ func declaresEventStream(h http.Header) bool {
 
 // declaredLength reads the Content-Length the handler set, or -1 for none. A
 // length that is not a number is also -1: net/http rejects and logs that one
-// itself, and a second complaint about it would say nothing new.
+// itself, and a second complaint about it would say nothing new - except where
+// startGzip has deleted the header before net/http could read it, which is why
+// that one place repeats it.
 func declaredLength(h http.Header) int64 {
 	// indexed rather than Get: the key is already canonical, and this is the
 	// same lookup net/http makes when it decides what to put on the wire
@@ -453,6 +455,16 @@ func (g *gzipResponseWriter) startGzip() {
 	if _, declared := h["Content-Type"]; !declared {
 		h.Set("Content-Type", http.DetectContentType(g.buf))
 	}
+	// net/http names a Content-Length it cannot parse, but only one it still
+	// holds. Deleting it here takes that complaint away from the compressed
+	// path alone: the same handler was named for a client sending identity and
+	// passed over for one sending gzip - the very split this file reports for a
+	// length that is merely wrong, in the one spelling that reached the wire
+	// without it. Below the buffer nothing is deleted and net/http still speaks,
+	// so this says it exactly where it would otherwise be lost.
+	if v := h["Content-Length"]; len(v) > 0 && g.declared < 0 {
+		log.Printf("borgo: invalid Content-Length of %q", v[0])
+	}
 	h.Del("Content-Length")
 	h.Set("Content-Encoding", "gzip")
 	g.sendHeader()
@@ -538,20 +550,31 @@ func (g *gzipResponseWriter) finish() {
 //
 // It says nothing about a response that is merely unusual. A body that no
 // Content-Length described, one that matched, one on a status that carries no
-// body at all (net/http drops those, so the counter would read 0 against a
-// length that was right about the body it stood for), one cut short by a panic,
-// and one cut short because the connection stopped taking bytes are all
-// correct, or at least not this defect, and none of them is worth a line.
+// body at all (net/http drops that body, so whatever the counter holds never
+// described what the client received, while the length still describes the
+// representation the request asked about), one cut short by a panic, and one
+// cut short because the connection stopped taking bytes are all correct, or at
+// least not this defect, and none of them is worth a line.
 func (g *gzipResponseWriter) reportLengthMismatch() {
-	if g.declared < 0 || g.written == g.declared || g.bodyless || !g.complete {
+	declared := g.declared
+	if g.status == 0 {
+		// no status was ever committed, so nothing has read the length yet: a
+		// handler that declared one and returned without writing a byte leaves
+		// net/http to ship it under an implicit 200 over an empty body, and the
+		// client waits for a body that was never coming. Read here, that lands
+		// on both encodings at once - with nothing written there is nothing to
+		// compress, so neither path had reached WriteHeader
+		declared = declaredLength(g.rw.Header())
+	}
+	if declared < 0 || g.written == declared || g.bodyless || !g.complete {
 		return
 	}
 	// a body that stopped short of a write error is the connection's doing; the
 	// handler that checks Write and returns - io.Copy, http.ServeContent - is
 	// the well-behaved one, and every client that hangs up mid-download would
 	// otherwise be reported as an application bug
-	if g.writeFailed && g.written < g.declared {
+	if g.writeFailed && g.written < declared {
 		return
 	}
-	log.Printf("borgo: Content-Length %d but wrote %d bytes", g.declared, g.written)
+	log.Printf("borgo: Content-Length %d but wrote %d bytes", declared, g.written)
 }
