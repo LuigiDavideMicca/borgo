@@ -656,16 +656,16 @@ describe("the read deadline: how long a REQUEST may take to arrive", () => {
   // ONE NAME MUST NOT MEAN TWO THINGS.
   //
   // This started as BORGO_IDLE_TIMEOUT, which is the go api's: go parses it with
-  // time.ParseDuration and PANICS on anything else. The systemd unit and the
+  // time.ParseDuration and REFUSES anything else. The systemd unit and the
   // compose file put both processes in one environment block, so one name meant
   // two things at once - BORGO_IDLE_TIMEOUT=2m gave go two minutes and gave this
-  // side a silent 30 seconds, and BORGO_IDLE_TIMEOUT=120 panicked the go api at
-  // boot.
+  // side a silent 30 seconds, and BORGO_IDLE_TIMEOUT=120 stopped the go api
+  // booting at all.
   //
   // The first fix renamed this side's knob to BORGO_READ_TIMEOUT - which
-  // newServer in borgo.go also reads, also as a duration, also panicking. The
-  // rename moved the collision onto a new spelling and the test written with it
-  // asserted the move was a fix ("one env block carrying both gives each side
+  // newServer in borgo.go also reads, also as a duration. The rename moved the
+  // collision onto a new spelling and the test written with it asserted the
+  // move was a fix ("one env block carrying both gives each side
   // what it asked for", on an env whose BORGO_READ_TIMEOUT=45 stops the go
   // binary from booting at all). It is rewritten here, because it certified the
   // bug.
@@ -696,7 +696,7 @@ describe("the read deadline: how long a REQUEST may take to arrive", () => {
 
   // The structural guard, so the next rename cannot recreate what two renames
   // already created. Go reads its timeouts through envDuration (a duration
-  // string, malformed panics at boot); the front server reads its own through
+  // string, malformed fails the boot); the front server reads its own through
   // envInt (a plain number, malformed silently falls back). A name in both sets
   // is a value that cannot mean the same thing to both halves, and `borgo start`
   // hands one environment to both children.
@@ -1322,8 +1322,7 @@ describe("sessionSecure", () => {
     expect(sessionSecure({ SESSION_SECURE: "" })).toBe(false);
   });
 
-  // the whole point: refusing is what keeps a typo from silently downgrading
-  // a cookie, exactly as the go half panics rather than reading it as false
+  // the go half returns an error rather than reading a typo as false
   test("refuses what it cannot read rather than defaulting to insecure", () => {
     for (const v of ["yes", "on", "2", " 1", "true ", "secure"]) {
       expect(() => sessionSecure({ SESSION_SECURE: v })).toThrow(/SESSION_SECURE/);
