@@ -271,12 +271,63 @@ func recoverMiddleware(next http.Handler) http.Handler {
 				// not to this error: a Cache-Control from borgo.Cache would
 				// have a cdn hold the 500 for everyone, and a session cookie
 				// would hand out a login the request never completed
-				clear(rw.Header())
+				dropAbandonedHeaders(rw.Header())
 				WriteJSON(rw, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 			}
 		}()
 		next.ServeHTTP(rw, r)
 	})
+}
+
+// connectionHeaders are the response headers that describe the connection the
+// reply travels over, or the negotiation that picked it - never the bytes of
+// any one representation. They are the headers that survive a response being
+// replaced by the recovery's 500.
+//
+// Vary is the one that had to be named. gzipMiddleware sets Vary:
+// Accept-Encoding on every request before the handler runs, precisely so a
+// shared cache knows the reply depends on the negotiation, and a blanket clear
+// took it back off - measured on the wire, both with and without
+// Accept-Encoding, because a panic before the response buffer fills starts no
+// gzip and so leaves the 500 uncompressed for either client. The practical
+// exposure is small: the 500 carries no freshness of its own and 500 is not a
+// status a cache may store heuristically (RFC 9111 4.2.2), so nothing should
+// keep it. Small is not the point. Vary is the one header whose whole job is to
+// tell a shared cache that this reply was negotiated, and deleting it is
+// exactly the gesture that must not happen by accident.
+//
+// Connection is the second, and it is not cosmetic at all: a handler that set
+// Connection: close said something about the connection, not about the body it
+// then failed to produce, and dropping it silently returned a connection the
+// handler had condemned to the keep-alive pool. Keep-Alive travels with it for
+// the same reason.
+//
+// Content framing is deliberately absent. Trailer and Transfer-Encoding
+// describe how this message is delimited, and this message is being replaced -
+// announcing a trailer the 500 will never send is a promise made by the
+// response that died.
+//
+// Canonical spellings only, matching what h.Set stages and what the rest of
+// borgo's header code can see. A header written straight into the map as
+// w.Header()["vary"] is dropped with everything else, and that is the correct
+// side to be wrong on: keeping too little costs a cache hit, keeping too much
+// could carry the abandoned response's cookie onto the error.
+var connectionHeaders = [...]string{"Connection", "Keep-Alive", "Vary"}
+
+// dropAbandonedHeaders empties the header map of everything staged for a
+// response that will not be sent, keeping what describes the connection it
+// would have been sent over.
+func dropAbandonedHeaders(h http.Header) {
+	var kept [len(connectionHeaders)][]string
+	for i, name := range connectionHeaders {
+		kept[i] = h[name]
+	}
+	clear(h)
+	for i, name := range connectionHeaders {
+		if kept[i] != nil {
+			h[name] = kept[i]
+		}
+	}
 }
 
 // recoverWriter records whether the response was committed. It forwards Flush

@@ -229,6 +229,52 @@ func TestPanicAfterEarlyHintsIsStillA500(t *testing.T) {
 	}
 }
 
+// a ResponseRecorder has no connection to condemn, so the half of the fix that
+// matters most is checked where it takes effect: net/http reads Connection from
+// the header map it is handed, and if the recovery cleared it the socket goes
+// back to the keep-alive pool the handler had just written it off
+func TestPanicKeepsConnectionCloseOnTheWire(t *testing.T) {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	srv := httptest.NewServer(Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		panic("boom")
+	})))
+	defer srv.Close()
+
+	c, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	// no Connection header of our own: only the handler's may close this
+	if _, err := io.WriteString(c, "GET /api/x HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	br := bufio.NewReader(c)
+	res, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", res.StatusCode)
+	}
+	if !res.Close {
+		t.Error("the 500 kept the connection alive; the handler asked for it to close")
+	}
+	if got := res.Header.Get("Vary"); got != "Accept-Encoding" {
+		t.Errorf("Vary = %q on the wire, want Accept-Encoding", got)
+	}
+	if _, err := br.ReadByte(); err != io.EOF {
+		t.Errorf("read after the 500 = %v, want EOF from a closed connection", err)
+	}
+}
+
 // every browser sends Accept-Encoding: gzip, so the response buffer is in the
 // path of a real request
 func gzipRequest() *http.Request {
@@ -320,6 +366,56 @@ func TestRecoverMiddleware(t *testing.T) {
 		}
 		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+	})
+
+	// the direction: what describes the connection survives a response being
+	// replaced. Vary is set by gzipMiddleware for every request, and it is what
+	// tells a shared cache the reply was negotiated - a blanket clear took it
+	// off the 500. Both encodings are checked because a panic before the
+	// response buffer fills starts no gzip, so the 500 is uncompressed for the
+	// client that asked for gzip too, and the clear reached both of them.
+	t.Run("the 500 keeps Vary", func(t *testing.T) {
+		for _, accept := range []string{"", "gzip"} {
+			rec := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodGet, "/api/x", nil)
+			if accept != "" {
+				r.Header.Set("Accept-Encoding", accept)
+			}
+			Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				panic("boom")
+			})).ServeHTTP(rec, r)
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("Accept-Encoding %q: status = %d, want 500", accept, rec.Code)
+			}
+			if got := rec.Header().Get("Vary"); got != "Accept-Encoding" {
+				t.Errorf("Accept-Encoding %q: 500 Vary = %q, want Accept-Encoding", accept, got)
+			}
+		}
+	})
+
+	t.Run("the 500 keeps the handler's own Vary and Connection", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		recoverMiddleware(gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Vary", "Cookie")
+			w.Header().Set("Connection", "close")
+			w.Header().Set("Etag", `"v1"`)
+			w.Header().Set("Trailer", "Cache-Control")
+			panic("after the headers")
+		}))).ServeHTTP(rec, gzipRequest())
+
+		if got := rec.Header().Get("Vary"); got != "Cookie" {
+			t.Errorf("Vary = %q, want the handler's Cookie", got)
+		}
+		if got := rec.Header().Get("Connection"); got != "close" {
+			t.Errorf("Connection = %q: a connection the handler condemned went back to the pool", got)
+		}
+		// framing and validators belong to the response that died
+		for _, header := range []string{"Etag", "Trailer"} {
+			if got := rec.Header().Get(header); got != "" {
+				t.Errorf("500 carries %s: %q", header, got)
+			}
 		}
 	})
 
