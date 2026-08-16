@@ -168,6 +168,7 @@ type gzipResponseWriter struct {
 	rw          http.ResponseWriter
 	status      int
 	header      http.Header // snapshot taken at WriteHeader, written at commit
+	trailers    http.Header // trailer values, held out of that header block
 	buf         []byte
 	gz          *gzip.Writer
 	declared    int64 // Content-Length the handler set, -1 when it set none
@@ -257,11 +258,67 @@ func bodylessStatus(status int) bool {
 func (g *gzipResponseWriter) commitHeader() {
 	h := g.rw.Header()
 	if g.header != nil {
+		g.trailers = takeTrailers(h, g.header)
 		clear(h)
 		maps.Copy(h, g.header)
 	}
 	varyAcceptEncoding(h)
 	privateIfCookies(h)
+}
+
+// takeTrailers collects the trailers the handler has set so far, which the
+// snapshot restore must not take with it.
+//
+// A trailer is read out of the header map after the handler returns, so at
+// WriteHeader - where the snapshot is taken - none of them has a value yet.
+// Clearing them with the rest dropped every trailer of a response short enough
+// to commit in finish, while the same handler with a longer body committed
+// mid-Write and kept the ones set after that point: the response deciding
+// itself on a byte count the handler never sees, which is the one thing the
+// snapshot is here to prevent.
+func takeTrailers(live, snapshot http.Header) http.Header {
+	// only the announcement being committed counts: a Trailer line the handler
+	// adds later is as late as any other header, here and in net/http
+	announced := snapshot["Trailer"]
+	var out http.Header
+	for k, v := range live {
+		if !isTrailer(k, announced) {
+			continue
+		}
+		if out == nil {
+			out = make(http.Header, 1)
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// isTrailer reports whether a header key holds a trailer rather than a header:
+// either the TrailerPrefix spelling, which needs no announcement, or a name the
+// response announced in Trailer.
+func isTrailer(key string, announced []string) bool {
+	if strings.HasPrefix(key, http.TrailerPrefix) {
+		return true
+	}
+	for _, line := range announced {
+		for _, name := range strings.Split(line, ",") {
+			if strings.EqualFold(strings.TrimSpace(name), key) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sendHeader commits the status, then puts the trailers back in the map the
+// response reads them from at the end. They go back after the header block and
+// not before, because a trailer shipped as a header is a different response
+// again - and which one the client got would once more depend on whether the
+// commit happened before or after the handler set it.
+func (g *gzipResponseWriter) sendHeader() {
+	g.rw.WriteHeader(g.status)
+	maps.Copy(g.rw.Header(), g.trailers)
+	g.trailers = nil
 }
 
 // varyAcceptEncoding keeps our Vary on the response next to whatever the
@@ -362,7 +419,7 @@ func (g *gzipResponseWriter) startGzip() {
 	}
 	h.Del("Content-Length")
 	h.Set("Content-Encoding", "gzip")
-	g.rw.WriteHeader(g.status)
+	g.sendHeader()
 	if gz, ok := gzipWriters.Get().(*gzip.Writer); ok {
 		gz.Reset(g.rw)
 		g.gz = gz
@@ -376,7 +433,7 @@ func (g *gzipResponseWriter) startGzip() {
 func (g *gzipResponseWriter) startPassthrough() {
 	g.passthrough = true
 	g.commitHeader()
-	g.rw.WriteHeader(g.status)
+	g.sendHeader()
 	if len(g.buf) > 0 {
 		g.noteWrite(g.rw.Write(g.buf))
 		g.buf = nil
@@ -425,7 +482,7 @@ func (g *gzipResponseWriter) finish() {
 		return
 	}
 	g.commitHeader()
-	g.rw.WriteHeader(g.status)
+	g.sendHeader()
 	if len(g.buf) > 0 {
 		g.rw.Write(g.buf)
 	}

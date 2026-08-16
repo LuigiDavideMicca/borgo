@@ -324,6 +324,188 @@ func TestGzipHeadersFreezeAtWriteHeader(t *testing.T) {
 	})
 }
 
+// Trailers are the one thing the snapshot must not freeze: they are read out of
+// the header map after the handler returns, so at WriteHeader - where the
+// snapshot is taken - none of them has a value yet. Restoring that snapshot at
+// the commit cleared every trailer of a response short enough to commit in
+// finish, while the same handler with a longer body committed mid-Write and
+// kept them: the same handler answering differently once its body outgrows the
+// buffer, which is the defect the snapshot exists to prevent.
+//
+// The recorder is the subject here rather than a socket because net/http will
+// not send trailers on a response it gave a Content-Length - true with or
+// without borgo, and not something this middleware decides.
+func TestGzipTrailersDoNotDependOnResponseSize(t *testing.T) {
+	const name, value = "X-Checksum", "abc"
+
+	modes := []struct {
+		name     string
+		announce bool
+		key      string
+	}{
+		{"announced", true, name},
+		// TrailerPrefix needs no announcement: net/http and the recorder both
+		// read it straight out of the map at the end of the response
+		{"unannounced", false, http.TrailerPrefix + name},
+	}
+	sizes := []struct {
+		name string
+		n    int
+	}{
+		{"under the buffer", 5},
+		{"exactly the buffer", gzipMinBytes},
+		{"past the buffer", 4 * gzipMinBytes},
+	}
+	cases := []struct {
+		name string
+		want string
+		// an announced trailer set before the snapshot is in the header block as
+		// well, which is what net/http does with it too
+		inBlock bool
+		serve   func(w http.ResponseWriter, body []byte, set func())
+	}{
+		{"no trailer", "", false, func(w http.ResponseWriter, body []byte, set func()) {
+			w.WriteHeader(http.StatusOK)
+			w.Write(body)
+		}},
+		{"set before WriteHeader", value, true, func(w http.ResponseWriter, body []byte, set func()) {
+			set()
+			w.WriteHeader(http.StatusOK)
+			w.Write(body)
+		}},
+		{"set after WriteHeader", value, false, func(w http.ResponseWriter, body []byte, set func()) {
+			w.WriteHeader(http.StatusOK)
+			set()
+			w.Write(body)
+		}},
+		{"set after the first write", value, false, func(w http.ResponseWriter, body []byte, set func()) {
+			w.WriteHeader(http.StatusOK)
+			w.Write(body[:len(body)/2])
+			set()
+			w.Write(body[len(body)/2:])
+		}},
+		{"set after a flush", value, false, func(w http.ResponseWriter, body []byte, set func()) {
+			w.WriteHeader(http.StatusOK)
+			w.Write(body[:len(body)/2])
+			w.(http.Flusher).Flush()
+			set()
+			w.Write(body[len(body)/2:])
+		}},
+		{"set after the whole body", value, false, func(w http.ResponseWriter, body []byte, set func()) {
+			w.WriteHeader(http.StatusOK)
+			w.Write(body)
+			set()
+		}},
+	}
+
+	for _, mode := range modes {
+		for _, size := range sizes {
+			for _, c := range cases {
+				t.Run(mode.name+"/"+size.name+"/"+c.name, func(t *testing.T) {
+					body := bytes.Repeat([]byte("t"), size.n)
+					h := func(w http.ResponseWriter, r *http.Request) {
+						if mode.announce {
+							w.Header().Set("Trailer", name)
+						}
+						c.serve(w, body, func() { w.Header().Set(mode.key, value) })
+					}
+					identity := serveGzip(t, "identity", h).Result()
+					compressed := serveGzip(t, "gzip", h).Result()
+
+					got, zipped := identity.Trailer.Get(name), compressed.Trailer.Get(name)
+					if got != zipped {
+						t.Errorf("the trailer depends on Accept-Encoding: identity %q, gzip %q", got, zipped)
+					}
+					if got != c.want {
+						t.Errorf("trailer = %q, want %q: a body of %d bytes decided it", got, c.want, size.n)
+					}
+
+					// and it must not arrive as a header instead, which would be
+					// the same handler sending a different response again
+					wantBlock := ""
+					if c.inBlock && mode.announce {
+						wantBlock = value
+					}
+					block, zippedBlock := identity.Header.Get(name), compressed.Header.Get(name)
+					if block != zippedBlock {
+						t.Errorf("the header block depends on Accept-Encoding: identity %q, gzip %q", block, zippedBlock)
+					}
+					if block != wantBlock {
+						t.Errorf("header %s = %q, want %q", name, block, wantBlock)
+					}
+				})
+			}
+		}
+	}
+}
+
+// The recorder models the header map; a socket is where a trailer either
+// arrives or does not. Both rows are chunked - one because it was flushed, one
+// because it outgrew net/http's own buffer - since a response net/http can give
+// a Content-Length to carries no trailers at all, with or without borgo.
+func TestGzipTrailersReachARealClient(t *testing.T) {
+	const name, value = "X-Checksum", "abc"
+
+	cases := []struct {
+		name string
+		h    http.HandlerFunc
+	}{
+		{"short body, trailer set before the flush", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Trailer", name)
+			w.WriteHeader(http.StatusOK)
+			w.Header().Set(name, value)
+			w.Write([]byte("small"))
+			w.(http.Flusher).Flush()
+		}},
+		{"body past the buffer, trailer set at the end", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Trailer", name)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(strings.Repeat("x", 4*gzipMinBytes)))
+			w.Header().Set(name, value)
+		}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(recoverMiddleware(gzipMiddleware(c.h)))
+			defer srv.Close()
+			// the transport would otherwise ask for gzip on its own and decode
+			// it again, hiding which path ran
+			client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+
+			for _, ae := range []string{"identity", "gzip"} {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+				if err != nil {
+					cancel()
+					t.Fatal(err)
+				}
+				req.Header.Set("Accept-Encoding", ae)
+				res, err := client.Do(req)
+				if err != nil {
+					cancel()
+					t.Fatalf("Accept-Encoding %s: %v", ae, err)
+				}
+				// trailers exist only once the body is read to the end
+				if _, err := io.Copy(io.Discard, res.Body); err != nil {
+					res.Body.Close()
+					cancel()
+					t.Fatalf("Accept-Encoding %s: body cut short (%v)", ae, err)
+				}
+				res.Body.Close()
+				cancel()
+
+				if got := res.Trailer.Get(name); got != value {
+					t.Errorf("Accept-Encoding %s: trailer %s = %q, want %q", ae, name, got, value)
+				}
+				if got := res.Header.Get(name); got != "" {
+					t.Errorf("Accept-Encoding %s: %s arrived as a header (%q), not as a trailer", ae, name, got)
+				}
+			}
+		})
+	}
+}
+
 // pooled gzip writers must never leak one response's bytes into another
 func TestGzipConcurrentResponsesStayIsolated(t *testing.T) {
 	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
