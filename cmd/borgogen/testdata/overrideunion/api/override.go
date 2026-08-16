@@ -22,12 +22,30 @@ type Soft struct {
 
 func (Soft) MarshalJSON() ([]byte, error) { return json.Marshal(nil) }
 
-// Holder puts that leaf in every position that widens it.
+// Handler stands for every replacement that binds looser than the union a
+// nullable position wraps it in. Spliced in bare, "(v: string) => void"
+// widened to "(v: string) => void | null": a function returning void|null,
+// which is a different type, and one no compiler anywhere complains about.
+//
+//borgo:type Handler (v: string) => void
+type Handler struct {
+	Name string `json:"name"`
+}
+
+// Tags is nilable in Go, and the replacement text replaces the shape, not the
+// nil: json.Marshal of a nil Tags is "null" whatever Array<string> says.
+//
+//borgo:type Tags Array<string>
+type Tags []string
+
+// Holder puts those leaves in every position that widens them.
 type Holder struct {
 	One   Soft            `json:"one"`
 	Ptr   *Soft           `json:"ptr"`
 	Many  []Soft          `json:"many"`
 	Keyed map[string]Soft `json:"keyed"`
+	Fn    *Handler        `json:"fn"`
+	Tags  Tags            `json:"tags"`
 }
 
 //borgo:route GET /api/soft

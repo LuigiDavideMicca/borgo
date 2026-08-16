@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,8 +17,12 @@ import (
 	deeph3 "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/deeppush/h3"
 	deeph4 "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/deeppush/h4"
 	embedapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/embed/api"
+	ifaceapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/ifacetext/api"
 	nestedapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/nested/api"
+	overrideapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/overrideunion/api"
 	recursiveapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/recursive/api"
+	requestapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/request/api"
+	stringoptapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/stringopt/api"
 	textapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/textmarshal/api"
 	wireapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/wire/api"
 )
@@ -34,7 +39,27 @@ func wants(t *testing.T, types string, want ...string) {
 	}
 }
 
+// generated holds the output of one run per fixture. A run is a packages.Load
+// and this suite asks for the same handful of fixtures from thirty tests -
+// testdata/wire alone answers eight of them - while the output is a pure
+// function of the fixture. Under -race that repetition is minutes, and the
+// package has a ten minute timeout like every other.
+var generated sync.Map
+
 func generate(t *testing.T, dir string) string {
+	t.Helper()
+	if out, ok := generated.Load(dir); ok {
+		return out.(string)
+	}
+	out := generateFresh(t, dir)
+	generated.Store(dir, out)
+	return out
+}
+
+// generateFresh runs the generator whatever the cache holds, for the tests that
+// are about the run itself - what it says on stderr, what it leaves on disk -
+// rather than about what it rendered.
+func generateFresh(t *testing.T, dir string) string {
 	t.Helper()
 	root := filepath.Join("testdata", dir)
 	if err := run(root); err != nil {
@@ -54,6 +79,23 @@ func marshals(t *testing.T, v any, want string) {
 	}
 	if string(b) != want {
 		t.Fatalf("json.Marshal(%T) = %s, want %s", v, b, want)
+	}
+}
+
+// accepts and rejects assert what encoding/json really does with a body for a
+// fixture type, so the request types are checked against the decoder the way
+// the response types are checked against the encoder.
+func accepts(t *testing.T, body string, v any) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(body), v); err != nil {
+		t.Fatalf("json.Unmarshal(%s, %T): %v", body, v, err)
+	}
+}
+
+func rejects(t *testing.T, body string, v any) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(body), v); err == nil {
+		t.Fatalf("json.Unmarshal(%s, %T) was accepted, and the point of this fixture is that it is not", body, v)
 	}
 }
 
@@ -364,11 +406,7 @@ func TestStaleMountingRecoversAlongsideAnExternalTestPackage(t *testing.T) {
 }
 
 func TestGenericInstantiationsStayDistinct(t *testing.T) {
-	root := filepath.Join("testdata", "generics")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "generics")
 	for _, want := range []string{
 		"export interface PageWidget {",
 		"export interface PagePost {",
@@ -384,11 +422,7 @@ func TestGenericInstantiationsStayDistinct(t *testing.T) {
 }
 
 func TestSameNameStructsInDifferentPackagesStayDistinct(t *testing.T) {
-	root := filepath.Join("testdata", "collide")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "collide")
 	for _, want := range []string{
 		"export interface Status {",
 		"export interface LibStatus {",
@@ -425,11 +459,7 @@ func TestMountingAvoidsAPackageLevelBorgo(t *testing.T) {
 // writes, so every Record<...> in the file became "type is not generic" - and
 // apps typecheck with skipLibCheck, so nobody saw it.
 func TestTypesNamedAfterTSGenericsAreRenamed(t *testing.T) {
-	root := filepath.Join("testdata", "tsnames")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "tsnames")
 	for _, want := range []string{
 		"export interface ApiRecord {\n  m: Record<string, number> | null;\n}",
 		"export interface ApiArray {\n  l: Array<number> | null;\n}",
@@ -440,17 +470,47 @@ func TestTypesNamedAfterTSGenericsAreRenamed(t *testing.T) {
 	}
 }
 
+// A Go type may be named anything Go allows, and TypeScript reserves names Go
+// does not. `type null struct{...}` came out "export interface null {...}",
+// which does not parse at all, so the file it sat in stopped being a file - and
+// with it every route in the project, not only the one that declared the type.
+func TestTypesNamedAfterTSReservedWordsAreRenamed(t *testing.T) {
+	types := generate(t, "tsnames")
+	wants(t, types,
+		"export interface ApiNull {\n  x: number;\n}",
+		"export interface ApiFunction {\n  y: number;\n}",
+		"export interface ApiString {\n  z: number;\n}",
+		`"GET /api/null": { response: ApiNull };`,
+		`"GET /api/function": { response: ApiFunction };`,
+		`"GET /api/string": { response: ApiString };`,
+	)
+	typechecks(t, types)
+}
+
 func TestTextMarshalersAreStrings(t *testing.T) {
-	root := filepath.Join("testdata", "textmarshal")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "textmarshal")
 	want := "export interface Resp {\n  id: string;\n  lvl: string;\n  addr: string;\n" +
 		"  keyed: Record<string, number> | null;\n  plain: number;\n}"
 	if !strings.Contains(types, want) {
 		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
 	}
+}
+
+// An interface that embeds encoding.TextMarshaler marshals as a string only
+// when it holds something. A nil one is "null", and encoding/json never calls
+// the method to find out - so typing the interface "string" narrowed the type
+// in the dangerous direction: the browser reads .length off a null that the
+// declaration promised was a string.
+func TestMarshalerInterfacesAreNullable(t *testing.T) {
+	marshals(t, ifaceapi.Box{}, `{"code":null,"free":null,"many":null}`)
+	marshals(t, ifaceapi.Box{Code: ifaceapi.Warn{}, Many: []ifaceapi.Coded{nil, ifaceapi.Warn{}}},
+		`{"code":"warn","free":null,"many":[null,"warn"]}`)
+
+	types := generate(t, "ifacetext")
+	wants(t, types, "export interface Box {\n  code: string | null;\n"+
+		// an interface carrying no marshaler at all was never the narrow case
+		"  free: unknown;\n  many: Array<string | null> | null;\n}")
+	typechecks(t, types)
 }
 
 // A MarshalText on the pointer receiver runs only where encoding/json holds an
@@ -487,11 +547,7 @@ func TestByteSlicesAreBase64Strings(t *testing.T) {
 // what json.Marshal of a zero value actually writes (each case is spelled out
 // in testdata/embed/api/embed.go).
 func TestEmbeddedFieldPromotion(t *testing.T) {
-	root := filepath.Join("testdata", "embed")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "embed")
 	for _, want := range []string{
 		// exported fields of an embedded unexported struct type do reach the wire
 		"export interface Doc {\n  id: number;\n  name: string;\n  title: string;\n}",
@@ -511,11 +567,7 @@ func TestEmbeddedFieldPromotion(t *testing.T) {
 // One `json:"user-name"` used to be written unquoted, which is a syntax error
 // that costs the whole project its types, not just that route's.
 func TestNonIdentifierJSONNamesAreQuoted(t *testing.T) {
-	root := filepath.Join("testdata", "tagnames")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "tagnames")
 	for _, want := range []string{
 		`"user-name": string`,
 		`"a.b": string`,
@@ -535,16 +587,36 @@ func TestNonIdentifierJSONNamesAreQuoted(t *testing.T) {
 	}
 }
 
+// encoding/json decides `,string` on the Go kind, in typeFields, before it
+// knows anything about how the value will be written. Deciding it on the
+// rendered TypeScript agreed by coincidence - "number" and "boolean" are what
+// the quotable kinds render as - and stopped agreeing the moment a //borgo:type
+// stood between the kind and the text, in both directions at once.
+func TestStringOptionFollowsTheGoKindNotTheRenderedText(t *testing.T) {
+	marshals(t, stringoptapi.Kinds{Amount: 7, Plain: 7},
+		`{"amount":"7","plain":7,"ratio":3,"coin":9,"flag":"false","p":null}`)
+
+	types := generate(t, "stringopt")
+	wants(t, types, "export interface Kinds {\n"+
+		// an int kind is quoted however it is rendered
+		"  amount: string;\n"+
+		"  plain: `${number}`;\n"+
+		// and a struct kind is not, however it is rendered
+		"  ratio: number;\n"+
+		// a marshaler outranks the option: opts.quoted never reaches it
+		"  coin: unknown;\n"+
+		"  flag: string;\n"+
+		// the null a pointer carries is untouched by the quoting
+		"  p: string | null;\n}")
+	typechecks(t, types)
+}
+
 // omitzero (go 1.24) drops a field whose value is the zero of its type, which
 // is exactly the case omitempty does not cover for structs and time.Time. A
 // required property for a field the wire routinely omits is the dangerous
 // direction: the browser reads undefined off a type that promised a value.
 func TestOptionalFieldsMatchEncodingJSON(t *testing.T) {
-	root := filepath.Join("testdata", "optional")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "optional")
 	for _, want := range []string{
 		"zerost?: Inner;",
 		"zeronum?: number;",
@@ -580,11 +652,7 @@ func TestNilSlicesMapsAndBytesAreNullable(t *testing.T) {
 	marshals(t, wireapi.Empty{},
 		`{"items":null,"m":null,"raw":null,"nest":null,"named":null,"arr":[0,0]}`)
 
-	root := filepath.Join("testdata", "wire")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "wire")
 	want := "export interface Empty {\n  items: Array<number> | null;\n  m: Record<string, number> | null;\n" +
 		"  raw: string | null;\n  nest: Array<Array<string> | null> | null;\n  named: Array<string> | null;\n" +
 		// an array is not a slice: it is on the wire every time, elements and all
@@ -603,11 +671,7 @@ func TestNilSlicesMapsAndBytesAreNullable(t *testing.T) {
 func TestAnonymousStructWithPromotedMarshalerIsNotAnObject(t *testing.T) {
 	marshals(t, wireapi.Stamped{}, `{"at":"0001-01-01T00:00:00Z","plain":{"n":0}}`)
 
-	root := filepath.Join("testdata", "wire")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "wire")
 	// and one without a marshaler still expands to its fields
 	want := "export interface Stamped {\n  at: unknown;\n  plain: { n: number };\n}"
 	if !strings.Contains(types, want) {
@@ -627,11 +691,7 @@ func TestAnonymousStructWithPromotedTextMarshaler(t *testing.T) {
 	}{})
 	marshals(t, one, `{"l":"label","p":{"N":0,"extra":0},"many":["ptr"]}`)
 
-	root := filepath.Join("testdata", "wire")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "wire")
 	want := "export interface Tagged {\n  l: string;\n  p: { N: number; extra: number };\n" +
 		"  many: Array<string> | null;\n}"
 	if !strings.Contains(types, want) {
@@ -648,11 +708,7 @@ func TestFloatMapKeysAreUnknown(t *testing.T) {
 		t.Fatalf("want encoding/json to refuse a float map key, got %v", err)
 	}
 
-	root := filepath.Join("testdata", "wire")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "wire")
 	want := "export interface Keys {\n  fees: unknown;\n  sizes: Record<string, number> | null;\n}"
 	if !strings.Contains(types, want) {
 		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
@@ -666,11 +722,7 @@ func TestFieldsPromotedThroughANilPointerAreOptional(t *testing.T) {
 	marshals(t, embedapi.PtrOuter{PtrInner: &embedapi.PtrInner{A: 7}, B: 1}, `{"a":7,"b":1}`)
 	marshals(t, embedapi.Deep{D: 2}, `{"d":2}`)
 
-	root := filepath.Join("testdata", "embed")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "embed")
 	for _, want := range []string{
 		"export interface PtrOuter {\n  a?: number;\n  b: number;\n}",
 		// two hops down, still behind the same nil pointer
@@ -686,11 +738,7 @@ func TestFieldsPromotedThroughANilPointerAreOptional(t *testing.T) {
 // had no anchor and expanded until the stack blew up - a fatal error run()'s
 // recover never sees, so the dev loop died on save with no message at all.
 func TestRecursiveNamedNonStructTypesTerminate(t *testing.T) {
-	root := filepath.Join("testdata", "recursive")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "recursive")
 	for _, want := range []string{
 		"export type Tree = Record<string, Tree> | null;",
 		"export type Ring = Array<Hop> | null;",
@@ -713,11 +761,7 @@ func TestRecursiveNamedNonStructTypesTerminate(t *testing.T) {
 // ordinary layering. Scanning only api/ dropped those events, and with them the
 // whole WsEvents block, so every subscriber in the app lost its types at once.
 func TestPushesInOtherPackagesAreCollected(t *testing.T) {
-	root := filepath.Join("testdata", "pushpkg")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "pushpkg")
 	for _, want := range []string{
 		"interface WsEvents {",
 		// one hop out, through a function taking no writer and no request
@@ -737,11 +781,7 @@ func TestPushesInOtherPackagesAreCollected(t *testing.T) {
 // silently ignoring one left the directive looking applied and the wrong type in
 // every caller.
 func TestTypeOverrideAppliesToAnAlias(t *testing.T) {
-	root := filepath.Join("testdata", "aliastype")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "aliastype")
 	want := "export interface Price {\n  amount: string;\n  ship: string;\n  raw: number;\n}"
 	if !strings.Contains(types, want) {
 		t.Errorf("api-types.d.ts missing:\n%s\ngot:\n%s", want, types)
@@ -770,11 +810,7 @@ func TestComputedHandlePatternWarns(t *testing.T) {
 // A struct that embeds a pointer to itself used to recurse until the stack
 // blew up - a fatal error, not a recoverable one, on every save in dev.
 func TestSelfEmbeddingStructTerminates(t *testing.T) {
-	root := filepath.Join("testdata", "selfembed")
-	if err := run(root); err != nil {
-		t.Fatal(err)
-	}
-	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	types := generate(t, "selfembed")
 	// json.Marshal(Node{nil, 5}) is {"x":5}: the promoted copy never shows up
 	if want := "export interface Node {\n  x: number;\n}"; !strings.Contains(types, want) {
 		t.Errorf("want %q\n%s", want, types)
@@ -1111,13 +1147,54 @@ func TestNestedNullableTypesAreClosedAndKeepEveryNull(t *testing.T) {
 // goes by carrying the override as structure from the directive, never by
 // splitting the rendering again.
 func TestOverrideTextIsCarriedWholeIntoEveryNullablePosition(t *testing.T) {
+	// the wire the two nilable cases below are typed against
+	marshals(t, overrideapi.Tags(nil), `null`)
+	marshals(t, overrideapi.Tags{"a"}, `["a"]`)
+
 	types := generate(t, "overrideunion")
 	wants(t, types, "export interface Holder {\n"+
 		"  one: string | null;\n"+
-		"  ptr: string | null | null;\n"+
+		"  ptr: (string | null) | null;\n"+
 		"  many: Array<string | null> | null;\n"+
-		"  keyed: Record<string, string | null> | null;\n}")
+		"  keyed: Record<string, string | null> | null;\n"+
+		// a replacement that binds looser than "|" is parenthesised before
+		// anything is composed around it, or the null lands inside the
+		// function's return type instead of beside the function
+		"  fn: ((v: string) => void) | null;\n"+
+		// and a nilable Go type keeps its null: the text replaces the shape,
+		// not the nil. No parentheses here - the scan found nothing loose in it
+		"  tags: Array<string> | null;\n}")
 	typechecks(t, types)
+}
+
+// A replacement nobody validated went into the file exactly as written, and a
+// generated file is not a place where a mistake stays local: one unbalanced
+// bracket in one directive costs every route in the project its types. A
+// generator that cannot render a type says so instead.
+func TestUnparsableTypeOverridesFailTheRun(t *testing.T) {
+	for _, c := range []struct{ name, dir, want string }{
+		{"unclosed generic", "badtypets", "the < in it is never closed"},
+		{"trailing comment", "badtypecomment", "it contains a comment"},
+		{"statement after the type", "badtypestmt", `it contains a top-level ";"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// what is asserted below is that this run writes nothing, and that
+			// is a claim about a known starting state: a copy left by an
+			// earlier run - a mutation experiment above all, which is where
+			// this was found - would otherwise read as one this run wrote
+			out := filepath.Join("testdata", c.dir, ".borgo", "api-types.d.ts")
+			if err := os.Remove(out); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			err := run(filepath.Join("testdata", c.dir))
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want an error containing %q, got %v", c.want, err)
+			}
+			if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+				t.Errorf("a refused directive must leave no generated file behind: %v", statErr)
+			}
+		})
+	}
 }
 
 // `type Loop *Loop` is a cycle that runs through pointers alone: every value is
@@ -1145,7 +1222,7 @@ func TestClosureAndConvertedHandlersAreTyped(t *testing.T) {
 	marshals(t, closureapi.Wrapped{B: "b"}, `{"b":"b"}`)
 
 	var types string
-	out := captureStderr(t, func() { types = generate(t, "closurehandle") })
+	out := captureStderr(t, func() { types = generateFresh(t, "closurehandle") })
 	wants(t, types,
 		"export interface Inline {\n  a: number;\n}",
 		"export interface Wrapped {\n  b: string;\n}",
@@ -1170,7 +1247,7 @@ func TestPushBeyondTheHopCapWarns(t *testing.T) {
 	marshals(t, deeph4.PFour{}, `{"n":0}`)
 
 	var types string
-	out := captureStderr(t, func() { types = generate(t, "deeppush") })
+	out := captureStderr(t, func() { types = generateFresh(t, "deeppush") })
 	wants(t, types,
 		`"chain/one": POne;`,
 		`"chain/two": PTwo;`,
@@ -1182,6 +1259,89 @@ func TestPushBeyondTheHopCapWarns(t *testing.T) {
 	if !strings.Contains(out, "deeppush/h4") || !strings.Contains(out, "package hops from api/") {
 		t.Errorf("want a warning naming the package that was not scanned, got:\n%s", out)
 	}
+}
+
+// A request body is what encoding/json reads, and reading is not writing run
+// backwards: the decoder consults UnmarshalJSON and UnmarshalText, and it always
+// holds the address of what it is filling, because borgo.Bind declares its own
+// value and decodes into &v. Rendering request types with the marshal rules was
+// inverted in both directions at once, and the assertions below are both of
+// them: the shape the old generator told callers to send is the one shape the
+// server refuses, and the shape it refused to admit is the one it accepts.
+func TestRequestTypesFollowTheUnmarshalRules(t *testing.T) {
+	// out: Slug is a string, because MarshalText says so
+	marshals(t, requestapi.Create{Slug: requestapi.Slug{Raw: "x"}}, `{"slug":"x","stamp":{"unix":0},"note":""}`)
+	// in: that very body is rejected, and the object shape is what binds
+	rejects(t, `{"slug":"x"}`, &requestapi.Create{})
+	accepts(t, `{"slug":{"raw":"x"},"stamp":17,"note":"n"}`, &requestapi.Create{})
+
+	types := generate(t, "request")
+	wants(t, types,
+		"export interface Create {\n  slug: string;\n  stamp: Stamp;\n  note: string;\n}",
+		"export interface Create$Request {\n  slug: Slug$Request;\n  stamp: unknown;\n  note: string;\n}",
+		"export interface Slug$Request {\n  raw: string;\n}",
+		`"POST /api/things": { response: Create; request: Create$Request };`,
+		// a type that converts nothing itself is one shape both ways, and one
+		// declaration answers for both: no second name, no second declaration
+		"export interface Plain {\n  name: string;\n}",
+		`"POST /api/plain": { response: Plain; request: Plain };`,
+	)
+	if strings.Contains(types, "Plain$Request") {
+		t.Errorf("a type read exactly as it is written needs no second declaration:\n%s", types)
+	}
+	typechecks(t, types)
+}
+
+// Registering a handler that lives in another package of the app is ordinary
+// layering: api/ knows the *types.Func and holds no declaration for it, so the
+// walk began at nothing and the route came out "response: unknown" - the same
+// answer a handler that writes nothing gets, with nothing to tell them apart.
+func TestHandlersInOtherPackagesAreTyped(t *testing.T) {
+	var types string
+	out := captureStderr(t, func() { types = generateFresh(t, "pkghandler") })
+	wants(t, types,
+		"export interface User {\n  name: string;\n}",
+		"export interface Filter {\n  q: string;\n}",
+		`"GET /api/users": { response: User; request: Filter };`,
+		// and one whose package this generator really does not read stays
+		// unknown - out loud, which is the whole difference
+		`"GET /api/notfound": { response: unknown };`,
+	)
+	if !strings.Contains(out, "net/http") || !strings.Contains(out, "stay unknown") {
+		t.Errorf("want a warning naming the package that was not read, got:\n%s", out)
+	}
+	if strings.Contains(out, "users.List") || strings.Contains(out, "handler List") {
+		t.Errorf("the handler that was read must not warn:\n%s", out)
+	}
+	// borgo's own handlers are untyped by the framework's choice and on every
+	// run of every app that registers them: a warning nobody can act on is how
+	// the ones that matter stop being read
+	if strings.Contains(out, "LoginHandler") {
+		t.Errorf("the framework's own handlers must not warn:\n%s", out)
+	}
+	if !strings.Contains(types, `"POST /api/login": { response: unknown };`) {
+		t.Errorf("the framework handler is still a route, and still untyped:\n%s", types)
+	}
+	typechecks(t, types)
+}
+
+// The hop cap bounds how much of the module one route can pull into analysis.
+// What sits past it used to be dropped without a word, and a missing
+// alternative does not read as missing: the route just answers less than it
+// does, or nothing at all, and the caller's code fails to compile against a
+// response the server really sends. The push walk already says where it
+// stopped; this is the same debt on the response side.
+func TestResponsesBeyondTheHopCapWarn(t *testing.T) {
+	var types string
+	out := captureStderr(t, func() { types = generateFresh(t, "deepresp") })
+	wants(t, types, `"GET /api/chain": { response: ROne | RTwo | RThree };`)
+	if strings.Contains(types, "RFour") {
+		t.Errorf("h4 is past the cap, so nothing in it can be typed:\n%s", types)
+	}
+	if !strings.Contains(out, "h4.Four") || !strings.Contains(out, "package hops from the handler") {
+		t.Errorf("want a warning naming the function that was not followed, got:\n%s", out)
+	}
+	typechecks(t, types)
 }
 
 // A //borgo:type naming a function-local type does apply, as long as the name

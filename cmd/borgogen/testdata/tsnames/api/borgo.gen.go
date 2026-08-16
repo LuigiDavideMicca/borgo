@@ -5,5 +5,8 @@ import "github.com/LuigiDavideMicca/borgo"
 
 func init() {
 	borgo.Handle("GET /api/arr", GetArr)
+	borgo.Handle("GET /api/function", GetFunction)
+	borgo.Handle("GET /api/null", GetNull)
 	borgo.Handle("GET /api/rec", GetRec)
+	borgo.Handle("GET /api/string", GetString)
 }

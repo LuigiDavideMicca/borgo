@@ -4,14 +4,29 @@ export interface ApiArray {
   l: Array<number> | null;
 }
 
+export interface ApiFunction {
+  y: number;
+}
+
+export interface ApiNull {
+  x: number;
+}
+
 export interface ApiRecord {
   m: Record<string, number> | null;
+}
+
+export interface ApiString {
+  z: number;
 }
 
 declare module "borgo-framework" {
   interface ApiRoutes {
     "GET /api/arr": { response: ApiArray };
+    "GET /api/function": { response: ApiFunction };
+    "GET /api/null": { response: ApiNull };
     "GET /api/rec": { response: ApiRecord };
+    "GET /api/string": { response: ApiString };
   }
 }
 

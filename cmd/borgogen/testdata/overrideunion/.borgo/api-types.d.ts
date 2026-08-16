@@ -2,9 +2,11 @@
 
 export interface Holder {
   one: string | null;
-  ptr: string | null | null;
+  ptr: (string | null) | null;
   many: Array<string | null> | null;
   keyed: Record<string, string | null> | null;
+  fn: ((v: string) => void) | null;
+  tags: Array<string> | null;
 }
 
 declare module "borgo-framework" {

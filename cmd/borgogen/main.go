@@ -140,12 +140,8 @@ func run(root string) (err error) {
 	})
 
 	gen := &tsGen{
-		names: map[string]string{},
-		// Array and Record are the two generics this file writes: an interface
-		// declared under either name shadows them inside the module and every
-		// use turns into "type is not generic", quietly, since apps typecheck
-		// with skipLibCheck
-		taken:     map[string]bool{"Array": true, "Record": true},
+		names:     map[string]string{},
+		taken:     reservedTSNames(),
 		expanding: map[string]bool{},
 		apiPkg:    pkg.Types,
 		overrides: collectTypeOverrides(pkg),
@@ -163,11 +159,8 @@ func run(root string) (err error) {
 			continue
 		}
 		first[r.pattern] = r.pos
-		body := r.decl
-		if body == nil {
-			body = decls[r.handler]
-		}
-		resp, req := gen.bridgeTypes(pkg, decls, body, loader)
+		hpkg, hdecls, body := handlerBody(pkg, decls, r, loader)
+		resp, req := gen.bridgeTypes(hpkg, hdecls, body, loader)
 		entry := "{ response: " + resp
 		if req != "" {
 			entry += "; request: " + req
@@ -577,7 +570,7 @@ func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]s
 				// borgo.Push marshals the payload as a map value of type any:
 				// unaddressable twice over, so a pointer-receiver marshaler
 				// on the payload itself never runs
-				unions[key].add(gen.tsType(inst.TypeArgs.At(0), false))
+				unions[key].add(gen.tsType(inst.TypeArgs.At(0), site{}))
 				return true
 			})
 		}
@@ -673,6 +666,53 @@ func handlerTarget(info *types.Info, expr ast.Expr) (*types.Func, *ast.FuncDecl)
 	return nil, nil
 }
 
+// handlerBody resolves the package, declarations and body a route's bridge
+// types are read from. A handler registered as borgo.Handle("GET /x",
+// users.List) is an ordinary layering choice, and api/ knows its *types.Func
+// while holding no declaration for it: the walk started at a nil body, the
+// route came out "response: unknown", and nothing said why. The package is
+// loaded like any other helper, and what cannot be loaded is said out loud
+// rather than typed as unknown in silence.
+func handlerBody(pkg *packages.Package, decls map[*types.Func]*ast.FuncDecl, r route, loader *helperLoader) (*packages.Package, map[*types.Func]*ast.FuncDecl, *ast.FuncDecl) {
+	switch {
+	case r.decl != nil:
+		return pkg, decls, r.decl
+	case r.handler == nil:
+		return pkg, decls, nil // collectRoutes already warned
+	case decls[r.handler] != nil:
+		return pkg, decls, decls[r.handler]
+	}
+	hpkg := r.handler.Pkg()
+	if hpkg != nil && hpkg.Path() == borgoPath {
+		// borgo's own handlers - the built-in auth ones above all, which the
+		// full template registers exactly as they come - are untyped by
+		// construction and by the framework's choice, not by anything the app
+		// did. Warning here would fire on every run of every app that uses
+		// them, and a warning nobody can act on is how the ones that matter
+		// stop being read
+		return pkg, decls, nil
+	}
+	if hpkg == nil || hpkg == pkg.Types || !loader.sameModule(hpkg.Path()) {
+		where := "outside this module"
+		if hpkg != nil {
+			where = hpkg.Path()
+		}
+		warn("%s: handler %s is declared in %s, which this generator does not read; the route is registered but its request and response types stay unknown", r.pos, r.handler.Name(), where)
+		return pkg, decls, nil
+	}
+	hp := loader.load(hpkg.Path(), r.pos.String()+": ")
+	if hp == nil {
+		return pkg, decls, nil // load warned
+	}
+	decl := hp.byName[r.handler.Name()]
+	if decl == nil {
+		// a method value, or a function this build does not compile
+		warn("%s: handler %s is not a package-level function of %s, so its request and response types stay unknown", r.pos, r.handler.Name(), hpkg.Path())
+		return pkg, decls, nil
+	}
+	return hp.pkg, hp.decls, decl
+}
+
 func funcDecls(pkg *packages.Package) map[*types.Func]*ast.FuncDecl {
 	decls := map[*types.Func]*ast.FuncDecl{}
 	for _, file := range pkg.Syntax {
@@ -750,6 +790,9 @@ func collectTypeOverrides(pkg *packages.Package) *overrideSet {
 					continue
 				}
 				goType, ts := m[1], strings.TrimSpace(m[2])
+				if _, reason := scanOverrideTS(ts); reason != "" {
+					fail("%s: //borgo:type %s %s: %s", pos, goType, ts, reason)
+				}
 				// two directives conflict when they land on one type, however
 				// each of them spelled it
 				var target any = goType
@@ -769,6 +812,80 @@ func collectTypeOverrides(pkg *packages.Package) *overrideSet {
 		}
 	}
 	return out
+}
+
+// scanOverrideTS reads a //borgo:type replacement once and answers the only two
+// questions anything here ever asks about it: whether it can be a TypeScript
+// type at all, and whether it binds loosely enough to need parentheses when
+// something is composed around it.
+//
+// reason is why the text cannot parse, or "" when nothing here can tell. The
+// text is hand written and spliced into the generated file whole - no site
+// downstream ever looks inside it - so what a bad one costs is not the type it
+// names: an unclosed bracket, a trailing comment or a stray ";" takes the parse
+// of the whole .d.ts with it, and every route in the project loses its types at
+// once. This is not a typechecker and cannot be one: the replacement usually
+// names a type declared somewhere in the app, which is not knowable from here,
+// and refusing what it cannot resolve would fail runs that are perfectly
+// correct. It refuses what cannot parse, and leaves the compiler the rest.
+//
+// loose is set by a "|", "&", "?" or "=>" outside every bracket - the operators
+// that bind looser than the union a nullable position wraps the text in. The
+// scan is what decides it, not a look at the finished string: it is the same
+// mistake as splitting a rendered type to count its alternatives, and it is
+// wrong the same way.
+func scanOverrideTS(ts string) (loose bool, reason string) {
+	if ts == "" {
+		return false, "the TypeScript type is empty"
+	}
+	pairs := map[rune]rune{')': '(', ']': '[', '}': '{', '>': '<'}
+	var open []rune
+	r := []rune(ts)
+	for i := 0; i < len(r); i++ {
+		switch c := r[i]; c {
+		case '"', '\'', '`':
+			j := i + 1
+			for j < len(r) && r[j] != c {
+				if r[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j >= len(r) {
+				return loose, fmt.Sprintf("the %s string literal in it is never closed", string(c))
+			}
+			i = j
+		case '/':
+			if i+1 < len(r) && (r[i+1] == '/' || r[i+1] == '*') {
+				return loose, "it contains a comment, which would comment out the rest of the line it is written into"
+			}
+		case '=':
+			// the ">" of a "=>" closes nothing, and a lone "=" is an assignment
+			// and not part of any type
+			if i+1 >= len(r) || r[i+1] != '>' {
+				return loose, `it contains "=", which is not part of a type`
+			}
+			i++
+			loose = loose || len(open) == 0
+		case '|', '&', '?':
+			loose = loose || len(open) == 0
+		case '(', '[', '{', '<':
+			open = append(open, c)
+		case ')', ']', '}', '>':
+			if len(open) == 0 || open[len(open)-1] != pairs[c] {
+				return loose, fmt.Sprintf("the %s in it closes nothing", string(c))
+			}
+			open = open[:len(open)-1]
+		case ';':
+			if len(open) == 0 {
+				return loose, `it contains a top-level ";", which would end the declaration it is written into and leave the rest of the text loose in the file`
+			}
+		}
+	}
+	if len(open) > 0 {
+		return loose, fmt.Sprintf("the %s in it is never closed", string(open[len(open)-1]))
+	}
+	return loose, ""
 }
 
 // resolveOverride binds a directive's Go type to the one declaration it names,
@@ -902,11 +1019,27 @@ func shortPos(pkg *packages.Package, obj *types.TypeName) string {
 type tsRef struct {
 	ts   string // one whole alternative; "" when the type is null and nothing else
 	null bool
+	// override text that binds looser than a union does (scanOverrideTS). Every
+	// rendering of our own is already an atom where a union puts it - a name, an
+	// Array<...>, a Record<...>, an object literal - but "(v: string) => void"
+	// is not: widening it to admit null yields "(v: string) => void | null", a
+	// function returning void|null, which is a different type and typechecks
+	// happily as one.
+	opaque bool
 }
 
 func (r tsRef) orNull() tsRef {
 	r.null = true
 	return r
+}
+
+// member renders the type as one alternative of a union, parenthesizing the
+// text that needs it. Only override text ever does: see opaque.
+func (r tsRef) member() string {
+	if r.opaque {
+		return "(" + r.ts + ")"
+	}
+	return r.ts
 }
 
 func (r tsRef) String() string {
@@ -916,7 +1049,7 @@ func (r tsRef) String() string {
 	case r.ts == "":
 		return "unknown"
 	case r.null:
-		return r.ts + " | null"
+		return r.member() + " | null"
 	}
 	return r.ts
 }
@@ -940,9 +1073,9 @@ func (u *union) add(r tsRef) {
 	if u.seen == nil {
 		u.seen = map[string]bool{}
 	}
-	if !u.seen[r.ts] {
-		u.seen[r.ts] = true
-		u.parts = append(u.parts, r.ts)
+	if part := r.member(); !u.seen[part] {
+		u.seen[part] = true
+		u.parts = append(u.parts, part)
 	}
 }
 
@@ -1090,6 +1223,7 @@ func takesHTTP(fn *types.Func) bool {
 func (g *tsGen) bridgeTypes(pkg *packages.Package, decls map[*types.Func]*ast.FuncDecl, decl *ast.FuncDecl, loader *helperLoader) (response, request string) {
 	var resp, req union
 	visited := map[*ast.FuncDecl]bool{}
+	capped := map[*types.Func]bool{} // warned about once per route, not per call site
 
 	var walk func(pkg *packages.Package, decls map[*types.Func]*ast.FuncDecl, d *ast.FuncDecl, depth int)
 	walk = func(pkg *packages.Package, decls map[*types.Func]*ast.FuncDecl, d *ast.FuncDecl, depth int) {
@@ -1105,23 +1239,25 @@ func (g *tsGen) bridgeTypes(pkg *packages.Package, decls map[*types.Func]*ast.Fu
 			switch name, sel := borgoFunc(pkg.TypesInfo, call); name {
 			case "JSON", "Bind", "BindMax":
 				if inst, ok := pkg.TypesInfo.Instances[sel]; ok && inst.TypeArgs.Len() == 1 {
-					// every one of these hands the value to encoding/json through
-					// an any, so what reaches the wire is the unaddressable shape
 					if name != "JSON" {
-						req.add(g.tsType(inst.TypeArgs.At(0), false))
+						// Bind declares its own value and decodes into &v, so
+						// the decoder holds the address of everything in it
+						req.add(g.tsType(inst.TypeArgs.At(0), inbound()))
 					} else if len(call.Args) != 3 || !isErrorStatus(pkg.TypesInfo, call.Args[1]) {
-						resp.add(g.tsType(inst.TypeArgs.At(0), false))
+						// JSON hands the value to encoding/json through an any,
+						// so what reaches the wire is the unaddressable shape
+						resp.add(g.tsType(inst.TypeArgs.At(0), site{}))
 					}
 				}
 			case "WriteJSON":
 				if len(call.Args) == 3 && !isErrorStatus(pkg.TypesInfo, call.Args[1]) {
 					if tv := pkg.TypesInfo.Types[call.Args[2]]; tv.Type != nil {
-						resp.add(g.tsType(types.Default(tv.Type), false))
+						resp.add(g.tsType(types.Default(tv.Type), site{}))
 					}
 				}
 			case "":
 				if t := encodedType(pkg.TypesInfo, call); t != nil {
-					resp.add(g.tsType(t, false))
+					resp.add(g.tsType(t, site{}))
 					return true
 				}
 				fn := callee(pkg.TypesInfo, call)
@@ -1132,12 +1268,24 @@ func (g *tsGen) bridgeTypes(pkg *packages.Package, decls map[*types.Func]*ast.Fu
 					walk(pkg, decls, decls[fn], depth)
 					return true
 				}
-				if fn.Pkg() == nil || !loader.sameModule(fn.Pkg().Path()) ||
-					!takesHTTP(fn) || depth >= maxCrossPkgDepth {
+				if fn.Pkg() == nil || !loader.sameModule(fn.Pkg().Path()) || !takesHTTP(fn) {
 					return true
 				}
 				if sig, ok := fn.Type().(*types.Signature); !ok || sig.Recv() != nil {
 					// methods cannot be matched by name across loads
+					return true
+				}
+				if depth >= maxCrossPkgDepth {
+					// the cap is a bound on how much of the module one route can
+					// pull in, not a statement that there is nothing out there.
+					// Dropped in silence it takes a whole alternative out of the
+					// union - or leaves the route "unknown" - and reads exactly
+					// like a handler that answers nothing
+					if !capped[fn] {
+						capped[fn] = true
+						warn("%s: %s.%s is more than %d package hops from the handler, so it was not followed; a borgo.JSON or borgo.Bind inside it is missing from this route's types",
+							pkg.Fset.Position(call.Pos()), fn.Pkg().Name(), fn.Name(), maxCrossPkgDepth)
+					}
 					return true
 				}
 				if hp := loader.load(fn.Pkg().Path(), pkg.Fset.Position(call.Pos()).String()+": "); hp != nil {
@@ -1169,6 +1317,100 @@ func isErrorStatus(info *types.Info, expr ast.Expr) bool {
 	}
 	v, ok := constant.Int64Val(tv.Value)
 	return ok && v >= 300
+}
+
+// wire is which crossing a type is being rendered for. The two are not mirror
+// images: encoding/json consults MarshalJSON and MarshalText on the way out and
+// UnmarshalJSON and UnmarshalText on the way in, and a type routinely carries
+// one side without the other. A hand written enum with a MarshalText and no
+// UnmarshalText is a string in a response and an ordinary object in a request
+// body; a type with an UnmarshalJSON - which is where practically all of them
+// are declared, on the pointer receiver - accepts whatever that method accepts
+// and nothing like its Go shape.
+//
+// Rendering a request body with the marshal rules was wrong in both directions
+// at once, and both are the dangerous one: it promised the caller a string the
+// server will not accept, and it typed a body the decoder rewrites as the Go
+// shape the decoder never sees.
+type wire int
+
+const (
+	out wire = iota
+	in
+)
+
+// site is where a value sits and which way it is crossing - the two things that
+// decide which of a type's methods encoding/json actually calls.
+//
+// addr is what json.Marshal can take the address of, and it matters only going
+// out: the decoder always holds a pointer to what it is filling. borgo.Bind
+// decodes into &v, a map value is decoded into a fresh addressable value and
+// stored back, a slice grows into addressable elements - so a pointer-receiver
+// Unmarshaler runs in every position and nothing on the way in depends on where
+// the value sits.
+type site struct {
+	w    wire
+	addr bool
+}
+
+func inbound() site { return site{w: in, addr: true} }
+
+// at moves to a position of the given addressability, which is a move only on
+// the way out.
+func (s site) at(addr bool) site {
+	if s.w == out {
+		s.addr = addr
+	}
+	return s
+}
+
+// wireTS reports the shape t reaches the wire as when it converts itself, and
+// whether it does at all.
+func wireTS(t types.Type, s site) (string, bool) {
+	if s.w == in {
+		switch {
+		case hasUnmarshalMethod(t, "UnmarshalJSON"):
+			return "unknown", true
+		case hasUnmarshalMethod(t, "UnmarshalText"):
+			return "string", true
+		}
+		return "", false
+	}
+	return marshalTS(t, s.addr)
+}
+
+// keyTS reports whether a map key type names itself on the wire. Only the text
+// side counts, in either direction: encoding/json's resolveKeyName consults
+// TextMarshaler and never MarshalJSON, and its decoder consults
+// TextUnmarshaler and never UnmarshalJSON.
+func keyTS(t types.Type, s site) (string, bool) {
+	if s.w == in {
+		if hasUnmarshalMethod(t, "UnmarshalText") {
+			return "string", true
+		}
+		return "", false
+	}
+	if hasMarshalMethod(t, "MarshalText", false) {
+		return "string", true
+	}
+	return "", false
+}
+
+// hasUnmarshalMethod looks for a method with the exact func([]byte) error shape
+// of json.Unmarshaler and encoding.TextUnmarshaler. The lookup always includes
+// the method set of *t: see site.addr for why coming in there is no other case.
+func hasUnmarshalMethod(t types.Type, name string) bool {
+	obj, _, _ := types.LookupFieldOrMethod(t, true, nil, name)
+	fn, ok := obj.(*types.Func)
+	if !ok {
+		return false
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Params().Len() != 1 || sig.Results().Len() != 1 {
+		return false
+	}
+	return types.Identical(sig.Params().At(0).Type(), types.NewSlice(types.Typ[types.Byte])) &&
+		sig.Results().At(0).Type().String() == "error"
 }
 
 // marshalTS reports the shape t reaches the wire as when it marshals itself,
@@ -1215,23 +1457,26 @@ func hasMarshalMethod(t types.Type, name string, addressable bool) bool {
 		sig.Results().At(1).Type().String() == "error"
 }
 
-// tsType renders t as TypeScript. addressable says whether the value sits
-// where encoding/json can take its address, which is the whole of what decides
-// whether a MarshalJSON or MarshalText declared on the pointer receiver runs.
-// json.Marshal's own argument is not addressable, and neither is a map value or
-// anything behind an interface; a slice element and everything behind a pointer
-// always are; a struct field, an array element and a value-embedded struct
-// inherit from what holds them, while a group promoted through an embedded
-// pointer is reached with a dereference and so is addressable wherever the
-// outer value sits. Every one of these is pinned to a json.Marshal of the
-// shape it describes in TestAddressableVariantsMatchEncodingJSON.
-func (g *tsGen) tsType(t types.Type, addressable bool) tsRef {
+// tsType renders t as TypeScript at the site the value sits at: which way it
+// crosses the wire, and - going out - whether encoding/json can take its
+// address, which is the whole of what decides whether a MarshalJSON or
+// MarshalText declared on the pointer receiver runs. json.Marshal's own
+// argument is not addressable, and neither is a map value or anything behind an
+// interface; a slice element and everything behind a pointer always are; a
+// struct field, an array element and a value-embedded struct inherit from what
+// holds them, while a group promoted through an embedded pointer is reached
+// with a dereference and so is addressable wherever the outer value sits. Every
+// one of these is pinned to a json.Marshal of the shape it describes in
+// TestAddressableVariantsMatchEncodingJSON.
+func (g *tsGen) tsType(t types.Type, s site) tsRef {
 	switch t := t.(type) {
 	case *types.Named:
 		obj := t.Obj()
 		if ts, ok := g.override(obj); ok {
-			return tsRef{ts: ts}
+			return overrideRef(t, ts)
 		}
+		// time.Time and json.Number cross the same way in both directions, so
+		// neither of these two needs to know which one it is on
 		if obj.Pkg() != nil && obj.Pkg().Path() == "time" && obj.Name() == "Time" {
 			return tsRef{ts: "string"}
 		}
@@ -1241,20 +1486,28 @@ func (g *tsGen) tsType(t types.Type, addressable bool) tsRef {
 		if obj.Pkg() != nil && obj.Pkg().Path() == "encoding/json" && obj.Name() == "Number" {
 			return tsRef{ts: "number"}
 		}
-		if ts, ok := marshalTS(t, addressable); ok {
+		if ts, ok := wireTS(t, s); ok {
+			// a marshaler reached through an interface is reached through
+			// something that can be nil, and encoding/json writes "null" for it
+			// without ever calling the method. Typing a domain interface that
+			// embeds encoding.TextMarshaler as "string" was a narrowing, and the
+			// dangerous direction of one: the browser reads .length off a null
+			if _, iface := t.Underlying().(*types.Interface); iface {
+				return tsRef{ts: ts}.orNull()
+			}
 			return tsRef{ts: ts}
 		}
-		if s, ok := t.Underlying().(*types.Struct); ok {
-			return g.interfaceFor(t, s, addressable)
+		if u, ok := t.Underlying().(*types.Struct); ok {
+			return g.interfaceFor(t, u, s)
 		}
-		return g.namedFor(t, addressable)
+		return g.namedFor(t, s)
 	case *types.Alias:
 		// an alias is a name of its own, so a //borgo:type may target it
 		// instead of the type it stands for
 		if ts, ok := g.override(t.Obj()); ok {
-			return tsRef{ts: ts}
+			return overrideRef(t, ts)
 		}
-		return g.tsType(types.Unalias(t), addressable)
+		return g.tsType(types.Unalias(t), s)
 	case *types.Basic:
 		switch {
 		case t.Info()&types.IsBoolean != 0:
@@ -1266,46 +1519,48 @@ func (g *tsGen) tsType(t types.Type, addressable bool) tsRef {
 		}
 		return tsRef{ts: "unknown"}
 	case *types.Pointer:
-		return g.tsType(t.Elem(), true).orNull()
+		return g.tsType(t.Elem(), s.at(true)).orNull()
 	case *types.Slice:
 		// encoding/json base64s a slice of any byte-kinded element, named or
 		// aliased, not just of the predeclared byte - unless that element
-		// marshals itself, by MarshalJSON or by MarshalText, in which case the
-		// slice is written element by element like any other. Slice elements
-		// are addressable, so a marshaler on the pointer receiver counts.
+		// converts itself, by MarshalJSON or by MarshalText going out and by
+		// their Unmarshal counterparts coming in, in which case the slice is
+		// written element by element like any other. Slice elements are
+		// addressable, so a method on the pointer receiver counts.
 		if b, ok := types.Unalias(t.Elem()).Underlying().(*types.Basic); ok && b.Kind() == types.Uint8 {
-			if _, self := marshalTS(t.Elem(), true); !self {
+			if _, self := wireTS(t.Elem(), s.at(true)); !self {
 				return tsRef{ts: "string"}.orNull()
 			}
 		}
 		// a nil slice is "null", never "[]": only an array is always there
-		return tsRef{ts: "Array<" + g.tsType(t.Elem(), true).String() + ">"}.orNull()
+		return tsRef{ts: "Array<" + g.tsType(t.Elem(), s.at(true)).String() + ">"}.orNull()
 	case *types.Array:
-		return tsRef{ts: "Array<" + g.tsType(t.Elem(), addressable).String() + ">"}
+		return tsRef{ts: "Array<" + g.tsType(t.Elem(), s).String() + ">"}
 	case *types.Map:
 		// encoding/json keys an object by a string or an integer key, and
 		// rejects the whole value for anything else it cannot name - floats
 		// and complexes included, which IsNumeric would have let through
 		if b, ok := t.Key().Underlying().(*types.Basic); ok && b.Info()&(types.IsString|types.IsInteger) != 0 {
-			return tsRef{ts: "Record<string, " + g.tsType(t.Elem(), false).String() + ">"}.orNull()
+			return tsRef{ts: "Record<string, " + g.tsType(t.Elem(), s.at(false)).String() + ">"}.orNull()
 		}
-		if hasMarshalMethod(t.Key(), "MarshalText", false) {
+		if _, self := keyTS(t.Key(), s); self {
 			// encoding/json keys the object by MarshalText output, and only by
 			// it: resolveKeyName never consults MarshalJSON, so a key type
-			// carrying both is still a string key and not "unknown". A key is
-			// never addressable either, so a MarshalText on the pointer receiver
-			// does not apply - encoding/json refuses to marshal the map at all
-			return tsRef{ts: "Record<string, " + g.tsType(t.Elem(), false).String() + ">"}.orNull()
+			// carrying both is still a string key and not "unknown". Coming in
+			// it is TextUnmarshaler and only it, the same way. A key is never
+			// addressable going out either, so a MarshalText on the pointer
+			// receiver does not apply - encoding/json refuses the map outright
+			return tsRef{ts: "Record<string, " + g.tsType(t.Elem(), s.at(false)).String() + ">"}.orNull()
 		}
 		return tsRef{ts: "unknown"}
 	case *types.Struct:
 		// an anonymous struct promotes its embedded methods too, so one
 		// embedding a time.Time reaches the wire as a JSON string and never as
 		// the object its fields describe
-		if ts, ok := marshalTS(t, addressable); ok {
+		if ts, ok := wireTS(t, s); ok {
 			return tsRef{ts: ts}
 		}
-		return tsRef{ts: "{ " + strings.Join(g.fields(t, addressable), "; ") + " }"}
+		return tsRef{ts: "{ " + strings.Join(g.fields(t, s), "; ") + " }"}
 	}
 	return tsRef{ts: "unknown"}
 }
@@ -1374,6 +1629,102 @@ func marshalsDiffer(t types.Type) (answered, differs bool) {
 	return true, okPlain != okAddr || plain != addr
 }
 
+// dirDiffers reports whether t is rendered differently coming in than going
+// out, and so needs a declaration of its own for request bodies instead of
+// sharing the one the responses already have.
+//
+// It over-approximates deliberately, and the two errors are not symmetric:
+// answering "differs" where nothing does costs one duplicate declaration under
+// a $Request name, while answering "does not" where something does hands a
+// request body the response's shape, which is the whole bug this direction
+// exists to fix. So the walk follows every composition - a slice of a type that
+// converts itself one way only makes its holder differ too - and stops only
+// where tsType itself stops looking: an override, the two types pinned by name,
+// and a type that converts itself identically in both directions.
+func (g *tsGen) dirDiffers(t types.Type) bool {
+	return g.differs(t, map[types.Type]bool{})
+}
+
+func (g *tsGen) differs(t types.Type, seen map[types.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch t := t.(type) {
+	case *types.Named:
+		obj := t.Obj()
+		if _, ok := g.override(obj); ok {
+			return false
+		}
+		if obj.Pkg() != nil && obj.Pkg().Path() == "time" && obj.Name() == "Time" {
+			return false
+		}
+		if obj.Pkg() != nil && obj.Pkg().Path() == "encoding/json" && obj.Name() == "Number" {
+			return false
+		}
+		if answered, d := wiresDiffer(t); answered {
+			return d
+		}
+		return g.differs(t.Underlying(), seen)
+	case *types.Alias:
+		if _, ok := g.override(t.Obj()); ok {
+			return false
+		}
+		return g.differs(types.Unalias(t), seen)
+	case *types.Pointer:
+		return g.differs(t.Elem(), seen)
+	case *types.Slice:
+		return g.differs(t.Elem(), seen)
+	case *types.Array:
+		return g.differs(t.Elem(), seen)
+	case *types.Map:
+		return g.differs(t.Key(), seen) || g.differs(t.Elem(), seen)
+	case *types.Struct:
+		if answered, d := wiresDiffer(t); answered {
+			return d
+		}
+		return g.differsFields(t, map[*types.Struct]bool{t: true}, seen)
+	}
+	return false
+}
+
+// wiresDiffer reports whether t converts itself at all, in either direction or
+// either position, and if so whether all of those answers agree. A type with a
+// MarshalText and no UnmarshalText disagrees; so does one whose marshaler is on
+// the pointer receiver, because the position it does not run in renders the Go
+// shape while the decoder - which always has the address - does not.
+func wiresDiffer(t types.Type) (answered, differs bool) {
+	plain, okPlain := marshalTS(t, false)
+	addr, okAddr := marshalTS(t, true)
+	back, okBack := wireTS(t, inbound())
+	if !okPlain && !okAddr && !okBack {
+		return false, false
+	}
+	return true, okPlain != okAddr || okPlain != okBack || plain != addr || plain != back
+}
+
+func (g *tsGen) differsFields(s *types.Struct, expanded map[*types.Struct]bool, seen map[types.Type]bool) bool {
+	for i := 0; i < s.NumFields(); i++ {
+		plan := planField(s, i)
+		switch {
+		case plan.skip:
+		case plan.embedded != nil:
+			if expanded[plan.embedded] {
+				continue
+			}
+			expanded[plan.embedded] = true
+			d := g.differsFields(plan.embedded, expanded, seen)
+			delete(expanded, plan.embedded)
+			if d {
+				return true
+			}
+		case g.differs(s.Field(i).Type(), seen):
+			return true
+		}
+	}
+	return false
+}
+
 func (g *tsGen) sensitiveFields(s *types.Struct, expanded map[*types.Struct]bool, seen map[types.Type]bool) bool {
 	for i := 0; i < s.NumFields(); i++ {
 		plan := planField(s, i)
@@ -1416,6 +1767,25 @@ func (g *tsGen) override(obj *types.TypeName) (string, bool) {
 	return ts, ok
 }
 
+// overrideRef renders a //borgo:type replacement. The text replaces the shape
+// the Go type reaches the wire as - it does not replace the nil: a nil slice,
+// map, pointer or interface is "null" on the wire whatever the replacement
+// says, and the Go type is the only thing that knows which of them it is. A
+// directive mapping `type Tags []string` to Array<string> used to promise the
+// browser an array for a response that arrives null on the first empty result.
+//
+// The Go kind decides, so a text that already ends in "| null" is widened
+// again rather than merged with: see TestOverrideTextIsCarriedWholeIntoEveryNullablePosition.
+func overrideRef(t types.Type, ts string) tsRef {
+	loose, _ := scanOverrideTS(ts) // the reason was answered when it was collected
+	r := tsRef{ts: ts, opaque: loose}
+	switch types.Unalias(t).Underlying().(type) {
+	case *types.Slice, *types.Map, *types.Pointer, *types.Interface:
+		return r.orNull()
+	}
+	return r
+}
+
 // typeArgSuffix mangles instantiated type arguments into a readable,
 // deterministic name part: Page[Widget] -> "Widget", Page[[]post.Item] ->
 // "PostItem".
@@ -1452,13 +1822,23 @@ func (g *tsGen) typeArgSuffix(args *types.TypeList) string {
 // name can never be one a user type would claim.
 const addrSuffix = "$Addressable"
 
+// reqSuffix marks the declaration of a type as encoding/json reads it, for the
+// types that are read differently from how they are written. It is unconditional
+// where it applies, rather than a fallback for a name already claimed: which of
+// the two directions reached a type first is an accident of route order, and a
+// name that moves with it is a diff nobody can read.
+const reqSuffix = "$Request"
+
 // reserveName picks the TypeScript identifier for a Go type and claims it, so
 // two Go types that share a short name cannot collide in the generated file.
-func (g *tsGen) reserveName(t *types.Named, addressable bool) string {
+func (g *tsGen) reserveName(t *types.Named, addressable, req bool) string {
 	obj := t.Obj()
 	name := obj.Name() + g.typeArgSuffix(t.TypeArgs())
 	if addressable {
 		name += addrSuffix
+	}
+	if req {
+		name += reqSuffix
 	}
 	if g.taken[name] && obj.Pkg() != nil {
 		// title-cased, so the one-off `type resp struct{...}` a second handler
@@ -1480,14 +1860,20 @@ func title(s string) string {
 	return s
 }
 
-// variantKey identifies one of the up to two declarations a named type gets:
-// its plain shape and, for a type whose shape depends on where the value sits,
-// the shape it takes where encoding/json can address it.
-func (g *tsGen) variantKey(t *types.Named, addressable bool) (string, bool) {
-	if !addressable || !g.addrSensitive(t) {
-		return typeKey(t), false
+// variantKey identifies one of the up to three declarations a named type gets:
+// its plain shape, the shape it takes where encoding/json can address it, and
+// the shape encoding/json reads back. Each of the last two exists only for the
+// types that really do take a different one there - the plain shape answers for
+// everything else, and a request body of an ordinary struct goes on sharing the
+// declaration its response has.
+func (g *tsGen) variantKey(t *types.Named, s site) (key string, addr, req bool) {
+	switch {
+	case s.w == in && g.dirDiffers(t):
+		return typeKey(t) + "#in", false, true
+	case s.w == out && s.addr && g.addrSensitive(t):
+		return typeKey(t) + "#addr", true, false
 	}
-	return typeKey(t) + "#addr", true
+	return typeKey(t), false, false
 }
 
 // typeKey identifies a named type across the names, expanding and taken maps.
@@ -1537,62 +1923,67 @@ func pointerCycle(t types.Type) bool {
 // unless the expansion re-enters this same type, which means the type is
 // recursive and has to be able to refer to itself. Then it gets a declaration
 // of its own and the inner reference resolves to that name.
-func (g *tsGen) namedFor(t *types.Named, addressable bool) tsRef {
+func (g *tsGen) namedFor(t *types.Named, s site) tsRef {
 	if pointerCycle(t) {
 		return tsRef{null: true}
 	}
-	key, addr := g.variantKey(t, addressable)
+	key, addr, req := g.variantKey(t, s)
 	if name, ok := g.names[key]; ok {
 		return tsRef{ts: name}
 	}
 	if g.expanding[key] {
-		name := g.reserveName(t, addr)
+		name := g.reserveName(t, addr, req)
 		g.names[key] = name
 		return tsRef{ts: name}
 	}
 	g.expanding[key] = true
-	body := g.tsType(t.Underlying(), addr)
+	body := g.tsType(t.Underlying(), s.at(addr))
 	delete(g.expanding, key)
 	// a name appeared while we were inside: an inner frame hit the cycle and
 	// reserved one, and this frame owns the declaration that gives it meaning
 	if name, ok := g.names[key]; ok {
-		g.defs = append(g.defs, addrNote(t, addr)+"export type "+name+" = "+body.String()+";\n")
+		g.defs = append(g.defs, variantNote(t, addr, req)+"export type "+name+" = "+body.String()+";\n")
 		return tsRef{ts: name}
 	}
 	return body
 }
 
-func (g *tsGen) interfaceFor(t *types.Named, s *types.Struct, addressable bool) tsRef {
-	key, addr := g.variantKey(t, addressable)
+func (g *tsGen) interfaceFor(t *types.Named, u *types.Struct, s site) tsRef {
+	key, addr, req := g.variantKey(t, s)
 	if name, ok := g.names[key]; ok {
 		return tsRef{ts: name}
 	}
-	name := g.reserveName(t, addr)
+	name := g.reserveName(t, addr, req)
 	g.names[key] = name
 
-	fields := g.fields(s, addr)
-	g.defs = append(g.defs, addrNote(t, addr)+"export interface "+name+" {\n  "+strings.Join(fields, ";\n  ")+";\n}\n")
+	fields := g.fields(u, s.at(addr))
+	g.defs = append(g.defs, variantNote(t, addr, req)+"export interface "+name+" {\n  "+strings.Join(fields, ";\n  ")+";\n}\n")
 	return tsRef{ts: name}
 }
 
-// addrNote heads the addressable variant of a type with the reason it exists:
-// two declarations for one Go type is otherwise a puzzle, and the reference
-// sites alone do not say which position produced which.
-func addrNote(t *types.Named, addressable bool) string {
-	if !addressable {
-		return ""
+// variantNote heads the second or third declaration of one Go type with the
+// reason it exists: more than one declaration for one type is otherwise a
+// puzzle, and the reference sites alone do not say which produced which.
+func variantNote(t *types.Named, addressable, req bool) string {
+	switch {
+	case addressable:
+		return "// " + t.Obj().Name() + " as encoding/json writes it where the value is\n" +
+			"// addressable - a slice element, or anything behind a pointer - so the\n" +
+			"// pointer-receiver marshalers inside it do run.\n"
+	case req:
+		return "// " + t.Obj().Name() + " as encoding/json reads it: the request body it\n" +
+			"// accepts, which is not the response it writes - something inside it\n" +
+			"// carries one side of the conversion without the other.\n"
 	}
-	return "// " + t.Obj().Name() + " as encoding/json writes it where the value is\n" +
-		"// addressable - a slice element, or anything behind a pointer - so the\n" +
-		"// pointer-receiver marshalers inside it do run.\n"
+	return ""
 }
 
 // fields returns the interface members of a struct as encoding/json would
 // write it: json tags for naming, omitempty for optionality, embedded structs
 // flattened, and the name conflicts that flattening creates resolved.
-func (g *tsGen) fields(s *types.Struct, addressable bool) []string {
+func (g *tsGen) fields(u *types.Struct, s site) []string {
 	var found []jsonField
-	g.collectFields(s, 0, false, addressable, map[*types.Struct]bool{s: true}, &found)
+	g.collectFields(u, 0, false, s, map[*types.Struct]bool{u: true}, &found)
 
 	// encoding/json's promotion rule: of the fields that would marshal under
 	// the same name, the shallowest wins; at equal depth exactly one tagged
@@ -1690,9 +2081,9 @@ func planField(s *types.Struct, i int) fieldPlan {
 // zero Outer in `type Outer struct{ *Inner; B int }` is {"b":1}, with no sign
 // of Inner's fields - so none of them can be promised. The same dereference
 // makes that group addressable whatever holds the outer value.
-func (g *tsGen) collectFields(s *types.Struct, depth int, viaPtr, addressable bool, expanded map[*types.Struct]bool, out *[]jsonField) {
-	for i := 0; i < s.NumFields(); i++ {
-		plan := planField(s, i)
+func (g *tsGen) collectFields(u *types.Struct, depth int, viaPtr bool, s site, expanded map[*types.Struct]bool, out *[]jsonField) {
+	for i := 0; i < u.NumFields(); i++ {
+		plan := planField(u, i)
 		if plan.skip {
 			continue
 		}
@@ -1701,11 +2092,11 @@ func (g *tsGen) collectFields(s *types.Struct, depth int, viaPtr, addressable bo
 				continue
 			}
 			expanded[plan.embedded] = true
-			g.collectFields(plan.embedded, depth+1, viaPtr || plan.viaPtr, addressable || plan.viaPtr, expanded, out)
+			g.collectFields(plan.embedded, depth+1, viaPtr || plan.viaPtr, s.at(s.addr || plan.viaPtr), expanded, out)
 			delete(expanded, plan.embedded)
 			continue
 		}
-		f := s.Field(i)
+		f := u.Field(i)
 		optional := ""
 		if viaPtr || hasOpt(plan.opts, "omitzero") || (hasOpt(plan.opts, "omitempty") && canBeEmpty(f.Type())) {
 			// omitzero drops the field whenever the value is the zero of its
@@ -1713,18 +2104,47 @@ func (g *tsGen) collectFields(s *types.Struct, depth int, viaPtr, addressable bo
 			// a struct: a `json:"t,omitzero"` time.Time is routinely absent
 			optional = "?"
 		}
-		ts := g.tsType(f.Type(), addressable)
-		if hasOpt(plan.opts, "string") {
-			// ,string quotes booleans and pointed-to numbers too, not just
-			// plain ones: {"b":"true","p":"5"}. The null a pointer added is
-			// untouched by the quoting and rides along on its own
-			switch ts.ts {
-			case "number", "boolean":
-				ts.ts = "string"
-			}
+		ts := g.tsType(f.Type(), s)
+		if quotesAsString(f.Type(), plan.opts, s) {
+			// the null a pointer added is untouched by the quoting and rides
+			// along on its own. Whatever text was here is gone, and with it any
+			// reason to treat it as somebody else's
+			ts.ts, ts.opaque = "string", false
 		}
 		*out = append(*out, jsonField{name: plan.name, optional: optional, ts: ts.String(), depth: depth, tagged: plan.tagged})
 	}
+}
+
+// quotesAsString reports whether a `,string` option really puts this field on
+// the wire quoted. encoding/json decides it on the Go kind, in typeFields,
+// before it knows anything about how the value will be written: a bool, an
+// integer, a float or a string is quoted, and an unnamed pointer to one is
+// quoted through - `type P *int` is a named type and is not. Everything else
+// keeps the option and ignores it.
+//
+// Reading the rendered TypeScript instead - rewriting a "number" or a "boolean"
+// to "string" - agreed with that by coincidence, because those two renderings
+// happen to come from the quotable kinds. It stopped agreeing the moment a
+// //borgo:type stood between the kind and the text: a `type Cents int64`
+// rendered as some hand written Money is still a quoted number on the wire,
+// and a struct rendered as "number" is not quoted at all.
+//
+// A converter outranks the option in the other direction: marshalerEncoder and
+// textMarshalerEncoder never look at opts.quoted, so a MarshalJSON writing a
+// bare number stays a bare number however the field is tagged, and the same
+// holds of the Unmarshal side coming back.
+func quotesAsString(t types.Type, opts string, s site) bool {
+	if !hasOpt(opts, "string") {
+		return false
+	}
+	if p, ok := types.Unalias(t).(*types.Pointer); ok {
+		t, s = p.Elem(), s.at(true)
+	}
+	if _, self := wireTS(t, s); self {
+		return false
+	}
+	b, ok := types.Unalias(t).Underlying().(*types.Basic)
+	return ok && b.Info()&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsString) != 0
 }
 
 // tsPropName quotes a JSON name that is not a bare TypeScript identifier.
@@ -1736,6 +2156,41 @@ func tsPropName(name string) string {
 		return name
 	}
 	return fmt.Sprintf("%q", name)
+}
+
+// tsReserved holds every name a generated declaration cannot carry.
+//
+// Array and Record are the two generics this file writes: an interface declared
+// under either name shadows them inside the module and every use turns into
+// "type is not generic", quietly, since apps typecheck with skipLibCheck. The
+// rest do not even parse, or are refused outright by name - "export interface
+// null" is a syntax error and "export interface string" is TS2427 - and one
+// such declaration costs every route in the project its types at once, not just
+// the type that produced it. A Go type is rarely called null or function, but a
+// function-local `type function struct{...}` is a name nobody thinks twice
+// about, and the .d.ts it breaks is the whole app's.
+//
+// The list is what this repo's own tsc rejects as an interface name or a type
+// alias name, one name per program - the two categories below are its two error
+// messages, TS1xxx at the parse and TS2427/TS2457 at the check.
+var tsReserved = []string{
+	"Array", "Record",
+	"as", "await", "break", "case", "catch", "class", "const", "continue",
+	"debugger", "default", "delete", "do", "else", "enum", "export", "extends",
+	"false", "finally", "for", "function", "if", "implements", "import", "in",
+	"instanceof", "interface", "let", "new", "null", "package", "private",
+	"protected", "public", "return", "static", "super", "switch", "this",
+	"throw", "true", "try", "typeof", "var", "void", "while", "with", "yield",
+	"any", "bigint", "boolean", "never", "number", "object", "string",
+	"symbol", "undefined", "unknown",
+}
+
+func reservedTSNames() map[string]bool {
+	taken := make(map[string]bool, len(tsReserved))
+	for _, name := range tsReserved {
+		taken[name] = true
+	}
+	return taken
 }
 
 func isTSIdent(s string) bool {
