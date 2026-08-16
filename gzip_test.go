@@ -240,6 +240,271 @@ func TestGzipMiddlewarePassesThroughSSE(t *testing.T) {
 	}
 }
 
+const contentType = "Content-Type"
+
+// A response declares itself an event stream in a header map that holds a list,
+// and Header.Get reads only the first entry of it: a handler that added
+// text/plain before text/event-stream walked through the gate, and borgo put
+// Content-Encoding: gzip over a 3 KB stream. net/http decides on Content-Type
+// by presence of the key and never by the value of one line, and it puts every
+// line the map holds on the wire - so nothing that *declares* itself a stream
+// may be compressed or buffered, however the handler wrote that header.
+//
+// Direction of failure: a header declared more than once is read whole, because
+// reading only one of its values chooses by order.
+func TestGzipReadsEveryContentTypeValue(t *testing.T) {
+	// past the buffer on its own, so a response that is not held back as a
+	// stream is compressed and the table fails in both directions
+	body := strings.Repeat("data: tick\n\n", 300)
+
+	cases := []struct {
+		name   string
+		set    func(http.Header)
+		stream bool
+	}{
+		{"one text/event-stream", func(h http.Header) {
+			h.Set(contentType, "text/event-stream")
+		}, true},
+		{"Set then Set, stream last", func(h http.Header) {
+			h.Set(contentType, "text/plain")
+			h.Set(contentType, "text/event-stream")
+		}, true},
+		// Set replaces: this response really has stopped being a stream
+		{"Set then Set, stream first", func(h http.Header) {
+			h.Set(contentType, "text/event-stream")
+			h.Set(contentType, "text/plain")
+		}, false},
+		// the measured one
+		{"Add then Add, stream last", func(h http.Header) {
+			h.Add(contentType, "text/plain")
+			h.Add(contentType, "text/event-stream")
+		}, true},
+		{"Add then Add, stream first", func(h http.Header) {
+			h.Add(contentType, "text/event-stream")
+			h.Add(contentType, "text/plain")
+		}, true},
+		{"three values, the stream in the middle", func(h http.Header) {
+			h.Add(contentType, "text/plain")
+			h.Add(contentType, "text/event-stream")
+			h.Add(contentType, "application/json")
+		}, true},
+		{"parameters on the value", func(h http.Header) {
+			h.Set(contentType, "text/event-stream; charset=utf-8")
+		}, true},
+		// media types are case-insensitive (RFC 9110 8.3.1)
+		{"mixed case", func(h http.Header) {
+			h.Set(contentType, "Text/Event-Stream")
+		}, true},
+		{"spaces around the values", func(h http.Header) {
+			h.Add(contentType, "  text/plain  ")
+			h.Add(contentType, "  text/event-stream  ")
+		}, true},
+		// what an intermediary makes of two Content-Type lines
+		{"one line, two values, comma joined", func(h http.Header) {
+			h.Set(contentType, "text/plain, text/event-stream")
+		}, true},
+		{"no Content-Type at all", func(h http.Header) {}, false},
+		{"a type that is not a stream", func(h http.Header) {
+			h.Set(contentType, "text/plain")
+		}, false},
+	}
+
+	for _, c := range cases {
+		for _, ae := range []string{"gzip", "identity"} {
+			t.Run(c.name+"/"+ae, func(t *testing.T) {
+				rec := serveGzip(t, ae, func(w http.ResponseWriter, r *http.Request) {
+					c.set(w.Header())
+					w.WriteHeader(http.StatusOK)
+					io.WriteString(w, body)
+				})
+
+				want := ""
+				if !c.stream && ae == "gzip" {
+					want = "gzip"
+				}
+				if got := rec.Header().Get("Content-Encoding"); got != want {
+					t.Fatalf("Content-Type %q: Content-Encoding = %q, want %q",
+						rec.Header().Values(contentType), got, want)
+				}
+				if got := decodedBody(t, rec); got != body {
+					t.Errorf("body mangled: %d bytes, want %d", len(got), len(body))
+				}
+			})
+		}
+	}
+}
+
+// The recorder holds a header map; a socket holds the answer to the question a
+// stream is asked. A compressed stream still arrives - at the end, in one piece
+// - so the proof is that the first chunk reaches the client while the handler
+// is still holding the second, in the plaintext the browser has to read it in.
+func TestEventStreamReachesTheSocketAsItIsWritten(t *testing.T) {
+	// past gzipMinBytes on its own: under the defect this first chunk is what
+	// commits the response to gzip, and what the client then cannot read
+	first := "event: first\n" + strings.Repeat("data: xxxxxxxx\n", 200) + "\n"
+	second := "event: second\ndata: y\n\n"
+
+	cases := []struct {
+		name string
+		set  func(http.Header)
+	}{
+		{"one text/event-stream", func(h http.Header) {
+			h.Set(contentType, "text/event-stream")
+		}},
+		{"Add then Add, stream last", func(h http.Header) {
+			h.Add(contentType, "text/plain")
+			h.Add(contentType, "text/event-stream")
+		}},
+		{"one line, two values, comma joined", func(h http.Header) {
+			h.Set(contentType, "text/plain, text/event-stream")
+		}},
+		{"mixed case", func(h http.Header) {
+			h.Set(contentType, "Text/Event-Stream")
+		}},
+	}
+
+	for _, c := range cases {
+		for _, ae := range []string{"gzip", "identity"} {
+			t.Run(c.name+"/"+ae, func(t *testing.T) {
+				held := make(chan struct{})
+				var once sync.Once
+				release := func() { once.Do(func() { close(held) }) }
+
+				srv := httptest.NewServer(gzipMiddleware(http.HandlerFunc(
+					func(w http.ResponseWriter, r *http.Request) {
+						c.set(w.Header())
+						w.WriteHeader(http.StatusOK)
+						io.WriteString(w, first)
+						w.(http.Flusher).Flush()
+						select {
+						case <-held:
+						case <-time.After(10 * time.Second):
+						}
+						io.WriteString(w, second)
+						w.(http.Flusher).Flush()
+					})))
+				defer srv.Close()
+				defer release()
+
+				// the transport would ask for gzip on its own and decode it
+				// again, hiding which path ran
+				client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+				req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Accept-Encoding", ae)
+				res, err := client.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer res.Body.Close()
+
+				if got := res.Header.Get("Content-Encoding"); got != "" {
+					t.Fatalf("Content-Encoding = %q on a declared event stream", got)
+				}
+
+				chunks, stop := readAsItArrives(res.Body)
+				defer close(stop)
+				var seen strings.Builder
+				awaitOnTheWire(t, chunks, &seen, "event: first")
+				release()
+				awaitOnTheWire(t, chunks, &seen, "event: second")
+			})
+		}
+	}
+}
+
+// readAsItArrives hands over each read as it completes, so a test can wait for
+// the bytes of one write without blocking on the write after it. Closing stop
+// releases the reader wherever it is.
+func readAsItArrives(r io.Reader) (<-chan []byte, chan struct{}) {
+	chunks := make(chan []byte)
+	stop := make(chan struct{})
+	go func() {
+		defer close(chunks)
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				select {
+				case chunks <- append([]byte(nil), buf[:n]...):
+				case <-stop:
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return chunks, stop
+}
+
+func awaitOnTheWire(t *testing.T, chunks <-chan []byte, seen *strings.Builder, marker string) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for !strings.Contains(seen.String(), marker) {
+		select {
+		case b, ok := <-chunks:
+			if !ok {
+				t.Fatalf("stream ended before %q arrived; wire held %q", marker, seen.String())
+			}
+			seen.Write(b)
+		case <-deadline:
+			t.Fatalf("%q never reached the client; %d bytes on the wire", marker, seen.Len())
+		}
+	}
+}
+
+// The sniffing gate had the stream gate's shape. net/http decides whether to
+// sniff on the presence of the Content-Type key (`_, haveType :=
+// header["Content-Type"]`), so declaring the field empty is how a handler turns
+// sniffing off; reading the first value alone overrode that, and replaced a
+// real value standing behind an empty one - typing the same handler one way for
+// the client that asked for gzip and another for the client that did not.
+func TestGzipSniffsOnTheSameGateAsNetHTTP(t *testing.T) {
+	body := strings.Repeat("plain body ", 300)
+
+	cases := []struct {
+		name                   string
+		set                    func(http.Header)
+		wantGzip, wantIdentity []string
+	}{
+		// borgo has to type this one itself: net/http would sniff the gzip bytes
+		{"no Content-Type", func(h http.Header) {},
+			[]string{"text/plain; charset=utf-8"}, nil},
+		{"sniffing suppressed the net/http way", func(h http.Header) { h[contentType] = nil },
+			nil, nil},
+		{"an empty value in front of a real one", func(h http.Header) {
+			h.Add(contentType, "")
+			h.Add(contentType, "text/plain")
+		}, []string{"", "text/plain"}, []string{"", "text/plain"}},
+	}
+
+	for _, c := range cases {
+		for _, ae := range []string{"gzip", "identity"} {
+			t.Run(c.name+"/"+ae, func(t *testing.T) {
+				rec := serveGzip(t, ae, func(w http.ResponseWriter, r *http.Request) {
+					c.set(w.Header())
+					w.WriteHeader(http.StatusOK)
+					io.WriteString(w, body)
+				})
+				want := c.wantIdentity
+				if ae == "gzip" {
+					want = c.wantGzip
+				}
+				if got := rec.Header().Values(contentType); !slices.Equal(got, want) {
+					t.Errorf("Content-Type = %q, want %q", got, want)
+				}
+				if got := decodedBody(t, rec); got != body {
+					t.Errorf("body mangled: %d bytes, want %d", len(got), len(body))
+				}
+			})
+		}
+	}
+}
+
 func TestGzipMiddlewarePassesThroughPreEncoded(t *testing.T) {
 	rec := serveGzip(t, "gzip", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Encoding", "br")

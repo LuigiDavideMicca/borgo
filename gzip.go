@@ -213,10 +213,40 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 	// makes a wrong one invisible on the compressed path
 	g.declared = declaredLength(h)
 	g.bodyless = g.bodyless || bodylessStatus(status)
-	if g.bodyless ||
-		strings.HasPrefix(h.Get("Content-Type"), "text/event-stream") || h.Get("Content-Encoding") != "" {
+	// Content-Encoding stays on Get: net/http reads that one by its first value
+	// too (server.go: ce := header.Get("Content-Encoding")), so this gate and
+	// stdlib's sniffing gate agree about which responses are already encoded
+	if g.bodyless || declaresEventStream(h) || h.Get("Content-Encoding") != "" {
 		g.startPassthrough()
 	}
+}
+
+// declaresEventStream reports whether the response says it is an event stream,
+// however the handler wrote that header.
+//
+// A header declared more than once is read whole, because reading only one of
+// its values chooses by order. Header.Get returns the first line, so a handler
+// that added text/plain before text/event-stream walked through this gate and
+// borgo put Content-Encoding: gzip over a stream - which then reaches the
+// browser in one piece at the end, the one thing a stream exists not to do.
+// net/http decides on Content-Type by presence of the key and never by the
+// value of one line, and every line the map holds goes on the wire, so every
+// line has to be read here.
+//
+// A value is matched whole, after its parameters and case-insensitively: media
+// types are case-insensitive (RFC 9110 8.3.1), and a single line holding two
+// comma-separated values is what an intermediary makes of two Content-Type
+// lines.
+func declaresEventStream(h http.Header) bool {
+	for _, line := range h.Values("Content-Type") {
+		for _, value := range strings.Split(line, ",") {
+			mediaType, _, _ := strings.Cut(value, ";")
+			if strings.EqualFold(strings.TrimSpace(mediaType), "text/event-stream") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // declaredLength reads the Content-Length the handler set, or -1 for none. A
@@ -413,8 +443,14 @@ func (g *gzipResponseWriter) Flush() {
 func (g *gzipResponseWriter) startGzip() {
 	g.commitHeader()
 	h := g.rw.Header()
-	// sniff before compressing: net/http would otherwise see gzip bytes
-	if h.Get("Content-Type") == "" {
+	// sniff before compressing: net/http would otherwise see gzip bytes. The
+	// gate is presence and not value, which is net/http's own gate
+	// (`_, haveType := header["Content-Type"]`): declaring the field empty is
+	// how a handler turns sniffing off, and reading the first value alone both
+	// overrode that and replaced a second, real value standing behind it - so
+	// the same handler was typed one way for a client that asked for gzip and
+	// another for a client that did not
+	if _, declared := h["Content-Type"]; !declared {
 		h.Set("Content-Type", http.DetectContentType(g.buf))
 	}
 	h.Del("Content-Length")
