@@ -224,6 +224,31 @@ export function exportSummary(pages: number, wrote404: boolean, assets: number, 
   return `exported ${parts.join(" + ")}${variants}`;
 }
 
+// Windows releases an image only once the process is gone, and that lags the
+// process's own exit, so a refusal is retried rather than thrown.
+//
+// It never throws. This runs from a finally, where an exception replaces
+// whatever the export was already reporting - a page that failed to render
+// would surface as an EPERM on a file the operator never asked about. A binary
+// that outlives its removal is said out loud instead.
+export async function removeScratchBin(
+  bin: string,
+  attempts = 20,
+  wait = 50,
+  say: (line: string) => void = console.log,
+): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      rmSync(bin, { force: true });
+      return true;
+    } catch {
+      await Bun.sleep(wait);
+    }
+  }
+  say(`  ${c.dim(`${g.dot} could not remove ${bin} ${g.dot} it is safe to delete`)}`);
+  return false;
+}
+
 export async function exportSite(): Promise<number> {
   const t0 = performance.now();
   console.log(`\n  ${banner("export")}\n`);
@@ -267,35 +292,9 @@ export async function exportSite(): Promise<number> {
   // loaders and prerenderPaths run for real, so they get a real api: the
   // binary is built and spawned on an ephemeral port, and killed at the end
   let apiProc: import("bun").Subprocess | null = null;
-  if (needApi) {
-    // a scratch binary: dist/ may be running under borgo start right now,
-    // and windows locks executing binaries against overwrite
-    const bin = `.borgo/export-${goBinName()}`;
-    const goBuild = Bun.spawn(["go", "build", "-o", bin, "."], { stdout: "inherit", stderr: "inherit" });
-    if ((await goBuild.exited) !== 0) {
-      console.error(`  ${c.red(g.err)} go build failed`);
-      return 1;
-    }
-    // explicit env: a mutated process.env does not reliably reach children
-    apiProc = Bun.spawn([bin], {
-      stdout: "ignore",
-      stderr: "inherit",
-      env: { ...process.env, API_PORT: String(apiPort), PORT: String(frontPort) },
-    });
-    const deadline = Date.now() + 30_000;
-    for (;;) {
-      try {
-        await fetch(`http://localhost:${apiPort}/`, { signal: AbortSignal.timeout(1_000) });
-        break;
-      } catch {}
-      if (Date.now() > deadline) {
-        console.error(`  ${c.red(g.err)} api never answered on :${apiPort}`);
-        apiProc.kill();
-        return 1;
-      }
-      await Bun.sleep(100);
-    }
-  }
+  // named before the build, never after: `go build -o` writes the file it was
+  // told to write, and a build that dies partway still leaves one
+  let apiBin: string | null = null;
 
   let failures = 0;
   // rendered beside the published directory and moved onto it at the end,
@@ -307,6 +306,35 @@ export async function exportSite(): Promise<number> {
   const outDir = "dist/site";
   const stageDir = `dist/.site-staged-${process.pid}`;
   try {
+    if (needApi) {
+      // a scratch binary: dist/ may be running under borgo start right now,
+      // and windows locks executing binaries against overwrite
+      apiBin = `.borgo/export-${goBinName()}`;
+      const goBuild = Bun.spawn(["go", "build", "-o", apiBin, "."], { stdout: "inherit", stderr: "inherit" });
+      if ((await goBuild.exited) !== 0) {
+        console.error(`  ${c.red(g.err)} go build failed`);
+        return 1;
+      }
+      // explicit env: a mutated process.env does not reliably reach children
+      apiProc = Bun.spawn([apiBin], {
+        stdout: "ignore",
+        stderr: "inherit",
+        env: { ...process.env, API_PORT: String(apiPort), PORT: String(frontPort) },
+      });
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        try {
+          await fetch(`http://localhost:${apiPort}/`, { signal: AbortSignal.timeout(1_000) });
+          break;
+        } catch {}
+        if (Date.now() > deadline) {
+          console.error(`  ${c.red(g.err)} api never answered on :${apiPort}`);
+          return 1;
+        }
+        await Bun.sleep(100);
+      }
+    }
+
     const apiUrl = `http://localhost:${apiPort}/api`;
     const api = makeApiClient(`http://localhost:${apiPort}`);
 
@@ -449,6 +477,13 @@ export async function exportSite(): Promise<number> {
     // a successful run renamed it away; anything else leaves a half-rendered
     // tree in dist/ that nothing will ever read again
     rmSync(stageDir, { recursive: true, force: true });
+    // and the 21 MB the api ran from, which nothing removed at all: the binary
+    // was built, spawned, killed, and left. Measured on examples/tasks,
+    // .borgo/export-api.exe, 21,217,280 bytes, two weeks stale; reproduced in a
+    // scratch copy on both paths, since a failed export left it exactly as a
+    // whole one did. What a command builds to work, it removes even when it
+    // fails - so this is here, beside the kill, and not on the happy path.
+    if (apiBin) await removeScratchBin(apiBin);
   }
   return failures ? 1 : 0;
 }

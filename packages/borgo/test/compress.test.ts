@@ -307,6 +307,34 @@ describe("buildAssetIndex", () => {
     expect(buildAssetIndex(join(tmpdir(), "borgo-does-not-exist-" + Date.now())).size).toBe(0);
   });
 
+  // The index is a boot-time snapshot, and every field it carries is a fact
+  // about a file as it was then. `mtimeMs` was one of them and nothing ever
+  // read it - not serveIndexed, which re-stats the file it is about to send,
+  // and not a test. Named as a set, so a field that arrives without a reader
+  // has to be argued for here rather than accumulate quietly beside the ones
+  // that are load-bearing.
+  test("carries no field nobody reads", async () => {
+    await withAssets(async (dir) => {
+      await Bun.write(join(dir, "assets/style.css"), "body{color:red}");
+      await Bun.write(join(dir, "assets/style.css.gz"), "gz");
+      const css = buildAssetIndex(dir).get("/assets/style.css")!;
+      expect(Object.keys(css).sort()).toEqual([
+        "compressible",
+        "identity",
+        "lastModified",
+        "type",
+        "variants",
+      ]);
+      for (const variant of [css.identity, ...css.variants]) {
+        expect(Object.keys(variant).sort()).toEqual(
+          (variant.encoding
+            ? ["encoding", "etag", "path", "pinnedSize", "size"]
+            : ["etag", "path", "pinnedSize", "size"]) as string[],
+        );
+      }
+    });
+  });
+
   test("cache-control: vouched-for files forever, everything else revalidates", () => {
     const out: BuildOutputs = {
       dir: "public/assets",

@@ -42,6 +42,52 @@ export type DoctorEnv = {
   isPortFree: (port: number) => Promise<boolean>;
 };
 
+// the nearest existing ancestor of dir, since borgo creates these directories
+// on demand: what fails a read-only checkout is the mkdir, and that is the
+// parent's permission
+export function probeTarget(dir: string, exists: (path: string) => boolean): string {
+  let target = dir;
+  while (target && !exists(target)) {
+    const parent = dirname(target);
+    if (parent === target) break;
+    target = parent;
+  }
+  return target || ".";
+}
+
+/**
+ * Whether the probe file could be written. That question only.
+ *
+ * It used to be `write; remove; return "ok"` inside one try, so a directory
+ * that took the write and refused the delete answered "denied" - the diagnosis
+ * of a read-only checkout, printed for a machine that writes perfectly well,
+ * and doctor exits 1 on it. Measured on windows with delete denied by ACL:
+ * "denied", and `.borgo-doctor-<pid>` still sitting there afterwards, which is
+ * itself the proof the write had worked.
+ *
+ * So the removal moves to a finally and stops being evidence. A check that
+ * writes to find out whether it can write cleans up on every branch, including
+ * the one where it decides the answer is no.
+ */
+export function probeWriteWith(
+  probe: string,
+  write: (path: string) => void,
+  remove: (path: string) => void,
+): "ok" | "denied" {
+  try {
+    write(probe);
+    return "ok";
+  } catch {
+    return "denied";
+  } finally {
+    // a probe that cannot be removed is not the caller's answer, and throwing
+    // from here would replace it
+    try {
+      remove(probe);
+    } catch {}
+  }
+}
+
 export const realEnv = (): DoctorEnv => ({
   platform: process.platform,
   env: process.env,
@@ -92,22 +138,12 @@ export const realEnv = (): DoctorEnv => ({
       return null;
     }
   },
-  probeWrite: (dir) => {
-    let target = dir;
-    while (target && !existsSync(target)) {
-      const parent = dirname(target);
-      if (parent === target) break;
-      target = parent;
-    }
-    const probe = join(target || ".", `.borgo-doctor-${process.pid}`);
-    try {
-      writeFileSync(probe, "");
-      unlinkSync(probe);
-      return "ok";
-    } catch {
-      return "denied";
-    }
-  },
+  probeWrite: (dir) =>
+    probeWriteWith(
+      join(probeTarget(dir, existsSync), `.borgo-doctor-${process.pid}`),
+      (path) => writeFileSync(path, ""),
+      unlinkSync,
+    ),
   diskFree: (path) => {
     try {
       const fs = statfsSync(path);

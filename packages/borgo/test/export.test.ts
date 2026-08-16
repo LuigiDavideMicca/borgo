@@ -19,6 +19,7 @@ import {
   markStaticExport,
   outputPath,
   planExport,
+  removeScratchBin,
   requestResidue,
   unsafeParamReason,
 } from "../src/export";
@@ -526,5 +527,69 @@ describe("static export flag", () => {
       if (saved === undefined) delete process.env.BORGO_STATIC;
       else process.env.BORGO_STATIC = saved;
     }
+  });
+});
+
+// EVERY EXPORT LEFT 21 MB BEHIND.
+//
+// The scratch api binary was built into .borgo/export-api.exe, spawned, killed
+// - and removed by nobody. Measured on examples/tasks: export-api.exe,
+// 21,217,280 bytes, dated two weeks before the run that found it. Reproduced in
+// a scratch copy of that app on both paths, which is the whole point: a failed
+// export (exit 1, one page refused) and a whole one (exit 0, 7 pages published)
+// each left 21,276,160 bytes in .borgo/.
+//
+// So the removal belongs in the finally beside the kill, not at the end of the
+// happy path - and the name has to exist before `go build` runs, because
+// `go build -o` writes that file whether or not it finishes.
+describe("the scratch binary an export builds to work", () => {
+  const scratch = () => mkdtempSync(join(tmpdir(), "borgo-scratchbin-"));
+
+  test("is removed, and a missing one is not an error", async () => {
+    const dir = scratch();
+    try {
+      const bin = join(dir, "export-api.exe");
+      writeFileSync(bin, "x");
+      expect(await removeScratchBin(bin)).toBe(true);
+      expect(existsSync(bin)).toBe(false);
+      // a `go build` that wrote nothing at all leaves the finally with a name
+      // and no file, which is not a thing to report
+      expect(await removeScratchBin(bin)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // it runs from a finally: throwing here would replace the export's own
+  // outcome with an EPERM on a file the operator never asked about
+  test("says so rather than throwing when it cannot remove one", async () => {
+    const dir = scratch();
+    try {
+      // rmSync without `recursive` refuses a non-empty directory on every
+      // platform, which is the refusal windows produces for a locked image
+      const bin = join(dir, "export-api.exe");
+      mkdirSync(bin);
+      writeFileSync(join(bin, "held"), "x");
+      const said: string[] = [];
+      expect(await removeScratchBin(bin, 2, 1, (line) => said.push(line))).toBe(false);
+      expect(said.join("\n")).toContain(bin);
+      expect(existsSync(bin)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // the structural guard, because the defect was never in removeScratchBin -
+  // it was in where the call sat. A removal at the end of the happy path is
+  // indistinguishable from this one until an export fails.
+  test("is removed from the finally, and named before the build", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/export.ts"), "utf8");
+    const closing = source.lastIndexOf("} finally {");
+    expect(closing).toBeGreaterThan(-1);
+    expect(source.slice(closing)).toContain("removeScratchBin(apiBin)");
+    const named = source.indexOf("apiBin = `.borgo/export-");
+    const built = source.indexOf('"go", "build"');
+    expect(named).toBeGreaterThan(-1);
+    expect(built).toBeGreaterThan(named);
   });
 });

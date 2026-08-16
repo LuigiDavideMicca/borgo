@@ -22,13 +22,15 @@ import {
   parseNetstatPid,
   parseVersion,
   portHolder,
+  probeTarget,
+  probeWriteWith,
   realEnv,
   resolvePort,
   runChecks,
   versionAtLeast,
   type DoctorEnv,
 } from "../src/doctor";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -883,5 +885,70 @@ describe("project checks", () => {
     );
     expect(r!.ok).toBe(true);
     expect(r!.detail).toContain("borgo-framework 0.10.1");
+  });
+});
+
+// A CHECK THAT WRITES TO FIND OUT WHETHER IT CAN WRITE, AND THEN LEAVES THE FILE.
+//
+// probeWrite was `write; remove; return "ok"` in one try. Measured on windows
+// with delete denied by ACL (icacls /deny <user>:(DC) plus (OI)(CI)(DE) on the
+// directory): it answered "denied" for a directory whose write had just
+// succeeded, and `.borgo-doctor-3048` was still on disk afterwards - the file
+// proving the write had worked was the same file the answer said was
+// impossible. Both halves come from the same missing finally.
+describe("probeWrite", () => {
+  test("the answer is the write, not the removal", () => {
+    const removed: string[] = [];
+    const refuses = () => {
+      throw new Error("EPERM");
+    };
+    // the write lands, the removal is refused: the directory is writable
+    expect(probeWriteWith("/p", () => {}, refuses)).toBe("ok");
+    // and the removal is still attempted on the branch that says no
+    expect(probeWriteWith("/p", refuses, (path) => removed.push(path))).toBe("denied");
+    expect(removed).toEqual(["/p"]);
+  });
+
+  test("the probe is removed on every branch", () => {
+    const removed: string[] = [];
+    const remove = (path: string) => removed.push(path);
+    probeWriteWith("/ok", () => {}, remove);
+    probeWriteWith(
+      "/no",
+      () => {
+        throw new Error("EACCES");
+      },
+      remove,
+    );
+    expect(removed).toEqual(["/ok", "/no"]);
+  });
+
+  // borgo creates .borgo, dist and public/assets on demand, so a missing one is
+  // the parent's permission and not its own
+  test("probes the nearest existing ancestor of a directory borgo has not made yet", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-probetarget-"));
+    try {
+      expect(probeTarget(dir, existsSync)).toBe(dir);
+      expect(probeTarget(join(dir, "dist"), existsSync)).toBe(dir);
+      expect(probeTarget(join(dir, "a", "b", "c"), existsSync)).toBe(dir);
+      // a relative name whose ancestors run out lands on the cwd
+      expect(probeTarget("borgo-nothing-here-at-all", existsSync)).toBe(".");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the real probe leaves nothing behind", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-probewrite-"));
+    try {
+      expect(realEnv().probeWrite(dir)).toBe("ok");
+      expect(readdirSync(dir)).toEqual([]);
+      // and for a directory borgo would create, the probe lands in the parent
+      // and is cleaned up there too
+      expect(realEnv().probeWrite(join(dir, "dist"))).toBe("ok");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

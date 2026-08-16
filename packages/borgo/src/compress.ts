@@ -213,8 +213,17 @@ const strong = (validator: string) => validator.replace(WEAK, "");
 // file, or null if no build vouched for it. Per variant, not per url: the
 // directive travels on the response, and the response carries these bytes.
 //
-// `etag`, `size`, `mtimeMs` and `lastModified` on these two types are what boot
-// saw. Nothing is served from them - see serveIndexed.
+// `etag`, `size` and `lastModified` on these two types are what boot saw.
+// Nothing is *served* from them - see serveIndexed, which re-stats the file it
+// is about to send - but they are read: they are the snapshot the asset tests
+// compare the live headers against.
+//
+// `mtimeMs` sat here beside them and was read by nobody at all. It was written
+// once per file by buildAssetIndex, from the same stat `lastModified` is
+// derived from, and every mtime in this file's request paths comes off a live
+// stat instead. A field nobody reads is a field somebody will read believing
+// it is current, which for an mtime is exactly the mistake serveIndexed exists
+// to avoid.
 export type AssetVariant = {
   path: string;
   encoding?: "br" | "gzip";
@@ -228,7 +237,6 @@ export type AssetInfo = {
   // precompressed siblings in server preference order
   variants: AssetVariant[];
   compressible: boolean;
-  mtimeMs: number;
   lastModified: string;
   type: string;
 };
@@ -299,7 +307,6 @@ export function buildAssetIndex(
       },
       variants,
       compressible,
-      mtimeMs: file.mtimeMs,
       lastModified: new Date(file.mtimeMs).toUTCString(),
       type: Bun.file(path).type,
     };
