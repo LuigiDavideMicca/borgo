@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -84,42 +85,217 @@ func TestSSERequiresFlusher(t *testing.T) {
 	}
 }
 
+// The three tests below used to register their subscriber by writing
+// hub.subs[ch] straight, which only works because NewSSEHub pre-builds that
+// map - the very assumption that produced the zero-value defect further down
+// this file, where ServeHTTP wrote to a nil map and left the mutex held for
+// good. A test that goes round the constructor cannot notice a constructor
+// that is missing, and a test that goes round ServeHTTP cannot notice anything
+// about the handler every app's subscription really goes through. So they open
+// their subscriptions the way an app does.
+
+// slowClient is a client that stops taking bytes on demand. Wedged, the hub's
+// own handler blocks inside the write it is doing and stops draining the
+// subscription behind it - which is what "too slow to keep up" is, seen from
+// the hub's side. The wedge is taken before the mutex, so a test can read what
+// has arrived while a write is being held, and that read is not a race.
+type slowClient struct {
+	header  http.Header
+	mu      sync.Mutex
+	body    strings.Builder
+	wedged  atomic.Bool
+	once    sync.Once
+	entered chan struct{}
+	gate    chan struct{}
+}
+
+func newSlowClient() *slowClient {
+	return &slowClient{header: http.Header{}, entered: make(chan struct{}), gate: make(chan struct{})}
+}
+
+func (c *slowClient) Header() http.Header { return c.header }
+func (c *slowClient) WriteHeader(int)     {}
+func (c *slowClient) Flush()              {}
+
+func (c *slowClient) Write(p []byte) (int, error) {
+	if c.wedged.Load() {
+		c.once.Do(func() { close(c.entered) })
+		<-c.gate
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.body.Write(p)
+}
+
+func (c *slowClient) received() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.body.String()
+}
+
+// eventNames is the names of the events that reached a client, in the order
+// they reached it.
+func eventNames(body string) []string {
+	var names []string
+	for _, line := range strings.Split(body, "\n") {
+		if name, ok := strings.CutPrefix(line, "event: "); ok {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// publishNow fails rather than hangs when Publish blocks: not blocking the
+// publisher is half of what the hub promises a slow client will not cost, and
+// a hang is indistinguishable from a slow machine.
+func publishNow(t *testing.T, hub *SSEHub, event string, data any) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); hub.Publish(event, data) }()
+	select {
+	case <-done:
+	case <-time.After(streamDeadline):
+		t.Fatalf("Publish(%q) blocked on a client that was not keeping up", event)
+	}
+}
+
 func TestHubSkipsSlowClients(t *testing.T) {
 	hub := NewSSEHub()
-	slow := make(chan []byte, 1)
-	hub.mu.Lock()
-	hub.subs[slow] = struct{}{}
-	hub.mu.Unlock()
+	client := newSlowClient()
 
-	hub.Publish("first", 1)
-	hub.Publish("second", 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		hub.ServeHTTP(client, httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx))
+	}()
+	// the subscription under test is the one the handler registered for this
+	// request; nothing here reaches into the hub to make one
+	waitSubscribers(t, hub, 1)
 
-	if len(slow) != 1 {
-		t.Fatalf("want exactly one buffered message, got %d", len(slow))
+	// from here the client takes nothing. The first event is pulled out of the
+	// subscription and wedged inside the write, so the buffer behind it is empty
+	// and everything published after this queues into a known state.
+	client.wedged.Store(true)
+	publishNow(t, hub, "e0", 0)
+	select {
+	case <-client.entered:
+	case <-time.After(streamDeadline):
+		t.Fatal("the handler never reached a write, so no client is wedged and nothing is queueing behind one")
 	}
-	if frame := string(<-slow); !strings.HasPrefix(frame, "event: first\n") {
-		t.Fatalf("kept message = %q, want first", frame)
+
+	// far more than any buffer the hub could reasonably keep, so that something
+	// must be skipped without this test naming the capacity it is skipping past
+	const flood = 64
+	for i := 1; i <= flood; i++ {
+		publishNow(t, hub, fmt.Sprintf("e%d", i), i)
+	}
+
+	// the client starts keeping up again, and goes on being offered a last event
+	// until one lands: the subscription is a queue, so "last" arriving is the
+	// proof that everything the hub kept before it has already been written
+	close(client.gate)
+	deadline := time.Now().Add(streamDeadline)
+	for !strings.Contains(client.received(), "event: last\n") {
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing more reached the client after it started reading again; it got %q", eventNames(client.received()))
+		}
+		publishNow(t, hub, "last", 1)
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-served:
+	case <-time.After(streamDeadline):
+		t.Fatal("the hub handler never returned")
+	}
+
+	kept := eventNames(client.received())
+	for i, name := range kept {
+		if name == "last" {
+			kept = kept[:i]
+			break
+		}
+	}
+	if len(kept) == 0 {
+		t.Fatal("nothing at all reached a client that was only wedged for a moment")
+	}
+	// what a slow client keeps is a prefix of what was published: messages are
+	// skipped, not reordered, and never the ones already queued
+	for i, name := range kept {
+		if want := fmt.Sprintf("e%d", i); name != want {
+			t.Fatalf("the client received %q; want the events published, in order, from e0", kept)
+		}
+	}
+	if len(kept) > flood {
+		t.Fatalf("all %d events reached a client that took none of them: nothing was skipped", len(kept))
 	}
 }
 
 // an unencodable payload used to travel to every subscriber and fail there,
-// closing every open stream
+// closing every open stream. The subscriber is a real request through
+// ServeHTTP, so what is asserted is what a client is sent, rather than what a
+// channel the test registered by hand happens to hold.
 func TestHubDropsUnpublishableEvents(t *testing.T) {
 	hub := NewSSEHub()
-	sub := make(chan []byte, 4)
-	hub.mu.Lock()
-	hub.subs[sub] = struct{}{}
-	hub.mu.Unlock()
+	server := httptest.NewServer(hub)
+	// an open event stream never goes idle, so Close alone would wait out a
+	// failure instead of reporting it
+	defer func() {
+		server.CloseClientConnections()
+		server.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*streamDeadline)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("building the request: %v", err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("opening the stream: %v", err)
+	}
+	defer res.Body.Close()
+	waitSubscribers(t, hub, 1)
 
 	hub.Publish("broken", make(chan int))
 	hub.Publish("multi\nline", 1)
 	hub.Publish("fine", 1)
 
-	if len(sub) != 1 {
-		t.Fatalf("want only the valid event queued, got %d", len(sub))
+	// the first framing lines to reach the client, whatever they are: had either
+	// refused payload travelled, the first of them would not be the valid event -
+	// and the newline in an event name would have smuggled a frame of its own
+	frames := make(chan []string, 1)
+	go func() {
+		scanner := bufio.NewScanner(res.Body)
+		var lines []string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" || strings.HasPrefix(line, ":") {
+				continue
+			}
+			lines = append(lines, line)
+			if len(lines) == 2 {
+				break
+			}
+		}
+		frames <- lines
+	}()
+	select {
+	case lines := <-frames:
+		if len(lines) != 2 || lines[0] != "event: fine" || lines[1] != "data: 1" {
+			t.Fatalf("the first frames to reach the client were %q; only the event that encodes may be broadcast", lines)
+		}
+	case <-time.After(streamDeadline):
+		t.Fatal("the valid event never reached the client that the refused ones were published to")
 	}
-	if frame := string(<-sub); !strings.HasPrefix(frame, "event: fine\n") {
-		t.Fatalf("queued frame = %q", frame)
+
+	// and the stream those two publishes passed over is still open and still
+	// subscribed: one bad Publish must not disconnect anybody
+	if got := hub.Subscribers(); got != 1 {
+		t.Fatalf("hub has %d subscribers after two refused publishes, want the 1 that is still connected", got)
 	}
 }
 
@@ -1671,21 +1847,83 @@ func copyOfStream(s *SSEStream) *SSEStream {
 	return dup
 }
 
+// BenchmarkHubPublish measures Publish against 100 subscribers that cannot
+// keep up: the frame, and the fan-out over a hundred subscriptions whose
+// buffers are all full. That is the path a publisher takes under load, and the
+// number to watch is that it stays flat as subscribers are added - a Publish
+// that ever waits on one of them stalls every publisher in the process.
+//
+// The subscriptions are opened through ServeHTTP, the way an app's are.
+// Registering hand-built channels in hub.subs went round the constructor and
+// the handler both, and would go on reporting a number for a hub nobody can
+// build.
+//
+// The clients are wedged rather than draining, and that is what keeps this a
+// measurement. A hundred handlers reading as fast as they can cannot be woken
+// as fast as this loop publishes, so their buffers fill anyway - but the
+// scheduling of a hundred goroutines lands inside the timed region and the
+// number moves by 3x between identical runs (29us to 90us/op measured), with
+// the allocations of the delivery path counted against Publish (212-365
+// allocs/op, against the 9 that are really Publish's). Wedged, every send takes
+// the same skip branch it would take under load, nothing else runs, and the
+// same three runs come back within 9% of each other at 9 allocs/op.
 func BenchmarkHubPublish(b *testing.B) {
 	hub := NewSSEHub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clients := make([]*slowClient, 0, 100)
+	var handlers sync.WaitGroup
 	for range 100 {
-		ch := make(chan []byte, 1)
-		hub.subs[ch] = struct{}{}
-		// drain so the buffer never fills and short-circuits the send
+		client := newSlowClient()
+		clients = append(clients, client)
+		handlers.Add(1)
 		go func() {
-			for range ch {
-			}
+			defer handlers.Done()
+			hub.ServeHTTP(client, httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx))
 		}()
 	}
+	deadline := time.Now().Add(streamDeadline)
+	for hub.Subscribers() < 100 {
+		if time.Now().After(deadline) {
+			b.Fatalf("only %d of 100 streams subscribed", hub.Subscribers())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// enough frames to wedge every handler inside a write and fill the buffer
+	// behind it, so the timed loop below meets the same state every iteration
+	for _, client := range clients {
+		client.wedged.Store(true)
+	}
+	for i := range 32 {
+		hub.Publish("warm", i)
+	}
+	for i, client := range clients {
+		select {
+		case <-client.entered:
+		case <-time.After(streamDeadline):
+			b.Fatalf("client %d never reached a write, so its subscription is not full and this is not the path under test", i)
+		}
+	}
+
 	payload := map[string]any{"id": 7, "title": "a task", "done": false}
 	b.ReportAllocs()
 	for b.Loop() {
 		hub.Publish("task-created", payload)
+	}
+	b.StopTimer()
+
+	for _, client := range clients {
+		close(client.gate)
+	}
+	cancel()
+	unwound := make(chan struct{})
+	go func() { handlers.Wait(); close(unwound) }()
+	select {
+	case <-unwound:
+	case <-time.After(streamDeadline):
+		b.Fatal("the hub's handlers never returned after their clients were released")
 	}
 }
 
