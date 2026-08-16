@@ -19,6 +19,8 @@ import {
   assetCacheControl,
   assetEtag,
   buildAssetIndex,
+  CASE_INSENSITIVE_FS,
+  findAsset,
   documentStream,
   gzipStream,
   isCompressiblePath,
@@ -1021,5 +1023,114 @@ describe("asset validators, on real files", () => {
     expect(isNotModified(r({ "if-none-match": etag }), etag, 0)).toBe(true);
     expect(isNotModified(r({ "if-none-match": etag.replace("W/", "") }), etag, 0)).toBe(true);
     expect(serve("/site.css", { "if-none-match": etag }).status).toBe(304);
+  });
+});
+
+// THE BRANCH THAT ONLY EVER RAN IN PRODUCTION.
+//
+// CASE_INSENSITIVE_FS is injected into both buildAssetIndex and findAsset, and
+// every test in this repository took the default - which on the machine borgo
+// is developed on is `true`. The `false` half is the one Linux runs, and it is
+// the one nothing had ever executed.
+//
+// Measured difference between the two, with `assets/Logo.png` the only file on
+// disk: with `true` the index carries two keys, `/assets/Logo.png` and the
+// folded `/assets/logo.png`, and all three of Logo.png, logo.png and LOGO.PNG
+// answer. With `false` the index carries one key and only the exact spelling
+// answers - the other two 404.
+describe("findAsset where the filesystem tells the cases apart", () => {
+  const withDir = async (fn: (dir: string) => Promise<void>) => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-case-"));
+    try {
+      await fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("an exact url is found on either filesystem", async () => {
+    await withDir(async (dir) => {
+      await Bun.write(join(dir, "assets/Logo.png"), "png");
+      for (const ci of [false, true]) {
+        const index = buildAssetIndex(dir, ci);
+        expect(findAsset(index, "/assets/Logo.png", ci)!.identity.path).toContain("Logo.png");
+      }
+    });
+  });
+
+  // the whole observable difference, in one assertion pair
+  test("a url that differs only in case is found on windows and missed on linux", async () => {
+    await withDir(async (dir) => {
+      await Bun.write(join(dir, "assets/Logo.png"), "png");
+
+      const sensitive = buildAssetIndex(dir, false);
+      expect([...sensitive.keys()]).toEqual(["/assets/Logo.png"]);
+      expect(findAsset(sensitive, "/assets/logo.png", false)).toBeUndefined();
+      expect(findAsset(sensitive, "/assets/LOGO.PNG", false)).toBeUndefined();
+
+      const insensitive = buildAssetIndex(dir, true);
+      expect([...insensitive.keys()].sort()).toEqual(["/assets/Logo.png", "/assets/logo.png"]);
+      expect(findAsset(insensitive, "/assets/logo.png", true)).toBeDefined();
+      expect(findAsset(insensitive, "/assets/LOGO.PNG", true)).toBeDefined();
+    });
+  });
+
+  // NTFS cannot hold both spellings, so the index is built by hand - which is
+  // the reason the flag is a parameter and not a read of process.platform.
+  // Each url has to keep its own file: folding here would hand a request for
+  // one of them the bytes of the other.
+  test("both spellings of one name stay two assets", async () => {
+    await withDir(async (dir) => {
+      await Bun.write(join(dir, "assets/Logo.png"), "maiuscolo");
+      const index = buildAssetIndex(dir, false);
+      const upper = index.get("/assets/Logo.png")!;
+      index.set("/assets/logo.png", { ...upper, identity: { ...upper.identity, etag: '"minuscolo"' } });
+
+      expect(findAsset(index, "/assets/Logo.png", false)!.identity.etag).toBe(upper.identity.etag);
+      expect(findAsset(index, "/assets/logo.png", false)!.identity.etag).toBe('"minuscolo"');
+      // and a spelling neither file has stays a 404 rather than being folded
+      // onto whichever of the two sorts first
+      expect(findAsset(index, "/assets/LOGO.PNG", false)).toBeUndefined();
+    });
+  });
+
+  // the hazard the folding comment names, pinned: an index built where the
+  // cases are distinct, read as though they were not, hands back the wrong
+  // file. Nothing ships this combination - server.ts lets both default to the
+  // same constant - but findAsset takes the flag from its caller, so the
+  // behaviour is written down rather than left to be rediscovered.
+  test("reading a case-sensitive index case-insensitively serves the wrong file", async () => {
+    await withDir(async (dir) => {
+      await Bun.write(join(dir, "assets/Logo.png"), "maiuscolo");
+      const index = buildAssetIndex(dir, false);
+      const upper = index.get("/assets/Logo.png")!;
+      index.set("/assets/logo.png", { ...upper, identity: { ...upper.identity, etag: '"minuscolo"' } });
+      expect(findAsset(index, "/assets/LOGO.PNG", true)!.identity.etag).toBe('"minuscolo"');
+    });
+  });
+
+  // the flag is the only thing that decides it: same disk, same urls, same
+  // call, and the answers differ
+  test("the flag alone decides, on one index and one url", async () => {
+    await withDir(async (dir) => {
+      await Bun.write(join(dir, "assets/Logo.png"), "png");
+      const index = buildAssetIndex(dir, true);
+      expect(findAsset(index, "/assets/LOGO.PNG", true)).toBeDefined();
+      expect(findAsset(index, "/assets/LOGO.PNG", false)).toBeUndefined();
+    });
+  });
+
+  // and the omitted argument is the platform's, which is what every other test
+  // in this file has been taking without saying so
+  test("omitting the flag is the platform's answer", async () => {
+    await withDir(async (dir) => {
+      await Bun.write(join(dir, "assets/Logo.png"), "png");
+      const index = buildAssetIndex(dir);
+      expect([...index.keys()].sort()).toEqual(
+        CASE_INSENSITIVE_FS ? ["/assets/Logo.png", "/assets/logo.png"] : ["/assets/Logo.png"],
+      );
+      expect(findAsset(index, "/assets/logo.png") !== undefined).toBe(CASE_INSENSITIVE_FS);
+      expect(CASE_INSENSITIVE_FS).toBe(process.platform === "win32" || process.platform === "darwin");
+    });
   });
 });
