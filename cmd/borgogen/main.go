@@ -1336,6 +1336,34 @@ type wire int
 
 const (
 	out wire = iota
+	// in is the decoder's side, and what it does with one struct field was
+	// measured against encoding/json rather than read off its documentation.
+	// TestInboundFieldsMatchEncodingJSON runs the whole table; these are the two
+	// rows that decide the rendering, and both hold for every kind this file can
+	// emit - bool, number, string, pointer, slice, array, map, struct, []byte,
+	// time.Time, json.Number, an UnmarshalText type, an interface, a `,string`
+	// field, an omitempty one:
+	//
+	//   - a field that is absent is not an error. The decoder leaves the zero
+	//     value and says nothing, so nothing a request type declares is really
+	//     required and every property is "?".
+	//   - a field present as null is not an error either. On a *T it gives nil,
+	//     and on a plain T it gives the zero - encoding/json's literalStore
+	//     returns before it calls any UnmarshalText, and time.Time and
+	//     json.Number both check for null themselves - so every property admits
+	//     "| null" as well.
+	//
+	// The third row is what keeps the type strong rather than a shrug: a field
+	// present with the wrong type IS an error, for every kind above except the
+	// two that accept any JSON at all and are already rendered "unknown" - an
+	// interface, and a type with its own UnmarshalJSON. So "x?: string | null"
+	// is the exact type of a Go string field, and not one alternative wider.
+	//
+	// omitempty and omitzero are marshal directives and change nothing here: a
+	// field carrying one decodes exactly like a field carrying neither, in all
+	// four cases. Anyone who read a `json:"x,omitempty"` as "this one is the
+	// optional one" was reading the wrong direction, and the ones without it are
+	// no less optional.
 	in
 )
 
@@ -1633,14 +1661,25 @@ func marshalsDiffer(t types.Type) (answered, differs bool) {
 // out, and so needs a declaration of its own for request bodies instead of
 // sharing the one the responses already have.
 //
-// It over-approximates deliberately, and the two errors are not symmetric:
-// answering "differs" where nothing does costs one duplicate declaration under
-// a $Request name, while answering "does not" where something does hands a
-// request body the response's shape, which is the whole bug this direction
-// exists to fix. So the walk follows every composition - a slice of a type that
-// converts itself one way only makes its holder differ too - and stops only
-// where tsType itself stops looking: an override, the two types pinned by name,
-// and a type that converts itself identically in both directions.
+// Any struct that puts a field on the wire differs, and that is not a shortcut:
+// coming in every property is optional and admits null (see in), and going out
+// a property is optional only where omitempty or omitzero can drop it and
+// nullable only where the Go kind can be nil. So `{ name: string }` on the way
+// out is `{ name?: string | null }` on the way in, and one declaration cannot
+// be both. What used to be the rare case - a type carrying one side of a
+// conversion without the other - is now the ordinary one, and a struct is the
+// only thing this ever turns on: `type Money int` renders "number" both ways,
+// and so does a slice or a map of one.
+//
+// It still over-approximates in the one place where the two renderings can
+// coincide - a struct whose every field is already both optional and nullable
+// going out, an all-`json:",omitempty"`-pointer struct - and the two errors are
+// not symmetric: answering "differs" where nothing does costs one duplicate
+// declaration under a $Request name, while answering "does not" where something
+// does hands a request body the response's shape, which is the whole bug this
+// direction exists to fix. Deciding that case exactly would mean a second walk
+// asking which renderings are nullable, able to disagree with the one that
+// renders them; the duplicate declaration is the cheaper mistake.
 func (g *tsGen) dirDiffers(t types.Type) bool {
 	return g.differs(t, map[types.Type]bool{})
 }
@@ -1683,7 +1722,35 @@ func (g *tsGen) differs(t types.Type, seen map[types.Type]bool) bool {
 		if answered, d := wiresDiffer(t); answered {
 			return d
 		}
-		return g.differsFields(t, map[*types.Struct]bool{t: true}, seen)
+		// a struct that converts nothing itself is rendered field by field, and
+		// the fields are what differ. One with nothing on the wire renders
+		// "{ [key: string]: unknown }" both ways and does not
+		return hasWireField(t, map[*types.Struct]bool{t: true})
+	}
+	return false
+}
+
+// hasWireField reports whether any field of s reaches the wire, counting the
+// ones flattened in from an embedded struct. expanded is collectFields' guard
+// against a struct that embeds itself.
+func hasWireField(s *types.Struct, expanded map[*types.Struct]bool) bool {
+	for i := 0; i < s.NumFields(); i++ {
+		plan := planField(s, i)
+		switch {
+		case plan.skip:
+		case plan.embedded != nil:
+			if expanded[plan.embedded] {
+				continue
+			}
+			expanded[plan.embedded] = true
+			found := hasWireField(plan.embedded, expanded)
+			delete(expanded, plan.embedded)
+			if found {
+				return true
+			}
+		default:
+			return true
+		}
 	}
 	return false
 }
@@ -1701,28 +1768,6 @@ func wiresDiffer(t types.Type) (answered, differs bool) {
 		return false, false
 	}
 	return true, okPlain != okAddr || okPlain != okBack || plain != addr || plain != back
-}
-
-func (g *tsGen) differsFields(s *types.Struct, expanded map[*types.Struct]bool, seen map[types.Type]bool) bool {
-	for i := 0; i < s.NumFields(); i++ {
-		plan := planField(s, i)
-		switch {
-		case plan.skip:
-		case plan.embedded != nil:
-			if expanded[plan.embedded] {
-				continue
-			}
-			expanded[plan.embedded] = true
-			d := g.differsFields(plan.embedded, expanded, seen)
-			delete(expanded, plan.embedded)
-			if d {
-				return true
-			}
-		case g.differs(s.Field(i).Type(), seen):
-			return true
-		}
-	}
-	return false
 }
 
 func (g *tsGen) sensitiveFields(s *types.Struct, expanded map[*types.Struct]bool, seen map[types.Type]bool) bool {
@@ -1823,10 +1868,13 @@ func (g *tsGen) typeArgSuffix(args *types.TypeList) string {
 const addrSuffix = "$Addressable"
 
 // reqSuffix marks the declaration of a type as encoding/json reads it, for the
-// types that are read differently from how they are written. It is unconditional
-// where it applies, rather than a fallback for a name already claimed: which of
-// the two directions reached a type first is an accident of route order, and a
-// name that moves with it is a diff nobody can read.
+// types that are read differently from how they are written - which, since
+// every property of a request body is optional and nullable (see in), is every
+// type with a field on it. It is unconditional where it applies, rather than a
+// fallback for a name already claimed: which of the two directions reached a
+// type first is an accident of route order, and a name that moves with it is a
+// diff nobody can read. So a type only ever bound carries the suffix too, and
+// carries it whether or not some route also answers with it.
 const reqSuffix = "$Request"
 
 // reserveName picks the TypeScript identifier for a Go type and claims it, so
@@ -1971,9 +2019,10 @@ func variantNote(t *types.Named, addressable, req bool) string {
 			"// addressable - a slice element, or anything behind a pointer - so the\n" +
 			"// pointer-receiver marshalers inside it do run.\n"
 	case req:
-		return "// " + t.Obj().Name() + " as encoding/json reads it: the request body it\n" +
-			"// accepts, which is not the response it writes - something inside it\n" +
-			"// carries one side of the conversion without the other.\n"
+		return "// " + t.Obj().Name() + " as encoding/json reads it, which is not\n" +
+			"// the response it writes: a field the decoder never receives is not an\n" +
+			"// error, and neither is one that arrives null, so every property below\n" +
+			"// is optional and admits null whatever its Go type is.\n"
 	}
 	return ""
 }
@@ -2110,6 +2159,10 @@ func (g *tsGen) collectFields(u *types.Struct, depth int, viaPtr bool, s site, e
 			// along on its own. Whatever text was here is gone, and with it any
 			// reason to treat it as somebody else's
 			ts.ts, ts.opaque = "string", false
+		}
+		if s.w == in {
+			optional = "?" // see the doc on the in constant for both of these
+			ts = ts.orNull()
 		}
 		*out = append(*out, jsonField{name: plan.name, optional: optional, ts: ts.String(), depth: depth, tagged: plan.tagged})
 	}

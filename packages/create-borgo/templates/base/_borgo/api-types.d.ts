@@ -4,15 +4,19 @@ export interface Greeting {
   message: string;
 }
 
-export interface GreetRequest {
-  name: string;
+// GreetRequest as encoding/json reads it, which is not
+// the response it writes: a field the decoder never receives is not an
+// error, and neither is one that arrives null, so every property below
+// is optional and admits null whatever its Go type is.
+export interface GreetRequest$Request {
+  name?: string | null;
 }
 
 declare module "borgo-framework" {
   interface ApiRoutes {
     "GET /api/events": { response: unknown };
     "GET /api/hello": { response: Greeting };
-    "POST /api/hello": { response: Greeting; request: GreetRequest };
+    "POST /api/hello": { response: Greeting; request: GreetRequest$Request };
     "GET /api/hello/{name}": { response: Greeting };
   }
 }

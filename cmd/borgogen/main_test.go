@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +21,7 @@ import (
 	deeph4 "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/deeppush/h4"
 	embedapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/embed/api"
 	ifaceapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/ifacetext/api"
+	inboundapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/inbound/api"
 	nestedapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/nested/api"
 	overrideapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/overrideunion/api"
 	recursiveapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/recursive/api"
@@ -149,8 +153,18 @@ func tscBin(t *testing.T) (bin, script string) {
 // typecheck compiles declarations with that compiler and reports what it said.
 func typecheck(t *testing.T, types string) ([]byte, error) {
 	t.Helper()
-	bin, script := tscBin(t)
-	dir := t.TempDir()
+	bin, script, dir := tscProject(t, types, "")
+	cmd := exec.Command(bin, script, "--noEmit", "-p", "tsconfig.json")
+	cmd.Dir = dir
+	return cmd.CombinedOutput()
+}
+
+// tscProject lays out a compilable project around the generated declarations,
+// with probe.ts beside them when there is one to compile.
+func tscProject(t *testing.T, types, probe string) (bin, script, dir string) {
+	t.Helper()
+	bin, script = tscBin(t)
+	dir = t.TempDir()
 	writeTemp(t, dir, "api-types.d.ts", types)
 	// the emitted file augments "borgo-framework", and augmenting a module that
 	// does not resolve is TS2664 before a single member of it is looked at
@@ -159,12 +173,59 @@ func typecheck(t *testing.T, types string) ([]byte, error) {
 	// skipLibCheck is what apps compile with, and it hides everything in a .d.ts
 	// but the syntax; off here, so a declaration that parses and still means
 	// nothing is caught too
+	include := `["*.d.ts"]`
+	if probe != "" {
+		writeTemp(t, dir, "probe.ts", probe)
+		include = `["*.d.ts","probe.ts"]`
+	}
 	writeTemp(t, dir, "tsconfig.json",
-		`{"compilerOptions":{"strict":true,"noEmit":true,"skipLibCheck":false,"types":[]},"include":["*.d.ts"]}`)
+		`{"compilerOptions":{"strict":true,"noEmit":true,"skipLibCheck":false,"types":[]},"include":`+include+`}`)
+	return bin, script, dir
+}
 
+var tscErrorLine = regexp.MustCompile(`probe\.ts\((\d+),`)
+
+// typecheckBodies assigns each body to a generated type, one per line, and
+// reports which ones the compiler accepted. One tsc run answers for the whole
+// table, and the line a diagnostic carries is what maps it back to its body -
+// so the bodies must be written on one line each, and are.
+//
+// This is the half of the property that no assertion about the emitted text can
+// stand in for: what a type declares valid is what tsc says about a body, not
+// what the declaration looks like to a reader.
+func typecheckBodies(t *testing.T, types, typeName string, bodies []string) []bool {
+	t.Helper()
+	var probe strings.Builder
+	fmt.Fprintf(&probe, "import type { %s } from \"./api-types\";\n", typeName)
+	for i, body := range bodies {
+		if strings.ContainsAny(body, "\n\r") {
+			t.Fatalf("body %d spans lines, and the line is what identifies it: %q", i, body)
+		}
+		fmt.Fprintf(&probe, "const b%d: %s = %s;\nvoid b%d;\n", i, typeName, body, i)
+	}
+	bin, script, dir := tscProject(t, types, probe.String())
 	cmd := exec.Command(bin, script, "--noEmit", "-p", "tsconfig.json")
 	cmd.Dir = dir
-	return cmd.CombinedOutput()
+	out, _ := cmd.CombinedOutput()
+
+	bad := map[int]bool{}
+	for _, m := range tscErrorLine.FindAllStringSubmatch(string(out), -1) {
+		line, err := strconv.Atoi(m[1])
+		if err != nil {
+			t.Fatalf("unreadable tsc diagnostic %q in:\n%s", m[0], out)
+		}
+		bad[line] = true
+	}
+	// a diagnostic outside probe.ts means the project itself did not compile,
+	// and every "accepted" below would be an accident of that
+	if strings.Contains(string(out), "api-types.d.ts(") {
+		t.Fatalf("tsc rejected the generated declarations themselves:\n%s", out)
+	}
+	accepted := make([]bool, len(bodies))
+	for i := range bodies {
+		accepted[i] = !bad[2+2*i] // line 1 is the import; two lines per body
+	}
+	return accepted
 }
 
 // typechecks compiles the emitted declarations with tsc. Every other assertion
@@ -229,10 +290,13 @@ func TestGenerateFixture(t *testing.T) {
 		`"GET /api/export": { response: Export };`,
 		`"GET /api/mixed": { response: Widget | Deleted };`,
 		`"GET /api/widgets": { response: WidgetList };`,
-		`"POST /api/widgets": { response: Widget; request: WidgetCreate };`,
+		// a request body is read, not written, and nothing about reading is
+		// required: see TestInboundFieldsMatchEncodingJSON
+		`"POST /api/widgets": { response: Widget; request: WidgetCreate$Request };`,
+		"export interface WidgetCreate$Request {\n  name?: string | null;\n}",
 		`"DELETE /api/widgets/{id}": { response: Deleted };`,
 		`"GET /api/widgets/{id}": { response: Widget };`,
-		`"PUT /api/widgets/{id}": { response: Widget; request: WidgetCreate };`,
+		`"PUT /api/widgets/{id}": { response: Widget; request: WidgetCreate$Request };`,
 		`"GET /api/manual": { response: string };`,
 		`"GET /api/secret": { response: Deleted };`,
 		"created: string;",
@@ -1278,17 +1342,15 @@ func TestRequestTypesFollowTheUnmarshalRules(t *testing.T) {
 	types := generate(t, "request")
 	wants(t, types,
 		"export interface Create {\n  slug: string;\n  stamp: Stamp;\n  note: string;\n}",
-		"export interface Create$Request {\n  slug: Slug$Request;\n  stamp: unknown;\n  note: string;\n}",
-		"export interface Slug$Request {\n  raw: string;\n}",
+		"export interface Create$Request {\n  slug?: Slug$Request | null;\n  stamp?: unknown | null;\n  note?: string | null;\n}",
+		"export interface Slug$Request {\n  raw?: string | null;\n}",
 		`"POST /api/things": { response: Create; request: Create$Request };`,
-		// a type that converts nothing itself is one shape both ways, and one
-		// declaration answers for both: no second name, no second declaration
+		// and a type that converts nothing itself still reads differently from
+		// how it is written, because reading is lenient about every field
 		"export interface Plain {\n  name: string;\n}",
-		`"POST /api/plain": { response: Plain; request: Plain };`,
+		"export interface Plain$Request {\n  name?: string | null;\n}",
+		`"POST /api/plain": { response: Plain; request: Plain$Request };`,
 	)
-	if strings.Contains(types, "Plain$Request") {
-		t.Errorf("a type read exactly as it is written needs no second declaration:\n%s", types)
-	}
 	typechecks(t, types)
 }
 
@@ -1301,8 +1363,8 @@ func TestHandlersInOtherPackagesAreTyped(t *testing.T) {
 	out := captureStderr(t, func() { types = generateFresh(t, "pkghandler") })
 	wants(t, types,
 		"export interface User {\n  name: string;\n}",
-		"export interface Filter {\n  q: string;\n}",
-		`"GET /api/users": { response: User; request: Filter };`,
+		"export interface Filter$Request {\n  q?: string | null;\n}",
+		`"GET /api/users": { response: User; request: Filter$Request };`,
 		// and one whose package this generator really does not read stays
 		// unknown - out loud, which is the whole difference
 		`"GET /api/notfound": { response: unknown };`,
@@ -1406,4 +1468,167 @@ func TestTypeOverrideCanNameOneDeclarationByPosition(t *testing.T) {
 		"export interface stamp {\n  nano: number;\n}",
 		"export interface ApiResp {\n  at: stamp;\n}",
 	)
+}
+
+// What a request type must describe is what encoding/json's decoder does, and
+// that was measured rather than reasoned about: the table on the in constant is
+// the output of running every kind borgogen renders through the four bodies
+// that can reach a field. Two of its rows decide the whole rendering - an
+// absent field is not an error and a null field is not an error, for every kind
+// without exception - and the third keeps it from being a shrug: a field of the
+// wrong type IS an error, so "string | null" is exact and not merely safe.
+//
+// The assertion below is the property itself and not a reading of the emitted
+// text: each body is handed to tsc against the generated type and to
+// encoding/json against the Go type it was generated from, and the two answers
+// must be the same answer. A body the type calls valid is decoded; a body the
+// server refuses does not compile.
+func TestInboundFieldsMatchEncodingJSON(t *testing.T) {
+	types := generate(t, "inbound")
+	wants(t, types,
+		// going out, a field is optional only where omitempty can drop it and
+		// nullable only where the Go kind can be nil. Nothing here moved
+		"export interface Every {\n"+
+			"  flag: boolean;\n  count: number;\n  ratio: number;\n  name: string;\n"+
+			"  ptr: string | null;\n  list: Array<string> | null;\n  fixed: Array<string>;\n"+
+			"  dict: Record<string, string> | null;\n  nested: Inner;\n  blob: string | null;\n"+
+			"  at: string;\n  amount: number;\n  free: unknown;\n  code: string;\n"+
+			"  opt?: string;\n  quoted: string;\n}",
+		// coming in, every one of them is both
+		"export interface Every$Request {\n"+
+			"  flag?: boolean | null;\n  count?: number | null;\n  ratio?: number | null;\n  name?: string | null;\n"+
+			"  ptr?: string | null;\n  list?: Array<string> | null;\n  fixed?: Array<string> | null;\n"+
+			"  dict?: Record<string, string> | null;\n  nested?: Inner$Request | null;\n  blob?: string | null;\n"+
+			"  at?: string | null;\n  amount?: number | null;\n  free?: unknown | null;\n  code?: string | null;\n"+
+			"  opt?: string | null;\n  quoted?: string | null;\n}",
+		// a nested struct is read by the same decoder, so it is lenient too
+		"export interface Inner {\n  a: number;\n}",
+		"export interface Inner$Request {\n  a?: number | null;\n}",
+		// and a type with no fields for that leniency to apply to is one shape
+		// both ways, so it keeps one declaration
+		`"POST /api/tags": { response: Array<string> | null; request: Array<string> | null };`,
+		// the case dirDiffers over-approximates: already optional, already
+		// nullable, and it still gets a second declaration of the same text
+		"export interface Loose {\n  ptr?: string | null;\n}",
+		"export interface Loose$Request {\n  ptr?: string | null;\n}",
+	)
+	// a json:"-" field and an unexported one are not read at all, so neither can
+	// appear in a body the type admits
+	if strings.Contains(types, "Skipped") || strings.Contains(types, "hidden") {
+		t.Errorf("a field the decoder never fills must not be in the request type:\n%s", types)
+	}
+
+	rows := []struct {
+		body string
+		ok   bool // encoding/json decodes it
+	}{
+		// absent: never an error, for any kind
+		{`{}`, true},
+		{`{"nested":{}}`, true},
+		// null: never an error either, for any kind - pointer and non-pointer,
+		// converter and container, `,string` and omitempty alike
+		{`{"flag":null,"count":null,"ratio":null,"name":null,"ptr":null,"list":null,"fixed":null,"dict":null,"nested":null,"blob":null,"at":null,"amount":null,"free":null,"code":null,"opt":null,"quoted":null}`, true},
+		{`{"nested":{"a":null}}`, true},
+		// the right type
+		{`{"flag":true,"count":7,"ratio":1.5,"name":"n","ptr":"p","list":["a"],"fixed":["a","b"],"dict":{"k":"v"},"nested":{"a":1},"blob":"aGk=","at":"2020-01-01T00:00:00Z","amount":7,"free":{"anything":true},"code":"c","opt":"o","quoted":"7"}`, true},
+		{`{"list":[]}`, true},
+		{`{"dict":{}}`, true},
+		// an array is not a tuple to encoding/json: it takes what it is given
+		// and pads or drops the rest, so Array<T> is exact and [T,T] would not be
+		{`{"fixed":["only"]}`, true},
+		{`{"fixed":["a","b","c"]}`, true},
+		// an interface field takes any JSON at all, which is what unknown says
+		{`{"free":7}`, true},
+		{`{"free":"s"}`, true},
+		// the wrong type: an error for every kind but the one above
+		{`{"flag":"x"}`, false},
+		{`{"count":"x"}`, false},
+		{`{"ratio":"x"}`, false},
+		{`{"name":7}`, false},
+		{`{"ptr":7}`, false},
+		{`{"list":7}`, false},
+		{`{"list":[7]}`, false},
+		{`{"fixed":7}`, false},
+		{`{"dict":7}`, false},
+		{`{"dict":{"k":7}}`, false},
+		{`{"nested":7}`, false},
+		{`{"nested":{"a":"x"}}`, false},
+		{`{"blob":7}`, false},
+		{`{"at":7}`, false},
+		{`{"amount":"s"}`, false},
+		{`{"code":7}`, false},
+		// `,string` is enforced coming in: the field wants the quoted form and
+		// refuses the bare one, which is why it is typed string and not number
+		{`{"quoted":7}`, false},
+		// omitempty is a marshal directive and buys the decoder nothing: this
+		// field is exactly as strict about its type as one without it
+		{`{"opt":7}`, false},
+	}
+
+	for _, r := range rows {
+		v := &inboundapi.Every{}
+		if got := json.Unmarshal([]byte(r.body), v) == nil; got != r.ok {
+			t.Fatalf("encoding/json accepted %s = %v, and this table claims %v", r.body, got, r.ok)
+		}
+	}
+
+	bodies := make([]string, len(rows))
+	for i, r := range rows {
+		bodies[i] = r.body
+	}
+	for i, accepted := range typecheckBodies(t, types, "Every$Request", bodies) {
+		if accepted != rows[i].ok {
+			t.Errorf("%s: the generated type accepts it = %v, the server accepts it = %v", rows[i].body, accepted, rows[i].ok)
+		}
+	}
+}
+
+// Some things about a request body cannot be said in TypeScript at all, and a
+// type that pretended otherwise would be worse than one that says where it
+// stops. Each row below is a body the two sides really do disagree about,
+// pinned so that a disagreement which ever stops being one is noticed here
+// rather than believed.
+func TestWhereTheRequestTypeCannotBeExact(t *testing.T) {
+	types := generate(t, "inbound")
+	rows := []struct {
+		body    string
+		decodes bool
+		why     string
+	}{
+		// TypeScript has one number type, so the width and the integer-ness of a
+		// Go numeric field are unsayable. The type is wider than the server here
+		{`{"count":1.5}`, false, "a fraction into an int"},
+		{`{"count":1e300}`, false, "a value past the width of an int"},
+		// and a string is a string: RFC3339, base64 and the `,string` payload
+		// are sub-languages of it that a type cannot spell
+		{`{"at":"nope"}`, false, "a string that is not a timestamp"},
+		{`{"blob":"!!!"}`, false, "a string that is not base64"},
+		{`{"quoted":"x"}`, false, "a quoted value that is not a number"},
+		// the other direction, and the only one: json.Number also accepts a
+		// numeric string, and typing it "number | string" to admit that would
+		// admit every non-numeric string with it - trading one body the server
+		// takes for a whole class of bodies it refuses. It stays number
+		{`{"amount":"7"}`, true, "a numeric string into a json.Number"},
+		// an unknown key is ignored by the decoder and refused by tsc, which
+		// refuses it twice over: as an excess property on a fresh literal, and -
+		// since every property here is optional - as a weak-type mismatch. It
+		// costs the caller nothing the server would have done anything with
+		{`{"nope":1}`, true, "a key the Go type does not declare"},
+		{`{"Skipped":"x"}`, true, `a json:"-" field addressed by its Go name`},
+	}
+	for _, r := range rows {
+		v := &inboundapi.Every{}
+		if got := json.Unmarshal([]byte(r.body), v) == nil; got != r.decodes {
+			t.Fatalf("%s (%s): encoding/json accepted it = %v, want %v", r.body, r.why, got, r.decodes)
+		}
+	}
+	bodies := make([]string, len(rows))
+	for i, r := range rows {
+		bodies[i] = r.body
+	}
+	for i, accepted := range typecheckBodies(t, types, "Every$Request", bodies) {
+		if accepted == rows[i].decodes {
+			t.Errorf("%s (%s): tsc and encoding/json agree now, so this is no longer an inexactness to document", rows[i].body, rows[i].why)
+		}
+	}
 }

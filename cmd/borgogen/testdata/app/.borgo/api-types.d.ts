@@ -42,8 +42,12 @@ export interface WidgetList {
   widgets: Array<Widget> | null;
 }
 
-export interface WidgetCreate {
-  name: string;
+// WidgetCreate as encoding/json reads it, which is not
+// the response it writes: a field the decoder never receives is not an
+// error, and neither is one that arrives null, so every property below
+// is optional and admits null whatever its Go type is.
+export interface WidgetCreate$Request {
+  name?: string | null;
 }
 
 declare module "borgo-framework" {
@@ -56,10 +60,10 @@ declare module "borgo-framework" {
     "GET /api/mixed": { response: Widget | Deleted };
     "GET /api/secret": { response: Deleted };
     "GET /api/widgets": { response: WidgetList };
-    "POST /api/widgets": { response: Widget; request: WidgetCreate };
+    "POST /api/widgets": { response: Widget; request: WidgetCreate$Request };
     "DELETE /api/widgets/{id}": { response: Deleted };
     "GET /api/widgets/{id}": { response: Widget };
-    "PUT /api/widgets/{id}": { response: Widget; request: WidgetCreate };
+    "PUT /api/widgets/{id}": { response: Widget; request: WidgetCreate$Request };
   }
   interface WsEvents {
     "widgets/created": Widget;

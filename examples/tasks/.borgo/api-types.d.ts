@@ -25,9 +25,13 @@ export interface TaskList {
   tasks: Array<Task> | null;
 }
 
-export interface TaskCreate {
-  title: string;
-  body: string;
+// TaskCreate as encoding/json reads it, which is not
+// the response it writes: a field the decoder never receives is not an
+// error, and neither is one that arrives null, so every property below
+// is optional and admits null whatever its Go type is.
+export interface TaskCreate$Request {
+  title?: string | null;
+  body?: string | null;
 }
 
 export interface TaskItem {
@@ -48,7 +52,7 @@ declare module "borgo-framework" {
     "POST /api/register": { response: unknown };
     "DELETE /api/tasks": { response: Cleared };
     "GET /api/tasks": { response: TaskList };
-    "POST /api/tasks": { response: TaskItem; request: TaskCreate };
+    "POST /api/tasks": { response: TaskItem; request: TaskCreate$Request };
     "DELETE /api/tasks/{id}": { response: Deleted };
     "GET /api/tasks/{id}": { response: TaskItem };
   }

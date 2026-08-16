@@ -12,12 +12,16 @@ export interface Note {
 }
 
 export interface NoteList {
-  notes: Array<Note>;
+  notes: Array<Note> | null;
 }
 
-export interface NoteCreate {
-  title: string;
-  body: string;
+// NoteCreate as encoding/json reads it, which is not
+// the response it writes: a field the decoder never receives is not an
+// error, and neither is one that arrives null, so every property below
+// is optional and admits null whatever its Go type is.
+export interface NoteCreate$Request {
+  title?: string | null;
+  body?: string | null;
 }
 
 export interface NoteItem {
@@ -35,7 +39,7 @@ declare module "borgo-framework" {
     "POST /api/logout": { response: unknown };
     "GET /api/me": { response: Me };
     "GET /api/notes": { response: NoteList };
-    "POST /api/notes": { response: NoteItem; request: NoteCreate };
+    "POST /api/notes": { response: NoteItem; request: NoteCreate$Request };
     "DELETE /api/notes/{id}": { response: Deleted };
     "POST /api/register": { response: unknown };
   }
