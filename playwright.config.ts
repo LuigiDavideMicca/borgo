@@ -5,6 +5,14 @@ import { defineConfig } from "@playwright/test";
 // runs after, so the two builds never race over public/assets
 export default defineConfig({
   testDir: "e2e",
+  // .e2e.ts, not .spec.ts: `bun test` with no arguments collects *.spec.ts
+  // anywhere under the repo, so these files used to load under bun's runner and
+  // die 17 times on "Playwright Test did not expect test() to be called here" -
+  // a red that meant "wrong command", indistinguishable from a real one. Bun's
+  // discovery patterns are *.test.*, *_test.*, *.spec.* and *_spec.*, so this
+  // extension is out of its reach while staying in Playwright's. e2e/reach.test.ts
+  // keeps a stray .spec.ts from quietly putting them back.
+  testMatch: "**/*.e2e.ts",
   timeout: 30_000,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "line" : "list",

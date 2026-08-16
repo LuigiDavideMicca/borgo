@@ -140,7 +140,7 @@ describe("a 413 an enhanced submit receives", () => {
   });
 
   // the branch itself lives inside mount(), which needs a document, a form and
-  // a react root - e2e territory (e2e/actions.spec.ts), not bun:test. What can
+  // a react root - e2e territory (e2e/actions.e2e.ts), not bun:test. What can
   // be pinned here is that the classification is wired to the overlay and not to
   // the reload, and that it is decided before the reload branch is reached. The
   // same source-reading shape api.test.ts and csrf-rejects.test.ts use.

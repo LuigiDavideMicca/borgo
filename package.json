@@ -9,7 +9,7 @@
   "scripts": {
     "typecheck": "bun scripts/typecheck.ts",
     "check:docs": "bun scripts/check-doc-links.ts",
-    "test": "bun test packages/borgo/test packages/create-borgo/test",
+    "test": "bun test packages/borgo/test packages/create-borgo/test e2e",
     "test:go": "go test ./...",
     "e2e": "playwright test",
     "bench": "bun bench/run.ts"

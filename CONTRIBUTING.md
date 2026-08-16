@@ -47,7 +47,8 @@ packages/borgo           npm "borgo-framework": the CLI, the Bun SSR front serve
 packages/create-borgo    npm "create-borgo": the scaffolder and its three templates.
 examples/tasks           the demo app CI exercises end to end.
 docs/                    the user documentation. Every snippet in it is compiled by CI.
-e2e/                     playwright specs, run against a production build of examples/tasks.
+e2e/                     playwright specs, named *.e2e.ts so `bun test` does not collect them
+                         (it cannot run them), run against a production build of examples/tasks.
 scripts/                 check-doc-links.ts — the docs gate.
 .github/workflows        ci.yml (everything below), release-please.yml, publish.yml.
 ```

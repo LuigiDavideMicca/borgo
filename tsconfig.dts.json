@@ -25,15 +25,35 @@
   // `bunx tsc -p tsconfig.dts.json --listFiles`; if a node_modules body ever
   // shows up there, something in this list started importing.
   //
+  // The one template file here is packages/create-borgo/templates/full/ws-events.d.ts,
+  // and it is in for its body alone. It was left out on the belief that sharing
+  // a program with examples/tasks/ws-events.d.ts would merge two `interface
+  // WsEvents` and forbid the template from ever diverging from the example.
+  // That does not happen, and it was measured rather than assumed: `declare
+  // module "borgo-framework"` resolves from examples/tasks (which depends on
+  // it) and does NOT resolve from packages/create-borgo/templates/full
+  // (create-borgo does not depend on it, and bun's isolated linker puts it in
+  // no parent node_modules), so the two declarations never reach the same
+  // interface. Giving the template "live/message": number against the example's
+  // string, and giving it a key the example does not have, both stayed clean.
+  //
+  // What that buys is narrow and worth stating: the body is compiled - a typo'd
+  // type name in it fails this gate - but the augmentation itself is not
+  // validated against borgo-framework the way the example's is, because tsc
+  // resolves nothing from that path and says nothing about an augmentation it
+  // could not resolve. Body coverage is exactly what a hand-written declaration
+  // needed; it had none.
+  //
   // Deliberately out:
-  //   packages/create-borgo/templates/*  - template sources, see that package's
-  //     tsconfig; CI typechecks them after scaffolding
+  //   packages/create-borgo/templates/*  - the rest: template sources, see that
+  //     package's tsconfig; CI typechecks them after scaffolding
   //   bench/**                           - not a workspace member, see bench/tsconfig.json
   //   cmd/borgogen/testdata/*/.borgo/api-types.d.ts - 33 golden outputs that
   //     augment the same module with disagreeing members; see tsconfig.json
   "include": [
     "packages/borgo/src/ambient.d.ts",
     "examples/tasks/ws-events.d.ts",
-    "examples/tasks/.borgo/api-types.d.ts"
+    "examples/tasks/.borgo/api-types.d.ts",
+    "packages/create-borgo/templates/full/ws-events.d.ts"
   ]
 }

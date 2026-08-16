@@ -46,11 +46,11 @@ const outOfScope = [
   },
   {
     pattern: "cmd/borgogen/testdata/*/.borgo/api-types.d.ts",
-    why: "33 golden borgogen outputs. they are assertions, not sources, and cannot share a program: all 33 augment `declare module \"borgo-framework\"` and they disagree. `go test ./cmd/borgogen` asserts each one byte for byte",
+    why: "33 golden borgogen outputs. they are assertions, not sources, and cannot share a program: all 33 augment `declare module borgo-framework` and they disagree. `go test ./cmd/borgogen` asserts each one byte for byte",
   },
   {
     pattern: "packages/create-borgo/templates/**",
-    why: "template sources, not sources of this repo: they import borgo-framework and keep generated types under _borgo/, both of which resolve only once scaffolded. the 'scaffold test' CI steps run `bunx tsc --noEmit` inside each freshly scaffolded app. that covers the .ts/.tsx and the 3 tsconfigs, but not the 4 .d.ts bodies - the template tsconfig sets skipLibCheck too, so scaffolding does not check them either. the 3 generated _borgo/api-types.d.ts are pinned by the same steps a different way, `go tool borgogen` then diff against the shipped copy. full/ws-events.d.ts is the one hand-written declaration here whose body nothing reads: a limit, not a claim. it is a copy of examples/tasks/ws-events.d.ts, which tsconfig.dts.json does check, and nothing asserts the two stay equal",
+    why: "template sources, not sources of this repo: they import borgo-framework and keep generated types under _borgo/, both of which resolve only once scaffolded. the 'scaffold test' CI steps run `bunx tsc --noEmit` inside each freshly scaffolded app, which covers the .ts/.tsx and the 3 tsconfigs. the 3 generated _borgo/api-types.d.ts are pinned a different way, `go tool borgogen` then diff against the shipped copy. full/ws-events.d.ts used to be excused here as a declaration nothing could check: the fear was that putting it in the same program as examples/tasks/ws-events.d.ts would merge two WsEvents interfaces and forbid the template from ever diverging. Measured, that cannot happen - the module augmentation resolves from the example, which depends on the package, and does not resolve from a template, which does not, so the two never reach the same interface. It is in tsconfig.dts.json now, which compiles its body; it does not validate the augmentation itself, because tsc says nothing about one it cannot resolve",
   },
   {
     pattern: "packages/borgo/test/**/*.d.ts",
