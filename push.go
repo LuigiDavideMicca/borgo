@@ -220,13 +220,18 @@ func pushKeyMayTravel(u *url.URL) error {
 //
 // The inet_aton short forms - 127.1, 127.0.1, 2130706433, 0x7f000001,
 // 0177.0.0.1 - are deliberately NOT read here, and this is not an oversight to
-// repair. glibc and Windows hand them to connect() as 127.0.0.1; Go's own
-// resolver (netgo, the common build on Linux) looks them up as names instead
-// and can be sent somewhere else entirely. A guard that concludes "this
-// machine" where the resolver may go elsewhere is worse than one that refuses a
-// spelling nobody needs: anyone who can write 2130706433 can write 127.0.0.1.
-// Reading them requires a parser here to agree with every resolver everywhere,
-// which is a premise that cannot be checked.
+// repair. Go hands none of them to connect() as an address: measured on windows
+// and on linux with the pure-go resolver, every one of them comes back "no such
+// host" and every dial to one fails, because Go looks them up as names. On
+// linux 0x7f000001 went further and was put on the wire to the DNS server,
+// where it timed out - a name a DNS server is free to answer with any address
+// at all. A guard that concluded "this machine" there would be authorising a
+// key to travel to whatever the answer is.
+//
+// So: reading them requires a parser here to agree with every resolver
+// everywhere, which is a premise that cannot be checked, and refusing a
+// spelling nobody needs costs nothing - anyone who can write 2130706433 can
+// write 127.0.0.1.
 //
 // A host merely *called* localhost.something is somebody else's.
 func loopbackHost(host string) bool {
