@@ -221,7 +221,13 @@ describe("refreshTransform", () => {
     expect(sigOf(withState)).toBeTruthy();
     expect(sigOf(withTwo)).toBeTruthy();
     expect(sigOf(withState)).not.toBe(sigOf(withTwo));
-  });
+    // 7ms warm, but no test here is guaranteed to be warm: the sibling above
+    // pays the lazy @babel/core and react-refresh/babel imports only when it
+    // runs first, and any run filtered by name makes whichever one it selects
+    // the first call. That first call measured 8.2-11.6s at 2x
+    // oversubscription, against a 5s default - so all four carry the same
+    // budget the first one does.
+  }, 30_000);
 
   test("instruments custom hooks with signatures", async () => {
     const out = await refreshTransform(
@@ -230,12 +236,16 @@ describe("refreshTransform", () => {
     );
     expect(out).toContain("$RefreshSig$");
     expect(out).toContain("useCounter");
-  });
+    // 5ms warm, 8.2-11.6s if it is the call that pays the babel import
+  }, 30_000);
 
   test("passes plain modules through untouched", async () => {
     const js = "export const x = 1;\n";
     expect(await refreshTransform(js, "lib/util.ts")).toBe(js);
-  });
+    // 2ms warm: the transform runs and its output is thrown away. It still
+    // awaits loadBabelRefresh first, so passing through costs the same import
+    // as transforming when this is the call that pays it
+  }, 30_000);
 });
 
 describe("precacheStamp", () => {
@@ -1813,7 +1823,14 @@ describe("a failed bundle leaves the last good build alone", () => {
     expect((caught as BundleFailed).name).toBe("BundleFailed");
     // one detail per bundler message, so the cli can print them as its own lines
     expect((caught as BundleFailed).details.length).toBeGreaterThan(0);
-  });
+    // the only test in this describe that builds anything: a whole
+    // buildAssets, so generateManifest, compileCss and a real Bun.build that
+    // has to resolve the app before it can reach the parse error. 5.0-5.7s
+    // measured idle - already over the 5s default it used to run on, red in 4
+    // reruns of 12 - and timed out in 2 runs of 3 at 2x oversubscription. The
+    // budget is scheduling headroom over a cost that is the bundler's, not
+    // borgo's: if it ever fails here, the bundle is what to look at.
+  }, 60_000);
 
   test("every byte of the previous build is still there", () => {
     for (const [name, body] of Object.entries(PREVIOUS)) {

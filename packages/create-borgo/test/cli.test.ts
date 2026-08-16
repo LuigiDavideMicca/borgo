@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   cpSync,
   existsSync,
@@ -12,6 +12,13 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+// every test here spawns the scaffolder - a bun process that resolves a
+// workspace and writes a tree - and 6.5s was measured against bun's 5s default
+// while other suites were building. A suite that reddens because the machine
+// was busy teaches everyone to re-run rather than read, and the day the red is
+// real it looks exactly the same.
+setDefaultTimeout(120_000);
 
 // the scaffolder is a script, so it is tested the way a user runs it: spawned
 // in a scratch directory, asserted on the tree it leaves behind

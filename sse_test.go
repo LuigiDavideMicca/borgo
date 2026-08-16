@@ -343,17 +343,26 @@ func TestHubUnderConcurrentSubscribers(t *testing.T) {
 	publishers.Wait()
 
 	// every stream that ended must have unsubscribed: a hub that leaks slots
-	// grows without bound
-	deadline := time.Now().Add(5 * time.Second)
+	// grows without bound. Read through Subscribers(), which is all an app has
+	// - a leak the map does not show but the accessor does is still a leak,
+	// and reaching past it is how a test misses one.
+	//
+	// The wait is generous because the thing being waited for is not the
+	// unsubscribe itself - that is one deferred delete - but 128 handlers
+	// getting scheduled long enough to return, after their clients were cut by
+	// a 500ms request timeout and while four publishers are still spinning.
+	// Idle it settles in milliseconds; at 2x oversubscription one slot was
+	// still there 5s in, which was this loop's old budget. What it must not do
+	// is return before they land, so it polls to the end and reports the count.
+	const unsubscribed = 30 * time.Second
+	deadline := time.Now().Add(unsubscribed)
 	for {
-		hub.mu.Lock()
-		n := len(hub.subs)
-		hub.mu.Unlock()
+		n := hub.Subscribers()
 		if n == 0 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%d subscriptions leaked after every client disconnected", n)
+			t.Fatalf("%d subscriptions leaked %v after every client disconnected", n, unsubscribed)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -976,14 +985,11 @@ func TestZeroValueSSEStreamRefusesToWrite(t *testing.T) {
 			t.Fatal("Ping() reported success on a stream that has nowhere to write")
 		}
 	})
-	t.Run("write", func(t *testing.T) {
-		var s SSEStream
-		var err error
-		streamCall(t, "write()", func() { err = s.write(pingFrame) })
-		if err == nil {
-			t.Fatal("write() reported success on a stream that has nowhere to write")
-		}
-	})
+	// write() gets no subtest of its own: Send and Ping are its two public
+	// faces and each has one above, so the unexported bottom is covered
+	// through the surface an app can actually reach. A subtest calling it
+	// directly would go on passing on a build where neither exported caller
+	// reached it any more.
 	t.Run("Done", func(t *testing.T) {
 		var s SSEStream
 		var done <-chan struct{}
@@ -1027,10 +1033,12 @@ func TestZeroValueSSEStreamUnderConcurrentCalls(t *testing.T) {
 					panics <- r
 				}
 			}()
+			// Send, Ping and Done are every exported call a handler can make
+			// on a stream, and Ping is write's own public face: the mutex
+			// these contend for is the same one either way
 			for range 25 {
 				_ = s.Send("tick", 1)
 				_ = s.Ping()
-				_ = s.write(pingFrame)
 				_ = s.Done()
 			}
 		}()
@@ -1180,7 +1188,11 @@ func TestSSEStreamWatcherEndsWithTheStream(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		stream.end()
+		// Close, not the unexported end: this is the call a handler that
+		// detached its request context has, and the watcher it has to release
+		// is the one behind that call. end() is reached anyway, by the hub,
+		// in TestSSEHubEndsTheStreamItOpened just below.
+		stream.Close()
 	}
 
 	waitGoroutinesBackTo(t, baseline, "after ending 200 streams whose requests were never cancelled")
@@ -1210,6 +1222,19 @@ func TestSSEHubEndsTheStreamItOpened(t *testing.T) {
 // performance budget: each of these fires in microseconds when it fires at
 // all, and the whole point is telling "did not happen" from "was slow".
 const streamDeadline = 10 * time.Second
+
+// shutdownAfterChurn is the exception to the sentence above, and the only
+// budget in this file that pays for work rather than for scheduling slack.
+// Two tests open and drop streams by the dozen on one server and then shut it
+// down: Shutdown closes the listeners, then polls the connections those
+// streams left until they read as idle, on net/http's own ticker. Idle that
+// costs well under a second; with the cores oversubscribed 2x it was measured
+// at 18.6s in one run of eight and over 10s in another, against the 10s
+// streamDeadline was giving it - a stream nobody ended looks exactly the same
+// from here, so the wait stays bounded and still fails saying Shutdown did not
+// return. If it ever fails at this budget, look at what is holding a
+// connection open, not at the clock.
+const shutdownAfterChurn = 60 * time.Second
 
 // waitStreamEnd fails saying what was still open, instead of timing out mute.
 func waitStreamEnd(t *testing.T, done <-chan struct{}, what string) {
@@ -1524,7 +1549,7 @@ func TestSSEStreamClose(t *testing.T) {
 	})
 
 	t.Run("after the client is gone", func(t *testing.T) {
-		s, done := servedStream(t)
+		s, _, done := servedStream(t)
 		done()
 		waitStreamEnd(t, s.Done(), "the stream after its client disconnected")
 		// the disconnection already fired the latch: Close must find it fired
@@ -1536,10 +1561,10 @@ func TestSSEStreamClose(t *testing.T) {
 	})
 
 	t.Run("after Shutdown", func(t *testing.T) {
-		s, _ := servedStream(t)
+		s, srv, _ := servedStream(t)
 		ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
 		defer cancel()
-		if err := srvShutdown(ctx, s.r.Context().Value(http.ServerContextKey).(*http.Server)); err != nil {
+		if err := srvShutdown(ctx, srv); err != nil {
 			t.Fatalf("shutting the server down: %v", err)
 		}
 		waitStreamEnd(t, s.Done(), "the stream after Shutdown")
@@ -1716,15 +1741,27 @@ func TestReconnectingStreamsKeepOneLatchOnOneServer(t *testing.T) {
 			t.Fatalf("reconnection %d was handed a different latch: the entry was dropped and rebuilt, and every rebuild appends an OnShutdown hook that this server can never drop", i)
 		}
 	}
-	if n := countLatches(); n != entries {
-		t.Errorf("51 streams on one server left %d latch entries, want the %d it started with", n, entries)
+	// One-sided, and not by taste: countLatches counts every server the binary
+	// has ever armed, and the entries the other tests left drop out of it
+	// asynchronously, whenever the collector reaches their servers. Measured
+	// falling from 3 to 1 mid-test in 6 runs of 8 at 2x oversubscription, and
+	// never once rising. A count below the baseline is another test's server
+	// being collected; a count above it is this server arming a second entry,
+	// which is the only half this test is about - so it is bounded above, the
+	// way waitLatchesDropTo already bounds its own. The equality that says the
+	// entry was never dropped and rebuilt is the latch identity checked in the
+	// loop above, which no other test can move.
+	if n := countLatches(); n > entries {
+		t.Errorf("51 streams on one server left %d latch entries, want at most the %d it started with", n, entries)
 	}
 
-	// and the one latch every reconnection shared is still the live one
-	ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
+	// and the one latch every reconnection shared is still the live one. This
+	// Shutdown walks what 51 reconnections left behind, so it gets the churn
+	// budget rather than streamDeadline - see shutdownAfterChurn.
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownAfterChurn)
 	defer cancel()
 	if err := srvShutdown(ctx, srv); err != nil {
-		t.Fatalf("shutting down after 51 streams: %v", err)
+		t.Fatalf("shutting down after 51 streams, in %v: %v", shutdownAfterChurn, err)
 	}
 	waitStreamEnd(t, first, "the one latch, after Shutdown")
 }
@@ -1770,25 +1807,34 @@ func TestAStreamArrivingAsTheLastLeavesSharesTheOneLatch(t *testing.T) {
 	if got := latchOf(t, srv); got != watched {
 		t.Fatal("the server's latch was replaced while streams were coming and going: whichever streams took the old one are watching a channel Shutdown will not trip")
 	}
-	if n := countLatches(); n != entries {
-		t.Errorf("streams crossing zero left %d latch entries for one server, want %d", n, entries)
+	// bounded above only, for the reason given in the test above: the global
+	// count falls under load as other tests' servers are collected, and this
+	// test's finding is an entry gained, not one somebody else lost
+	if n := countLatches(); n > entries {
+		t.Errorf("streams crossing zero left %d latch entries for one server, want at most %d", n, entries)
 	}
 
 	// the stream opened last must still be reachable by the server's shutdown
 	ended := readingStream(t, base)
-	ctx, cancel := context.WithTimeout(context.Background(), streamDeadline)
+	// and this Shutdown has 160 opened-and-dropped streams' connections to
+	// walk, so it gets the churn budget too - see shutdownAfterChurn
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownAfterChurn)
 	defer cancel()
 	if err := srvShutdown(ctx, srv); err != nil {
-		t.Fatalf("shutting down: %v", err)
+		t.Fatalf("shutting down after 160 streams came and went, in %v: %v", shutdownAfterChurn, err)
 	}
 	waitStreamEnd(t, ended, "the stream opened after all that coming and going")
 }
 
 // servedStream opens a stream through a real server and hands the test the
-// stream itself, so it can be closed from outside its handler. The returned
-// func disconnects the client. httptest.Server is no use here: its Close waits
-// for every connection to go idle, and an open event stream never does.
-func servedStream(t *testing.T) (*SSEStream, func()) {
+// stream itself, so it can be closed from outside its handler, along with the
+// server serving it - the caller that wants to shut that server down is handed
+// it here rather than digging it out of the stream's own request, which is a
+// field of borgo's that no app has and that no test should be reading. The
+// returned func disconnects the client. httptest.Server is no use here: its
+// Close waits for every connection to go idle, and an open event stream never
+// does.
+func servedStream(t *testing.T) (*SSEStream, *http.Server, func()) {
 	t.Helper()
 	streams := make(chan *SSEStream, 1)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1810,10 +1856,10 @@ func servedStream(t *testing.T) (*SSEStream, func()) {
 	t.Cleanup(disconnect)
 	select {
 	case s := <-streams:
-		return s, disconnect
+		return s, srv, disconnect
 	case <-time.After(streamDeadline):
 		t.Fatal("the handler never reached its stream")
-		return nil, disconnect
+		return nil, srv, disconnect
 	}
 }
 
@@ -1930,46 +1976,59 @@ func BenchmarkHubPublish(b *testing.B) {
 func TestHubBroadcast(t *testing.T) {
 	hub := NewSSEHub()
 	server := httptest.NewServer(hub)
-	defer server.Close()
+	// an open event stream never goes idle, so Close alone would wait out a
+	// failure instead of reporting it
+	defer func() {
+		server.CloseClientConnections()
+		server.Close()
+	}()
 
-	res, err := http.Get(server.URL)
+	// the request carries a deadline of its own, as the backstop under the
+	// select below: a read with neither is how a lost broadcast used to end
+	// this test at the ten-minute panic, with a stack of every goroutine in
+	// the binary in place of the one line saying the frame never arrived
+	ctx, cancel := context.WithTimeout(context.Background(), 2*streamDeadline)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("building the request: %v", err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("opening the stream: %v", err)
 	}
 	defer res.Body.Close()
 
-	// wait for the subscription to register before publishing
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		hub.mu.Lock()
-		n := len(hub.subs)
-		hub.mu.Unlock()
-		if n == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("client never subscribed")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// wait for the subscription to register before publishing, through the
+	// count the hub publishes rather than the map behind it
+	waitSubscribers(t, hub, 1)
 
 	hub.Publish("task-created", map[string]int{"id": 7})
 
-	scanner := bufio.NewScanner(res.Body)
-	var lines []string
-	for scanner.Scan() {
-		line := scanner.Text()
-		// the stream opens with a comment so the headers reach the client
-		// before the first event; comments and separators are not framing
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
+	frames := make(chan []string, 1)
+	go func() {
+		scanner := bufio.NewScanner(res.Body)
+		var lines []string
+		for scanner.Scan() {
+			line := scanner.Text()
+			// the stream opens with a comment so the headers reach the client
+			// before the first event; comments and separators are not framing
+			if line == "" || strings.HasPrefix(line, ":") {
+				continue
+			}
+			lines = append(lines, line)
+			if len(lines) == 2 {
+				break
+			}
 		}
-		lines = append(lines, line)
-		if len(lines) == 2 {
-			break
+		frames <- lines
+	}()
+	select {
+	case lines := <-frames:
+		if len(lines) != 2 || lines[0] != "event: task-created" || lines[1] != `data: {"id":7}` {
+			t.Fatalf("broadcast frames wrong: %q", lines)
 		}
-	}
-	if len(lines) != 2 || lines[0] != "event: task-created" || lines[1] != `data: {"id":7}` {
-		t.Fatalf("broadcast frames wrong: %q", lines)
+	case <-time.After(streamDeadline):
+		t.Fatalf("the published event never reached the one subscriber the hub reported, in %v: a broadcast is either delivered or lost, and this says which", streamDeadline)
 	}
 }
