@@ -17,8 +17,12 @@ import { prepareShell } from "../src/util";
 // an app with react installed, so a real bundle can resolve its imports
 const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
 import {
+  assetChannelFaults,
+  AssetChannelRefused,
   assetsBuildMode,
   buildAssets,
+  channelLines,
+  metaPathConcats,
   buildLeftUnfinished,
   buildModeFor,
   buildReasons,
@@ -2538,17 +2542,16 @@ describe("the unserved reference read off a real tree", () => {
     }
     return dir;
   };
-  const said = (dir: string, bundled: string[] = []): string[] => {
-    const lines: string[] = [];
-    const original = console.warn;
-    try {
-      console.warn = (...args: unknown[]) => void lines.push(args.join(" "));
-      warnAssetCase(dir, join(dir, "public"), bundled);
-    } finally {
-      console.warn = original;
-    }
-    return lines;
-  };
+  // what the build would refuse, read off the tree exactly as buildAssets reads
+  // it: the emitted bundles on disk against what public/ really holds
+  const refused = (dir: string, emitted: string[] = []): string[] =>
+    channelLines(
+      assetChannelFaults(
+        bundleSources(join(dir, "public", "assets")),
+        publicAssetUrls(join(dir, "public")),
+        emitted,
+      ),
+    ).map((line) => line.replaceAll(/\[[0-9;]*m/g, ""));
   afterAll(() => {
     for (const dir of roots) rmSync(dir, { recursive: true, force: true });
   });
@@ -2586,24 +2589,25 @@ describe("the unserved reference read off a real tree", () => {
       "pages/index.tsx":
         'export const loader = async () => (await import("../lib/load")).seed();\nexport default () => <img src="/logo.svg" />;',
     });
-    expect(said(dir)).toEqual([]);
+    expect(refused(dir)).toEqual([]);
     expect(warnAssetCase(dir, join(dir, "public"))).toBe(0);
   });
 
   // the same tree, one expression different: this is the whole defect
-  test("and the url the emitted bundle asks for names the file, the url and the limits", () => {
+  test("and the url the emitted bundle asks for names the file and the url", () => {
     const dir = project({
       "public/logo.svg": "SVG",
       "public/assets/client-abc12345.js": `var n=new URL("./probe.png",import.meta.url).href;`,
       "pages/index.tsx": "export default () => null;",
     });
-    const lines = said(dir);
-    expect(lines).toHaveLength(2);
+    const lines = refused(dir);
+    expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("client-abc12345.js");
     expect(lines[0]).toContain("/assets/probe.png");
     expect(lines[0]).toContain("./probe.png");
     expect(lines[0]).toContain("404");
-    expect(lines[1]).toContain("not read");
+    // and the spelling report beside it stays silent: it is not its finding
+    expect(warnAssetCase(dir, join(dir, "public"))).toBe(0);
   });
 
   // the file is beside the source and the build still emits nothing for it:
@@ -2615,54 +2619,398 @@ describe("the unserved reference read off a real tree", () => {
       "pages/probe.tsx": 'const u = new URL("./probe.png", import.meta.url).href;',
       "public/assets/probe-wh39bmjg.js": `var n=new URL("./probe.png",import.meta.url).href;`,
     });
-    expect(said(dir)[0]).toContain("/assets/probe.png");
+    expect(refused(dir)[0]).toContain("/assets/probe.png");
   });
 
-  test("a bundle whose runtime url is a file public/ holds is silent", () => {
+  // THE EXEMPTION, AND ITS COST, WHICH IS MEASURED AND NAMED. A url that
+  // resolves to a file public/ really serves works in the browser, so refusing
+  // it would refuse working code. It is exempt here and it still renders as a
+  // file:// path on the server: measured on a live production server, the same
+  // expression came out as src="file:///C:/.../public/served.png". That half is
+  // redactLocalPaths's in server.ts, not this rule's.
+  test("a bundle whose runtime url is a file public/ holds is not refused", () => {
     const dir = project({
       "public/logo.svg": "SVG",
       "public/assets/client-abc12345.js": `var n=new URL("../logo.svg",import.meta.url).href;`,
     });
-    expect(said(dir)).toEqual([]);
+    expect(refused(dir)).toEqual([]);
   });
 
-  test("an emitted asset is named even when every spelling in the tree agrees", () => {
+  test("an emitted asset is refused even when every spelling in the tree agrees", () => {
     const dir = project({
       "public/logo.svg": "SVG",
       "pages/index.tsx": 'export default () => <img src="/logo.svg" />;',
     });
-    const lines = said(dir, ["logo-7zjyd5xx.png"]);
-    expect(lines).toHaveLength(2);
+    const lines = refused(dir, ["logo-7zjyd5xx.png"]);
+    expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("public/assets/logo-7zjyd5xx.png");
     expect(lines[0]).toContain("/assets/");
   });
 
-  test("the count carries both new findings, not just the old ones", () => {
+  // the two readings are separate on purpose: a spelling that works here is
+  // warned about, a channel that works nowhere stops the build
+  test("a spelling warning and a refusal are counted by different readers", () => {
     const dir = project({
       "public/Logo.png": "PNG",
       "index.html": '<link rel="icon" href="/logo.png" />',
       "public/assets/client-abc12345.js": `var n=new URL("./probe.png",import.meta.url).href;`,
     });
-    expect(warnAssetCase(dir, join(dir, "public"), ["logo-7zjyd5xx.png"])).toBe(3);
+    expect(warnAssetCase(dir, join(dir, "public"))).toBe(1);
+    expect(refused(dir, ["logo-7zjyd5xx.png"])).toHaveLength(2);
   });
 
   // A CHECK THAT NAMES NO LIMIT TEACHES WHOEVER READ IT THAT THERE IS NONE.
-  // The hydrate=false hole is measured, not hypothetical: such a page never
-  // enters the client bundle, so its new URL is in no emitted file and this
-  // reads nothing about it - while ssr still renders it as a file:// path.
-  test("the limits line names the page that never enters the client bundle", () => {
+  test("the limits line hands the channel over rather than claiming it", () => {
     const dir = project({
-      "public/assets/client-abc12345.js": `var n=new URL("./probe.png",import.meta.url).href;`,
+      "public/Logo.png": "PNG",
+      "index.html": '<link rel="icon" href="/logo.png" />',
     });
-    const limits = said(dir)[1];
-    expect(limits).toContain("hydrate = false");
-    expect(limits).toContain("new URL(..., import.meta.url) in the bundle this build emitted");
+    const lines: string[] = [];
+    const original = console.warn;
+    try {
+      console.warn = (...args: unknown[]) => void lines.push(args.join(" "));
+      warnAssetCase(dir, join(dir, "public"));
+    } finally {
+      console.warn = original;
+    }
+    const limits = lines[lines.length - 1];
+    expect(limits).toContain("not read");
+    expect(limits).toContain("assetChannelFaults refuses the build over it");
     expect(limits).toContain('<img src="./x.png">');
     expect(limits).toContain("runtime");
   });
 
   test("an output directory that holds no bundle is not a finding", () => {
     const dir = project({ "public/logo.svg": "SVG" });
+    expect(refused(dir)).toEqual([]);
     expect(warnAssetCase(dir, join(dir, "public"))).toBe(0);
   });
+});
+
+// THE THREE DEFECTS THAT ARE ONE DISEASE, AND THE DECISION THAT REFUSES ALL OF
+// THEM.
+//
+// Warning and exiting 0 left the tree shippable, and what shipped was measured
+// on a real production build served by borgo's own front server:
+// /logo-vfrp2mc1.png 404 while the file the bundler emitted sits at
+// /assets/logo-vfrp2mc1.png; an emitted stylesheet no document links; and, in
+// the html handed to every visitor, src="C:\Users\...\pages\logo.png" - the
+// absolute path of the machine that rendered it.
+//
+// A refusal is only admissible while it cannot refuse an app that works, which
+// is why the evidence is the EMITTED OUTPUT and never the sources: pages are
+// rewritten for the client build with loader, action and prerender eliminated,
+// so the correct server-side reads - borgo's own colors.ts does
+// Bun.file(new URL("../package.json", import.meta.url)) - are in no emitted
+// file. The reference app emits none of these: 0 asset outputs and 0 unserved
+// urls across 24 bundles and 413 kB, measured.
+describe("metaPathConcats", () => {
+  const cases: Array<[string, string, number]> = [
+    ["a url built from it", 'var s=import.meta.dir+"/x.png";', 1],
+    ["on the other side", 'var s="file://"+import.meta.dir;', 1],
+    ["import.meta.path too", 'var s=import.meta.path+"/x";', 1],
+    ["minified, no spaces", "s=import.meta.dir+e", 1],
+    ["spelled out with spaces", "s = import . meta . dir + e", 1],
+    ["twice", 'a=import.meta.dir+"/x";b=import.meta.dir+"/y";', 2],
+    ["nothing at all", 'var s="/logo.svg";', 0],
+  ];
+  for (const [name, source, want] of cases) {
+    test(name, () => {
+      expect(metaPathConcats(source)).toBe(want);
+    });
+  }
+
+  // A BUILD THAT REFUSES MUST NOT REFUSE WORKING CODE. `import.meta.dir` is
+  // also how a module asks which runtime it is in, and that discriminator works
+  // in a browser bundle - it is undefined there, which is the answer. Only the
+  // shape that is building a string is a fault.
+  const legitimate: Array<[string, string]> = [
+    ["a typeof discriminator", 'if(typeof import.meta.dir!=="undefined"){s()}'],
+    ["a truthiness discriminator", "if(import.meta.dir){s()}"],
+    ["a ternary on it", "var s=import.meta.dir?a:b;"],
+    ["handed to a call", "var s=readSeed(import.meta.dir);"],
+    ["compared", 'if(import.meta.dir===".")s()'],
+  ];
+  for (const [name, source] of legitimate) {
+    test(`not a fault: ${name}`, () => {
+      expect(metaPathConcats(source)).toBe(0);
+    });
+  }
+});
+
+describe("assetChannelFaults", () => {
+  const bundle = (source: string, name = "index-abc12345.js") => [{ name, source }];
+
+  test("a file the bundler emitted for an import is a fault", () => {
+    expect(assetChannelFaults([], [], ["logo-7zjyd5xx.png"])).toEqual([
+      { kind: "emitted", name: "logo-7zjyd5xx.png" },
+    ]);
+  });
+
+  test("a url the emitted bundle asks for and public/ has not is a fault", () => {
+    expect(assetChannelFaults(bundle('n=new URL("./probe.png",import.meta.url).href'), [])).toEqual([
+      { kind: "url", from: "index-abc12345.js", spec: "./probe.png", url: "/assets/probe.png" },
+    ]);
+  });
+
+  test("a url the bundle asks for and public/ does hold is not a fault", () => {
+    expect(
+      assetChannelFaults(bundle('n=new URL("../logo.svg",import.meta.url).href'), ["/logo.svg"]),
+    ).toEqual([]);
+  });
+
+  test("a url built out of import.meta.dir is a fault, named once for the bundle", () => {
+    expect(assetChannelFaults(bundle('a=import.meta.dir+"/x";b=import.meta.dir+"/y"'), [])).toEqual([
+      { kind: "dir", from: "index-abc12345.js" },
+    ]);
+  });
+
+  // THE HEALTHY BUNDLE, CARRYING EVERY SHAPE A WIDER RULE WOULD MISREAD: a
+  // relative url in a plain string, one assembled at runtime, an absolute one,
+  // one against another base, one that resolves to a file public/ really
+  // serves, the runtime discriminator, and a windows path in a string literal.
+  test("a healthy bundle set is no faults at all", () => {
+    const faults = assetChannelFaults(
+      [
+        {
+          name: "client-abc12345.js",
+          source: [
+            'var a="/logo.svg";fetch("./data.json");',
+            "var b=new URL(name,import.meta.url).href;",
+            'var c=new URL("/api/tasks.json",import.meta.url).href;',
+            'var d=new URL("./x.png",location.href).href;',
+            'var e=new URL("../logo.svg",import.meta.url).href;',
+            'var f=typeof import.meta.dir!=="undefined";',
+            'var g="C:\\Users\\alice\\site";',
+          ].join("\n"),
+        },
+      ],
+      ["/logo.svg", "/assets/client-abc12345.js"],
+      [],
+    );
+    expect(faults).toEqual([]);
+  });
+});
+
+describe("AssetChannelRefused", () => {
+  test("the message counts the references and says what would have shipped", () => {
+    const error = new AssetChannelRefused([
+      { kind: "emitted", name: "logo-7zjyd5xx.png" },
+      { kind: "url", from: "index-abc.js", spec: "./probe.png", url: "/assets/probe.png" },
+    ]);
+    expect(error.name).toBe("AssetChannelRefused");
+    expect(error.message).toContain("2 references");
+    expect(error.message).toContain("the path of this machine inside the rendered html");
+    expect(error.lines).toHaveLength(2);
+  });
+
+  test("one reference is not two", () => {
+    expect(new AssetChannelRefused([{ kind: "emitted", name: "x.png" }]).message).toContain(
+      "1 reference to",
+    );
+  });
+
+  // ONE WORDING FOR BOTH READERS. The refusal that stops a build and the report
+  // a tree already built gets are the same sentences, so they cannot drift.
+  test("every kind of fault has a line naming the file and the cure", () => {
+    const lines = channelLines([
+      { kind: "emitted", name: "logo-7zjyd5xx.png" },
+      { kind: "url", from: "index-abc.js", spec: "./probe.png", url: "/assets/probe.png" },
+      { kind: "dir", from: "index-abc.js" },
+    ]).map((l) => l.replaceAll(/\[[0-9;]*m/g, ""));
+    expect(lines[0]).toContain("public/assets/logo-7zjyd5xx.png");
+    expect(lines[0]).toContain("put the file in public/ and name it absolutely");
+    expect(lines[1]).toContain("/assets/probe.png");
+    expect(lines[1]).toContain("404 everywhere");
+    expect(lines[2]).toContain("import.meta.dir");
+    expect(lines[2]).toContain("undefined/...");
+  });
+});
+
+describe("a refused build is reported as a build failure", () => {
+  const captured = (error: unknown) => {
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void lines.push(args.join(" "));
+    try {
+      reportBuildFailure(error, false);
+    } finally {
+      console.error = original;
+    }
+    return lines.join("\n").replaceAll(/\[[0-9;]*m/g, "");
+  };
+
+  // THE MARK IS THE SECOND HALF OF THE REPAIR. buildAssets throws this before
+  // clearBuildMark(), so the tree keeps the mark that says the last build did
+  // not finish and the next boot rebuilds it instead of finding a public/assets
+  // that looks complete and serving the leak.
+  test("it names every reference and says the tree stays unfinished", () => {
+    const out = captured(
+      new AssetChannelRefused([
+        { kind: "url", from: "index-abc.js", spec: "./probe.png", url: "/assets/probe.png" },
+      ]),
+    );
+    expect(out).toContain("a file beside its own source");
+    expect(out).toContain("/assets/probe.png");
+    expect(out).toContain("the next boot rebuilds it rather than serving it");
+    // not the bundler's framing, which says the opposite about the tree
+    expect(out).not.toContain("public/assets still holds the last build that worked");
+  });
+
+  test("the refusal is thrown before the mark comes off", async () => {
+    const source = await Bun.file(join(import.meta.dir, "../src/build.ts")).text();
+    const refused = source.indexOf("throw new AssetChannelRefused");
+    const cleared = source.indexOf("clearBuildMark();", source.indexOf("await Bun.write(buildModePath"));
+    expect(refused).toBeGreaterThan(0);
+    expect(cleared).toBeGreaterThan(refused);
+  });
+});
+
+// THE PROOF, AGAINST THE REAL BUNDLER AND THE REAL TREE, that the decision is a
+// refusal and not a sentence. Measured by hand first, on a production build
+// served by borgo's own front server:
+//
+//   import logo from "./logo.png"   -> public/assets/logo-vfrp2mc1.png emitted,
+//                                     the bundle asks for "./logo-vfrp2mc1.png",
+//                                     /logo-vfrp2mc1.png 404 from every route,
+//                                     and ssr rendered src="C:\\Users\\...\\pages\\logo.png"
+//   import "./beside.css"          -> public/assets/client-mghja486.css emitted,
+//                                     linked by no document at all
+//
+// Both now stop the build, and the tree keeps its unfinished mark so the next
+// boot rebuilds rather than serves.
+describe("the build refuses a file referenced beside its own source", () => {
+  const TEMPLATE = join(import.meta.dir, "../../create-borgo/templates/base/index.html");
+  const app = (dir: string, pages: Record<string, string>, extra: Record<string, string> = {}) => {
+    mkdirSync(join(dir, "pages"), { recursive: true });
+    mkdirSync(join(dir, "public"), { recursive: true });
+    writeFileSync(join(dir, "index.html"), readFileSync(TEMPLATE, "utf8"));
+    writeFileSync(join(dir, "style.scss"), "body { color: rebeccapurple; }\n");
+    for (const [rel, body] of Object.entries({ ...pages, ...extra })) {
+      const path = join(dir, rel);
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, body);
+    }
+  };
+
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "an imported asset stops it, and the mark stays on the tree",
+    async () => {
+      const dir = mkdtempSync(join(APP_HOST, "borgo-refuse-import-"));
+      const cwd = process.cwd();
+      try {
+        app(dir, {
+          "pages/index.tsx": 'import logo from "./logo.png";\nexport default () => <img src={logo} />;\n',
+          "pages/logo.png": "PNG",
+        });
+        process.chdir(dir);
+        let thrown: unknown = null;
+        try {
+          await buildAssets(false);
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toBeInstanceOf(AssetChannelRefused);
+        expect((thrown as AssetChannelRefused).lines.join("\n")).toContain("logo-");
+        // the second half of the repair: the next boot must not find a tree
+        // that looks finished
+        expect(buildLeftUnfinished()).toBe(true);
+      } finally {
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "a stylesheet imported beside a page stops it too - nothing would have linked it",
+    async () => {
+      const dir = mkdtempSync(join(APP_HOST, "borgo-refuse-css-"));
+      const cwd = process.cwd();
+      try {
+        app(dir, {
+          "pages/index.tsx": 'import "./beside.css";\nexport default () => <h1>one</h1>;\n',
+          "pages/beside.css": ".beside { color: red; }\n",
+        });
+        process.chdir(dir);
+        await expect(buildAssets(false)).rejects.toBeInstanceOf(AssetChannelRefused);
+      } finally {
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "new URL against import.meta.url stops it, and import.meta.dir with it",
+    async () => {
+      const dir = mkdtempSync(join(APP_HOST, "borgo-refuse-url-"));
+      const cwd = process.cwd();
+      try {
+        app(dir, {
+          "pages/index.tsx":
+            "export default () => (<>" +
+            "<img src={new URL(\"./probe.png\", import.meta.url).href} />" +
+            "<img src={import.meta.dir + \"/probe.png\"} />" +
+            "</>);\n",
+          "pages/probe.png": "PNG",
+        });
+        process.chdir(dir);
+        let thrown: unknown = null;
+        try {
+          await buildAssets(false);
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toBeInstanceOf(AssetChannelRefused);
+        const said = (thrown as AssetChannelRefused).lines.join("\n");
+        expect(said).toContain("/assets/probe.png");
+        expect(said).toContain("import.meta.dir");
+      } finally {
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  // THE ONE THAT DECIDES WHETHER A REFUSAL MAY EXIST: a tree that does not use
+  // the channel has to build. It carries, on purpose, the shapes a wider rule
+  // would refuse - a loader reading a seed beside itself through
+  // import.meta.url (the pattern borgo's own colors.ts uses and which is
+  // CORRECT), a runtime discriminator on import.meta.dir, an absolute asset url
+  // written the documented way, and a windows path in a string literal.
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "a healthy tree - loader reading a seed beside itself included - still builds",
+    async () => {
+      const dir = mkdtempSync(join(APP_HOST, "borgo-refuse-healthy-"));
+      const cwd = process.cwd();
+      try {
+        app(dir, {
+          "pages/index.tsx":
+            'import { seed } from "../lib/load";\n' +
+            "export const loader = async () => ({ rows: await seed() });\n" +
+            "export default ({ rows }: { rows: unknown }) => (<>" +
+            '<img src="/logo.svg" />' +
+            "<p>{String(rows)}</p>" +
+            '<code>{"C:" + String.fromCharCode(92) + "Users"}</code>' +
+            "</>);\n",
+          "lib/seed.json": '{"rows":[]}',
+          "lib/load.ts":
+            'export const seed = async () => (await Bun.file(new URL("./seed.json", import.meta.url)).json()).rows;\n' +
+            'export const onServer = typeof import.meta.dir !== "undefined";\n',
+          "public/logo.svg": "<svg/>",
+        });
+        process.chdir(dir);
+        const built = await buildAssets(false);
+        expect(built.names["client.js"]).toContain("client-");
+      } finally {
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
 });

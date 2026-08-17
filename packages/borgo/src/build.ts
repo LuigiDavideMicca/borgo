@@ -653,9 +653,12 @@ export function miscasedImports(root = "."): CaseMismatch[] {
  * `new URL("../logo.svg", import.meta.url)` - which resolves to /logo.svg and
  * is served - is silent.
  *
- * Not covered, and the limits line says so: a page that never enters the client
- * bundle (`hydrate = false`, `_500.tsx`) is not in any emitted file, so its
- * `new URL` is not read here even though SSR renders it broken.
+ * Not covered here, and measured: a page that never enters the client bundle
+ * (`hydrate = false`, `_500.tsx`) is in no emitted file - a probe app built in
+ * production emitted index-*.js and boom-*.js and nothing at all for zero.tsx
+ * or _500.tsx - so nothing read at build time can see its `new URL`, while ssr
+ * renders it as a `file://` path into the served document. That half is closed
+ * at render time instead, by `redactLocalPaths` in server.ts.
  */
 export type UnservedRef = { spec: string; url: string; from: string };
 
@@ -668,6 +671,31 @@ export function runtimeUrlRefs(source: string): string[] {
   const found: string[] = [];
   for (const match of source.matchAll(RUNTIME_URL_REF)) found.push(match[2]);
   return found;
+}
+
+/**
+ * The other spelling of the same mistake, and the one nothing read until now:
+ * `import.meta.dir + "/x.png"`.
+ *
+ * Measured on the served document of a real production build: ssr renders
+ * `src="C:\Users\...\pages/probe.png"` - the on-disk path with native
+ * separators, next to the `file://` one `new URL` produces - and in the browser
+ * `import.meta.dir` is not defined at all, so the same expression is the string
+ * `"undefined/x.png"`. Broken on both halves, every time.
+ *
+ * ONLY WHEN CONCATENATED. `import.meta.dir` is also how a module asks "am I
+ * running under bun or in a browser", and `typeof import.meta.dir` or
+ * `if (import.meta.dir)` is a discriminator that works. A build that refuses is
+ * only safe while it cannot refuse working code, so the rule is narrowed to the
+ * one shape that is building a string: a `+` on either side of it.
+ */
+const META_PATH_CONCAT =
+  /(?:\+\s*import\s*\.\s*meta\s*\.\s*(?:dir|path)\b|import\s*\.\s*meta\s*\.\s*(?:dir|path)\s*\+)/g;
+
+export function metaPathConcats(source: string): number {
+  let n = 0;
+  for (const _ of source.matchAll(META_PATH_CONCAT)) n++;
+  return n;
 }
 
 // where the emitted bundle is served from: `import.meta.url` in a chunk is that
@@ -744,29 +772,130 @@ export function bundledAssetNames(
   return names.sort();
 }
 
+/**
+ * EVERY WAY THE CHANNEL SHOWS UP IN THE OUTPUT A BUILD JUST WROTE, IN ONE LIST.
+ *
+ * Three defects, one disease, and the evidence for all three is the emitted
+ * output rather than the sources - which is what makes a refusal safe. The
+ * pattern is correct on the server: borgo's own colors.ts does
+ * `Bun.file(new URL("../package.json", import.meta.url))`, and a loader reading
+ * a seed beside itself is right. Pages are rewritten for the client build with
+ * `loader`, `action` and `prerender` eliminated and then tree-shaken, so none of
+ * that server-side code is in any emitted file. What IS in one is code the
+ * browser will run.
+ *
+ *   - `emitted`: the bundler wrote a file for `import x from "./x.png"` or
+ *     `import "./x.css"`. Measured: the file lands at
+ *     public/assets/x-<hash>.png and the reference in the bundle becomes
+ *     `"./x-<hash>.png"`, which resolves against the DOCUMENT, not against
+ *     /assets/ - a 404 from every route (measured: /logo-vfrp2mc1.png 404 while
+ *     /assets/logo-vfrp2mc1.png is 200). Emitted css is worse: nothing links it,
+ *     so the styles are simply absent and nothing says so.
+ *   - `url`: an emitted bundle asks for a url public/ does not hold.
+ *   - `dir`: an emitted bundle concatenates `import.meta.dir`, which the browser
+ *     has not got.
+ *
+ * WHY THIS IS FATAL AND NOT A WARNING. A refusal is only admissible while it
+ * cannot refuse an app that works, and that is the measured part: none of these
+ * three forms works anywhere, on any filesystem, ever - the emitted url is
+ * wrong from every route and the emitted stylesheet is linked by nothing. The
+ * channel is also outside the documented contract and never denied by it: the
+ * docs prescribe public/ plus an absolute path, and grep finds no mention of
+ * `import.meta.url` or of importing an asset from a source anywhere in docs/.
+ * The reference app builds with none of these (measured: 0 asset outputs, 0
+ * unserved urls across 24 bundles and 413 kB).
+ *
+ * And the reason it stopped being enough to print it: the same expression, run
+ * in the ssr pass from source, writes THE ABSOLUTE PATH OF THE MACHINE into the
+ * document every visitor receives. A warning at the end of a green build does
+ * not stop that from shipping. A refusal does.
+ */
+export type ChannelFault =
+  | { kind: "emitted"; name: string }
+  | { kind: "url"; from: string; spec: string; url: string }
+  | { kind: "dir"; from: string };
+
+export function assetChannelFaults(
+  bundles: Iterable<{ name: string; source: string }>,
+  served: Iterable<string>,
+  emitted: readonly string[] = [],
+): ChannelFault[] {
+  const faults: ChannelFault[] = [];
+  for (const name of emitted) faults.push({ kind: "emitted", name });
+  for (const ref of unservedRuntimeUrls(bundles, served)) {
+    faults.push({ kind: "url", from: ref.from, spec: ref.spec, url: ref.url });
+  }
+  // re-read for the concatenation form: unservedRuntimeUrls owns the new URL one
+  for (const { name, source } of bundles) {
+    if (metaPathConcats(source)) faults.push({ kind: "dir", from: name });
+  }
+  return faults;
+}
+
+// one wording for both readers - the refusal that stops a build and the report
+// that a tree already built gets - so a message cannot drift between them
+export function channelLines(faults: readonly ChannelFault[]): string[] {
+  return faults.map((fault) => {
+    if (fault.kind === "emitted") {
+      return (
+        `an import made the bundler write ${c.bold(`public/assets/${fault.name}`)}, which no document points at ` +
+        `${g.dot} the url in the bundle resolves against the page, not /assets/: put the file in public/ and name it absolutely`
+      );
+    }
+    if (fault.kind === "dir") {
+      return (
+        `assets/${fault.from} builds a url out of ${c.bold("import.meta.dir")}, which the browser has not got ` +
+        `${g.dot} it is "undefined/..." there and the path on disk in the server-rendered html: put the file in public/ and name it absolutely`
+      );
+    }
+    return (
+      `assets/${fault.from} asks the browser for ${c.bold(fault.url)}, and public/ holds no such file ` +
+      `${g.dot} new URL(${fault.spec}, import.meta.url) emits nothing: 404 everywhere, and ssr renders the path on disk`
+    );
+  });
+}
+
+/**
+ * A build that produced output borgo will not serve.
+ *
+ * Thrown BEFORE `clearBuildMark()`, which is the whole point of throwing here
+ * rather than after: the tree keeps the mark that says the last build did not
+ * finish, so the next `borgo start` rebuilds and refuses again instead of
+ * finding a public/assets that looks complete and serving the leak.
+ */
+export class AssetChannelRefused extends Error {
+  readonly lines: string[];
+  constructor(faults: readonly ChannelFault[]) {
+    super(
+      `${faults.length} reference${faults.length === 1 ? "" : "s"} to a file beside its own source - ` +
+        "borgo serves public/, and this build would have shipped a url nobody answers " +
+        "and the path of this machine inside the rendered html",
+    );
+    this.name = "AssetChannelRefused";
+    this.lines = channelLines(faults);
+  }
+}
+
 const SHOWN = 10;
 
 /**
- * Printed, never thrown. A build that works today has to go on working today:
- * the check reports a file that exists under another spelling, or a url the
- * emitted bundle asks for and public/ does not hold, which is as close to
- * certain as a static reading gets - and it is still only a warning. The one
- * thing it must not be able to do is stop a build over a string.
+ * Printed, never thrown, and that is right for THESE findings: a file that
+ * exists under another spelling works on the machine the author is looking at,
+ * so refusing the build would stop a tree that builds and runs here from being
+ * built at all. The channel checks went the other way and left this function
+ * for the same reason in reverse - nothing they name has ever worked anywhere,
+ * so assetChannelFaults refuses the build instead of printing at the end of a
+ * green one.
  *
  * The last line states what was not read, because a check that names no limit
  * teaches whoever read it that there is none.
  */
-export function warnAssetCase(
-  root = ".",
-  pub = join(root, "public"),
-  bundled: readonly string[] = [],
-): number {
+export function warnAssetCase(root = ".", pub = join(root, "public")): number {
   const served = publicAssetUrls(pub);
   const mismatches = caseOnlyMismatches(collectAssetRefs(root), served);
   const conventions = miscasedConventions(root);
   const imports = miscasedImports(root);
-  const unserved = unservedRuntimeUrls(bundleSources(join(pub, "assets")), served);
-  const total = mismatches.length + conventions.length + imports.length + unserved.length + bundled.length;
+  const total = mismatches.length + conventions.length + imports.length;
   if (!total) return 0;
   for (const { expected, onDisk } of conventions) {
     console.warn(
@@ -792,26 +921,8 @@ export function warnAssetCase(
   if (imports.length > SHOWN) {
     console.warn(`  ${c.red(g.err)} and ${imports.length - SHOWN} more imports spelled another way`);
   }
-  for (const { from, spec, url } of unserved.slice(0, SHOWN)) {
-    console.warn(
-      `  ${c.red(g.err)} assets/${from} asks the browser for ${c.bold(url)}, and public/ holds no such file ` +
-        `${g.dot} new URL(${spec}, import.meta.url) emits nothing: 404 everywhere, and ssr renders the path on disk`,
-    );
-  }
-  if (unserved.length > SHOWN) {
-    console.warn(`  ${c.red(g.err)} and ${unserved.length - SHOWN} more urls built against import.meta.url`);
-  }
-  for (const name of bundled.slice(0, SHOWN)) {
-    console.warn(
-      `  ${c.red(g.err)} an import made the bundler write ${c.bold(`public/assets/${name}`)}, which no document points at ` +
-        `${g.dot} the url in the bundle resolves against the page, not /assets/: put the file in public/ and name it absolutely`,
-    );
-  }
-  if (bundled.length > SHOWN) {
-    console.warn(`  ${c.red(g.err)} and ${bundled.length - SHOWN} more files emitted for an import`);
-  }
   console.warn(
-    `  ${c.dim(`${g.dot} read: literal absolute paths in html, ts/tsx/js, css/scss and json, relative import specifiers in ts/tsx/js, and new URL(..., import.meta.url) in the bundle this build emitted ${g.dot} not read: a relative url inside a string (<img src="./x.png">, fetch("./x.json")), a url or a specifier built at runtime, a page that never enters the client bundle (hydrate = false, _500.tsx) though ssr renders its new URL broken, a bare package specifier, @import inside css, or a path that comes from the api`)}`,
+    `  ${c.dim(`${g.dot} read: literal absolute paths in html, ts/tsx/js, css/scss and json, and relative import specifiers in ts/tsx/js ${g.dot} not read: a relative url inside a string (<img src="./x.png">, fetch("./x.json")), a url or a specifier built at runtime, a bare package specifier, @import inside css, or a path that comes from the api ${g.dot} a file referenced beside its own source is not warned about at all: assetChannelFaults refuses the build over it`)}`,
   );
   return total;
 }
@@ -1650,6 +1761,14 @@ function causeChain(error: unknown): string[] {
  * is the one who already read the message and wants more.
  */
 export function reportBuildFailure(error: unknown, debug = debugEnabled()): void {
+  if (error instanceof AssetChannelRefused) {
+    console.error(`\n  ${c.red(g.err)} ${error.message}`);
+    for (const line of error.lines) console.error(`    ${c.red(g.err)} ${line}`);
+    console.error(
+      `  ${c.dim(`${g.dot} this tree is left marked unfinished, so the next boot rebuilds it rather than serving it`)}\n`,
+    );
+    return;
+  }
   if (error instanceof BundleFailed) {
     console.error(`\n  ${c.red(g.err)} the client bundle failed to build`);
     for (const detail of error.details) console.error(`    ${detail}`);
@@ -1775,6 +1894,14 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
     names,
   );
   await Bun.write(buildModePath, buildModeFor(dev));
+
+  // BEFORE THE MARK COMES OFF, so a refused build is a tree the next boot
+  // rebuilds rather than one it serves. Read off what this build just emitted,
+  // never off the sources - assetChannelFaults carries the argument for why
+  // that is what makes refusing safe.
+  const faults = assetChannelFaults(bundleSources(outDir), publicAssetUrls("public"), bundledAssetNames(assets));
+  if (faults.length) throw new AssetChannelRefused(faults);
+
   // every byte this build promises is on disk: the tree is a finished build
   // again, and the next boot has nothing to inherit from this one
   clearBuildMark();
@@ -1784,7 +1911,7 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   // its output. dev runs it too - that is the machine the spelling looks right
   // on, and the only one the author is watching
   try {
-    warnAssetCase(".", "public", bundledAssetNames(assets));
+    warnAssetCase(".", "public");
   } catch {}
 
   // dev: page chunks carry an injected marker, so the fast-refresh channel

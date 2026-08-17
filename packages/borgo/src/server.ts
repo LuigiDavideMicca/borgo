@@ -75,6 +75,200 @@ function composeElement(route: Route, props: Record<string, unknown>) {
   return element;
 }
 
+/**
+ * THE PATH OF THIS MACHINE MUST NOT LEAVE IT INSIDE A DOCUMENT.
+ *
+ * A page is rendered from source, so `import.meta.url` in it is a `file://` url
+ * and `import.meta.dir` an absolute directory. Measured against a real
+ * production build (`dev: false`) and borgo's own front server, one page
+ * carrying `new URL("./probe.png", import.meta.url).href` and
+ * `import.meta.dir + "/probe.png"` served this to anyone who asked:
+ *
+ *   <link rel="preload" as="image" href="file:///C:/Users/.../pages/probe.png"/>
+ *   <img id="a" src="file:///C:/Users/.../pages/probe.png"/>
+ *   <img id="b" src="C:\Users\...\pages/probe.png"/>
+ *   <p id="d">file:///C:/Users/.../pages/index.tsx</p>
+ *
+ * - four routes into one document: an attribute, react's own auto-emitted
+ * preload link, rendered text, and the same again on `_500.tsx` and on a
+ * `hydrate = false` page, neither of which is in any emitted bundle. In a
+ * container that string is the image's layout instead.
+ *
+ * `borgo build` refuses this channel now, and that is the repair; this is the
+ * net under the cases a build cannot read - a page that never enters the client
+ * bundle, a helper module, a path a component computes at runtime.
+ *
+ * REDACT, NOT REFUSE, AND THE DIRECTION IS THE REASON. This sits on every html
+ * response in production. By the time a leaking chunk exists the shell's opening
+ * bytes are already on the wire, so a 500 is not available - and turning a page
+ * that is visible today into one that is not, over a string, is the wrong way
+ * for a guard on this path to be wrong. Rewriting a byte sequence that IS the
+ * server's own root path cannot break a healthy page: nothing else can contain
+ * it.
+ *
+ * WHICH SPELLINGS, AND WHY NOT ALL OF THEM. Only the unambiguous ones: the
+ * `file://` url of the root, and - on windows only - the root with native
+ * separators and with forward ones, both of which start with a drive letter and
+ * a colon and so can never be a url path. On linux the root is a bare absolute
+ * path like `/app`, which is textually a perfectly good root-relative url:
+ * redacting that would rewrite legitimate links, so it is left alone and named
+ * as a limit. What produces it there - `import.meta.dir` concatenation - is
+ * refused at build time instead.
+ */
+const REDACTED = "[redacted]";
+
+export function localPathNeedles(root: string, platform: string = process.platform): string[] {
+  if (!root) return [];
+  const needles: string[] = [];
+  // a drive-lettered root is not a url in either separator spelling; a posix
+  // one is, so it contributes nothing here
+  if (platform === "win32") needles.push(root, root.replaceAll("\\", "/"));
+  // and the file:// url only when it is not already spelled by one of those:
+  // `file:///C:/x/y` carries `C:/x/y` inside it, so scanning for it twice is a
+  // third of the per-response cost spent on nothing. A root that percent-encodes
+  // (a space in the path) is not carried, and then it is its own needle.
+  const fileUrl = pathToFileURL(root).href;
+  if (!needles.some((n) => fileUrl.includes(n))) needles.push(fileUrl);
+  return [...new Set(needles)].filter((n) => n.length > 0);
+}
+
+/**
+ * The rendered markup with every occurrence of those needles replaced.
+ *
+ * Streaming, so a needle can straddle two chunks and the last bytes of one are
+ * held back until the next arrives. The healthy path allocates nothing beyond a
+ * window of twice the longest needle: a chunk with no match is yielded as a
+ * subarray of the bytes react produced, never a copy, and only a chunk that
+ * really carries the path is rebuilt.
+ */
+export async function* redactLocalPaths(
+  source: AsyncIterable<Uint8Array>,
+  needles: readonly string[],
+  onFound?: () => void,
+): AsyncIterable<Uint8Array> {
+  if (!needles.length) {
+    yield* source;
+    return;
+  }
+  const patterns = needles.map((n) => Buffer.from(n, "utf8"));
+  const replacement = Buffer.from(REDACTED, "utf8");
+  // a needle plus the byte after it, which decides whether the match is the
+  // root or only a name that begins like it
+  const overlap = Math.max(...patterns.map((p) => p.length));
+
+  // whether the bytes held back could be the beginning of a needle whose end is
+  // in the chunk that just arrived. Almost always false, and while it is false
+  // nothing is copied: the held bytes go out as they are and the new chunk is
+  // scanned where react wrote it.
+  //
+  // Only the positions where the needle's first byte actually occurs are
+  // tried. The first shape of this walked every suffix length with
+  // `Buffer.compare`'s five-argument form and cost 137 us per 4 kB chunk -
+  // twenty times the scan it was protecting.
+  const straddles = (tail: Buffer): boolean => {
+    for (const pattern of patterns) {
+      for (let at = tail.indexOf(pattern[0]); at !== -1; at = tail.indexOf(pattern[0], at + 1)) {
+        const k = Math.min(tail.length - at, pattern.length);
+        if (tail.subarray(at, at + k).equals(pattern.subarray(0, k))) return true;
+      }
+    }
+    return false;
+  };
+
+  const scrub = (buf: Buffer, atEnd: boolean): Buffer | null => {
+    let out: Buffer | null = null;
+    for (const pattern of patterns) {
+      const subject = out ?? buf;
+      if (subject.indexOf(pattern) === -1) continue;
+      const replaced = replaceRoots(subject, pattern, replacement, atEnd);
+      if (replaced) out = replaced;
+    }
+    return out;
+  };
+
+  let carry: Buffer | null = null;
+  for await (const chunk of source) {
+    const bytes = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    let work = bytes;
+    if (carry) {
+      if (straddles(carry)) work = Buffer.concat([carry, bytes]);
+      else yield carry;
+      carry = null;
+    }
+    const cleaned = scrub(work, false);
+    if (cleaned) {
+      onFound?.();
+      work = cleaned;
+    }
+    if (work.length > overlap) {
+      yield work.subarray(0, work.length - overlap);
+      // copied, not viewed: a view would hold the whole rendered chunk alive
+      // for the sake of forty bytes
+      carry = Buffer.from(work.subarray(work.length - overlap));
+    } else {
+      carry = Buffer.from(work);
+    }
+  }
+  if (carry?.length) {
+    // the end of the document is a name boundary like any separator, and this
+    // is the only place that can know it has been reached
+    const cleaned = scrub(carry, true);
+    if (cleaned) onFound?.();
+    yield cleaned ?? carry;
+  }
+}
+
+/**
+ * A BYTE THAT CAN CONTINUE A FILE NAME, WHICH IS WHAT SEPARATES THE ROOT FROM A
+ * DIRECTORY THAT MERELY BEGINS LIKE IT.
+ *
+ * Found by the healthy-page test and not by reasoning: with the root
+ * `C:\srv\borgo\app`, a documentation page showing `C:\srv\borgo\application`
+ * came out as `[redacted]lication`. A guard on the path of every html response
+ * that mangles a page about paths is exactly the failure this whole design is
+ * arranged to avoid, so a match counts only when what follows it cannot be more
+ * of the same name.
+ */
+const nameByte = (b: number): boolean =>
+  (b >= 0x30 && b <= 0x39) || // 0-9
+  (b >= 0x41 && b <= 0x5a) || // A-Z
+  (b >= 0x61 && b <= 0x7a) || // a-z
+  b === 0x2e || // .
+  b === 0x5f || // _
+  b === 0x2d || // -
+  b === 0x25 || // % - a percent-encoded byte continues the name in a file url
+  b >= 0x80; // anything non-ascii is a name character somewhere
+
+// Buffer has no split; reached only by a chunk that really carries the root
+function replaceRoots(
+  buf: Buffer,
+  pattern: Buffer,
+  glue: Buffer,
+  atEnd: boolean,
+): Buffer | null {
+  const pieces: Buffer[] = [];
+  let from = 0;
+  let hit = false;
+  for (;;) {
+    const at = buf.indexOf(pattern, from);
+    if (at === -1) break;
+    const after = at + pattern.length;
+    const bounded = after === buf.length ? atEnd : !nameByte(buf[after]);
+    if (!bounded) {
+      // copied through untouched, and the search resumes past this one
+      pieces.push(buf.subarray(from, after));
+      from = after;
+      continue;
+    }
+    hit = true;
+    pieces.push(buf.subarray(from, at), glue);
+    from = after;
+  }
+  if (!hit) return null;
+  pieces.push(buf.subarray(from));
+  return Buffer.concat(pieces);
+}
+
 // each topic is a subscription table entry held for the life of the socket:
 // unbounded counts or names are cheap resident memory for anyone who can open
 // one.
@@ -244,6 +438,22 @@ export async function serve({
   const reloading = switches.reloading;
   const csrfCookieAttrs = switches.csrfCookieAttrs;
 
+  // the needles are this process's own root, resolved once: a per-request
+  // process.cwd() would be a syscall on the path of every html response, and
+  // the root cannot change under a running server
+  const pathNeedles = localPathNeedles(process.cwd());
+  // said once per page, not once per request: a leak is a defect the operator
+  // fixes, and a line per visitor buries it
+  const namedLeak = new Set<string>();
+  const noteLeak = (file: string) => {
+    if (namedLeak.has(file)) return;
+    namedLeak.add(file);
+    console.error(
+      `  ${c.red(g.err)} pages/${file} rendered the path of this machine into the document ` +
+        `${c.dim(`${g.dot} redacted before it was sent ${g.dot} borgo serves public/: put the file there and name it absolutely`)}`,
+    );
+  };
+
   const renderOptions: RenderPageOptions = {
     dev,
     shell,
@@ -251,6 +461,8 @@ export async function serve({
     csrfCookieAttrs,
     runLoader,
     compose: composeElement,
+    // replaced per render below, which is the only place the page being
+    // rendered is known - the log line is worthless without it
     renderToStream: (element, init) =>
       renderToReadableStream(element, init) as unknown as Promise<AsyncIterable<Uint8Array>>,
   };
@@ -261,7 +473,24 @@ export async function serve({
     status: number,
     extraProps?: Record<string, unknown>,
     extraCookies: string[] = [],
-  ) => renderDocument(req, route, params, status, renderOptions, extraProps, extraCookies);
+  ) =>
+    renderDocument(
+      req,
+      route,
+      params,
+      status,
+      {
+        ...renderOptions,
+        renderToStream: async (element, init) =>
+          redactLocalPaths(
+            (await renderToReadableStream(element, init)) as unknown as AsyncIterable<Uint8Array>,
+            pathNeedles,
+            () => noteLeak(route.file),
+          ),
+      },
+      extraProps,
+      extraCookies,
+    );
 
   // static files: hashed build outputs cache forever, compressible types are
   // served from the .gz/.br siblings that `borgo build` emitted. dev has no
