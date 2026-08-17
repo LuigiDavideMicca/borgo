@@ -43,16 +43,34 @@ function forgetPid(pid: number) {
   writePidfile();
 }
 
+/**
+ * A process that exited but was never collected keeps its pid and keeps
+ * accepting signal 0, so the corpse is read from /proc/<pid>/stat as
+ * dev.ts and serve-entry.ts already do; without /proc the signal is the answer.
+ */
+export function isCorpse(stat: string | null): boolean {
+  if (!stat) return false;
+  // the comm is in parentheses and unescaped: only the last ")" closes it
+  const close = stat.lastIndexOf(")");
+  if (close < 0) return false;
+  const state = stat.slice(close + 1).trimStart().charAt(0);
+  return state === "Z" || state === "X" || state === "x";
+}
+
 /** does a process with this pid exist? signal 0 checks without signalling */
-function isAlive(pid: number): boolean {
+export function isAlive(pid: number): boolean {
   if (pid === process.pid) return true;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
     // EPERM means it exists but belongs to somebody else
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
   }
+  let stat: string | null = null;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch {}
+  return !isCorpse(stat);
 }
 
 /** kills a pid and every descendant, synchronously enough to be usable from an exit hook */
