@@ -619,22 +619,154 @@ export function miscasedImports(root = "."): CaseMismatch[] {
   return found.sort((a, b) => a.source.localeCompare(b.source) || a.ref.localeCompare(b.ref));
 }
 
+/**
+ * A file next to a source, referenced through a channel borgo does not serve.
+ *
+ * The two rules above are about spelling and answer differently on two
+ * filesystems. This one does not: it fails everywhere, always, silently.
+ *
+ *   `new URL("./x.png", import.meta.url)` is not an asset for borgo. Measured
+ *   on bun 1.3.14 across six configurations - the default one borgo uses,
+ *   `target` browser/bun/node, an explicit file loader, and `publicPath` - the
+ *   string survives the bundle untouched and the file is neither emitted nor
+ *   copied. It is not a misconfiguration: bun does not know the form.
+ *
+ * In the browser the bundle is a module script under /assets/, so
+ * `import.meta.url` is the chunk's url and `./x.png` resolves to /assets/x.png,
+ * where nothing was written: 404, on every filesystem, after a green build. In
+ * the SSR pass the same expression runs from source under bun, where
+ * `import.meta.url` is a file:// url - so the served document carries the
+ * absolute path of the machine that rendered it, and hydration disagrees with
+ * it. `import x from "./x.png"` is the other half: the bundler does emit and
+ * copy the file, under a hashed name, and rewrites the reference to
+ * `./x-hash.png` - a document-relative url that resolves against the page, not
+ * against /assets/, so it is a 404 from every route, and the SSR pass renders
+ * the on-disk path into the html. Emitted css is worse still: nothing links it.
+ *
+ * The proof is the emitted output, never the source, and that is the whole
+ * design. The pattern is correct and common on the server - borgo's own
+ * colors.ts reads its package.json this way, and so does any loader reading a
+ * file beside itself - so a check that read sources would cry wolf at healthy
+ * code. A specifier that survived into public/assets is code the browser will
+ * run: no guess about which half of a page it came from. And the url it
+ * resolves to is compared against what public/ actually holds, so
+ * `new URL("../logo.svg", import.meta.url)` - which resolves to /logo.svg and
+ * is served - is silent.
+ *
+ * Not covered, and the limits line says so: a page that never enters the client
+ * bundle (`hydrate = false`, `_500.tsx`) is not in any emitted file, so its
+ * `new URL` is not read here even though SSR renders it broken.
+ */
+export type UnservedRef = { spec: string; url: string; from: string };
+
+// tolerant of the shape a minifier leaves behind - no spaces, either quote -
+// and anchored on `import.meta.url`, which nothing can rename
+const RUNTIME_URL_REF =
+  /new\s+URL\s*\(\s*(["'])(\.{1,2}\/[^"'\n]*)\1\s*,\s*import\s*\.\s*meta\s*\.\s*url\s*\)/g;
+
+export function runtimeUrlRefs(source: string): string[] {
+  const found: string[] = [];
+  for (const match of source.matchAll(RUNTIME_URL_REF)) found.push(match[2]);
+  return found;
+}
+
+// where the emitted bundle is served from: `import.meta.url` in a chunk is that
+// chunk's url, so every relative specifier resolves against this
+const ASSET_BASE = "/assets/";
+
+export function unservedRuntimeUrls(
+  bundles: Iterable<{ name: string; source: string }>,
+  served: Iterable<string>,
+  base = ASSET_BASE,
+): UnservedRef[] {
+  const urls = new Set(served);
+  const found: UnservedRef[] = [];
+  const seen = new Set<string>();
+  for (const { name, source } of bundles) {
+    for (const spec of runtimeUrlRefs(source)) {
+      let url: string;
+      try {
+        // the host is arbitrary and never printed: only the path is compared
+        url = new URL(spec, `http://borgo${base}${name}`).pathname;
+      } catch {
+        continue;
+      }
+      if (urls.has(url)) continue;
+      const key = `${name}\0${spec}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ spec, url, from: name });
+    }
+  }
+  return found.sort((a, b) => a.from.localeCompare(b.from) || a.spec.localeCompare(b.spec));
+}
+
+// the emitted javascript of the build that just ran. Read from disk rather than
+// from the build result so the check has one shape whether it is called after a
+// build or on a tree that already holds one.
+export function bundleSources(dir = outDir): Array<{ name: string; source: string }> {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const bundles: Array<{ name: string; source: string }> = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".js")) continue;
+    try {
+      bundles.push({ name: entry.name, source: readFileSync(join(dir, entry.name), "utf8") });
+    } catch {}
+  }
+  return bundles.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * The files the bundler emitted for an asset import, which borgo does not serve
+ * at the url the bundle names.
+ *
+ * `kind: "asset"` is an exact signal, not a guess: borgo bundles javascript
+ * entrypoints and compiles its stylesheet outside the bundler, so an asset
+ * output exists only because a source imported a file through the file loader.
+ * A healthy tree emits none - measured on examples/tasks. Sourcemaps are
+ * dropped in case a later build ever turns them on.
+ */
+export function bundledAssetNames(
+  outputs: Iterable<{ kind: string; path: string }>,
+): string[] {
+  const names: string[] = [];
+  for (const { kind, path } of outputs) {
+    if (kind !== "asset") continue;
+    const name = path.replaceAll("\\", "/").split("/").pop()!;
+    if (name.endsWith(".map")) continue;
+    names.push(name);
+  }
+  return names.sort();
+}
+
 const SHOWN = 10;
 
 /**
  * Printed, never thrown. A build that works today has to go on working today:
- * the check reports a file that exists under another spelling, which is as
- * close to certain as a static reading gets, and it is still only a warning -
- * the one thing it must not be able to do is stop a build over a string.
+ * the check reports a file that exists under another spelling, or a url the
+ * emitted bundle asks for and public/ does not hold, which is as close to
+ * certain as a static reading gets - and it is still only a warning. The one
+ * thing it must not be able to do is stop a build over a string.
  *
  * The last line states what was not read, because a check that names no limit
  * teaches whoever read it that there is none.
  */
-export function warnAssetCase(root = ".", pub = join(root, "public")): number {
-  const mismatches = caseOnlyMismatches(collectAssetRefs(root), publicAssetUrls(pub));
+export function warnAssetCase(
+  root = ".",
+  pub = join(root, "public"),
+  bundled: readonly string[] = [],
+): number {
+  const served = publicAssetUrls(pub);
+  const mismatches = caseOnlyMismatches(collectAssetRefs(root), served);
   const conventions = miscasedConventions(root);
   const imports = miscasedImports(root);
-  const total = mismatches.length + conventions.length + imports.length;
+  const unserved = unservedRuntimeUrls(bundleSources(join(pub, "assets")), served);
+  const total = mismatches.length + conventions.length + imports.length + unserved.length + bundled.length;
   if (!total) return 0;
   for (const { expected, onDisk } of conventions) {
     console.warn(
@@ -660,8 +792,26 @@ export function warnAssetCase(root = ".", pub = join(root, "public")): number {
   if (imports.length > SHOWN) {
     console.warn(`  ${c.red(g.err)} and ${imports.length - SHOWN} more imports spelled another way`);
   }
+  for (const { from, spec, url } of unserved.slice(0, SHOWN)) {
+    console.warn(
+      `  ${c.red(g.err)} assets/${from} asks the browser for ${c.bold(url)}, and public/ holds no such file ` +
+        `${g.dot} new URL(${spec}, import.meta.url) emits nothing: 404 everywhere, and ssr renders the path on disk`,
+    );
+  }
+  if (unserved.length > SHOWN) {
+    console.warn(`  ${c.red(g.err)} and ${unserved.length - SHOWN} more urls built against import.meta.url`);
+  }
+  for (const name of bundled.slice(0, SHOWN)) {
+    console.warn(
+      `  ${c.red(g.err)} an import made the bundler write ${c.bold(`public/assets/${name}`)}, which no document points at ` +
+        `${g.dot} the url in the bundle resolves against the page, not /assets/: put the file in public/ and name it absolutely`,
+    );
+  }
+  if (bundled.length > SHOWN) {
+    console.warn(`  ${c.red(g.err)} and ${bundled.length - SHOWN} more files emitted for an import`);
+  }
   console.warn(
-    `  ${c.dim(`${g.dot} read: literal absolute paths in html, ts/tsx/js, css/scss and json, and relative import specifiers in ts/tsx/js ${g.dot} not read: a url or a specifier built at runtime, a bare package specifier, @import inside css, or a path that comes from the api`)}`,
+    `  ${c.dim(`${g.dot} read: literal absolute paths in html, ts/tsx/js, css/scss and json, relative import specifiers in ts/tsx/js, and new URL(..., import.meta.url) in the bundle this build emitted ${g.dot} not read: a relative url inside a string (<img src="./x.png">, fetch("./x.json")), a url or a specifier built at runtime, a page that never enters the client bundle (hydrate = false, _500.tsx) though ssr renders its new URL broken, a bare package specifier, @import inside css, or a path that comes from the api`)}`,
   );
   return total;
 }
@@ -1634,7 +1784,7 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   // its output. dev runs it too - that is the machine the spelling looks right
   // on, and the only one the author is watching
   try {
-    warnAssetCase();
+    warnAssetCase(".", "public", bundledAssetNames(assets));
   } catch {}
 
   // dev: page chunks carry an injected marker, so the fast-refresh channel

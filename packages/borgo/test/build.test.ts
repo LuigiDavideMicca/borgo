@@ -51,10 +51,14 @@ import {
   renameUnsafeChunks,
   reservedRoutes,
   reportBuildFailure,
+  bundledAssetNames,
+  bundleSources,
+  runtimeUrlRefs,
   scanAssetRefs,
   scanCode,
   scanImportSpecifiers,
   sweepBuildOutput,
+  unservedRuntimeUrls,
   unusableBuiltAssets,
   warnAssetCase,
   warnDeadRoutes,
@@ -2372,5 +2376,293 @@ describe("the miscased import read off a real tree", () => {
 
   test("a root that cannot be read is an empty list", () => {
     expect(miscasedImports(join(tmpdir(), `borgo-imp-gone-${Date.now()}`))).toEqual([]);
+  });
+});
+
+// MEASURED on bun 1.3.14, on windows/ntfs, against a real borgo production
+// build of a copy of examples/tasks: the bundler leaves
+// `new URL("./probe.png", import.meta.url)` standing in the minified chunk and
+// emits no file, in all six configurations tried (borgo's own, target
+// browser/bun/node, an explicit file loader, publicPath). The chunk is a module
+// script under /assets/, so the browser asks for /assets/probe.png and the
+// front server answered 404 while /assets/probe-h5e98vbp.png answered 200.
+// Nothing here folds case: it is the same answer on every filesystem.
+describe("runtimeUrlRefs", () => {
+  test("the minified shape the bundler emits is the shape this has to read", () => {
+    expect(runtimeUrlRefs(`var n=new URL("./probe.png",import.meta.url).href;`)).toEqual([
+      "./probe.png",
+    ]);
+  });
+
+  test("single quotes, spacing and a parent segment are the same reference", () => {
+    expect(runtimeUrlRefs("const u = new URL( '../logo.svg' , import.meta.url );")).toEqual([
+      "../logo.svg",
+    ]);
+  });
+
+  // the narrowness is the design: only a relative specifier is provably a file
+  // meant to sit beside the source. `/x.png` and a bare specifier resolve
+  // somewhere this cannot vouch for - an api path, a route, a package
+  test("an absolute or bare first argument is not this channel", () => {
+    const source = [
+      `new URL("/abs.png", import.meta.url)`,
+      `new URL("react", import.meta.url)`,
+      `new URL("https://cdn/x.png", import.meta.url)`,
+    ].join(";");
+    expect(runtimeUrlRefs(source)).toEqual([]);
+  });
+
+  // import.meta.url is what makes the url resolve against the chunk. Against
+  // any other base it is a different expression with a different answer.
+  test("a base that is not import.meta.url is a different expression", () => {
+    expect(runtimeUrlRefs(`new URL("./x.png", location.href)`)).toEqual([]);
+    expect(runtimeUrlRefs(`new URL("./x.png", import.meta.dirname)`)).toEqual([]);
+  });
+});
+
+describe("unservedRuntimeUrls", () => {
+  const bundle = (source: string, name = "client-abc12345.js") => [{ name, source }];
+
+  test("the url the browser will ask for is the one public/ is asked about", () => {
+    const found = unservedRuntimeUrls(
+      bundle(`var n=new URL("./probe.png",import.meta.url).href;`),
+      ["/assets/client-abc12345.js", "/logo.svg"],
+    );
+    expect(found).toEqual([
+      { spec: "./probe.png", url: "/assets/probe.png", from: "client-abc12345.js" },
+    ]);
+  });
+
+  // THE FALSE POSITIVE THIS CANNOT BE ALLOWED TO HAVE. `../logo.svg` from a
+  // chunk under /assets/ resolves to /logo.svg, which public/ really holds and
+  // the server really serves. A check that named it would be crying wolf at
+  // working code, and this warning would earn the right to be ignored.
+  test("a url public/ really holds is silence", () => {
+    const found = unservedRuntimeUrls(
+      bundle(`var n=new URL("../logo.svg",import.meta.url).href;`),
+      ["/logo.svg"],
+    );
+    expect(found).toEqual([]);
+  });
+
+  test("a nested specifier resolves under /assets/, not at the root", () => {
+    const found = unservedRuntimeUrls(bundle(`new URL("./img/a.png",import.meta.url)`), []);
+    expect(found[0].url).toBe("/assets/img/a.png");
+  });
+
+  test("a query or a hash is not part of the file the server is asked for", () => {
+    const found = unservedRuntimeUrls(bundle(`new URL("./a.png?v=2#x",import.meta.url)`), [
+      "/assets/a.png",
+    ]);
+    expect(found).toEqual([]);
+  });
+
+  test("the same specifier twice in one file is one line, and files come out sorted", () => {
+    const found = unservedRuntimeUrls(
+      [
+        { name: "z.js", source: `new URL("./z.png",import.meta.url)` },
+        {
+          name: "a.js",
+          source: `new URL("./a.png",import.meta.url);new URL("./a.png",import.meta.url)`,
+        },
+      ],
+      [],
+    );
+    expect(found.map((f) => `${f.from} ${f.spec}`)).toEqual(["a.js ./a.png", "z.js ./z.png"]);
+  });
+
+  test("no bundle is no finding", () => {
+    expect(unservedRuntimeUrls([], ["/logo.svg"])).toEqual([]);
+  });
+});
+
+describe("bundleSources", () => {
+  const roots: string[] = [];
+  afterAll(() => {
+    for (const dir of roots) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the emitted javascript, and nothing else in the output directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-bundle-"));
+    roots.push(dir);
+    writeFileSync(join(dir, "client-abc12345.js"), "js");
+    writeFileSync(join(dir, "client-abc12345.js.br"), "compressed");
+    writeFileSync(join(dir, "style.css"), "css");
+    writeFileSync(join(dir, "precache.json"), "{}");
+    expect(bundleSources(dir).map((b) => b.name)).toEqual(["client-abc12345.js"]);
+  });
+
+  test("an output directory that is not there is an empty list, not a throw", () => {
+    expect(bundleSources(join(tmpdir(), `borgo-bundle-gone-${Date.now()}`))).toEqual([]);
+  });
+});
+
+// MEASURED: `import logo from "./logo.png"` makes the bundler emit and copy
+// public/assets/logo-<hash>.png and rewrite the reference to "./logo-<hash>.png"
+// - a document-relative url, so from /tasks/42 the browser asks for
+// /tasks/logo-<hash>.png and gets 404, and from / it asks for /logo-<hash>.png
+// and gets 404 too. The file only ever exists under /assets/. An imported
+// stylesheet is worse: it is emitted and nothing links it at all.
+describe("bundledAssetNames", () => {
+  test("only what the bundler emitted for an import, by name", () => {
+    expect(
+      bundledAssetNames([
+        { kind: "entry-point", path: "public/assets/client-abc12345.js" },
+        { kind: "chunk", path: "public/assets/index-def67890.js" },
+        { kind: "asset", path: "public/assets/logo-7zjyd5xx.png" },
+        { kind: "asset", path: "public\\assets\\client-n6253brc.css" },
+      ]),
+    ).toEqual(["client-n6253brc.css", "logo-7zjyd5xx.png"]);
+  });
+
+  test("a sourcemap is not a file anybody imported", () => {
+    expect(bundledAssetNames([{ kind: "asset", path: "public/assets/client.js.map" }])).toEqual([]);
+  });
+
+  test("a build that emitted no asset says nothing", () => {
+    expect(bundledAssetNames([{ kind: "entry-point", path: "public/assets/client.js" }])).toEqual(
+      [],
+    );
+  });
+});
+
+describe("the unserved reference read off a real tree", () => {
+  const roots: string[] = [];
+  const project = (files: Record<string, string>) => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-unserved-"));
+    roots.push(dir);
+    for (const [rel, body] of Object.entries(files)) {
+      const path = join(dir, rel);
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, body);
+    }
+    return dir;
+  };
+  const said = (dir: string, bundled: string[] = []): string[] => {
+    const lines: string[] = [];
+    const original = console.warn;
+    try {
+      console.warn = (...args: unknown[]) => void lines.push(args.join(" "));
+      warnAssetCase(dir, join(dir, "public"), bundled);
+    } finally {
+      console.warn = original;
+    }
+    return lines;
+  };
+  afterAll(() => {
+    for (const dir of roots) rmSync(dir, { recursive: true, force: true });
+  });
+
+  // THE TEST THAT MATTERS MOST, AND THE ONE A LOOSE RULE BREAKS FIRST. A tree
+  // that does not use this channel has to stay silent, or the warning cries
+  // wolf on healthy code and the whole report stops being read - including the
+  // two spelling rules that came before it. So the healthy tree holds, on
+  // purpose, every shape a wider rule would misread:
+  //
+  //   - a relative url in a plain string, which this does not read at all
+  //   - a url assembled at runtime, where the specifier is not a literal
+  //   - an absolute first argument, which is an api path, not a file beside the
+  //     source
+  //   - a relative one against some other base, which resolves somewhere else
+  //   - `../logo.svg`, which resolves to a file public/ really holds and really
+  //     serves
+  //   - and, in the sources, the server-side read that is CORRECT: a loader
+  //     reading a file beside itself through import.meta.url works, borgo's own
+  //     colors.ts does exactly this, and a check that read sources instead of
+  //     emitted output would name it.
+  test("a healthy tree says nothing, and none of the shapes a wider rule misreads", () => {
+    const dir = project({
+      "public/logo.svg": "SVG",
+      "public/assets/client-abc12345.js": [
+        `var a="/logo.svg";fetch("./data.json");`,
+        `var b=new URL(name,import.meta.url).href;`,
+        `var c=new URL("/api/tasks.json",import.meta.url).href;`,
+        `var d=new URL("./x.png",location.href).href;`,
+        `var e=new URL("../logo.svg",import.meta.url).href;`,
+      ].join("\n"),
+      "lib/seed.json": '{"rows":[]}',
+      "lib/load.ts":
+        'export const seed = () => Bun.file(new URL("./seed.json", import.meta.url));',
+      "pages/index.tsx":
+        'export const loader = async () => (await import("../lib/load")).seed();\nexport default () => <img src="/logo.svg" />;',
+    });
+    expect(said(dir)).toEqual([]);
+    expect(warnAssetCase(dir, join(dir, "public"))).toBe(0);
+  });
+
+  // the same tree, one expression different: this is the whole defect
+  test("and the url the emitted bundle asks for names the file, the url and the limits", () => {
+    const dir = project({
+      "public/logo.svg": "SVG",
+      "public/assets/client-abc12345.js": `var n=new URL("./probe.png",import.meta.url).href;`,
+      "pages/index.tsx": "export default () => null;",
+    });
+    const lines = said(dir);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("client-abc12345.js");
+    expect(lines[0]).toContain("/assets/probe.png");
+    expect(lines[0]).toContain("./probe.png");
+    expect(lines[0]).toContain("404");
+    expect(lines[1]).toContain("not read");
+  });
+
+  // the file is beside the source and the build still emits nothing for it:
+  // reading the source tree would say "it is right there", which is exactly the
+  // reasoning that ships the 404
+  test("the file sitting on disk beside the page does not make the url served", () => {
+    const dir = project({
+      "pages/probe.png": "PNG",
+      "pages/probe.tsx": 'const u = new URL("./probe.png", import.meta.url).href;',
+      "public/assets/probe-wh39bmjg.js": `var n=new URL("./probe.png",import.meta.url).href;`,
+    });
+    expect(said(dir)[0]).toContain("/assets/probe.png");
+  });
+
+  test("a bundle whose runtime url is a file public/ holds is silent", () => {
+    const dir = project({
+      "public/logo.svg": "SVG",
+      "public/assets/client-abc12345.js": `var n=new URL("../logo.svg",import.meta.url).href;`,
+    });
+    expect(said(dir)).toEqual([]);
+  });
+
+  test("an emitted asset is named even when every spelling in the tree agrees", () => {
+    const dir = project({
+      "public/logo.svg": "SVG",
+      "pages/index.tsx": 'export default () => <img src="/logo.svg" />;',
+    });
+    const lines = said(dir, ["logo-7zjyd5xx.png"]);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("public/assets/logo-7zjyd5xx.png");
+    expect(lines[0]).toContain("/assets/");
+  });
+
+  test("the count carries both new findings, not just the old ones", () => {
+    const dir = project({
+      "public/Logo.png": "PNG",
+      "index.html": '<link rel="icon" href="/logo.png" />',
+      "public/assets/client-abc12345.js": `var n=new URL("./probe.png",import.meta.url).href;`,
+    });
+    expect(warnAssetCase(dir, join(dir, "public"), ["logo-7zjyd5xx.png"])).toBe(3);
+  });
+
+  // A CHECK THAT NAMES NO LIMIT TEACHES WHOEVER READ IT THAT THERE IS NONE.
+  // The hydrate=false hole is measured, not hypothetical: such a page never
+  // enters the client bundle, so its new URL is in no emitted file and this
+  // reads nothing about it - while ssr still renders it as a file:// path.
+  test("the limits line names the page that never enters the client bundle", () => {
+    const dir = project({
+      "public/assets/client-abc12345.js": `var n=new URL("./probe.png",import.meta.url).href;`,
+    });
+    const limits = said(dir)[1];
+    expect(limits).toContain("hydrate = false");
+    expect(limits).toContain("new URL(..., import.meta.url) in the bundle this build emitted");
+    expect(limits).toContain('<img src="./x.png">');
+    expect(limits).toContain("runtime");
+  });
+
+  test("an output directory that holds no bundle is not a finding", () => {
+    const dir = project({ "public/logo.svg": "SVG" });
+    expect(warnAssetCase(dir, join(dir, "public"))).toBe(0);
   });
 });
