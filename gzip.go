@@ -296,6 +296,32 @@ func (g *gzipResponseWriter) commitHeader() {
 	}
 	varyAcceptEncoding(h)
 	privateIfCookies(h)
+	oneContentLength(h)
+}
+
+// oneContentLength leaves the response the single Content-Length its body was
+// already sized by. Both lines of a handler that Adds a second one reach the
+// wire, and RFC 9110 8.6 has a recipient treat contradictory ones as
+// unrecoverable: net/http's Transport drops the connection and delivers no
+// status, while above the buffer startGzip deletes them all - the same correct
+// body reaching a gzip client and no identity client at all.
+//
+// The first value is the one already in force, since net/http sizes the body by
+// it: keeping it states the choice the response has made rather than making
+// one, where keeping the last would contradict the bytes being sent. Identical
+// repeats are legal to a client and pass without a word.
+func oneContentLength(h http.Header) {
+	v := h["Content-Length"]
+	if len(v) < 2 {
+		return
+	}
+	h.Set("Content-Length", v[0])
+	for _, other := range v[1:] {
+		if other != v[0] {
+			log.Printf("borgo: %d Content-Length lines %q, keeping %q", len(v), v, v[0])
+			return
+		}
+	}
 }
 
 // takeTrailers collects the trailers the handler has set so far, which the
@@ -527,12 +553,46 @@ func (g *gzipResponseWriter) finish() {
 		// send a truncated 200 under a Content-Length that no longer matches;
 		// leaving the response uncommitted lets the recovery answer 500
 		// (net/http still writes an empty 200 if nobody else does)
+		if g.status == 0 && g.complete {
+			// a handler that returned without writing or committing leaves
+			// net/http to ship its implicit 200 out of the live header, which
+			// is the one road commitHeader never reaches. A panic is excluded:
+			// the recovery restates the headers itself
+			oneContentLength(g.rw.Header())
+			g.dropLengthUnlessItDescribes(0)
+		}
 		return
 	}
 	g.commitHeader()
+	g.dropLengthUnlessItDescribes(int64(len(g.buf)))
 	g.sendHeader()
 	if len(g.buf) > 0 {
 		g.rw.Write(g.buf)
+	}
+}
+
+// dropLengthUnlessItDescribes removes a Content-Length that does not describe
+// the n bytes about to go out, which is the rule startGzip already applies to
+// compressed bytes, reaching here because the buffer made it necessary here too.
+//
+// net/http refuses an over-long write whole rather than truncating it, and the
+// buffer had coalesced into one write what the handler wrote in pieces: 400
+// bytes under a declared 300 left the client zero, where the same handler
+// unwrapped got 300 and a usable response. A short body, and a length declared
+// over nothing written, stall the client the same way.
+//
+// Only where borgo still holds the commit: past it the header has gone and the
+// handler has net/http's own error, which is the behaviour to match, not undo.
+// reportLengthMismatch still names the handler; this stops the client paying.
+func (g *gzipResponseWriter) dropLengthUnlessItDescribes(n int64) {
+	// a bodyless response legitimately describes the body it stands for while
+	// writing none: HEAD is the shape that reaches here
+	if g.bodyless {
+		return
+	}
+	h := g.rw.Header()
+	if declared := declaredLength(h); declared >= 0 && declared != n {
+		h.Del("Content-Length")
 	}
 }
 

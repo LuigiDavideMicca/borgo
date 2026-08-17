@@ -1533,3 +1533,245 @@ func TestGzipInvalidContentLengthIsNamedOnEitherEncoding(t *testing.T) {
 		}
 	}
 }
+
+// clientReads runs one request through a real Transport and returns what the
+// client ends up holding. Not a recorder and not raw bytes: the question here
+// is whether a client can use the response at all, and the Transport is what
+// enforces RFC 9110 8.6 on the receiving side.
+func clientReads(t *testing.T, acceptEncoding string, h http.Handler) (status int, body string, err error) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// set by hand, so the Transport does not decompress behind the test's back
+	req.Header.Set("Accept-Encoding", acceptEncoding)
+	res, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer res.Body.Close()
+	var r io.Reader = res.Body
+	if res.Header.Get("Content-Encoding") == "gzip" {
+		zr, zerr := gzip.NewReader(res.Body)
+		if zerr != nil {
+			return res.StatusCode, "", zerr
+		}
+		defer zr.Close()
+		r = zr
+	}
+	b, err := io.ReadAll(r)
+	return res.StatusCode, string(b), err
+}
+
+// A SECOND CONTENT-LENGTH DESTROYED THE RESPONSE FOR HALF THE CLIENTS.
+//
+// A handler that Adds a Content-Length beside the one it already set puts both
+// lines on the wire, and RFC 9110 8.6 has a recipient treat contradictory ones
+// as unrecoverable: net/http's own Transport drops the connection and delivers
+// no status at all. Above the buffer startGzip deletes every Content-Length
+// before compressing, so the same handler with the same correct 4 KB body
+// answered a gzip client perfectly and an identity client not at all - the
+// split this file exists to close, decided once more by Accept-Encoding, and
+// with no line logged anywhere by borgo or by net/http.
+//
+// Direction of failure: only the first value is ever in force - net/http sizes
+// the body by it on every road - so what reaches the wire must be that one
+// value alone. Keeping the last would be the option that overrules the handler,
+// since it contradicts the body already being sent.
+//
+// The assertion is the client's, because a well-formed wire is not the point
+// unless somebody can read it. Identical repeats are legal to a client and must
+// pass without a word, or the remedy is noise.
+func TestGzipCommitsOneContentLengthWhateverTheEncoding(t *testing.T) {
+	stagings := []struct {
+		name   string
+		set    func(h http.Header, size int)
+		logged bool
+	}{
+		{"one", func(h http.Header, size int) {
+			h.Set("Content-Length", strconv.Itoa(size))
+		}, false},
+		{"two identical", func(h http.Header, size int) {
+			h.Add("Content-Length", strconv.Itoa(size))
+			h.Add("Content-Length", strconv.Itoa(size))
+		}, false},
+		{"two contradictory", func(h http.Header, size int) {
+			h.Add("Content-Length", strconv.Itoa(size))
+			h.Add("Content-Length", "9999")
+		}, true},
+		// the second line need not even be a number: net/http reads the first
+		// and never sees this one, so it reached the wire unnamed by anyone
+		{"second unparsable", func(h http.Header, size int) {
+			h.Add("Content-Length", strconv.Itoa(size))
+			h.Add("Content-Length", "banana")
+		}, true},
+		{"three", func(h http.Header, size int) {
+			h.Add("Content-Length", strconv.Itoa(size))
+			h.Add("Content-Length", "9999")
+			h.Add("Content-Length", "7")
+		}, true},
+	}
+	// 0 is not a smaller body: it is the response nobody commits, which
+	// net/http ships out of the live header on an implicit 200 - the one road
+	// commitHeader never reaches, and where both lines went out unchanged
+	for _, size := range []int{gzipMinBytes / 2, gzipMinBytes * 4, 0} {
+		for _, st := range stagings {
+			t.Run(fmt.Sprintf("%dB/%s", size, st.name), func(t *testing.T) {
+				want := strings.Repeat("x", size)
+				handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					st.set(w.Header(), size)
+					if size > 0 {
+						w.Write([]byte(want))
+					}
+				}))
+
+				said := map[string]string{}
+				for _, ae := range []string{"identity", "gzip"} {
+					borgoSaid, stdlibSaid, wire := serveAndDiagnose(t, ae, handler)
+					said[ae] = borgoSaid
+
+					head, _, _ := strings.Cut(wire, "\r\n\r\n")
+					var lines []string
+					for _, l := range strings.Split(head, "\r\n") {
+						if strings.HasPrefix(strings.ToLower(l), "content-length:") {
+							lines = append(lines, l)
+						}
+					}
+					if len(lines) > 1 {
+						t.Errorf("%s: %d Content-Length lines on the wire %q: a recipient must treat that as unrecoverable (RFC 9110 8.6)", ae, len(lines), lines)
+					}
+					if stdlibSaid != "" {
+						t.Errorf("%s: net/http complained: %q", ae, stdlibSaid)
+					}
+
+					status, body, err := clientReads(t, ae, handler)
+					if err != nil {
+						t.Fatalf("%s: the client got no usable response: %v", ae, err)
+					}
+					if status != http.StatusOK {
+						t.Errorf("%s: status = %d, want 200", ae, status)
+					}
+					if body != want {
+						t.Errorf("%s: the client read %d bytes, want %d", ae, len(body), len(want))
+					}
+				}
+
+				// the same handler must be named identically on both roads, or
+				// the asymmetry has only moved into the log
+				if said["identity"] != said["gzip"] {
+					t.Errorf("the two encodings said different things\n identity: %q\n gzip:     %q", said["identity"], said["gzip"])
+				}
+				switch got := said["identity"]; {
+				case st.logged && !strings.Contains(got, "Content-Length lines"):
+					t.Errorf("nothing named the contradiction: %q", got)
+				case !st.logged && got != "":
+					t.Errorf("a well-formed response was reported: %q", got)
+				}
+			})
+		}
+	}
+}
+
+// THE BUFFER TURNED A DELIVERABLE RESPONSE INTO ZERO BYTES.
+//
+// net/http refuses a write that would exceed the declared Content-Length whole,
+// rather than truncating it, and returns ErrContentLength to the handler. Below
+// the buffer borgo collects every Write and emits one: a handler declaring 300
+// and writing 400 in four calls got three of them through unwrapped - 300 bytes
+// and a well-formed response - and through borgo got a single 400-byte write
+// that net/http refused entirely, so the client read zero bytes under a
+// Content-Length of 300, and an unexpected EOF. The handler was told nothing on
+// either road, which is what the buffer is for; what it cost the client was not.
+//
+// Direction of failure: below the buffer the whole body is in hand before the
+// commit, so the length it will occupy is known, and a declared one that does
+// not describe it must not go out - the rule startGzip already applies to
+// compressed bytes. A short body, and a declared length with nothing written at
+// all, are the same defect pointing the other way and stall the client instead.
+//
+// This is not the report's defect: reportLengthMismatch names the handler here
+// exactly as before, and is asserted to still do it. The client is what changes.
+func TestGzipDeliversTheBufferedBodyWholeWhateverTheEncoding(t *testing.T) {
+	const size = gzipMinBytes / 2
+	shapes := []struct {
+		name  string
+		write func(w http.ResponseWriter)
+	}{
+		{"one call", func(w http.ResponseWriter) {
+			w.Write(bytes.Repeat([]byte("x"), size))
+		}},
+		// the io.Copy shape: unwrapped this is the one that still delivers a
+		// usable prefix, which is what the buffer took away
+		{"in pieces", func(w http.ResponseWriter) {
+			for i := 0; i < size; i += 100 {
+				if _, err := w.Write(bytes.Repeat([]byte("x"), min(100, size-i))); err != nil {
+					return
+				}
+			}
+		}},
+		{"nothing at all", func(w http.ResponseWriter) {}},
+	}
+	for _, declared := range []int{size - 100, size + 100, 0} {
+		for _, sh := range shapes {
+			t.Run(fmt.Sprintf("declared=%d/%s", declared, sh.name), func(t *testing.T) {
+				handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Length", strconv.Itoa(declared))
+					sh.write(w)
+				}))
+				want := size
+				if sh.name == "nothing at all" {
+					want = 0
+				}
+
+				said := map[string]string{}
+				for _, ae := range []string{"identity", "gzip"} {
+					said[ae], _, _ = serveAndDiagnose(t, ae, handler)
+					status, body, err := clientReads(t, ae, handler)
+					if err != nil {
+						t.Fatalf("%s: the client could not read the response: %v", ae, err)
+					}
+					if status != http.StatusOK {
+						t.Errorf("%s: status = %d, want 200", ae, status)
+					}
+					if len(body) != want {
+						t.Errorf("%s: the client got %d bytes, want the whole %d the handler wrote", ae, len(body), want)
+					}
+				}
+				if said["identity"] != said["gzip"] {
+					t.Errorf("the two encodings said different things\n identity: %q\n gzip:     %q", said["identity"], said["gzip"])
+				}
+				// the handler is still named: this changes what the client gets,
+				// not what the log says
+				reported := strings.Contains(said["identity"], "but wrote")
+				if wrong := declared != want; wrong != reported {
+					t.Errorf("declared %d, wrote %d: reported = %v, want %v (%q)", declared, want, reported, wrong, said["identity"])
+				}
+			})
+		}
+	}
+
+	// the one length that legitimately describes bytes nobody will send: a HEAD
+	// stands in for the GET whose body it declares, so dropping it here would
+	// answer the request with the size of nothing
+	t.Run("HEAD keeps the length it stands in for", func(t *testing.T) {
+		srv := httptest.NewServer(gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", strconv.Itoa(size))
+		})))
+		defer srv.Close()
+		req, err := http.NewRequest(http.MethodHead, srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if got := res.Header.Get("Content-Length"); got != strconv.Itoa(size) {
+			t.Errorf("Content-Length = %q, want %q: a HEAD answers for a body it does not send", got, strconv.Itoa(size))
+		}
+	})
+}
