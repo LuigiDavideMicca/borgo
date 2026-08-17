@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -14,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
+import { spawnSync } from "node:child_process";
 import {
   isRangeStale,
   assetCacheControl,
@@ -21,6 +23,9 @@ import {
   buildAssetIndex,
   CASE_INSENSITIVE_FS,
   findAsset,
+  isHiddenAsset,
+  foldsCase,
+  indexFoldsCase,
   documentStream,
   gzipStream,
   isCompressiblePath,
@@ -34,6 +39,27 @@ import {
   type AssetInfo,
   type BuildOutputs,
 } from "../src/compress";
+
+// A DEADLINE AGAINST A HANG, NOT A PERFORMANCE BUDGET.
+//
+// Three tests here cost whatever the machine has left: brotli at max quality,
+// a recursive mkdtemp/rmSync pair, and a 600 kB document pushed through zlib
+// with a sync flush per chunk. Measured on one machine while other work ran,
+// the same pump took 180 ms warm, 2 s cold and 21.8 s under contention - two
+// orders of magnitude, on identical code. Against bun's unstated 5000 ms they
+// went red on a busy machine and green on a quiet one: measured by alternating
+// this file against its own HEAD version, run for run, HEAD failed in the same
+// rounds and the same tests, so what the red named was the load and never the
+// diff. A test that reddens for that teaches rerunning instead of reading.
+//
+// The number is deliberately far above the worst measurement rather than close
+// to it, because none of the three proves anything about speed: contention
+// makes the pump produce LESS, which is the direction its assertion wants, and
+// the other two compare file contents, which a slow disk cannot change. What
+// the deadline still catches is the failure it is for - a pump that never
+// finishes - and each of the three is shown by mutation to still kill the
+// defect it was written for.
+const CONTENDED = 60_000;
 
 describe("pickEncoding", () => {
   const cases: Array<[string, string | null, readonly string[], string | null]> = [
@@ -240,7 +266,7 @@ describe("precompressAssets", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, CONTENDED);
 });
 
 describe("buildAssetIndex", () => {
@@ -290,7 +316,7 @@ describe("buildAssetIndex", () => {
       expect(png.compressible).toBe(false);
       expect(png.variants).toEqual([]);
     });
-  });
+  }, CONTENDED);
 
   test("every variant carries its own byte size, so a HEAD can be answered", async () => {
     await withAssets(async (dir) => {
@@ -547,44 +573,78 @@ describe("gzipStream", () => {
     expect(gunzipSync(Buffer.concat(chunks)).toString()).toBe("shell ".repeat(200) + "late chunk");
   });
 
+  // THE WINDOW IS MEASURED, NOT ASSUMED.
+  //
+  // "wait and check nothing was produced" only proves something if a pump with
+  // nothing holding it back would have produced in that wait. Measured: with
+  // the pump's wait deleted, a warm process lets 290 of 300 chunks escape in
+  // 150 ms and a cold one lets 0 - so on a cold or contended machine this test
+  // passed while the defect it exists for was present. A targeted `bun test -t`
+  // run is cold by construction, which is how the mutation first came back
+  // green. So the window is derived from the cost of a chunk on this machine
+  // at this moment, and the calibration that measures it also warms the code
+  // it is about to judge.
   test("a stalled client throttles the render instead of buffering the page", async () => {
     // documentStream is pull-based so a slow client paces react; in production
     // every document is compressed, and gzip's output is pushed from a 'data'
     // handler that cannot see the consumer's queue. the pump has to be the one
     // that waits, or wrapping the stream silently undoes the backpressure.
     const TOTAL = 300;
-    let produced = 0;
-    const source: AsyncIterable<Uint8Array> = {
-      [Symbol.asyncIterator]: () => ({
-        async next() {
-          if (produced >= TOTAL) return { done: true as const, value: undefined };
-          produced++;
-          return { done: false as const, value: encoder.encode("<li>" + "x".repeat(2000) + "</li>") };
-        },
-        async return() {
-          return { done: true as const, value: undefined };
-        },
-      }),
+    const document = (total: number) => {
+      const counted = { produced: 0 };
+      const source: AsyncIterable<Uint8Array> = {
+        [Symbol.asyncIterator]: () => ({
+          async next() {
+            if (counted.produced >= total) return { done: true as const, value: undefined };
+            counted.produced++;
+            return {
+              done: false as const,
+              value: encoder.encode("<li>" + "x".repeat(2000) + "</li>"),
+            };
+          },
+          async return() {
+            return { done: true as const, value: undefined };
+          },
+        }),
+      };
+      return { counted, stream: gzipStream(documentStream("<head>", source, "</body>")) };
     };
 
-    const reader = gzipStream(documentStream("<head>", source, "</body>")).getReader();
+    // what one chunk costs when the consumer never stops reading. Twice, and
+    // the slower of the two, because the run being judged comes after these and
+    // a window sized from an optimistic cost is a window that proves nothing.
+    let perChunkMs = 0;
+    for (let i = 0; i < 2; i++) {
+      const { stream } = document(60);
+      const started = performance.now();
+      const drain = stream.getReader();
+      for (let next = await drain.read(); !next.done; next = await drain.read());
+      perChunkMs = Math.max(perChunkMs, (performance.now() - started) / 60);
+    }
+    expect(perChunkMs).toBeGreaterThan(0);
+    // long enough for 60 chunks to escape, and never shorter than the 150 ms
+    // this test waited before the window was measured at all
+    const window = Math.ceil(Math.max(150, perChunkMs * 60));
+
+    const { counted, stream } = document(TOTAL);
+    const reader = stream.getReader();
     const first = await reader.read();
-    const afterFirstRead = produced;
-    await Bun.sleep(150);
+    const afterFirstRead = counted.produced;
+    await Bun.sleep(window);
     // the consumer has not read again: the render must not have run away
-    expect(produced).toBe(afterFirstRead);
-    expect(produced).toBeLessThan(TOTAL);
+    expect(counted.produced).toBe(afterFirstRead);
+    expect(counted.produced).toBeLessThan(TOTAL);
 
     // and draining still yields the whole document
     const chunks: Buffer[] = [Buffer.from(first.value!)];
     for (let next = await reader.read(); !next.done; next = await reader.read()) {
       chunks.push(Buffer.from(next.value));
     }
-    expect(produced).toBe(TOTAL);
+    expect(counted.produced).toBe(TOTAL);
     expect(gunzipSync(Buffer.concat(chunks)).toString()).toBe(
       "<head>" + ("<li>" + "x".repeat(2000) + "</li>").repeat(TOTAL) + "</body>",
     );
-  });
+  }, CONTENDED);
 
   test("a client that leaves while the pump is parked does not strand it", async () => {
     let returned = false;
@@ -1120,17 +1180,302 @@ describe("findAsset where the filesystem tells the cases apart", () => {
     });
   });
 
-  // and the omitted argument is the platform's, which is what every other test
-  // in this file has been taking without saying so
-  test("omitting the flag is the platform's answer", async () => {
+  // and the omitted argument is no longer the platform's: it is what the
+  // directory answered. On a tmpdir the two agree, which is why this asserts
+  // against the disk rather than against the constant.
+  test("omitting the flag is the directory's answer", async () => {
     await withDir(async (dir) => {
       await Bun.write(join(dir, "assets/Logo.png"), "png");
+      const folds = existsSync(join(dir, "assets/lOGO.PNG"));
       const index = buildAssetIndex(dir);
       expect([...index.keys()].sort()).toEqual(
-        CASE_INSENSITIVE_FS ? ["/assets/Logo.png", "/assets/logo.png"] : ["/assets/Logo.png"],
+        folds ? ["/assets/Logo.png", "/assets/logo.png"] : ["/assets/Logo.png"],
       );
-      expect(findAsset(index, "/assets/logo.png") !== undefined).toBe(CASE_INSENSITIVE_FS);
-      expect(CASE_INSENSITIVE_FS).toBe(process.platform === "win32" || process.platform === "darwin");
+      expect(findAsset(index, "/assets/logo.png") !== undefined).toBe(folds);
+      expect(indexFoldsCase(index)).toBe(folds);
     });
+  });
+});
+
+// A DOT ON THE FILE, NEVER ON THE DIRECTORY.
+//
+// The rule has to refuse what public/ collects by accident and keep what rfc
+// 8615 puts there on purpose, and it has to do it without an allowlist - an
+// allowlist is a name that can be misspelled, and misspelling this one breaks
+// certificate renewal.
+describe("isHiddenAsset", () => {
+  const hidden = [
+    ".DS_Store",
+    "public/.DS_Store",
+    "public/assets/.DS_Store",
+    "public/assets/.gitkeep",
+    "public/assets/.borgo-doctor-4242",
+    "public/.env",
+    "public/.htaccess",
+    "public/.well-known/.hidden",
+    // windows separators: a caller passes what join() built
+    "public\\assets\\.DS_Store",
+    "C:\\app\\public\\.env",
+  ];
+  const served = [
+    "public/app.js",
+    "public/assets/client-abcd1234.js",
+    "public/assets/client-abcd1234.js.gz",
+    "public/Thumbs.db",
+    // the whole reason the rule reads the last segment only
+    "public/.well-known/security.txt",
+    "public/.well-known/acme-challenge/tok3n",
+    "public/.well-known/apple-app-site-association",
+    // an ancestor with a dot in it is not the file's business
+    "/home/u/.local/share/app/public/app.js",
+    "C:\\Users\\u\\.borgo\\public\\app.js",
+    // a dot inside the name, not starting it
+    "public/assets/jquery.min.js",
+  ];
+
+  test("a leading dot on the name, and nothing else", () => {
+    for (const path of hidden) expect(`${path}: ${isHiddenAsset(path)}`).toBe(`${path}: true`);
+    for (const path of served) expect(`${path}: ${isHiddenAsset(path)}`).toBe(`${path}: false`);
+  });
+});
+
+// THE CONSTANT WAS A CONJECTURE ABOUT THE PROCESS, AND THE QUESTION IS ABOUT
+// THE DIRECTORY.
+//
+// process.platform is wrong on every deliberate choice: an APFS volume
+// formatted case-sensitive, a case-sensitive NTFS directory, a share mounted
+// on windows. foldsCase asks the disk instead, read-only, off the names the
+// index has just read.
+describe("foldsCase", () => {
+  const withDir = async (fn: (dir: string) => Promise<void>) => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-folds-"));
+    try {
+      await fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  // no probe can contradict this and none is run: a filesystem that folds
+  // cannot be holding both, and folding an index that holds both loses one
+  test("two spellings of one name are proof, on any platform", async () => {
+    // no file is touched: the collision is decided before any probe
+    expect(foldsCase(["/pub/assets/Logo.png", "/pub/assets/logo.png"], true)).toBe(false);
+    // and it wins over a probe that would have said the opposite - on a folding
+    // filesystem the flipped name of a file that exists resolves to that file
+    await withDir(async (dir) => {
+      const path = join(dir, "Logo.png").replaceAll("\\", "/");
+      await Bun.write(path, "png");
+      expect(foldsCase([path])).toBe(existsSync(join(dir, "lOGO.PNG")));
+      expect(foldsCase([path, path.toLowerCase()])).toBe(false);
+    });
+    // two directories are not a collision, and only the same one is
+    expect(foldsCase(["/pub/a/Logo.png", "/pub/b/logo.png"], true)).toBe(
+      foldsCase(["/pub/a/Logo.png"], true),
+    );
+  });
+
+  // the contract, stated against the filesystem itself rather than against a
+  // platform name - it is the same assertion on linux and on windows
+  test("the answer is the one the disk gives", async () => {
+    await withDir(async (dir) => {
+      const path = join(dir, "Logo.png").replaceAll("\\", "/");
+      await Bun.write(path, "png");
+      const folds = existsSync(join(dir, "lOGO.PNG"));
+      expect(foldsCase([path])).toBe(folds);
+      // handed the opposite guess it still answers the disk, which is what
+      // says the probe ran rather than the fallback
+      expect(foldsCase([path], !folds)).toBe(folds);
+    });
+  });
+
+  // a tree whose names are all one case is still measurable: both halves of the
+  // flip are needed, or the only name available carries no probe at all
+  test("a name of one case only is still a probe", async () => {
+    await withDir(async (dir) => {
+      for (const name of ["style.css", "STYLE.CSS"]) {
+        rmSync(join(dir, "style.css"), { force: true });
+        rmSync(join(dir, "STYLE.CSS"), { force: true });
+        const path = join(dir, name).replaceAll("\\", "/");
+        await Bun.write(path, "css");
+        const other = name === "style.css" ? "STYLE.CSS" : "style.css";
+        const folds = existsSync(join(dir, other));
+        expect(foldsCase([path], !folds)).toBe(folds);
+      }
+    });
+  });
+
+  // read-only: the probe never writes, so a ro checkout or a ro volume still
+  // gets an answer instead of an error
+  test("nothing is written and nothing is left behind", async () => {
+    await withDir(async (dir) => {
+      const path = join(dir, "Logo.png").replaceAll("\\", "/");
+      await Bun.write(path, "png");
+      foldsCase([path]);
+      expect(readdirSync(dir)).toEqual(["Logo.png"]);
+    });
+  });
+
+  test("nothing to probe falls back to the caller's guess", () => {
+    expect(foldsCase([], true)).toBe(true);
+    expect(foldsCase([], false)).toBe(false);
+    // no ascii letter in the name, so no other spelling of it exists
+    expect(foldsCase(["/pub/123"], true)).toBe(true);
+    expect(foldsCase(["/pub/123"], false)).toBe(false);
+  });
+
+  // the flip is on the last segment only: an ancestor may be on another mount,
+  // and on windows the case-sensitive attribute is per directory
+  test("only the file's own name is flipped", () => {
+    expect(foldsCase(["/Pub/Assets/123"], false)).toBe(false);
+    expect(foldsCase(["/Pub/Assets/123"], true)).toBe(true);
+  });
+
+  test("the default fallback is the platform constant", () => {
+    expect(foldsCase([])).toBe(CASE_INSENSITIVE_FS);
+  });
+});
+
+// A LOOKUP MUST NOT READ AN INDEX UNDER THE RULE IT WAS NOT BUILT WITH.
+//
+// 91fb092 pinned the wrong-file answer that combination produces and called it
+// unreachable because server.ts let both default to one constant. The
+// measurement removed that constant from one of the two, so the agreement is
+// now carried by the index itself.
+describe("findAsset takes its rule from the index it is given", () => {
+  const withDir = async (fn: (dir: string) => Promise<void>) => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-fold-of-"));
+    try {
+      await fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("a case-sensitive index is read case-sensitively with no argument", async () => {
+    await withDir(async (dir) => {
+      await Bun.write(join(dir, "assets/Logo.png"), "png");
+      const index = buildAssetIndex(dir, false);
+      expect(indexFoldsCase(index)).toBe(false);
+      expect(findAsset(index, "/assets/LOGO.PNG")).toBeUndefined();
+      // and the caller can still overrule it, which is what 91fb092 tests
+      expect(findAsset(index, "/assets/LOGO.PNG", true)).toBeUndefined();
+    });
+  });
+
+  test("a case-insensitive index is read case-insensitively with no argument", async () => {
+    await withDir(async (dir) => {
+      await Bun.write(join(dir, "assets/Logo.png"), "png");
+      const index = buildAssetIndex(dir, true);
+      expect(indexFoldsCase(index)).toBe(true);
+      expect(findAsset(index, "/assets/LOGO.PNG")).toBeDefined();
+    });
+  });
+
+  test("a copy of an index is not the index, and says so", async () => {
+    await withDir(async (dir) => {
+      await Bun.write(join(dir, "assets/Logo.png"), "png");
+      const index = buildAssetIndex(dir, false);
+      expect(indexFoldsCase(new Map(index))).toBe(CASE_INSENSITIVE_FS);
+    });
+  });
+});
+
+// EXECUTED ON A GENUINELY CASE-SENSITIVE FILESYSTEM.
+//
+// fsutil marks an NTFS directory case-sensitive without admin rights and real
+// bun respects it: with only Logo.png on disk, existsSync("logo.png") is false
+// and readdirSync returns one name. Everything below is the production path
+// running there, not a flag injected on a filesystem that folds.
+//
+// It does not run off windows, and it does not run if the attribute cannot be
+// set - the coexistence assertion in the first test is what stops a directory
+// that quietly stayed case-insensitive from passing the rest.
+const caseSensitiveDir = (): string | null => {
+  if (process.platform !== "win32") return null;
+  const dir = mkdtempSync(join(tmpdir(), "borgo-cs-"));
+  const done = spawnSync("fsutil.exe", ["file", "setCaseSensitiveInfo", dir, "enable"], {
+    stdio: "ignore",
+  });
+  if (done.status !== 0) {
+    rmSync(dir, { recursive: true, force: true });
+    return null;
+  }
+  return dir;
+};
+
+// decided before the describe so an unavailable attribute reports as skipped
+// tests rather than as passing ones
+const CS_ROOT = caseSensitiveDir();
+
+describe.skipIf(CS_ROOT === null)("on a case-sensitive filesystem", () => {
+  const pub = join(CS_ROOT ?? tmpdir(), "public").replaceAll("\\", "/");
+
+  beforeAll(async () => {
+    if (!CS_ROOT) return;
+    // after the attribute, never before: it is inherited only by directories
+    // created afterwards
+    await Bun.write(join(pub, "assets/Logo.png"), "maiuscolo");
+  });
+
+  afterAll(() => {
+    if (CS_ROOT) rmSync(CS_ROOT, { recursive: true, force: true });
+  });
+
+  test("the two spellings are two files here", async () => {
+    expect(existsSync(join(pub, "assets/Logo.png"))).toBe(true);
+    expect(existsSync(join(pub, "assets/logo.png"))).toBe(false);
+    await Bun.write(join(pub, "assets/logo.png"), "minuscolo");
+    expect(readFileSync(join(pub, "assets/Logo.png"), "utf8")).toBe("maiuscolo");
+    expect(readFileSync(join(pub, "assets/logo.png"), "utf8")).toBe("minuscolo");
+    rmSync(join(pub, "assets/logo.png"));
+  });
+
+  test("the measurement reads it as case-sensitive", () => {
+    expect(foldsCase([join(pub, "assets/Logo.png").replaceAll("\\", "/")])).toBe(false);
+    // and the platform still says the opposite, which is the whole point
+    expect(CASE_INSENSITIVE_FS).toBe(true);
+  });
+
+  // what the platform constant did here: two urls with no file behind them,
+  // answered with another file's bytes
+  test("the index no longer invents a url the filesystem does not have", () => {
+    const index = buildAssetIndex(pub);
+    expect([...index.keys()].sort()).toEqual(["/assets/Logo.png"]);
+    expect(indexFoldsCase(index)).toBe(false);
+    expect(findAsset(index, "/assets/Logo.png")).toBeDefined();
+    expect(findAsset(index, "/assets/logo.png")).toBeUndefined();
+    expect(findAsset(index, "/assets/LOGO.PNG")).toBeUndefined();
+  });
+
+  // server.ts's decision reproduced: index first, then the live lookup. Both
+  // misses have to end where the filesystem does, at 404.
+  test("the miscased url ends at 404, like the filesystem", async () => {
+    const index = buildAssetIndex(pub);
+    for (const url of ["/assets/logo.png", "/assets/LOGO.PNG"]) {
+      expect(findAsset(index, url)).toBeUndefined();
+      expect(await Bun.file(pub + url).exists()).toBe(false);
+    }
+  });
+
+  // the wrong-file answer, on the only filesystem that can hold the two files
+  // it needs. Each url keeps its own bytes, and a third spelling neither of
+  // them has is not folded onto whichever sorts first.
+  test("both spellings coexist and each url keeps its own file", async () => {
+    await Bun.write(join(pub, "assets/logo.png"), "minuscolo-b");
+    try {
+      const index = buildAssetIndex(pub);
+      expect(indexFoldsCase(index)).toBe(false);
+      const upper = findAsset(index, "/assets/Logo.png")!;
+      const lower = findAsset(index, "/assets/logo.png")!;
+      expect(upper.identity.size).toBe(9);
+      expect(lower.identity.size).toBe(11);
+      expect(upper.identity.etag).not.toBe(lower.identity.etag);
+      expect(await Bun.file(upper.identity.path).text()).toBe("maiuscolo");
+      expect(await Bun.file(lower.identity.path).text()).toBe("minuscolo-b");
+      expect(findAsset(index, "/assets/LOGO.PNG")).toBeUndefined();
+    } finally {
+      rmSync(join(pub, "assets/logo.png"), { force: true });
+    }
   });
 });

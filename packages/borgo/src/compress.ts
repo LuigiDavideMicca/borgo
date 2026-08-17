@@ -7,6 +7,28 @@ const compressibleRe = /\.(js|mjs|css|html|htm|svg|json|map|txt|xml|webmanifest)
 
 export const isCompressiblePath = (path: string) => compressibleRe.test(path);
 
+/**
+ * A file whose own name starts with a dot is not public content, and public/
+ * collects them by accident: .DS_Store, which carries the whole listing of the
+ * directory it sits in - including names nothing links to - .gitkeep, an
+ * editor's .swp, an .env somebody dropped, and the .borgo-doctor-<pid> a killed
+ * doctor leaves behind. Measured before this: every one of them answered 200.
+ *
+ * The last segment only, and never a directory. public/.well-known/ is a
+ * standard (rfc 8615) whose whole point is being fetched - acme http-01 renews
+ * a certificate through it, security.txt and the app-association files live
+ * there - and it is served today. A rule that read the segments instead would
+ * have to carry an allowlist to keep it, and an allowlist can be wrong; this
+ * one cannot reach it at all. What it does not reach either is a hidden
+ * directory that is *not* .well-known - public/.git/config stays servable -
+ * and that is the declared half, because refusing it needs the url's root,
+ * which is known where the url is accepted and not here.
+ *
+ * Both separators: a caller on windows passes a path a join() built.
+ */
+export const isHiddenAsset = (path: string): boolean =>
+  path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1).startsWith(".");
+
 // What a build vouched for: where it wrote, and the byte length of each output
 // whose name carries its own content hash. A list rather than a pattern - see
 // readBuildOutputs in build.ts for the measurement that killed the pattern -
@@ -249,7 +271,7 @@ export type AssetInfo = {
 // in here and falls back to a live lookup.
 export function buildAssetIndex(
   dir: string,
-  caseInsensitive: boolean = CASE_INSENSITIVE_FS,
+  caseInsensitive?: boolean,
   outputs: BuildOutputs = NO_BUILD_OUTPUTS,
 ): Map<string, AssetInfo> {
   const files = new Map<string, { size: number; mtimeMs: number }>();
@@ -260,13 +282,18 @@ export function buildAssetIndex(
     return new Map();
   }
   for (const entry of entries) {
-    if (!entry.isFile()) continue;
+    if (!entry.isFile() || isHiddenAsset(entry.name)) continue;
     const path = join(entry.parentPath, entry.name).replaceAll("\\", "/");
     try {
       const stat = statSync(path);
       files.set(path, { size: stat.size, mtimeMs: stat.mtimeMs });
     } catch {}
   }
+
+  // measured on the names just read, not guessed from the platform - see
+  // foldsCase. The directory being indexed is the one that has to answer, and
+  // it is not always the one the process runs on.
+  const folds = caseInsensitive ?? foldsCase(files.keys());
 
   const base = dir.replaceAll("\\", "/").replace(/\/+$/, "");
   const tag = (path: string, suffix: string) => {
@@ -313,11 +340,14 @@ export function buildAssetIndex(
     index.set(url, info);
     // the folded alias findAsset falls back to, where the filesystem folds
     // too. never over a real url: an exact match is always the right answer.
-    if (caseInsensitive) {
+    if (folds) {
       const folded = url.toLowerCase();
       if (folded !== url && !index.has(folded)) index.set(folded, info);
     }
   }
+  // so a lookup cannot read this index under the opposite rule from the one it
+  // was built with - the wrong-file answer 91fb092 pinned
+  foldingOf.set(index, folds);
   return index;
 }
 
@@ -468,12 +498,92 @@ const statOf = (path: string) => {
 // where the filesystem is case-insensitive and nowhere else: on a
 // case-sensitive one /OK.TXT and /ok.txt are two different files, and folding
 // them would serve the wrong one.
+//
+// The platform is now only the fallback, because it is not the question. An
+// APFS volume formatted case-sensitive, a case-sensitive NTFS directory and a
+// network share all make this wrong on exactly the machines whose owner chose
+// it deliberately. Measured on a case-sensitive directory with real bun and
+// only assets/Logo.png on disk: this constant folds, the index invents
+// /assets/logo.png and /assets/LOGO.PNG, and both answer 200 with Logo.png's
+// bytes where the filesystem says nothing is there.
 export const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
+
+// the other spelling of a name, in ascii only: ß uppercases to two characters
+// and a dotless ı is not the fold any filesystem applies, so a probe built out
+// of them would test something other than case
+const flipAscii = (name: string): string | null => {
+  let flipped = "";
+  let moved = false;
+  for (const ch of name) {
+    if (ch >= "a" && ch <= "z") {
+      flipped += ch.toUpperCase();
+      moved = true;
+    } else if (ch >= "A" && ch <= "Z") {
+      flipped += ch.toLowerCase();
+      moved = true;
+    } else flipped += ch;
+  }
+  return moved ? flipped : null;
+};
+
+/**
+ * Whether the directory these paths came from folds case - asked of the disk
+ * instead of of process.platform.
+ *
+ * Read-only, and that is the point: a checkout mounted ro and a container with
+ * a read-only volume are exactly where a write probe would fail, and the answer
+ * there has to be today's guess rather than an error. One statSync, 0.018 ms
+ * against 0.229 ms for the write+stat+unlink it replaces and 0.22 ms for the
+ * one-file index that calls it.
+ *
+ * Two spellings that fold together are proof, not a probe: no case-insensitive
+ * filesystem can hold both, and folding an index that contains them would lose
+ * one of the two whatever the disk says. Otherwise one name is flipped and
+ * stat'ed - only its last segment, so the answer is about the directory the
+ * file is in and not about some ancestor that may sit on another mount.
+ *
+ * The direction it fails in is chosen. Answering "case-sensitive" on a
+ * filesystem that folds costs the indexed path: the lookup misses and
+ * server.ts's live Bun.file() opens the file anyway (measured), so the url
+ * still answers 200, without the precomputed variants and without the pin.
+ * Answering "case-insensitive" on one that does not fold invents a resource:
+ * a url with no file behind it is served another file's bytes. So every
+ * uncertainty here resolves toward not folding, and the fallback - an empty
+ * directory, or names with no ascii letter in them - is the caller's guess.
+ */
+export function foldsCase(
+  paths: Iterable<string>,
+  fallback: boolean = CASE_INSENSITIVE_FS,
+): boolean {
+  const seen = new Set<string>();
+  let probe: string | null = null;
+  for (const path of paths) {
+    const folded = path.toLowerCase();
+    if (seen.has(folded)) return false;
+    seen.add(folded);
+    if (probe === null) {
+      const cut = path.lastIndexOf("/") + 1;
+      const other = flipAscii(path.slice(cut));
+      if (other) probe = path.slice(0, cut) + other;
+    }
+  }
+  if (probe === null) return fallback;
+  return statOf(probe) !== null;
+}
+
+// what buildAssetIndex measured for the index it returned. An index and the
+// lookups over it have to fold the same way or /LOGO.PNG is answered with
+// logo.png's bytes on a filesystem that keeps the two apart; a copy of an
+// index is not the index, so it falls back to the guess.
+const foldingOf = new WeakMap<Map<string, AssetInfo>, boolean>();
+
+export const indexFoldsCase = (index: Map<string, AssetInfo>): boolean =>
+  foldingOf.get(index) ?? CASE_INSENSITIVE_FS;
 
 export function findAsset(
   index: Map<string, AssetInfo>,
   url: string,
-  caseInsensitive: boolean = CASE_INSENSITIVE_FS,
+  caseInsensitive: boolean = indexFoldsCase(index),
 ): AssetInfo | undefined {
   const exact = index.get(url);
   if (exact || !caseInsensitive) return exact;
@@ -600,6 +710,12 @@ export function serveAsset(
   asset: ReturnType<typeof Bun.file>,
   { dev, outputs = NO_BUILD_OUTPUTS }: { dev: boolean; outputs?: BuildOutputs },
 ): Response {
+  // and here too, not only in the index. Dropping a dotfile from the boot
+  // snapshot alone removes it from no url at all: the caller's fallback opens
+  // the same file live and answers 200 - measured, on all seven of them. The
+  // two paths have to refuse it together or neither does.
+  if (isHiddenAsset(path)) return new Response("not found", { status: 404 });
+
   let base: { size: number; mtimeMs: number };
   try {
     base = statSync(path);

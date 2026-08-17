@@ -1267,3 +1267,109 @@ describe("validators on the wire: an in-place deploy under a running server", ()
   }, WIRE_TIMEOUT);
 
 });
+
+// WHAT PUBLIC/ COLLECTS BY ACCIDENT, AT A PUBLIC URL.
+//
+// Measured before the filter, over this same socket: .DS_Store, .gitkeep, a
+// stray .env and the .borgo-doctor-<pid> a killed doctor leaves in
+// public/assets all answered 200. .DS_Store is the one that matters - it
+// carries the listing of the directory it sits in, so it names files nothing
+// links to.
+//
+// The server here is server.ts's block, not half of it: index first, live
+// fallback second. That order is the point. A filter in buildAssetIndex alone
+// removes a dotfile from no url at all - the fallback opens the same file and
+// answers 200 - which is why the refusal is in both.
+//
+// And .well-known/ has to survive it. It is a directory, standard (rfc 8615),
+// and fetching it is its whole purpose: acme http-01 renews certificates
+// through it. It is served today and it still is.
+describe("dotfiles on the wire", () => {
+  let root: string;
+  let server: { base: string; stop: () => void };
+
+  const HIDDEN = [
+    "/.env",
+    "/assets/.DS_Store",
+    "/assets/.gitkeep",
+    "/assets/.borgo-doctor-4242",
+    "/.well-known/.hidden",
+  ];
+  const SERVED = [
+    "/.well-known/security.txt",
+    "/.well-known/acme-challenge/tok3n",
+    "/assets/app.js",
+    // not hidden, and not refused: a name blocklist is a different mechanism
+    "/assets/Thumbs.db",
+  ];
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), "borgo-dotfiles-"));
+    const pub = join(root, "public");
+    for (const url of [...HIDDEN, ...SERVED]) {
+      const path = join(pub, url);
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, `corpo di ${url}`);
+    }
+    const index = buildAssetIndex(pub.replaceAll("\\", "/"));
+    // server.ts's decision, both halves in order
+    const fetchOne = (r: Request) => {
+      const url = new URL(r.url).pathname;
+      const found = index.get(url);
+      if (found) return serveIndexed(r, found);
+      const path = join(pub, url).replaceAll("\\", "/");
+      if (!existsSync(path)) return new Response("not found", { status: 404 });
+      return serveAsset(r, path, Bun.file(path), { dev: false });
+    };
+    const bun = Bun.serve({ port: 0, fetch: fetchOne });
+    server = { base: `http://localhost:${bun.port}`, stop: () => bun.stop(true) };
+  });
+
+  afterAll(() => {
+    server.stop();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("every hidden file is on disk and answers 404", async () => {
+    for (const url of HIDDEN) {
+      // the file is really there: a 404 for a missing file would prove nothing
+      expect(existsSync(join(root, "public", url))).toBe(true);
+      const res = await fetch(`${server.base}${url}`);
+      expect(`${url}: ${res.status}`).toBe(`${url}: 404`);
+      expect(await res.text()).not.toContain("corpo di");
+    }
+  }, WIRE_TIMEOUT);
+
+  test("the standard dot-directory keeps serving every file in it", async () => {
+    for (const url of SERVED) {
+      const res = await fetch(`${server.base}${url}`);
+      expect(`${url}: ${res.status}`).toBe(`${url}: 200`);
+      expect(await res.text()).toBe(`corpo di ${url}`);
+    }
+  }, WIRE_TIMEOUT);
+
+  test("the index and the live fallback refuse the same set", async () => {
+    const index = buildAssetIndex(join(root, "public").replaceAll("\\", "/"));
+    for (const url of HIDDEN) {
+      expect(`indice ${url}`).toBe(index.has(url) ? `NON indice ${url}` : `indice ${url}`);
+      const path = join(root, "public", url).replaceAll("\\", "/");
+      const live = serveAsset(new Request(`http://a${url}`), path, Bun.file(path), { dev: false });
+      expect(`vivo ${url}: ${live.status}`).toBe(`vivo ${url}: 404`);
+    }
+    for (const url of SERVED) {
+      expect(`indice ${url}`).toBe(index.has(url) ? `indice ${url}` : `NON indice ${url}`);
+      const path = join(root, "public", url).replaceAll("\\", "/");
+      const live = serveAsset(new Request(`http://a${url}`), path, Bun.file(path), { dev: false });
+      expect(`vivo ${url}: ${live.status}`).toBe(`vivo ${url}: 200`);
+    }
+  });
+
+  // dev serves through the live path alone, so the refusal has to be there too
+  test("dev refuses them as well", async () => {
+    const path = join(root, "public", "/assets/.DS_Store").replaceAll("\\", "/");
+    const res = serveAsset(new Request("http://a/assets/.DS_Store"), path, Bun.file(path), {
+      dev: true,
+    });
+    expect(res.status).toBe(404);
+  });
+});
