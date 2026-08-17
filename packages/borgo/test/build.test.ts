@@ -23,6 +23,8 @@ import {
   buildModeFor,
   buildReasons,
   BundleFailed,
+  caseOnlyMismatches,
+  collectAssetRefs,
   compileCss,
   cssSource,
   emittedStylesheet,
@@ -30,11 +32,13 @@ import {
   generateManifest,
   hashedOutputNames,
   isSweepable,
+  miscasedConventions,
   missingBuiltAssets,
   nameCarriesHash,
   needsBuild,
   parseHydrate,
   precacheStamp,
+  publicAssetUrls,
   readAssetNames,
   readBuildInventory,
   readBuildMode,
@@ -45,9 +49,11 @@ import {
   renameUnsafeChunks,
   reservedRoutes,
   reportBuildFailure,
+  scanAssetRefs,
   scanCode,
   sweepBuildOutput,
   unusableBuiltAssets,
+  warnAssetCase,
   warnDeadRoutes,
   writeBuildInventory,
 } from "../src/build";
@@ -1867,5 +1873,296 @@ describe("a failed bundle leaves the last good build alone", () => {
     expect(buildReasons()).toContain("the last build here did not finish");
     // and the manifest it wrote before dying is exactly why the mark is needed
     expect(existsSync(join(dir, ".borgo/routes.gen.tsx"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE SPELLING NOBODY COMPARED.
+//
+// `public/Logo.png` on disk with `/logo.png` in a page is served by windows and
+// by macos and answered 404 by linux, and the divergence is the filesystem, not
+// the index: measured, dev and production answer alike on both branches - dev
+// falls through to Bun.file, production to buildAssetIndex, and both end at the
+// same fold. No lookup can be fixed to repair that; only a comparison of the
+// two spellings finds it, and it has to find it on the machine where it works.
+//
+// Every test here runs on NTFS, which cannot hold `logo.png` and `Logo.png` at
+// once. Where two spellings are needed the url list is built by hand and says
+// so; nothing below claims to have observed a case-sensitive filesystem.
+describe("scanAssetRefs", () => {
+  test("a path inside a comment is not a reference", () => {
+    const source = [
+      "// the logo used to live at /old-logo.png",
+      "/* and the icon at /old-icon.png */",
+      'export default () => <img src="/hero.png" />;',
+    ].join("\n");
+    expect(scanAssetRefs(source, true)).toEqual(["/hero.png"]);
+  });
+
+  test("an external url and a relative path are not absolute references", () => {
+    const source = [
+      'const a = "https://cdn.example.com/x/Logo.png";',
+      'const b = "./logo.png";',
+      'const c = "../assets/logo.png";',
+      'const d = "img/logo.png";',
+    ].join("\n");
+    // the lookbehind is the whole guard: without it `//cdn...:/x/Logo.png`
+    // offers `/Logo.png` to a project whose public/ holds logo.png, and the
+    // check reports a file the app never asked for
+    expect(scanAssetRefs(source, true)).toEqual([]);
+  });
+
+  // scanCode BLANKS comments and only RECORDS strings, so the comment above is
+  // caught by the blanking alone and says nothing about the span filter. A
+  // regex literal is left standing in `code`, which is where the spans are the
+  // only thing telling `/\/Logo.png/` apart from "/Logo.png" - and a project
+  // holding public/logo.png would otherwise be told its own guard is a defect.
+  test("a path inside a regex literal is not a reference either", () => {
+    expect(scanAssetRefs("const hit = /\\/Logo.png$/.test(url);", true)).toEqual([]);
+  });
+
+  test("a path with no extension is not an asset reference", () => {
+    expect(scanAssetRefs('fetch("/api/tasks"); go("/about");', true)).toEqual([]);
+  });
+
+  test("an interpolated path offers nothing to compare", () => {
+    expect(scanAssetRefs("const u = `/icons/${name}.png`;", true)).toEqual([]);
+  });
+
+  test("html and css are read whole - there are no literals to be inside of", () => {
+    expect(scanAssetRefs('<link rel="icon" href="/logo.svg" />', false)).toEqual(["/logo.svg"]);
+    expect(scanAssetRefs("body { background: url(/hero.png); }", false)).toEqual(["/hero.png"]);
+    expect(scanAssetRefs('{"icons":[{"src":"/icon-192.png"}]}', false)).toEqual(["/icon-192.png"]);
+  });
+});
+
+describe("caseOnlyMismatches", () => {
+  // THE RULE THAT MAKES THIS SAFE TO PRINT. A reference matching nothing is a
+  // route, an api path, an external url or a name assembled at runtime, and a
+  // check that guessed about those would be ignored within a week - which is
+  // the same as not existing, except that it broke builds on the way there.
+  test("a reference that matches nothing on disk is never reported", () => {
+    const refs = [
+      { url: "/does-not-exist.png", source: "pages/index.tsx" },
+      { url: "/api/tasks.json", source: "pages/index.tsx" },
+    ];
+    expect(caseOnlyMismatches(refs, ["/logo.png"])).toEqual([]);
+  });
+
+  test("a reference that matches exactly is never reported", () => {
+    expect(caseOnlyMismatches([{ url: "/Logo.png", source: "index.html" }], ["/Logo.png"])).toEqual([]);
+  });
+
+  test("only a reference that misses exactly and hits folded is reported", () => {
+    expect(caseOnlyMismatches([{ url: "/logo.png", source: "index.html" }], ["/Logo.png"])).toEqual([
+      { ref: "/logo.png", onDisk: ["/Logo.png"], source: "index.html" },
+    ]);
+  });
+
+  test("a folded hit deeper than the root is reported too", () => {
+    expect(
+      caseOnlyMismatches([{ url: "/img/Hero.png", source: "style.scss" }], ["/img/hero.png"]),
+    ).toEqual([{ ref: "/img/Hero.png", onDisk: ["/img/hero.png"], source: "style.scss" }]);
+  });
+
+  // CONSTRUCTED, NOT OBSERVED: NTFS cannot hold both of these names, so the
+  // url list is written out by hand. What is verified is that the report names
+  // every candidate rather than picking one - on the filesystem where this is
+  // reachable, picking one would name the wrong file half the time.
+  test("two files a fold cannot tell apart are both named", () => {
+    const found = caseOnlyMismatches(
+      [{ url: "/LOGO.PNG", source: "index.html" }],
+      ["/Logo.png", "/logo.png"],
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0].onDisk).toEqual(["/Logo.png", "/logo.png"]);
+  });
+
+  test("the same reference twice in one file is one line, and in two files is two", () => {
+    const found = caseOnlyMismatches(
+      [
+        { url: "/logo.png", source: "index.html" },
+        { url: "/logo.png", source: "index.html" },
+        { url: "/logo.png", source: "pages/index.tsx" },
+      ],
+      ["/Logo.png"],
+    );
+    expect(found.map((m) => m.source)).toEqual(["index.html", "pages/index.tsx"]);
+  });
+});
+
+describe("the mismatch read off a real tree", () => {
+  const roots: string[] = [];
+  const project = (files: Record<string, string>) => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-case-"));
+    roots.push(dir);
+    for (const [rel, body] of Object.entries(files)) {
+      const path = join(dir, rel);
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, body);
+    }
+    return dir;
+  };
+  const said = (dir: string): string[] => {
+    const lines: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void lines.push(args.join(" "));
+    try {
+      warnAssetCase(dir, join(dir, "public"));
+    } finally {
+      console.warn = original;
+    }
+    return lines;
+  };
+  afterAll(() => {
+    for (const dir of roots) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("publicAssetUrls spells the files the way the directory spells them", () => {
+    const dir = project({
+      "public/Logo.png": "PNG",
+      "public/img/Hero.jpg": "JPG",
+      "public/assets/client-abc12345.js": "js",
+    });
+    expect(publicAssetUrls(join(dir, "public")).sort()).toEqual([
+      "/Logo.png",
+      "/assets/client-abc12345.js",
+      "/img/Hero.jpg",
+    ]);
+  });
+
+  test("a public/ that is not there is an empty list, not a throw", () => {
+    expect(publicAssetUrls(join(tmpdir(), `borgo-no-public-${Date.now()}`))).toEqual([]);
+  });
+
+  test("public/Logo.png against /logo.png in index.html is the whole defect", () => {
+    const dir = project({
+      "public/Logo.png": "PNG",
+      "index.html": '<link rel="icon" href="/logo.png" />',
+    });
+    const found = caseOnlyMismatches(collectAssetRefs(dir), publicAssetUrls(join(dir, "public")));
+    expect(found).toEqual([{ ref: "/logo.png", onDisk: ["/Logo.png"], source: "index.html" }]);
+  });
+
+  test("the same defect through a stylesheet, a page and a manifest", () => {
+    const dir = project({
+      "public/Logo.png": "PNG",
+      "public/icon-192.png": "PNG",
+      "style.scss": "body { background: url(/LOGO.PNG); }",
+      "pages/index.tsx": 'export default () => <img src="/logo.png" />;',
+      "public/manifest.webmanifest": '{"icons":[{"src":"/Icon-192.png"}]}',
+    });
+    const found = caseOnlyMismatches(collectAssetRefs(dir), publicAssetUrls(join(dir, "public")));
+    expect(found.map((m) => `${m.source} ${m.ref}`).sort()).toEqual([
+      "pages/index.tsx /logo.png",
+      "public/manifest.webmanifest /Icon-192.png",
+      "style.scss /LOGO.PNG",
+    ]);
+  });
+
+  // public/assets is the bundler's own output: the names in there and the
+  // references to them came out of the same build, so they cannot disagree -
+  // and reading a minified bundle for url-shaped strings is how a check starts
+  // reporting chunks at itself
+  test("the build's own output directory is not read for references", () => {
+    const dir = project({
+      "public/Logo.png": "PNG",
+      "public/assets/client-abc12345.js": 'fetch("/logo.png");',
+    });
+    expect(collectAssetRefs(dir).map((r) => r.source)).toEqual([]);
+  });
+
+  // at any depth: a linked workspace puts a node_modules under a package, and
+  // a bundle in there names urls that belong to some other app entirely
+  test("node_modules and dist are not read either, however deep they sit", () => {
+    const dir = project({
+      "public/Logo.png": "PNG",
+      "node_modules/pkg/index.js": 'const a = "/logo.png";',
+      "dist/site/index.html": '<img src="/logo.png" />',
+      "lib/vendor/node_modules/pkg/index.js": 'const b = "/logo.png";',
+      "lib/vendor/dist/bundle.js": 'const c = "/logo.png";',
+    });
+    expect(collectAssetRefs(dir)).toEqual([]);
+  });
+
+  test("a tree whose spellings agree says nothing at all", () => {
+    const dir = project({
+      "public/Logo.png": "PNG",
+      "index.html": '<link rel="icon" href="/Logo.png" />',
+      "pages/index.tsx": 'export default () => <a href="/about">about</a>;',
+      "style.scss": "body { color: red; }",
+    });
+    expect(said(dir)).toEqual([]);
+    expect(warnAssetCase(dir, join(dir, "public"))).toBe(0);
+  });
+
+  test("and one whose spellings disagree names the file, the reference and the limit", () => {
+    const dir = project({
+      "public/Logo.png": "PNG",
+      "index.html": '<link rel="icon" href="/logo.png" />',
+    });
+    const lines = said(dir);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("index.html");
+    expect(lines[0]).toContain("/logo.png");
+    expect(lines[0]).toContain("/Logo.png");
+    // A CHECK THAT NAMES NO LIMIT TEACHES WHOEVER READ IT THAT THERE IS NONE.
+    // The channels below are outside any static reading, and the line that
+    // says so ships with every report rather than living in a doc nobody opens.
+    expect(lines[1]).toContain("not read");
+    expect(lines[1]).toContain("runtime");
+    expect(lines[1]).toContain("module import");
+  });
+
+  test("a root that cannot be read is silence, not a failed build", () => {
+    const gone = join(tmpdir(), `borgo-case-gone-${Date.now()}`);
+    expect(warnAssetCase(gone, join(gone, "public"))).toBe(0);
+  });
+});
+
+describe("miscasedConventions", () => {
+  const roots: string[] = [];
+  const rootWith = (names: string[]) => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-conv-"));
+    roots.push(dir);
+    for (const name of names) {
+      if (name.includes(".")) writeFileSync(join(dir, name), "x");
+      else mkdirSync(join(dir, name), { recursive: true });
+    }
+    return dir;
+  };
+  afterAll(() => {
+    for (const dir of roots) rmSync(dir, { recursive: true, force: true });
+  });
+
+  // WORSE THAN A MISSING ICON. cssSource looks for style.scss by name: on linux
+  // Style.scss is not there, compileCss finds no source anywhere, the build
+  // drops the stylesheet it emitted and exits 0. The site ships unstyled with
+  // nothing red anywhere.
+  test("Style.scss is the stylesheet linux will never compile", () => {
+    expect(miscasedConventions(rootWith(["Style.scss", "pages", "public"]))).toEqual([
+      { expected: "style.scss", onDisk: "Style.scss" },
+    ]);
+  });
+
+  test("Index.html and Pages are reported the same way", () => {
+    expect(miscasedConventions(rootWith(["Index.html", "Pages"])).map((m) => m.expected).sort()).toEqual([
+      "index.html",
+      "pages",
+    ]);
+  });
+
+  test("the exact spelling is never reported", () => {
+    expect(miscasedConventions(rootWith(["index.html", "style.scss", "pages", "public"]))).toEqual([]);
+  });
+
+  test("a name that is simply absent is not a miscasing", () => {
+    // no stylesheet at all is a legal borgo app; only a stylesheet under
+    // another spelling is a finding
+    expect(miscasedConventions(rootWith(["index.html", "pages", "public"]))).toEqual([]);
+  });
+
+  test("a root that cannot be read is an empty list", () => {
+    expect(miscasedConventions(join(tmpdir(), `borgo-conv-gone-${Date.now()}`))).toEqual([]);
   });
 });

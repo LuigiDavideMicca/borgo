@@ -9,7 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, extname, join, sep } from "node:path";
 import { c, g } from "./colors";
 import { NO_BUILD_OUTPUTS, precompressAssets, type BuildOutputs } from "./compress";
 import { stampWorkerFile } from "./pwa";
@@ -292,6 +292,205 @@ export function parseHydrate(source: string): "false" | "true" | '"visible"' {
     return match[1] === "false" ? "false" : match[1] === "true" ? "true" : '"visible"';
   }
   return "true";
+}
+
+/**
+ * A reference whose spelling only a case-insensitive filesystem forgives.
+ *
+ * `public/Logo.png` on disk and `/logo.png` in a page is served by windows and
+ * by macos - in dev and in production alike, because both serving paths end at
+ * the same fold - and answered 404 by linux. Nothing in the build, the export
+ * or the doctor compared the two spellings, so the app works on the machine it
+ * is written on and breaks on the machine it is deployed to, which for a chunk
+ * or the stylesheet is a page that never hydrates.
+ *
+ * The rule is deliberately narrow, and that is the whole design: a reference
+ * that matches nothing at all is ignored - it is a route, an api path, an
+ * external url or a name assembled at runtime, and guessing about those is how
+ * a warning earns the right to be ignored. Only a reference that misses on an
+ * exact match and hits on a folded one is reported, which is provably a file
+ * that exists under another spelling.
+ */
+export type CaseMismatch = { ref: string; onDisk: string[]; source: string };
+
+// an absolute url path carrying an extension, and only where the leading slash
+// is not itself part of something longer: `https://cdn/x/Logo.png` and
+// `./logo.png` are both refused by the lookbehind
+const ASSET_REF = /(?<![\p{L}\p{N}.:/_-])\/[\p{L}\p{N}._~%@+-]+(?:\/[\p{L}\p{N}._~%@+-]+)*\.[\p{L}\p{N}]{1,8}/gu;
+
+const CODE_EXT = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs"]);
+const TEXT_EXT = new Set([".html", ".css", ".scss", ".json", ".webmanifest"]);
+// at any depth, because a linked workspace puts a node_modules under a package
+const SKIP_DIRS = new Set(["node_modules", "dist"]);
+// public/assets is the build's own output: its references were written by the
+// bundler with the spelling it wrote the files under, so they cannot diverge
+const SKIP_PATHS = new Set(["public/assets"]);
+const MAX_SOURCE_BYTES = 512 * 1024;
+
+// in code the candidates are taken from string literals only, so a path in a
+// comment or inside a regex is not a reference
+export function scanAssetRefs(source: string, code: boolean): string[] {
+  const found: string[] = [];
+  if (!code) {
+    for (const match of source.matchAll(ASSET_REF)) found.push(match[0]);
+    return found;
+  }
+  const scan = scanCode(source);
+  for (const match of scan.code.matchAll(ASSET_REF)) {
+    const at = match.index;
+    if (scan.strings.some(([from, to]) => at >= from && at < to)) found.push(match[0]);
+  }
+  return found;
+}
+
+function* walkSources(root: string): Generator<string> {
+  const stack = [""];
+  while (stack.length) {
+    const rel = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(join(root, rel), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const child = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.name.startsWith(".") || SKIP_PATHS.has(child)) continue;
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) stack.push(child);
+      } else if (entry.isFile()) yield child;
+    }
+  }
+}
+
+export function collectAssetRefs(root = "."): Array<{ url: string; source: string }> {
+  const refs: Array<{ url: string; source: string }> = [];
+  for (const rel of walkSources(root)) {
+    const ext = extname(rel).toLowerCase();
+    const code = CODE_EXT.has(ext);
+    if (!code && !TEXT_EXT.has(ext)) continue;
+    const path = join(root, rel);
+    try {
+      if (statSync(path).size > MAX_SOURCE_BYTES) continue;
+      for (const url of scanAssetRefs(readFileSync(path, "utf8"), code)) refs.push({ url, source: rel });
+    } catch {}
+  }
+  return refs;
+}
+
+// the served urls of everything in public/, spelled as the directory spells it
+export function publicAssetUrls(dir = "public"): string[] {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true, recursive: true });
+  } catch {
+    return [];
+  }
+  const base = dir.replaceAll("\\", "/").replace(/\/+$/, "");
+  const urls: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    urls.push(join(entry.parentPath, entry.name).replaceAll("\\", "/").slice(base.length));
+  }
+  return urls;
+}
+
+export function caseOnlyMismatches(
+  refs: Iterable<{ url: string; source: string }>,
+  urls: Iterable<string>,
+): CaseMismatch[] {
+  const exact = new Set(urls);
+  const folded = new Map<string, string[]>();
+  for (const url of exact) {
+    const key = url.toLowerCase();
+    const hits = folded.get(key);
+    if (hits) hits.push(url);
+    else folded.set(key, [url]);
+  }
+  const found: CaseMismatch[] = [];
+  const seen = new Set<string>();
+  for (const { url, source } of refs) {
+    if (exact.has(url)) continue;
+    const hits = folded.get(url.toLowerCase());
+    if (!hits) continue;
+    const key = `${source}\0${url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    found.push({ ref: url, onDisk: [...hits].sort(), source });
+  }
+  return found.sort((a, b) => a.source.localeCompare(b.source) || a.ref.localeCompare(b.ref));
+}
+
+/**
+ * The names borgo opens by name, checked the same way and for a worse failure.
+ *
+ * `Style.scss` compiles on windows and is invisible to linux, where cssSource
+ * finds no source at all: the build drops the stylesheet it emitted, exits 0,
+ * and the site ships unstyled. This costs a single readdir of the app root and
+ * cannot report a name that is not there.
+ */
+export const CONVENTIONAL_PATHS = ["index.html", "style.scss", "style.css", "pages", "islands", "public"];
+
+export function miscasedConventions(
+  root = ".",
+  names: readonly string[] = CONVENTIONAL_PATHS,
+): Array<{ expected: string; onDisk: string }> {
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const exact = new Set(entries);
+  const folded = new Map<string, string>();
+  for (const name of entries) {
+    const key = name.toLowerCase();
+    if (!folded.has(key)) folded.set(key, name);
+  }
+  const found: Array<{ expected: string; onDisk: string }> = [];
+  for (const name of names) {
+    if (exact.has(name)) continue;
+    const onDisk = folded.get(name.toLowerCase());
+    if (onDisk) found.push({ expected: name, onDisk });
+  }
+  return found;
+}
+
+const SHOWN = 10;
+
+/**
+ * Printed, never thrown. A build that works today has to go on working today:
+ * the check reports a file that exists under another spelling, which is as
+ * close to certain as a static reading gets, and it is still only a warning -
+ * the one thing it must not be able to do is stop a build over a string.
+ *
+ * The last line states what was not read, because a check that names no limit
+ * teaches whoever read it that there is none.
+ */
+export function warnAssetCase(root = ".", pub = join(root, "public")): number {
+  const mismatches = caseOnlyMismatches(collectAssetRefs(root), publicAssetUrls(pub));
+  const conventions = miscasedConventions(root);
+  const total = mismatches.length + conventions.length;
+  if (!total) return 0;
+  for (const { expected, onDisk } of conventions) {
+    console.warn(
+      `  ${c.red(g.err)} borgo opens ${c.bold(expected)} by name and this folder holds ${c.bold(onDisk)} ` +
+        `${g.dot} windows and macos resolve it, linux does not`,
+    );
+  }
+  for (const { source, ref, onDisk } of mismatches.slice(0, SHOWN)) {
+    console.warn(
+      `  ${c.red(g.err)} ${source} references ${c.bold(ref)}, and public/ holds ${c.bold(onDisk.join(", "))} ` +
+        `${g.dot} served here, 404 on linux`,
+    );
+  }
+  if (mismatches.length > SHOWN) {
+    console.warn(`  ${c.red(g.err)} and ${mismatches.length - SHOWN} more references spelled another way`);
+  }
+  console.warn(
+    `  ${c.dim(`${g.dot} read: literal absolute paths in html, ts/tsx/js, css/scss and json ${g.dot} not read: a url built at runtime, a module import, or a path that comes from the api`)}`,
+  );
+  return total;
 }
 
 // islands are detected by the <Island marker in the page (or layout) source,
@@ -1256,6 +1455,14 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   // every byte this build promises is on disk: the tree is a finished build
   // again, and the next boot has nothing to inherit from this one
   clearBuildMark();
+
+  // after the build has committed, and inside a catch it can never escape: a
+  // reading of the source tree must not be able to fail a build that produced
+  // its output. dev runs it too - that is the machine the spelling looks right
+  // on, and the only one the author is watching
+  try {
+    warnAssetCase();
+  } catch {}
 
   // dev: page chunks carry an injected marker, so the fast-refresh channel
   // can tell the browser which chunk file belongs to which page
