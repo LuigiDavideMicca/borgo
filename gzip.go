@@ -352,6 +352,53 @@ func (g *gzipResponseWriter) commitHeader() {
 	varyAcceptEncoding(h)
 	privateIfCookies(h)
 	oneContentLength(h)
+	// the two fields startGzip writes under the canonical key, folded before it
+	// writes them - see foldFieldKey
+	foldFieldKey(h, "Content-Encoding")
+	foldFieldKey(h, "Content-Type")
+}
+
+// foldFieldKey moves every spelling of a field onto its canonical key, keeping
+// the values in the order their lines reach the wire.
+//
+// A GUARD THAT WRITES UNDER THE CANONICAL KEY WRITES BESIDE A SPELLING IT DID
+// NOT FOLD, NOT OVER IT. h.Set replaces h["Content-Encoding"] and leaves
+// h["CONTENT-ENCODING"] where it is, and writeSubset sorts the keys it emits,
+// so the survivor can arrive first. Measured: a handler assigning
+// h["CONTENT-ENCODING"] = [""] had borgo compress - correctly, an empty value
+// names no coding - and ship `CONTENT-ENCODING: ` ahead of its own
+// `Content-Encoding: gzip`, so a client reading the first value found none and
+// took 42 bytes of gzip for text. Bare net/http hands the same handler's 4096
+// plaintext bytes back whole. Content-Type breaks the other way round: borgo's
+// sniffed line sorts ahead of a lowercase `content-type`, and the handler's
+// text/html reached an identity client while a gzip client got text/plain.
+//
+// No value is dropped and none is reordered: this collapses keys, and every
+// decision about values was already taken by the guards that read them.
+// Normalising here rather than at each gate is what 29428b1 did for
+// Content-Length: the reads downstream, net/http's own included, stay canonical
+// and stay correct.
+func foldFieldKey(h http.Header, canonical string) {
+	scattered := false
+	for k := range h {
+		if k != canonical && sameField(k, canonical) {
+			scattered = true
+			break
+		}
+	}
+	// the response spelling it canonically, or not at all, pays one scan and no
+	// allocation
+	if !scattered {
+		return
+	}
+	var all []string
+	for _, k := range fieldKeys(h, canonical) {
+		all = append(all, h[k]...)
+		delete(h, k)
+	}
+	// assigned even when empty: a present key with no value is how a handler
+	// turns net/http's sniffing off, and folding must carry that across too
+	h[canonical] = all
 }
 
 // oneContentLength leaves the response the single Content-Length its body was
@@ -472,12 +519,12 @@ func (g *gzipResponseWriter) sendHeader() {
 // along, which may have no way to decode it. Added, never substituted: the
 // handler's own reasons for varying outlive ours.
 //
-// The key is not folded, and that is a limit with a measured reason. Vary is a
-// set of field names (RFC 9110 12.5.5), so the whole cost of missing a `vary`
-// assigned through the map is a second Accept-Encoding line naming the field
-// the first already named - measured on the wire, with the handler's own `*` or
-// `Cookie` still in force beside it. This guard cannot under-add, only repeat,
-// so folding would buy back a duplicate line at one map scan per response.
+// The key is not folded, and this is the one write here left canonical. Vary is
+// a set of field names (RFC 9110 12.5.5), so a `vary` assigned through the map
+// costs one repeated Accept-Encoding line and nothing else - measured on the
+// wire and at the client, with the handler's own `*` or `Cookie` still in force
+// beside it. This guard can only repeat itself, never under-add, where an
+// unfolded Content-Encoding cost the response.
 func varyAcceptEncoding(h http.Header) {
 	for _, line := range h.Values("Vary") {
 		for _, field := range strings.Split(line, ",") {
@@ -569,10 +616,8 @@ func (g *gzipResponseWriter) startGzip() {
 	// how a handler turns sniffing off, and reading the first value alone both
 	// overrode that and replaced a second, real value standing behind it - so
 	// the same handler was typed one way for a client that asked for gzip and
-	// another for a client that did not. The key stays canonical for the same
-	// reason the gate does: measured, borgo and bare net/http answer a
-	// non-canonical content-type identically, and folding it here alone would
-	// put the split back
+	// another for a client that did not. The canonical key is enough only
+	// because commitHeader has folded every other spelling onto it first
 	if _, declared := h["Content-Type"]; !declared {
 		h.Set("Content-Type", http.DetectContentType(g.buf))
 	}

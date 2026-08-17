@@ -2031,59 +2031,51 @@ func TestGzipNamesAWrongContentLengthUnderEverySpelling(t *testing.T) {
 
 // WHAT IS LEFT CANONICAL ON PURPOSE, ASSERTED SO IT STAYS A DECISION.
 //
-// The sniffing gate follows net/http's, key included: bare net/http answers a
-// non-canonical content-type with its own sniffed line beside it, and borgo does
-// the same. Folding it here alone would give a gzip client a different
-// Content-Type from an identity one, which is the split, not the fix.
+// Only Vary now, and the whole cost is asserted here: a second Accept-Encoding
+// line naming a field the first already names, with whatever the handler varied
+// on still in force beside it. Vary is a set of field names (RFC 9110 12.5.5),
+// so a repeat is not a second answer - which is what separates it from the two
+// fields commitHeader does fold, where the surviving line was read as a value.
+// The row is not proof of a defect; it is a guard on a decision.
 //
-// Vary is not folded either, and the whole cost is asserted here: a second
-// Accept-Encoding line naming a field the first already names, with whatever the
-// handler varied on still in force beside it. Neither row is proof of a defect;
-// both are guards on a decision.
+// The sniffing gate used to be defended here on the grounds that borgo and bare
+// net/http answer a non-canonical content-type identically. That reason was
+// false, and this test could not have caught it twice over: it sorted the lines
+// before comparing them - discarding the order, which is the whole of what a
+// reader taking one value sees - and it wrote gzipMinBytes/2, below the buffer,
+// where startGzip never runs and the gate it names is never reached. See
+// TestGzipTypesAResponseTheSameWhateverTheEncoding for the measurement.
 func TestGzipLeavesTheseHeadersCanonicalOnPurpose(t *testing.T) {
-	t.Run("sniffing follows net/http, key included", func(t *testing.T) {
-		for _, ae := range []string{"identity", "gzip"} {
+	// The cost is measured under both key orders, because that is what decided
+	// Content-Encoding: a spelling sorting BEFORE the canonical one puts its
+	// value first. For Vary that changes nothing, and the rows say so - a set
+	// has no first element. What must never happen is the handler's own field
+	// going missing, so `Cookie` and `*` are asserted still in force.
+	for _, row := range []struct {
+		name, key, value string
+		want             []string
+	}{
+		{"a repeat, spelling that sorts after", "vary", "Accept-Encoding", []string{"Accept-Encoding", "Accept-Encoding"}},
+		{"a repeat, spelling that sorts before", "VARY", "Accept-Encoding", []string{"Accept-Encoding", "Accept-Encoding"}},
+		{"the handler's own star survives", "VARY", "*", []string{"*", "Accept-Encoding"}},
+		{"the handler's own Cookie survives", "VARY", "Cookie", []string{"Accept-Encoding", "Cookie"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
 			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header()["content-type"] = []string{"text/html; charset=utf-8"}
+				w.Header().Del("Vary")
+				w.Header()[row.key] = []string{row.value}
 				w.Write(bytes.Repeat([]byte("x"), gzipMinBytes/2))
 			})
-			_, _, bareWire := serveAndDiagnose(t, ae, inner)
-			_, _, wire := serveAndDiagnose(t, ae, gzipMiddleware(inner))
-			types := func(raw string) []string {
-				head, _, _ := strings.Cut(raw, "\r\n\r\n")
-				var out []string
-				for _, line := range strings.Split(head, "\r\n") {
-					if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(k, "content-type") {
-						out = append(out, strings.TrimSpace(v))
-					}
+			for _, ae := range []string{"identity", "gzip"} {
+				_, _, wire := serveAndDiagnose(t, ae, gzipMiddleware(inner))
+				varies := wireValues(wire, "Vary")
+				slices.Sort(varies)
+				if !slices.Equal(varies, row.want) {
+					t.Errorf("%s: Vary lines = %q, want %q", ae, varies, row.want)
 				}
-				slices.Sort(out)
-				return out
 			}
-			if got, want := types(wire), types(bareWire); !slices.Equal(got, want) {
-				t.Errorf("%s: borgo typed the response %q, net/http %q", ae, got, want)
-			}
-		}
-	})
-
-	t.Run("an unseen vary costs one repeated line and nothing else", func(t *testing.T) {
-		_, _, wire := serveAndDiagnose(t, "identity", gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Del("Vary")
-			w.Header()["vary"] = []string{"*"}
-			w.Write(bytes.Repeat([]byte("x"), gzipMinBytes/2))
-		})))
-		head, _, _ := strings.Cut(wire, "\r\n\r\n")
-		var varies []string
-		for _, line := range strings.Split(head, "\r\n") {
-			if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(k, "vary") {
-				varies = append(varies, strings.TrimSpace(v))
-			}
-		}
-		slices.Sort(varies)
-		if !slices.Equal(varies, []string{"*", "Accept-Encoding"}) {
-			t.Errorf("Vary lines = %q, want the handler's own beside ours", varies)
-		}
-	})
+		})
+	}
 }
 
 // benchGzipHeaderCount prices a whole response by how many headers it carries,
@@ -2369,6 +2361,198 @@ func TestGzipTreatsIdentityAsACodingLikeNetHTTP(t *testing.T) {
 			// hasCE := len(ce) > 0
 			if values[0] != "" && len(h.Get("Content-Encoding")) == 0 {
 				t.Errorf("net/http reads %q as blank", values)
+			}
+		})
+	}
+}
+
+// firstWireValue returns the first value a field has in wire order, which is
+// what a reader taking one value takes. Not sorted and not canonicalised: the
+// order the lines arrive in is the whole of what this measures.
+func firstWireValue(raw, field string) (string, bool) {
+	head, _, _ := strings.Cut(raw, "\r\n\r\n")
+	for _, line := range strings.Split(head, "\r\n") {
+		if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(k), field) {
+			return strings.TrimSpace(v), true
+		}
+	}
+	return "", false
+}
+
+// wireValues returns every value a field carries, in wire order.
+func wireValues(raw, field string) []string {
+	head, _, _ := strings.Cut(raw, "\r\n\r\n")
+	var out []string
+	for _, line := range strings.Split(head, "\r\n") {
+		if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(k), field) {
+			out = append(out, strings.TrimSpace(v))
+		}
+	}
+	return out
+}
+
+// A GUARD WRITING UNDER THE CANONICAL KEY WRITES BESIDE A SPELLING IT DID NOT
+// FOLD, AND THE SURVIVOR CAN ARRIVE FIRST.
+//
+// Three rounds closed the reads: every header gzip.go and cache.go look at is
+// read under every spelling of its key. The writes were not, and h.Set replaces
+// one key. h["CONTENT-ENCODING"] = [""] is read correctly - an empty value names
+// no coding, so the body is compressed, which ec6cefe settled - and then
+// h.Set("Content-Encoding", "gzip") lands beside it, not over it. writeSubset
+// sorts the keys it emits and CONTENT-ENCODING sorts before Content-Encoding, so
+// the empty line goes out FIRST.
+//
+// Direction of failure: net/http reads Content-Encoding with Get, the first
+// value, which is the agreement c5f7713 defended and ec6cefe kept. Measured,
+// that reader found "" and did not decode, so it held 42 bytes of gzip it took
+// for text. The same handler through bare net/http hands back its 4096 plaintext
+// bytes whole - borgo unmaking a response the standard library delivers intact,
+// which is 29428b1's worst shape, reached this time through a write.
+//
+// The lowercase spelling sorts after and is only a redundant trailing empty, so
+// the two are not one row twice: the key decides whether this costs a line or
+// the response. Both are asserted, because a fix closing only the loud half
+// leaves the quiet half to be rediscovered.
+func TestGzipFoldsTheKeyItWritesTheEncodingUnder(t *testing.T) {
+	body := strings.Repeat("borgo compresses this ", gzipMinBytes/4)
+	for _, sp := range []struct {
+		name, key string
+	}{
+		{"canonical", "Content-Encoding"},
+		{"spelling that sorts before the canonical one", "CONTENT-ENCODING"},
+		{"spelling that sorts after it", "content-encoding"},
+	} {
+		t.Run(sp.name, func(t *testing.T) {
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header()[sp.key] = []string{""}
+				io.WriteString(w, body)
+			})
+
+			// bare net/http first: it names what borgo has at least to match
+			bareStatus, bare, bareErr := clientReads(t, "gzip", inner)
+			if bareErr != nil || bareStatus != http.StatusOK || bare != body {
+				t.Fatalf("bare net/http did not deliver the response: status %d, %d bytes, %v",
+					bareStatus, len(bare), bareErr)
+			}
+
+			status, got, err := clientReads(t, "gzip", gzipMiddleware(inner))
+			if err != nil {
+				t.Fatalf("the client could not read the response: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Errorf("status = %d, want 200", status)
+			}
+			if got != body {
+				t.Errorf("the client held %d bytes, not the %d the handler wrote; bare net/http delivers them whole",
+					len(got), len(body))
+			}
+
+			// and the field it read that by: one line, naming gzip, with no
+			// empty element in front of it
+			_, _, wire := serveAndDiagnose(t, "gzip", gzipMiddleware(inner))
+			if first, ok := firstWireValue(wire, "Content-Encoding"); !ok || first != "gzip" {
+				t.Errorf("the first Content-Encoding on the wire is %q, want %q", first, "gzip")
+			}
+			if got := wireValues(wire, "Content-Encoding"); len(got) != 1 {
+				t.Errorf("Content-Encoding lines on the wire = %q, want the one that describes the body", got)
+			}
+		})
+	}
+}
+
+// THE SAME HANDLER WAS TYPED ONE WAY FOR A GZIP CLIENT AND ANOTHER FOR THE REST.
+//
+// 29428b1 left the sniffing gate reading h["Content-Type"] canonically, with a
+// measured reason: borgo and bare net/http were said to answer a non-canonical
+// content-type identically, so folding the gate alone would give a gzip client a
+// different Content-Type than an identity client - putting back the split this
+// file exists to close.
+//
+// THE REASON WAS FALSE, AND THE SPLIT WAS ALREADY THERE. net/http does not put
+// its sniffed type in the header map: it writes it after the map's own lines, so
+// a lowercase content-type reaches the client FIRST and text/html is what it
+// reads. borgo writes the sniffed type INTO the map, where Content-Type sorts
+// before content-type, so the sniffed text/plain went out first. Measured on a
+// 4 KB HTML body: a gzip client read text/plain, an identity client text/html,
+// bare net/http text/html for both.
+//
+// Direction of failure: a browser asking for gzip - which is every browser -
+// gets an HTML page typed text/plain and renders the source. The assertion is
+// the value in wire order across both encodings, because a set of lines that
+// matches after sorting is exactly what hid this.
+func TestGzipTypesAResponseTheSameWhateverTheEncoding(t *testing.T) {
+	for _, sp := range []struct {
+		name, key string
+	}{
+		{"canonical", "Content-Type"},
+		{"spelling that sorts before the canonical one", "CONTENT-TYPE"},
+		{"spelling that sorts after it", "content-type"},
+	} {
+		t.Run(sp.name, func(t *testing.T) {
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header()[sp.key] = []string{"text/html; charset=utf-8"}
+				w.Write(bytes.Repeat([]byte("x"), gzipMinBytes*4))
+			})
+			seen := map[string]string{}
+			for _, ae := range []string{"identity", "gzip"} {
+				_, _, wire := serveAndDiagnose(t, ae, gzipMiddleware(inner))
+				seen[ae], _ = firstWireValue(wire, "Content-Type")
+				_, _, bareWire := serveAndDiagnose(t, ae, inner)
+				bare, _ := firstWireValue(bareWire, "Content-Type")
+				if seen[ae] != bare {
+					t.Errorf("%s: borgo typed it %q, bare net/http %q", ae, seen[ae], bare)
+				}
+			}
+			if seen["identity"] != seen["gzip"] {
+				t.Errorf("Accept-Encoding decided the type: identity read %q, gzip read %q",
+					seen["identity"], seen["gzip"])
+			}
+			if seen["gzip"] != "text/html; charset=utf-8" {
+				t.Errorf("the type the handler wrote never reached the client: %q", seen["gzip"])
+			}
+		})
+	}
+}
+
+// FOLDING A KEY MUST NOT COST A VALUE. This is the constraint the decision was
+// taken against rather than proof of a defect: a blind fold - deleting every
+// spelling before writing our own - would have closed the same two defects and
+// thrown away what the handler wrote. These rows guard that it does not.
+//
+// Both fields are lists (RFC 9110 5.3), so every value stays, in wire order, and
+// what the client reads is what bare net/http gives it. The Content-Encoding
+// rows go through passthrough - a named coding is not ours to touch - and the
+// Content-Type rows through startGzip, so both sides of the commit are covered.
+func TestGzipFoldingAFieldKeepsEveryValue(t *testing.T) {
+	for _, row := range []struct {
+		name, field string
+		set         func(h http.Header)
+		want        []string
+	}{
+		{"two content-type spellings", "Content-Type", func(h http.Header) {
+			h["Content-Type"] = []string{"application/json"}
+			h["content-type"] = []string{"text/html"}
+		}, []string{"application/json", "text/html"}},
+		{"content-type under two non-canonical keys", "Content-Type", func(h http.Header) {
+			h["CONTENT-TYPE"] = []string{"application/json"}
+			h["content-type"] = []string{"text/html"}
+		}, []string{"application/json", "text/html"}},
+		{"a coding behind an empty value", "Content-Encoding", func(h http.Header) {
+			h["CONTENT-ENCODING"] = []string{"", "br"}
+		}, []string{"", "br"}},
+		{"a coding under two spellings", "Content-Encoding", func(h http.Header) {
+			h["CONTENT-ENCODING"] = []string{"br"}
+			h["content-encoding"] = []string{"identity"}
+		}, []string{"br", "identity"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				row.set(w.Header())
+				w.Write(bytes.Repeat([]byte("x"), gzipMinBytes*4))
+			})
+			_, _, wire := serveAndDiagnose(t, "gzip", gzipMiddleware(inner))
+			if got := wireValues(wire, row.field); !slices.Equal(got, row.want) {
+				t.Errorf("%s on the wire = %q, want %q", row.field, got, row.want)
 			}
 		})
 	}
