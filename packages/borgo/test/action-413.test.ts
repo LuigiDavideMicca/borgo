@@ -139,11 +139,23 @@ describe("a 413 an enhanced submit receives", () => {
     await custom.text();
   });
 
+  // the one assertion here that cannot come off the wire: no server writes a
+  // marked 413 today, so reading the marker first is indistinguishable from
+  // reading the status first - both classify every real response identically,
+  // and swapping them leaves this file and the dom file green. What the order
+  // is for is the day util.ts gains an envelope for the refusal, and only a
+  // response built by hand can ask about that day
+  test("a 413 that ever gains a marker is still a refusal, not an action answer", () => {
+    expect(actionOutcome(new Response("too big", { status: 413, headers: { "X-Borgo": "action" } }))).toBe("too-large");
+    expect(actionOutcome(new Response("too big", { status: 413, headers: { "X-Borgo": "raw" } }))).toBe("too-large");
+  });
+
   // the branch itself lives inside mount(), which needs a document, a form and
-  // a react root - e2e territory (e2e/actions.e2e.ts), not bun:test. What can
-  // be pinned here is that the classification is wired to the overlay and not to
-  // the reload, and that it is decided before the reload branch is reached. The
-  // same source-reading shape api.test.ts and csrf-rejects.test.ts use.
+  // a react root: action-413-dom.test.ts runs it against one and asserts what
+  // the person at the form sees. This stays because it is cheap and it pins the
+  // shape - but on its own it is not evidence: drop the `return;` ending the
+  // branch and every line below still holds while the page reloads and the form
+  // empties. Measured, not assumed.
   test("the too-large answer is wired to the overlay, ahead of the reload", () => {
     const src = readFileSync(join(import.meta.dir, "../src/runtime.ts"), "utf8");
     const submit = src.slice(src.indexOf("const outcome = actionOutcome(res)"));
