@@ -33,6 +33,8 @@ import {
   hashedOutputNames,
   isSweepable,
   miscasedConventions,
+  miscasedImport,
+  miscasedImports,
   missingBuiltAssets,
   nameCarriesHash,
   needsBuild,
@@ -51,6 +53,7 @@ import {
   reportBuildFailure,
   scanAssetRefs,
   scanCode,
+  scanImportSpecifiers,
   sweepBuildOutput,
   unusableBuiltAssets,
   warnAssetCase,
@@ -2111,7 +2114,12 @@ describe("the mismatch read off a real tree", () => {
     // says so ships with every report rather than living in a doc nobody opens.
     expect(lines[1]).toContain("not read");
     expect(lines[1]).toContain("runtime");
-    expect(lines[1]).toContain("module import");
+    // the module import moved from the limits to the coverage, so the limits
+    // line has to move with it: a bare specifier and css's own @import are
+    // what this still does not read
+    expect(lines[1]).toContain("bare package specifier");
+    expect(lines[1]).toContain("@import");
+    expect(lines[1]).toContain("relative import specifiers");
   });
 
   test("a root that cannot be read is silence, not a failed build", () => {
@@ -2164,5 +2172,205 @@ describe("miscasedConventions", () => {
 
   test("a root that cannot be read is an empty list", () => {
     expect(miscasedConventions(join(tmpdir(), `borgo-conv-gone-${Date.now()}`))).toEqual([]);
+  });
+});
+
+describe("scanImportSpecifiers", () => {
+  test("static, side-effect, dynamic and require forms are all specifiers", () => {
+    const source = [
+      'import { a } from "./a";',
+      'import "./b.css";',
+      'export { c } from "../c";',
+      'const d = await import("./d");',
+      'const e = require("./e");',
+    ].join("\n");
+    expect(scanImportSpecifiers(source).sort()).toEqual(["../c", "./a", "./b.css", "./d", "./e"]);
+  });
+
+  // A BARE SPECIFIER IS A DIFFERENT MECHANISM WITH A DIFFERENT FAILURE. It goes
+  // through node_modules resolution, where a folded name means nothing, and
+  // guessing at it is how a warning earns the right to be ignored.
+  test("a bare specifier is not read at all", () => {
+    const source = 'import React from "react";\nimport { Route } from "borgo-framework/router";';
+    expect(scanImportSpecifiers(source)).toEqual([]);
+  });
+
+  test("a specifier in a comment is not an import", () => {
+    expect(scanImportSpecifiers('// import { x } from "./old";\nconst y = 1;')).toEqual([]);
+    expect(scanImportSpecifiers('/* import "./gone.css"; */')).toEqual([]);
+  });
+
+  // borgo writes its own manifests as text: .borgo/routes.gen.tsx is assembled
+  // from template literals holding `import ... from "../pages/x"`. Those are
+  // the generated file's imports, not the generator's, and resolving them
+  // against the generator's own folder is a report about a file that is not
+  // there.
+  test("an import inside a template literal is the generated file's, not this one's", () => {
+    const source = "const line = `import * as page from \"../pages/${file}\";`;";
+    expect(scanImportSpecifiers(source)).toEqual([]);
+  });
+
+  test("the same specifier twice is one specifier", () => {
+    expect(scanImportSpecifiers('import "./a";\nconst x = await import("./a");')).toEqual(["./a"]);
+  });
+
+  test("a query rides along and is stripped at resolution", () => {
+    expect(scanImportSpecifiers('import raw from "./logo.svg?raw";')).toEqual(["./logo.svg?raw"]);
+  });
+});
+
+describe("miscasedImport", () => {
+  const tree = (files: Record<string, string[]>): ((path: string) => string[]) => {
+    const at = new Map(Object.entries(files));
+    return (path) => at.get(path.replaceAll("\\", "/")) ?? [];
+  };
+
+  // THE PART IT IS EASY TO GET WRONG. A typescript import omits the extension,
+  // so the comparison is per path segment against every name a bundler would
+  // have tried - never filename against filename, which reports `./helper` for
+  // `helper.ts` and condemns the whole warning on its first real build.
+  test("./helper against Helper.ts is the defect, and the extension is not part of it", () => {
+    const dir = tree({ "app/lib": ["Helper.ts"] });
+    expect(miscasedImport("app", "lib", "./helper", dir)).toEqual(["Helper.ts"]);
+  });
+
+  test("the exact spelling is never reported, whichever extension carries it", () => {
+    for (const name of ["helper.ts", "helper.tsx", "helper.js", "helper.mjs", "helper.json"]) {
+      expect(miscasedImport("app", "lib", "./helper", tree({ "app/lib": [name] }))).toBeNull();
+    }
+  });
+
+  test("a directory answers the specifier as exactly as a file does", () => {
+    expect(miscasedImport("app", "", "./helper", tree({ app: ["helper"] }))).toBeNull();
+    expect(miscasedImport("app", "", "./helper", tree({ app: ["Helper"] }))).toEqual(["Helper"]);
+  });
+
+  // a name that matches nothing is a file generated later, an extension this
+  // does not know, or a mistake that is not a spelling one - and a warning
+  // about it is a guess
+  test("a specifier that matches nothing at all is silence", () => {
+    expect(miscasedImport("app", "lib", "./nowhere", tree({ "app/lib": ["Helper.ts"] }))).toBeNull();
+  });
+
+  test("./x.js beside an x.ts is not a miscasing", () => {
+    // NodeNext spells a typescript import with the emitted extension. It is
+    // not the same name folded, so it is not this check's business.
+    expect(miscasedImport("app", "", "./x.js", tree({ app: ["x.ts"] }))).toBeNull();
+  });
+
+  test("an intermediate directory is compared the same way", () => {
+    const dir = tree({ app: ["Lib"], "app/Lib": ["helper.ts"] });
+    expect(miscasedImport("app", "", "./lib/helper", dir)).toEqual(["Lib"]);
+  });
+
+  test("../ walks up before it compares", () => {
+    const dir = tree({ app: ["lib", "pages"], "app/lib": ["Helper.ts"] });
+    expect(miscasedImport("app", "pages", "../lib/helper", dir)).toEqual(["Helper.ts"]);
+    expect(miscasedImport("app", "pages", "../lib/Helper", dir)).toBeNull();
+  });
+
+  test("above the app root nothing has been read, so nothing is claimed", () => {
+    expect(miscasedImport("app", "", "../outside/Thing", tree({ app: [] }))).toBeNull();
+  });
+
+  test("an empty segment is not a segment", () => {
+    expect(miscasedImport("app", "", ".//helper", tree({ app: ["Helper.ts"] }))).toEqual(["Helper.ts"]);
+  });
+
+  test("a query is stripped before the name is compared", () => {
+    expect(miscasedImport("app", "", "./logo.svg?raw", tree({ app: ["Logo.svg"] }))).toEqual(["Logo.svg"]);
+  });
+
+  // on a case-sensitive checkout both spellings can sit in one directory -
+  // measured, with Helper.ts and helper.ts side by side - so the answer is
+  // every hit, sorted, rather than whichever one readdir returned first on
+  // this machine
+  test("two spellings in one folder are both named, in a fixed order", () => {
+    // the directory order is neither the sorted one nor its reverse, so a
+    // check that simply passed readdir's order through would be caught
+    const dir = tree({ app: ["Helper.ts", "HELPER.js", "helper.tsx"] });
+    expect(miscasedImport("app", "", "./HeLpEr", dir)).toEqual([
+      "HELPER.js",
+      "Helper.ts",
+      "helper.tsx",
+    ]);
+    // and either exact spelling is still silence
+    expect(miscasedImport("app", "", "./helper", dir)).toBeNull();
+    expect(miscasedImport("app", "", "./Helper", dir)).toBeNull();
+  });
+});
+
+describe("the miscased import read off a real tree", () => {
+  const roots: string[] = [];
+  const project = (files: Record<string, string>) => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-imp-"));
+    roots.push(dir);
+    for (const [rel, body] of Object.entries(files)) {
+      const path = join(dir, rel);
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, body);
+    }
+    return dir;
+  };
+  afterAll(() => {
+    for (const dir of roots) rmSync(dir, { recursive: true, force: true });
+  });
+
+  // MEASURED, AND THE REASON THIS EXISTS AT ALL. The page transpiler eliminates
+  // loader/action/prerender and trimUnusedImports takes their imports with
+  // them, so this specifier never reaches the bundler: on a case-sensitive
+  // filesystem the client build is green and does not name the module, and the
+  // loader the front server runs from source throws ENOENT on that one route,
+  // in production.
+  // named without parentheses on purpose: `bun test -t` reads the name as a
+  // regex, and a test nobody can isolate is a test nobody re-runs
+  test("a dynamic import inside a loader is the one the bundle never sees", () => {
+    const dir = project({
+      "pages/Data.ts": "export const rows = [];",
+      "pages/index.tsx":
+        'export const loader = async () => (await import("./data")).rows;\nexport default () => null;',
+    });
+    expect(miscasedImports(dir)).toEqual([
+      { ref: "./data", onDisk: ["Data.ts"], source: "pages/index.tsx" },
+    ]);
+  });
+
+  test("a tree whose imports agree says nothing", () => {
+    const dir = project({
+      "lib/helper.ts": "export const x = 1;",
+      "pages/index.tsx": 'import { x } from "../lib/helper";\nexport default () => x;',
+    });
+    expect(miscasedImports(dir)).toEqual([]);
+  });
+
+  test("node_modules is somebody else's spelling", () => {
+    const dir = project({
+      "node_modules/dep/Index.ts": "export const x = 1;",
+      "node_modules/dep/use.ts": 'import { x } from "./index";',
+    });
+    expect(miscasedImports(dir)).toEqual([]);
+  });
+
+  test("the source is named with the reference and the spelling on disk", () => {
+    const dir = project({
+      "components/Card.tsx": "export default () => null;",
+      "pages/index.tsx": 'import Card from "../components/card";\nexport default Card;',
+    });
+    const lines: string[] = [];
+    const original = console.warn;
+    try {
+      console.warn = (...args: unknown[]) => void lines.push(args.join(" "));
+      expect(warnAssetCase(dir, join(dir, "public"))).toBe(1);
+    } finally {
+      console.warn = original;
+    }
+    expect(lines[0]).toContain("pages/index.tsx");
+    expect(lines[0]).toContain("../components/card");
+    expect(lines[0]).toContain("Card.tsx");
+    expect(lines[0]).toContain("linux");
+  });
+
+  test("a root that cannot be read is an empty list", () => {
+    expect(miscasedImports(join(tmpdir(), `borgo-imp-gone-${Date.now()}`))).toEqual([]);
   });
 });

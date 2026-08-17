@@ -456,6 +456,169 @@ export function miscasedConventions(
   return found;
 }
 
+/**
+ * The module specifier with the same disease, and not the loud one it was
+ * registered as.
+ *
+ * `import "./helper"` against a `Helper.ts` on disk resolves on windows and on
+ * macos. It was left uncovered on the grounds that linux answers it with a
+ * failed build - loud, blocking, ahead of production. Half of that is measured
+ * true and half of it is measured false, on a real case-sensitive filesystem:
+ *
+ *   - a static import, and a dynamic `import()` the bundler walks: the build
+ *     fails, `File not found`, exit 1. Loud, and this check only moves it
+ *     earlier, onto the machine the author is already watching.
+ *   - a dynamic `import()` inside a loader, an action or a prerender export:
+ *     the page transpiler eliminates those exports and `trimUnusedImports`
+ *     takes the specifier with them, so the bundler never sees it. Measured:
+ *     the client build is green, the bundle does not name the module, and the
+ *     loader the front server runs from source throws ENOENT per request. The
+ *     deploy goes out, the container is healthy, one route answers 500.
+ *   - anything a `hydrate = false` page or `_500.tsx` imports: never in the
+ *     client bundle either, so the build is green and the server's own import
+ *     of the manifest is where it stops.
+ *
+ * `borgo export` builds on the author's machine and ships the output, so
+ * nothing on linux ever resolves those specifiers again - there the defect is
+ * invisible because it is inert. The scaffolded Dockerfile is the opposite: it
+ * runs `bun run build` on linux and then serves pages from source on linux.
+ *
+ * Same narrowness as the asset rule above, for the same reason: a specifier
+ * that matches nothing at all is left alone - it is a file that is generated
+ * later, an extension this does not know, or a genuine mistake that is not a
+ * spelling one - and only one that misses on the exact spelling and hits on a
+ * folded one is named, which is provably a file that exists under another.
+ */
+const IMPORT_EXT = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".css", ".scss"];
+
+// `from "x"` covers import and `export ... from`; the bare form covers a
+// side-effect import; then the two call forms. Read off scanCode's output, so
+// a specifier in a comment is already blank by the time these run.
+const SPEC_PATTERNS = [
+  /\bfrom\s*(["'])([^"'\n]+)\1/g,
+  /\bimport\s*(["'])([^"'\n]+)\1/g,
+  /\bimport\s*\(\s*(["'])([^"'\n]+)\1\s*\)/g,
+  /\brequire\s*\(\s*(["'])([^"'\n]+)\1\s*\)/g,
+];
+
+/**
+ * The relative specifiers a source names, and only those.
+ *
+ * A bare specifier (`react`, `borgo-framework/router`) goes through node_modules
+ * resolution, which is a different mechanism with a different failure, and
+ * guessing at it here is how a warning earns the right to be ignored.
+ *
+ * The match is rejected when the keyword that starts it is itself inside a
+ * string or a template literal: generated code - borgo's own manifests are
+ * written this way - holds `import ... from "./x"` as text, and that text is
+ * not this file's import.
+ */
+export function scanImportSpecifiers(source: string): string[] {
+  const { code, strings } = scanCode(source);
+  const found = new Set<string>();
+  for (const pattern of SPEC_PATTERNS) {
+    for (const match of code.matchAll(pattern)) {
+      const at = match.index;
+      if (strings.some(([from, to]) => at >= from && at < to)) continue;
+      const spec = match[2];
+      if (spec.startsWith("./") || spec.startsWith("../")) found.add(spec);
+    }
+  }
+  return [...found];
+}
+
+export type DirEntries = (path: string) => string[];
+
+/**
+ * The on-disk spellings of the segment this specifier spells another way, or
+ * null for every other answer.
+ *
+ * Compared segment by segment, never as a filename: a typescript import omits
+ * the extension, so `./helper` has to be matched against `helper.ts`,
+ * `helper.tsx` and a `helper/` directory alike. An intermediate segment must be
+ * a directory that is really there under that exact name; the last one is
+ * satisfied by the name itself or by the name plus any extension a bundler
+ * would have tried. Anything that resolves exactly returns null, and so does
+ * anything that resolves to nothing at all.
+ *
+ * Every folded hit is returned, sorted. On a case-sensitive checkout the two
+ * spellings can sit in the same directory - measured, with `Helper.ts` and
+ * `helper.ts` side by side - and naming whichever one readdir happened to
+ * return first is a message that changes between machines and hides the other.
+ */
+export function miscasedImport(
+  root: string,
+  fromDir: string,
+  spec: string,
+  dir: DirEntries,
+): string[] | null {
+  const hits = (names: string[]) => (names.length ? [...names].sort() : null);
+  const parts = spec.split(/[?#]/)[0].split("/");
+  let at = fromDir;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      // above the app root, where this has read nothing and knows nothing
+      if (!at) return null;
+      at = at.includes("/") ? at.slice(0, at.lastIndexOf("/")) : "";
+      continue;
+    }
+    const names = dir(at ? join(root, at) : root);
+    const folded = part.toLowerCase();
+    if (i < parts.length - 1) {
+      if (names.includes(part)) {
+        at = at ? `${at}/${part}` : part;
+        continue;
+      }
+      return hits(names.filter((name) => name.toLowerCase() === folded));
+    }
+    if (names.includes(part) || IMPORT_EXT.some((ext) => names.includes(part + ext))) return null;
+    return hits(
+      names.filter((name) => {
+        const lower = name.toLowerCase();
+        return lower === folded || IMPORT_EXT.some((ext) => lower === folded + ext);
+      }),
+    );
+  }
+  return null;
+}
+
+export function miscasedImports(root = "."): CaseMismatch[] {
+  const cache = new Map<string, string[]>();
+  const dir: DirEntries = (path) => {
+    let names = cache.get(path);
+    if (!names) {
+      try {
+        names = readdirSync(path);
+      } catch {
+        names = [];
+      }
+      cache.set(path, names);
+    }
+    return names;
+  };
+  const found: CaseMismatch[] = [];
+  const seen = new Set<string>();
+  for (const rel of walkSources(root)) {
+    if (!CODE_EXT.has(extname(rel).toLowerCase())) continue;
+    const path = join(root, rel);
+    try {
+      if (statSync(path).size > MAX_SOURCE_BYTES) continue;
+      const fromDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+      for (const spec of scanImportSpecifiers(readFileSync(path, "utf8"))) {
+        const onDisk = miscasedImport(root, fromDir, spec, dir);
+        if (!onDisk) continue;
+        const key = `${rel}\0${spec}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        found.push({ ref: spec, onDisk, source: rel });
+      }
+    } catch {}
+  }
+  return found.sort((a, b) => a.source.localeCompare(b.source) || a.ref.localeCompare(b.ref));
+}
+
 const SHOWN = 10;
 
 /**
@@ -470,7 +633,8 @@ const SHOWN = 10;
 export function warnAssetCase(root = ".", pub = join(root, "public")): number {
   const mismatches = caseOnlyMismatches(collectAssetRefs(root), publicAssetUrls(pub));
   const conventions = miscasedConventions(root);
-  const total = mismatches.length + conventions.length;
+  const imports = miscasedImports(root);
+  const total = mismatches.length + conventions.length + imports.length;
   if (!total) return 0;
   for (const { expected, onDisk } of conventions) {
     console.warn(
@@ -487,8 +651,17 @@ export function warnAssetCase(root = ".", pub = join(root, "public")): number {
   if (mismatches.length > SHOWN) {
     console.warn(`  ${c.red(g.err)} and ${mismatches.length - SHOWN} more references spelled another way`);
   }
+  for (const { source, ref, onDisk } of imports.slice(0, SHOWN)) {
+    console.warn(
+      `  ${c.red(g.err)} ${source} imports ${c.bold(ref)}, and that folder holds ${c.bold(onDisk.join(", "))} ` +
+        `${g.dot} resolved here, not found on linux`,
+    );
+  }
+  if (imports.length > SHOWN) {
+    console.warn(`  ${c.red(g.err)} and ${imports.length - SHOWN} more imports spelled another way`);
+  }
   console.warn(
-    `  ${c.dim(`${g.dot} read: literal absolute paths in html, ts/tsx/js, css/scss and json ${g.dot} not read: a url built at runtime, a module import, or a path that comes from the api`)}`,
+    `  ${c.dim(`${g.dot} read: literal absolute paths in html, ts/tsx/js, css/scss and json, and relative import specifiers in ts/tsx/js ${g.dot} not read: a url or a specifier built at runtime, a bare package specifier, @import inside css, or a path that comes from the api`)}`,
   );
   return total;
 }
