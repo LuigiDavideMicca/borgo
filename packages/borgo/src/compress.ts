@@ -175,7 +175,8 @@ export function pickEncoding(
 // so serving them costs nothing at runtime. skipped when not smaller.
 export async function precompressAssets(dir: string) {
   for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
-    if (!entry.isFile() || !isCompressiblePath(entry.name)) continue;
+    // what serveAsset refuses is only build time here: the same rule, not a copy of it
+    if (!entry.isFile() || !isCompressiblePath(entry.name) || isHiddenAsset(entry.name)) continue;
     const path = join(entry.parentPath, entry.name);
     // the listing is a snapshot: a `borgo dev` rebuilding the same app
     // deletes stale hashed chunks, and a file that vanished between the

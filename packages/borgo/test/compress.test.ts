@@ -267,6 +267,37 @@ describe("precompressAssets", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, CONTENDED);
+
+  test("what serveAsset refuses is not compressed, and .well-known/ still is", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-precompress-hidden-"));
+    try {
+      const body = "export const data = 'chunk';\n".repeat(300);
+      mkdirSync(join(dir, "assets"), { recursive: true });
+      mkdirSync(join(dir, ".well-known"), { recursive: true });
+      await Bun.write(join(dir, "assets", ".hidden.js"), body);
+      await Bun.write(join(dir, "assets", "app.js"), body);
+      await Bun.write(join(dir, ".well-known", "security.txt"), body);
+      await Bun.write(join(dir, ".DS_Store.txt"), body);
+
+      await precompressAssets(dir);
+
+      const written = readdirSync(dir, { recursive: true })
+        .map(String)
+        .filter((f) => /\.(gz|br)$/.test(f))
+        .map((f) => f.replaceAll("\\", "/"))
+        .sort();
+      // the hidden file is what isHiddenAsset refuses; the hidden directory is
+      // what it deliberately does not reach, so its files keep their siblings
+      expect(written).toEqual([
+        ".well-known/security.txt.br",
+        ".well-known/security.txt.gz",
+        "assets/app.js.br",
+        "assets/app.js.gz",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, CONTENDED);
 });
 
 describe("buildAssetIndex", () => {
