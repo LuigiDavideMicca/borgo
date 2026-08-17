@@ -2127,7 +2127,7 @@ func benchGzipHeaderReads(b *testing.B, n int) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if declaredLength(h) < 0 || declaresEventStream(h) || firstFieldValue(h, "Content-Encoding") != "" {
+		if declaredLength(h) < 0 || declaresEventStream(h) || declaresEncoding(h) {
 			b.Fatal("unexpected")
 		}
 		oneContentLength(h)
@@ -2136,3 +2136,240 @@ func benchGzipHeaderReads(b *testing.B, n int) {
 
 func BenchmarkGzipHeaderReads4(b *testing.B)  { benchGzipHeaderReads(b, 4) }
 func BenchmarkGzipHeaderReads32(b *testing.B) { benchGzipHeaderReads(b, 32) }
+
+// conformingClientReads returns what a client holds after undoing the codings
+// the response names, reading Content-Encoding the way RFC 9110 5.3 defines it:
+// repeated field lines are one list, and an empty element names no coding.
+// Neither a recorder nor clientReads, whose Get stops at the first value - the
+// question here is what the bytes are once the header has been obeyed.
+func conformingClientReads(t *testing.T, h http.Handler) (codings []string, body []byte) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept-Encoding", "gzip")
+	res, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("no response at all: %v", err)
+	}
+	defer res.Body.Close()
+	body, err = io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("reading the body: %v", err)
+	}
+	for _, line := range res.Header["Content-Encoding"] {
+		for _, c := range strings.Split(line, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				codings = append(codings, c)
+			}
+		}
+	}
+	// outermost coding first, as a decoder peels them
+	for i := len(codings) - 1; i >= 0 && strings.EqualFold(codings[i], "gzip"); i-- {
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("the response named %q and the bytes are not that: %v", codings, err)
+		}
+		body, err = io.ReadAll(zr)
+		zr.Close()
+		if err != nil {
+			t.Fatalf("decoding the %q layer: %v", codings[i], err)
+		}
+	}
+	return codings, body
+}
+
+// A BODY ALREADY CODED WAS COMPRESSED AGAIN, AND ITS DECLARATION DELETED.
+//
+// The gate read Content-Encoding by its first value, so Add("") before
+// Add("gzip") - a slice the public API produces on its own - read "" and walked
+// through it. borgo then compressed a body that was already a gzip stream and
+// h.Set("Content-Encoding", "gzip") replaced BOTH values, taking the only line
+// that said so off the wire. What is left is a response naming one coding and
+// carrying two.
+//
+// Direction of failure: a client that obeys the header undoes one layer and
+// stops, so it holds coded bytes it takes for plaintext - and it cannot know,
+// because the evidence went out with the header borgo overwrote. The same
+// handler through bare net/http delivers the plaintext whole, so this is not a
+// blind spot: it is borgo unmaking a response the standard library gets right.
+//
+// The comparison is the assertion. gzip stands in for br because the test has to
+// decode what it measures; the shape is the one measured on br, where borgo put
+// Content-Encoding: gzip alone over 6000 untouched br bytes.
+func TestGzipDoesNotRecompressABodyCodedBehindAnEmptyValue(t *testing.T) {
+	// incompressible, so the coded body is still above the buffer
+	plain := make([]byte, gzipMinBytes*40)
+	x := uint32(12345)
+	for i := range plain {
+		x = x*1664525 + 1013904223
+		plain[i] = byte(x >> 24)
+	}
+	copy(plain, []byte("payload-marker"))
+	var coded bytes.Buffer
+	zw := gzip.NewWriter(&coded)
+	zw.Write(plain)
+	zw.Close()
+	if coded.Len() < gzipMinBytes {
+		t.Fatalf("the coded body is %d bytes, below the buffer: this measures nothing", coded.Len())
+	}
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Encoding", "")
+		w.Header().Add("Content-Encoding", "gzip")
+		w.Write(coded.Bytes())
+	})
+	bareCodings, bare := conformingClientReads(t, inner)
+	if !bytes.Equal(bare, plain) {
+		t.Fatalf("bare net/http does not deliver this shape either: %q, %d bytes", bareCodings, len(bare))
+	}
+	codings, got := conformingClientReads(t, gzipMiddleware(inner))
+	if !bytes.Equal(got, plain) {
+		t.Errorf("borgo unmade a response net/http delivers whole: the client held %d bytes under %q, still a coded stream: %v\n net/http: %d bytes under %q",
+			len(got), codings, bytes.HasPrefix(got, []byte{0x1f, 0x8b}), len(bare), bareCodings)
+	}
+}
+
+// WHICH RESPONSES COUNT AS ALREADY CODED, ON THE WIRE, UNDER EVERY STAGING.
+//
+// The rule this round settles: a Content-Encoding naming a coding in ANY of its
+// values, under any spelling of its key, is a declaration and blocks
+// compression. An empty value names none, so a field holding only empties does
+// not stop a response compressing - the other half of the constraint, and the
+// half a blunter gate would break.
+func TestGzipCompressesOnlyWhatNamesNoCoding(t *testing.T) {
+	rows := []struct {
+		name     string
+		set      func(h http.Header)
+		compress bool
+		role     string
+	}{
+		// the defect: the first value is empty and a real coding stands behind it
+		{"empty then br, assigned", func(h http.Header) { h["Content-Encoding"] = []string{"", "br"} }, false, "proof"},
+		{"Add empty then Add br", func(h http.Header) {
+			h.Add("Content-Encoding", "")
+			h.Add("Content-Encoding", "br")
+		}, false, "proof"},
+		{"empty then br under a folded key", func(h http.Header) { h["content-encoding"] = []string{"", "br"} }, false, "proof"},
+		{"empty then gzip", func(h http.Header) { h["Content-Encoding"] = []string{"", "gzip"} }, false, "proof"},
+		// the constraint: nothing here names a coding, so nothing may stop it
+		{"one empty value", func(h http.Header) { h["Content-Encoding"] = []string{""} }, true, "constraint"},
+		{"two empty values", func(h http.Header) { h["Content-Encoding"] = []string{"", ""} }, true, "constraint"},
+		{"no field at all", func(h http.Header) {}, true, "constraint"},
+		// guards: the first value already blocked these before this round
+		{"br then empty", func(h http.Header) { h["Content-Encoding"] = []string{"br", ""} }, false, "guard"},
+		{"br alone", func(h http.Header) { h["Content-Encoding"] = []string{"br"} }, false, "guard"},
+		{"space then br", func(h http.Header) { h["Content-Encoding"] = []string{" ", "br"} }, false, "guard"},
+		{"a bare comma", func(h http.Header) { h["Content-Encoding"] = []string{","} }, false, "guard"},
+		// identity blocked before this round and blocks after it, in both
+		// positions: see TestGzipTreatsIdentityAsACodingLikeNetHTTP
+		{"identity alone", func(h http.Header) { h["Content-Encoding"] = []string{"identity"} }, false, "guard"},
+		{"empty then identity", func(h http.Header) { h["Content-Encoding"] = []string{"", "identity"} }, false, "guard"},
+	}
+	for _, row := range rows {
+		// below the buffer nothing compresses whatever the gate answers, so those
+		// rows are guards on the threshold and not on the gate
+		for _, size := range []int{gzipMinBytes / 2, gzipMinBytes * 4} {
+			t.Run(fmt.Sprintf("%s/%dB", row.name, size), func(t *testing.T) {
+				_, _, wire := serveAndDiagnose(t, "gzip", gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					row.set(w.Header())
+					w.Write(bytes.Repeat([]byte("x"), size))
+				})))
+				head, _, _ := strings.Cut(wire, "\r\n\r\n")
+				var got []string
+				for _, line := range strings.Split(head, "\r\n") {
+					if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(k, "content-encoding") {
+						got = append(got, strings.TrimSpace(v))
+					}
+				}
+				// one assertion for both halves: borgo either compresses, and then
+				// gzip is the whole field, or it does not, and then the field is
+				// the handler's own - h.Set replacing values it never read is the
+				// destructive half of the defect
+				staged := http.Header{}
+				row.set(staged)
+				var want []string
+				for _, k := range fieldKeys(staged, "Content-Encoding") {
+					for _, v := range staged[k] {
+						// every parser drops the optional whitespace after the
+						// colon, so " " and "" are one value on the wire
+						want = append(want, strings.TrimSpace(v))
+					}
+				}
+				if row.compress && size >= gzipMinBytes {
+					want = []string{"gzip"}
+				}
+				if !slices.Equal(got, want) {
+					t.Errorf("%s: wire Content-Encoding %q, want %q", row.role, got, want)
+				}
+			})
+		}
+	}
+}
+
+// THE AGREEMENT c5f7713 DEFENDED, ASSERTED WHERE IT IS OBSERVABLE.
+//
+// c5f7713 kept Content-Encoding on its first value because net/http reads it
+// that way, and unifying it would have made the two disagree about which
+// responses are already encoded. Reading every value does not: net/http's answer
+// decides one thing only, whether to sniff a Content-Type, and that is the whole
+// observable surface of it. So the assertion is that surface, on every shape this
+// round changed - borgo's Content-Type lines against bare net/http's.
+//
+// None of these rows is proof of the defect. They are the price of the decision,
+// asserted so a later round cannot pay it without noticing.
+func TestGzipStillTypesAResponseLikeNetHTTP(t *testing.T) {
+	for _, values := range [][]string{{"", "br"}, {"br", ""}, {""}, {"", ""}, {" ", "br"}, {"identity"}, {"", "identity"}} {
+		t.Run(fmt.Sprintf("%q", values), func(t *testing.T) {
+			vals := values
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header()["Content-Encoding"] = vals
+				w.Write(bytes.Repeat([]byte("x"), gzipMinBytes*4))
+			})
+			types := func(raw string) []string {
+				head, _, _ := strings.Cut(raw, "\r\n\r\n")
+				var out []string
+				for _, line := range strings.Split(head, "\r\n") {
+					if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(k, "content-type") {
+						out = append(out, strings.TrimSpace(v))
+					}
+				}
+				slices.Sort(out)
+				return out
+			}
+			_, _, bareWire := serveAndDiagnose(t, "gzip", inner)
+			_, _, wire := serveAndDiagnose(t, "gzip", gzipMiddleware(inner))
+			if got, want := types(wire), types(bareWire); !slices.Equal(got, want) {
+				t.Errorf("borgo typed the response %q, net/http %q", got, want)
+			}
+		})
+	}
+}
+
+// IDENTITY IS LEFT COUNTING AS A CODING, AND THAT IS A DECISION.
+//
+// RFC 9110 12.5.3 makes identity a synonym for no encoding, so a response
+// declaring it could be compressed. borgo does not, and net/http does not read it
+// as blank either - len(header.Get(...)) > 0 is true for it, so stdlib skips
+// sniffing on exactly these responses. The whole cost is bytes not saved on a
+// response that spelled out it was not coded; buying them means inventing a rule
+// neither side has, on the one field where being wrong ships undecodable bytes.
+// Not proof of anything - a guard on a decision.
+func TestGzipTreatsIdentityAsACodingLikeNetHTTP(t *testing.T) {
+	for _, values := range [][]string{{"identity"}, {"", "identity"}, {"identity", "br"}} {
+		t.Run(fmt.Sprintf("%q", values), func(t *testing.T) {
+			h := http.Header{"Content-Encoding": values}
+			if !declaresEncoding(h) {
+				t.Errorf("borgo would compress a response declaring %q", values)
+			}
+			// stdlib's own gate, quoted from server.go: ce := header.Get(...),
+			// hasCE := len(ce) > 0
+			if values[0] != "" && len(h.Get("Content-Encoding")) == 0 {
+				t.Errorf("net/http reads %q as blank", values)
+			}
+		})
+	}
+}

@@ -213,12 +213,7 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 	// makes a wrong one invisible on the compressed path
 	g.declared = declaredLength(h)
 	g.bodyless = g.bodyless || bodylessStatus(status)
-	// Content-Encoding stays on the first value: net/http reads that one by its
-	// first value too (server.go: ce := header.Get("Content-Encoding")), so this
-	// gate and stdlib's sniffing gate agree about which responses are already
-	// encoded. Only the key is folded, which stdlib has no opinion on and every
-	// client does
-	if g.bodyless || declaresEventStream(h) || firstFieldValue(h, "Content-Encoding") != "" {
+	if g.bodyless || declaresEventStream(h) || declaresEncoding(h) {
 		g.startPassthrough()
 	}
 }
@@ -280,6 +275,33 @@ func declaresEventStream(h http.Header) bool {
 				if strings.EqualFold(strings.TrimSpace(mediaType), "text/event-stream") {
 					return true
 				}
+			}
+		}
+	}
+	return false
+}
+
+// declaresEncoding reports whether the response names a content coding - any
+// value of the field, under any spelling of the key.
+//
+// Not the first value alone. net/http reads that one by Get, but its answer only
+// decides whether to sniff a Content-Type, where borgo's decides whether to
+// re-encode the body and overwrite the line describing it. On ["", "br"] - what
+// Add("") before Add("br") produces - both read "", and only borgo is destroyed
+// by it: it compressed the br bytes and h.Set deleted the br declaration, so a
+// client that gunzips once holds br it takes for plaintext. Repeated lines are
+// one list (RFC 9110 5.3), and a single value still reads as it did.
+//
+// An empty value names no coding, so a response carrying only empties still
+// compresses.
+func declaresEncoding(h http.Header) bool {
+	for key, lines := range h {
+		if !sameField(key, "Content-Encoding") {
+			continue
+		}
+		for _, line := range lines {
+			if line != "" {
+				return true
 			}
 		}
 	}
