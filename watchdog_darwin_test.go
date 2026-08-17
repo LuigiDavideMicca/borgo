@@ -43,12 +43,12 @@ func procStatus(pid int) (byte, error) {
 // never worked at all would look exactly like a darwin branch that works.
 func TestKinfoProcReadFindsThisProcessWhereThisCodeExpectsIt(t *testing.T) {
 	self := os.Getpid()
-	buf, err := kinfoProcRead(self)
-	if err != nil {
-		t.Fatalf("sysctl kern.proc.pid.%d failed: %v - the darwin branch answers 'alive' for every parent and the fix is not in effect", self, err)
+	n, buf, errno := kinfoProcSysctl(self)
+	if errno != 0 {
+		t.Fatalf("sysctl kern.proc.pid.%d failed: errno %d - the darwin branch answers 'alive' for every parent and the fix is not in effect", self, errno)
 	}
-	if len(buf) != kinfoProcSize {
-		t.Fatalf("the kernel wrote %d bytes of kinfo_proc, this code expects %d: the struct is not the one these offsets were taken from", len(buf), kinfoProcSize)
+	if n != kinfoProcSize {
+		t.Fatalf("the kernel wrote %d bytes of kinfo_proc, this code expects %d: the struct is not the one these offsets were taken from", n, kinfoProcSize)
 	}
 	if got := int(int32(binary.LittleEndian.Uint32(buf[kinfoPidOff:]))); got != self {
 		t.Fatalf("offset %d holds pid %d, this process is %d: the layout is wrong and the state byte belongs to another field", kinfoPidOff, got, self)
@@ -64,12 +64,32 @@ func TestKinfoProcReadFindsThisProcessWhereThisCodeExpectsIt(t *testing.T) {
 // reading that is not the whole struct is never a corpse.
 func TestKinfoProcReadReportsNothingForAPidNobodyOwns(t *testing.T) {
 	pid := deadPID(t)
-	buf, err := kinfoProcRead(pid)
-	if err == nil && len(buf) == kinfoProcSize {
+	n, _, errno := kinfoProcSysctl(pid)
+	if errno == 0 && n == kinfoProcSize {
 		t.Fatalf("sysctl returned a whole kinfo_proc for pid %d, which no process owns", pid)
 	}
 	if processIsCorpse(pid) {
 		t.Fatalf("pid %d read as a corpse", pid)
+	}
+}
+
+// A reaped parent is the frequent, legitimate case, and it must not be the
+// thing that spends the one anomaly line. Whatever darwin answers here - a
+// success that wrote nothing, or an errno - it is not a structural failure.
+func TestKinfoReadOfAPidNobodyOwnsIsNotAnAnomaly(t *testing.T) {
+	pid := deadPID(t)
+	n, buf, errno := kinfoProcSysctl(pid)
+	if a := kinfoReadAnomaly(pid, n, buf, errno); a != "" {
+		t.Fatalf("a pid nobody owns was reported as %q (n=%d errno=%d): the one line that says the branch is broken is spent on the ordinary case", a, n, errno)
+	}
+}
+
+// and neither must a live process this one may not signal
+func TestKinfoReadOfAProcessOutOfSignalReachIsNotAnAnomaly(t *testing.T) {
+	pid := unreachablePID(t)
+	n, buf, errno := kinfoProcSysctl(pid)
+	if a := kinfoReadAnomaly(pid, n, buf, errno); a != "" {
+		t.Fatalf("pid %d, live but out of signal reach, was reported as %q (n=%d errno=%d)", pid, a, n, errno)
 	}
 }
 
@@ -99,9 +119,9 @@ func TestProcessIsCorpseSaysNoForALiveChild(t *testing.T) {
 // still has to read as alive.
 func TestProcessIsCorpseReadsAProcessItMayNotSignal(t *testing.T) {
 	pid := unreachablePID(t)
-	buf, err := kinfoProcRead(pid)
-	if err != nil || len(buf) != kinfoProcSize {
-		t.Fatalf("sysctl kern.proc.pid.%d returned %d bytes, %v: a supervisor out of signal reach is undiagnosable here", pid, len(buf), err)
+	n, _, errno := kinfoProcSysctl(pid)
+	if errno != 0 || n != kinfoProcSize {
+		t.Fatalf("sysctl kern.proc.pid.%d returned %d bytes, errno %d: a supervisor out of signal reach is undiagnosable here", pid, n, errno)
 	}
 	if processIsCorpse(pid) {
 		t.Fatalf("live process %d, which this one may not signal, read as a corpse: its boot would be refused", pid)

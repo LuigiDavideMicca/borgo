@@ -1,7 +1,10 @@
 package borgo
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"testing"
@@ -180,6 +183,189 @@ func TestKinfoProcCorpseRefusesANonPid(t *testing.T) {
 		if kinfoProcCorpse(pid, kinfoBuf(pid, darwinSZOMB)) {
 			t.Errorf("pid %d read as a corpse", pid)
 		}
+	}
+}
+
+// The errno numbers, written out again rather than taken from the code under
+// test, for the same reason the offsets are.
+const (
+	errnoESRCH   = 3
+	errnoENOMEM  = 12
+	errnoEINVAL  = 22
+	errnoENOSYS  = 78
+	errnoEPERM   = 1
+	errnoSuccess = 0
+)
+
+// The frequent, legitimate case. A parent that has been reaped, or a pid that
+// never existed, must not spend the one line that says this branch is broken -
+// and neither must any errno that could be how some darwin spells it, which is
+// every errno but the two that cannot describe a missing process.
+func TestKinfoReadAnomalyIsSilentOnEverythingThatCouldBeAMissingParent(t *testing.T) {
+	full := kinfoBuf(4242, darwinSZOMB)
+	cases := []struct {
+		name  string
+		n     int
+		buf   []byte
+		errno int
+	}{
+		{"success with nothing written, which is how darwin reports a pid nobody owns", 0, make([]byte, darwinKinfoSize), errnoSuccess},
+		// on an errno the kernel need not touch the length at all, and the
+		// caller seeded it with the size of the buffer it offered: these carry
+		// the full size on purpose, or the errno arm is never the thing that
+		// keeps them quiet
+		{"ESRCH", darwinKinfoSize, kinfoBuf(99, darwinSZOMB), errnoESRCH},
+		{"EPERM", darwinKinfoSize, kinfoBuf(99, darwinSZOMB), errnoEPERM},
+		{"EINVAL", darwinKinfoSize, kinfoBuf(99, darwinSZOMB), errnoEINVAL},
+		{"an errno nothing here has a name for", darwinKinfoSize, kinfoBuf(99, darwinSZOMB), 42},
+		{"a whole struct about the pid asked about", darwinKinfoSize, full, errnoSuccess},
+		{"a whole struct holding pid 0, which a zeroed buffer also reads as", darwinKinfoSize, make([]byte, darwinKinfoSize), errnoSuccess},
+	}
+	for _, c := range cases {
+		if a := kinfoReadAnomaly(4242, c.n, c.buf, c.errno); a != "" {
+			t.Errorf("%s: reported as %q", c.name, a)
+		}
+	}
+}
+
+// ENOSYS cannot mean "the process is gone": it means no syscall ran at all.
+// This is the shape a darwin that stops accepting the direct trap would take,
+// and today it answers "alive" for every parent without a word.
+func TestKinfoReadAnomalyNamesASyscallThatDidNotDispatch(t *testing.T) {
+	a := kinfoReadAnomaly(4242, 0, make([]byte, darwinKinfoSize), errnoENOSYS)
+	if !strings.Contains(a, "ENOSYS") {
+		t.Fatalf("a sysctl that did not dispatch was reported as %q: a darwin branch that never ran looks exactly like one that works", a)
+	}
+}
+
+// ENOMEM says the kernel wants to write more than this code believes a
+// kinfo_proc is - the struct grew - which also cannot mean a missing process.
+func TestKinfoReadAnomalyNamesAKernelThatWantsMoreThanThisStruct(t *testing.T) {
+	a := kinfoReadAnomaly(4242, 720, make([]byte, darwinKinfoSize), errnoENOMEM)
+	if !strings.Contains(a, "ENOMEM") || !strings.Contains(a, "720") {
+		t.Fatalf("a grown kinfo_proc was reported as %q", a)
+	}
+}
+
+func TestKinfoReadAnomalyNamesAReadingOfUnexpectedLength(t *testing.T) {
+	for _, n := range []int{1, darwinKinfoSize - 1, darwinKinfoSize + 1} {
+		a := kinfoReadAnomaly(4242, n, make([]byte, darwinKinfoSize), errnoSuccess)
+		if !strings.Contains(a, strconv.Itoa(n)) {
+			t.Errorf("a %d-byte reading was reported as %q", n, a)
+		}
+	}
+}
+
+// The offsets are the part no machine here can check. A full struct that names
+// somebody else is the proof they are wrong, and it is silent today.
+func TestKinfoReadAnomalyNamesAStructAboutAnotherPid(t *testing.T) {
+	a := kinfoReadAnomaly(4242, darwinKinfoSize, kinfoBuf(99, darwinSZOMB), errnoSuccess)
+	if !strings.Contains(a, "99") {
+		t.Fatalf("a struct naming pid 99 for a question about 4242 was reported as %q: wrong offsets stay invisible", a)
+	}
+}
+
+func TestKinfoReadAnomalySaysNothingAboutANonPid(t *testing.T) {
+	for _, pid := range []int{0, -1} {
+		if a := kinfoReadAnomaly(pid, 0, nil, errnoENOSYS); a != "" {
+			t.Errorf("pid %d reported as %q", pid, a)
+		}
+	}
+}
+
+// The log has to be provable, or nobody knows whether it works. It also has to
+// be said once: waitParentExit re-probes every two seconds.
+func TestReportKinfoAnomalySpeaksOnceForTheLifeOfTheProcess(t *testing.T) {
+	var lines []string
+	restore := captureKinfoAnomaly(t, &lines)
+	defer restore()
+
+	reportKinfoAnomaly(4242, "the sysctl did not dispatch (ENOSYS)")
+	reportKinfoAnomaly(4242, "the sysctl did not dispatch (ENOSYS)")
+	reportKinfoAnomaly(7, "offset 40 holds pid 9, not the one asked about")
+
+	if len(lines) != 1 {
+		t.Fatalf("%d lines logged, want 1: %q", len(lines), lines)
+	}
+	for _, want := range []string{"kern.proc.pid.4242", "ENOSYS", "alive"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("the line does not say %q: %q", want, lines[0])
+		}
+	}
+}
+
+// The whole darwin answer, from a raw reading, on a machine with no darwin: a
+// broken reading still answers alive, and says so exactly once.
+func TestKinfoProcDecideAnswersAliveAndSpeaksWhenTheReadingIsBroken(t *testing.T) {
+	var lines []string
+	restore := captureKinfoAnomaly(t, &lines)
+	defer restore()
+
+	if kinfoProcDecide(4242, 0, make([]byte, darwinKinfoSize), errnoENOSYS) {
+		t.Fatal("a sysctl that did not dispatch refused a boot: the error direction is the one thing this branch may not change")
+	}
+	if len(lines) != 1 {
+		t.Fatalf("%d lines logged for a broken reading, want 1", len(lines))
+	}
+}
+
+// and a good reading decides, silently, in both directions
+func TestKinfoProcDecideReadsAGoodStructWithoutAWord(t *testing.T) {
+	var lines []string
+	restore := captureKinfoAnomaly(t, &lines)
+	defer restore()
+
+	if !kinfoProcDecide(4242, darwinKinfoSize, kinfoBuf(4242, darwinSZOMB), errnoSuccess) {
+		t.Fatal("a zombie read as alive: on macOS the api boots under a supervisor that has already exited")
+	}
+	if kinfoProcDecide(4242, darwinKinfoSize, kinfoBuf(4242, 3), errnoSuccess) {
+		t.Fatal("a sleeping process read as a corpse: its boot would be refused")
+	}
+	if kinfoProcDecide(4242, 0, make([]byte, darwinKinfoSize), errnoSuccess) {
+		t.Fatal("a pid nobody owns read as a corpse")
+	}
+	if len(lines) != 0 {
+		t.Fatalf("a good reading logged %q", lines)
+	}
+}
+
+// Every test above swaps the log function out, so all of them would still pass
+// with the real one wired to nothing. This one leaves it alone and reads what
+// actually reaches the log package.
+func TestReportKinfoAnomalyReachesTheRealLog(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	kinfoAnomalyLogged.Store(false)
+	defer func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+		kinfoAnomalyLogged.Store(false)
+	}()
+
+	reportKinfoAnomaly(4242, "the sysctl did not dispatch (ENOSYS)")
+
+	got := buf.String()
+	for _, want := range []string{"borgo:", "kern.proc.pid.4242", "ENOSYS", "alive"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the line that reached the log does not say %q: %q", want, got)
+		}
+	}
+}
+
+// captureKinfoAnomaly redirects the one anomaly line into lines and re-arms the
+// once, restoring both.
+func captureKinfoAnomaly(t *testing.T, lines *[]string) func() {
+	t.Helper()
+	prev := kinfoAnomalyLogf
+	kinfoAnomalyLogf = func(format string, args ...any) {
+		*lines = append(*lines, fmt.Sprintf(format, args...))
+	}
+	kinfoAnomalyLogged.Store(false)
+	return func() {
+		kinfoAnomalyLogf = prev
+		kinfoAnomalyLogged.Store(false)
 	}
 }
 
