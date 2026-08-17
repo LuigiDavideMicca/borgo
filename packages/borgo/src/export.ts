@@ -3,13 +3,14 @@
 // exportable means: no loader, or `export const prerender = true` (the loader
 // runs once now, against a temporary api process); dynamic-param routes need
 // `export const prerenderPaths` returning the param sets.
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
 import { buildAssets, reportBuildFailure } from "./build";
 import { banner, c, fmtMs, g } from "./colors";
+import { isHiddenAsset } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD } from "./index";
 import type { Route } from "./router";
 import { goBinName, runBorgogen } from "./util";
@@ -201,6 +202,23 @@ export async function freePorts(count: number): Promise<number[]> {
   return ports;
 }
 
+// what serveAsset would answer 200 to, through its own predicate: a dotfile
+// borgo start refuses must not reach dist/site either, or the 404 masks the
+// exposure. On the file, never on a directory: public/.well-known/ goes whole.
+export const isExportedFile = (path: string): boolean => !isHiddenAsset(path);
+
+const isDirectory = (path: string): boolean => {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+export function copyPublic(src: string, dest: string): void {
+  cpSync(src, dest, { recursive: true, filter: (path) => isDirectory(path) || isExportedFile(path) });
+}
+
 // a file plus its .gz/.br siblings is one asset; an orphan .gz/.br with no
 // base file next to it counts as an asset in its own right
 export function countAssets(dir: string): { assets: number; precompressed: number } {
@@ -208,7 +226,7 @@ export function countAssets(dir: string): { assets: number; precompressed: numbe
   let precompressed = 0;
   const files = new Set<string>();
   for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
-    if (entry.isFile()) files.add(join(entry.parentPath, entry.name));
+    if (entry.isFile() && isExportedFile(entry.name)) files.add(join(entry.parentPath, entry.name));
   }
   for (const file of files) {
     const m = file.match(/\.(gz|br)$/);
@@ -423,7 +441,7 @@ export async function exportSite(): Promise<number> {
     if (existsSync("public")) {
       ({ assets, precompressed } = countAssets("public"));
       // only onto a staging directory that is going to be published
-      if (!failures) cpSync("public", stageDir, { recursive: true });
+      if (!failures) copyPublic("public", stageDir);
     }
 
     // the swap, and only now: a partial render is not published under the name

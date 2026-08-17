@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  copyPublic,
   countAssets,
   exportSummary,
   fillPattern,
@@ -26,6 +27,7 @@ import {
 import { CSRF_FIELD } from "../src/index";
 import { createSecurity } from "../src/util";
 import { buildDefine } from "../src/build";
+import { buildAssetIndex } from "../src/compress";
 import type { Route } from "../src/router";
 import { propsPathEnabled } from "../src/runtime";
 
@@ -592,4 +594,150 @@ describe("the scratch binary an export builds to work", () => {
     expect(named).toBeGreaterThan(-1);
     expect(built).toBeGreaterThan(named);
   });
+});
+
+// borgo start answers 404 to a dotfile in public/ on both of its paths since
+// the fix in compress.ts, and export.ts kept copying the same files into
+// dist/site with cpSync and counting them in the summary. Measured before
+// this, on a scratch app: .DS_Store, .gitkeep, .env, .borgo-doctor-1234,
+// assets/.hidden.js and .well-known/.DS_Store all landed in dist/site, and
+// "15 assets" counted every one of them. The 404 on one path masked the
+// exposure on the other: whoever probes with borgo start concludes it is
+// closed, then exports.
+//
+// The static host has its own idea about dotfiles - nginx serves them, some
+// hosts refuse them at deploy, some serve them - so the only place borgo can
+// keep them off the wire is here, by not copying.
+describe("an export ships what serveAsset would serve, and nothing else", () => {
+  const HIDDEN = [".DS_Store", ".gitkeep", ".env", ".borgo-doctor-1234", "assets/.hidden.js", ".well-known/.DS_Store"];
+  const SHOWN = [
+    "logo.svg",
+    "assets/client.js",
+    "assets/client.js.gz",
+    "assets/client.js.br",
+    ".well-known/security.txt",
+    ".well-known/acme-challenge/token",
+  ];
+  const fixture = () => {
+    const root = mkdtempSync(join(tmpdir(), "borgo-dotfiles-"));
+    const src = join(root, "public");
+    for (const f of [...HIDDEN, ...SHOWN]) {
+      mkdirSync(join(src, f, ".."), { recursive: true });
+      writeFileSync(join(src, f), "x");
+    }
+    return { root, src, dest: join(root, "site") };
+  };
+  const filesUnder = (dir: string) =>
+    [...new Bun.Glob("**/*").scanSync({ cwd: dir, dot: true })].map((f) => f.replaceAll("\\", "/")).sort();
+
+  test("dotfiles stay behind, and public/.well-known/ goes through whole", () => {
+    const { root, src, dest } = fixture();
+    try {
+      copyPublic(src, dest);
+      expect(filesUnder(dest)).toEqual([...SHOWN].sort());
+      // spelled out, since these two are the whole reason the rule is on the
+      // file and not on the directory
+      expect(existsSync(join(dest, ".well-known/security.txt"))).toBe(true);
+      expect(existsSync(join(dest, ".well-known/acme-challenge/token"))).toBe(true);
+      for (const f of HIDDEN) expect(existsSync(join(dest, f))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the copied set is exactly the set buildAssetIndex would serve", () => {
+    const { root, src, dest } = fixture();
+    try {
+      copyPublic(src, dest);
+      // urls off the directory, case-sensitive so no folded alias doubles them
+      const indexed = [...buildAssetIndex(src, false).keys()].map((u) => u.slice(1)).sort();
+      expect(indexed.length).toBeGreaterThan(0);
+      expect(filesUnder(dest)).toEqual(indexed);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the summary counts what was copied, not what public/ holds", () => {
+    const { root, src, dest } = fixture();
+    try {
+      copyPublic(src, dest);
+      const copied = filesUnder(dest);
+      // 4 assets: logo.svg, client.js (+2 variants), security.txt, token
+      expect(countAssets(src)).toEqual({ assets: 4, precompressed: 2 });
+      // and, whatever the fixture, the count is the count of the tree on disk
+      const { assets, precompressed } = countAssets(src);
+      expect(assets + precompressed).toBe(copied.length);
+      // counting the copy itself gives the same numbers: nothing was refused
+      // by one predicate and admitted by the other
+      expect(countAssets(dest)).toEqual({ assets, precompressed });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a hidden directory that is not .well-known is left to serveAsset's rule", () => {
+    // declared, not desired: public/.git/config is served by borgo start
+    // today, so the export ships it too. Refusing it needs the url root, which
+    // is decided where the url is accepted; when that closes, this flips.
+    const { root, src, dest } = fixture();
+    try {
+      mkdirSync(join(src, ".git"));
+      writeFileSync(join(src, ".git/config"), "x");
+      copyPublic(src, dest);
+      expect(existsSync(join(dest, ".git/config"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
+  const CLI = join(import.meta.dir, "../src/cli.ts");
+  test.skipIf(!existsSync(join(APP_HOST, "node_modules/react")))(
+    "a real export leaves the dotfiles out of dist/site and says the true count",
+    () => {
+      const dir = mkdtempSync(join(APP_HOST, "borgo-dotfiles-"));
+      try {
+        mkdirSync(join(dir, "pages"), { recursive: true });
+        cpSync(join(APP_HOST, "index.html"), join(dir, "index.html"));
+        writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "dotfiles-scratch", private: true }));
+        writeFileSync(join(dir, "style.scss"), "body { color: #3d2f24; }\n");
+        writeFileSync(join(dir, "pages/index.tsx"), "export default () => <h1>dotfiles</h1>;\n");
+        for (const f of [...HIDDEN, ...SHOWN]) {
+          mkdirSync(join(dir, "public", f, ".."), { recursive: true });
+          writeFileSync(join(dir, "public", f), "x");
+        }
+        const run = Bun.spawnSync([process.execPath, CLI, "export"], {
+          cwd: dir,
+          env: { ...process.env, BORGO_RELOAD: "1" },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const said = run.stdout.toString() + run.stderr.toString();
+        expect(run.exitCode).toBe(0);
+        const site = join(dir, "dist/site");
+        const shipped = filesUnder(site);
+        for (const f of HIDDEN) expect(shipped).not.toContain(f);
+        expect(shipped).toContain(".well-known/security.txt");
+        expect(shipped).toContain(".well-known/acme-challenge/token");
+        expect(shipped).toContain("logo.svg");
+        // the build wrote its own bundle into public/assets, so the number is
+        // read off the run and checked against the tree, not hard-coded
+        const m = said.match(/exported 1 pages \+ (\d+) assets \(with (\d+) precompressed variants\)/);
+        expect(m).not.toBeNull();
+        const notHtml = shipped.filter((f) => !f.endsWith(".html"));
+        expect(Number(m![1]) + Number(m![2])).toBe(notHtml.length);
+        // and counted off the published tree, minus the pages, it agrees
+        const html = shipped.length - notHtml.length;
+        const onDisk = countAssets(site);
+        expect({ assets: onDisk.assets - html, precompressed: onDisk.precompressed }).toEqual({
+          assets: Number(m![1]),
+          precompressed: Number(m![2]),
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    180_000,
+  );
 });
