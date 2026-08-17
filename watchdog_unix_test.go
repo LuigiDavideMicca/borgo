@@ -22,26 +22,11 @@ const (
 	helperPPIDEnv = "BORGO_WATCHDOG_HELPER_PPID"
 )
 
-// procStatus reads the state letter of pid from /proc/<pid>/status, not from
-// the /proc/<pid>/stat the watchdog parses: a test that shared the parser
-// could not catch a bug in it.
-func procStatus(pid int) (byte, error) {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		rest, ok := strings.CutPrefix(line, "State:")
-		if !ok {
-			continue
-		}
-		if rest = strings.TrimSpace(rest); rest == "" {
-			return 0, fmt.Errorf("empty State line for pid %d", pid)
-		}
-		return rest[0], nil
-	}
-	return 0, fmt.Errorf("no State line for pid %d", pid)
-}
+// procStatus reads the state letter of pid from a source that is not the one
+// the watchdog parses - /proc/<pid>/status on linux, ps(1) on darwin - because
+// a test that shared the reading under test could not catch a bug in it. It is
+// declared per platform, alongside the processIsCorpse it has to stay
+// independent of.
 
 // stateOf is procStatus for an error message, where "gone" is an answer.
 func stateOf(pid int) string {
@@ -52,10 +37,13 @@ func stateOf(pid int) string {
 	return string(rune(st))
 }
 
-func requireProc(t *testing.T) {
+// requireProcState skips when this machine has no independent way to read a
+// process state, which is the only thing the zombie cases cannot be built
+// without.
+func requireProcState(t *testing.T) {
 	t.Helper()
 	if _, err := procStatus(os.Getpid()); err != nil {
-		t.Skipf("no readable /proc on %s: %v", runtime.GOOS, err)
+		t.Skipf("no readable process state on %s: %v", runtime.GOOS, err)
 	}
 }
 
@@ -196,23 +184,6 @@ func unreachablePID(t *testing.T) int {
 	return init
 }
 
-// shNamed copies /bin/sh to a file called name and returns the path. The
-// kernel takes comm from the basename, so this is the only way to get a
-// process whose name carries the spaces and parentheses /proc/<pid>/stat does
-// not escape.
-func shNamed(t *testing.T, name string) string {
-	t.Helper()
-	b, err := os.ReadFile("/bin/sh")
-	if err != nil {
-		t.Skipf("no /bin/sh to copy: %v", err)
-	}
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, b, 0o755); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-	return path
-}
-
 func TestProcessExitedSaysNoForALiveProcess(t *testing.T) {
 	if processExited(os.Getpid()) {
 		t.Fatal("this process reported itself as exited")
@@ -236,7 +207,7 @@ func TestProcessExitedSaysYesForAPidNobodyOwns(t *testing.T) {
 }
 
 func TestProcessExitedSaysYesForAReapedChild(t *testing.T) {
-	requireProc(t)
+	requireProcState(t)
 	pid := startChild(t, "/bin/sh", []string{"-c", "exit 0"}, nil)
 	waitState(t, pid, 'Z')
 	reapChild(t, pid)
@@ -251,7 +222,7 @@ func TestProcessExitedSaysYesForAReapedChild(t *testing.T) {
 // was already dead, mounted the registry, bound the port and served requests
 // nobody was watching.
 func TestProcessExitedSeesAZombieChild(t *testing.T) {
-	requireProc(t)
+	requireProcState(t)
 	pid := startChild(t, "/bin/sh", []string{"-c", "exit 0"}, nil)
 	waitState(t, pid, 'Z')
 	if err := syscall.Kill(pid, 0); err != nil {
@@ -265,7 +236,7 @@ func TestProcessExitedSeesAZombieChild(t *testing.T) {
 // the same corpse, made by a signal rather than an exit: this is the shape a
 // force-killed supervisor leaves
 func TestProcessExitedSeesASignalledZombieChild(t *testing.T) {
-	requireProc(t)
+	requireProcState(t)
 	pid := startChild(t, "/bin/sh", []string{"-c", "sleep 30"}, nil)
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill(%d, SIGKILL): %v", pid, err)
@@ -276,45 +247,13 @@ func TestProcessExitedSeesASignalledZombieChild(t *testing.T) {
 	}
 }
 
-// Field 2 of /proc/<pid>/stat is the comm in parentheses, unescaped, and a
-// process may be called "my prog (x)". Splitting on whitespace reads "prog" as
-// the state and every corpse comes back alive again.
-func TestProcessExitedSeesAZombieNamedWithParentheses(t *testing.T) {
-	requireProc(t)
-	sh := shNamed(t, "my prog (x)")
-	pid := startChild(t, sh, []string{"-c", "exit 0"}, nil)
-	waitState(t, pid, 'Z')
-	if !processExited(pid) {
-		t.Fatalf("zombie %d named %q read as alive: the state was taken from the wrong field", pid, filepath.Base(sh))
-	}
-}
-
-// and the other way round: a live process whose name contains ") Z (" must not
-// be read as a corpse. Stopping at the first ")" refuses its boot for a
-// supervisor that is perfectly healthy.
-func TestProcessExitedSaysNoForALiveProcessNamedLikeAZombie(t *testing.T) {
-	requireProc(t)
-	sh := shNamed(t, "a) Z (b")
-	pid := startChild(t, sh, []string{"-c", "sleep 30"}, nil)
-	waitState(t, pid, 'S')
-	if processExited(pid) {
-		t.Fatalf("live process %d named %q read as exited: the state was taken from inside its name", pid, filepath.Base(sh))
-	}
-}
-
-// Reading the state is the only part of this that needs /proc, and off linux
-// there is none. A pid with no /proc entry is the nearest thing to darwin this
-// machine has: unsure must answer "not a corpse", which leaves processExited
-// exactly where the signal probe alone left it rather than reading every
-// unreadable parent as gone.
-func TestProcessIsCorpseIsUnsureWithoutAProcEntry(t *testing.T) {
-	requireProc(t)
+// A pid nobody owns has no reading behind it on any platform. Unsure must
+// answer "not a corpse", which leaves processExited exactly where the signal
+// probe alone left it rather than reading every unreadable parent as gone.
+func TestProcessIsCorpseIsUnsureForAPidNobodyOwns(t *testing.T) {
 	pid := deadPID(t)
-	if _, err := os.Stat("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
-		t.Skipf("/proc/%d/stat exists after all", pid)
-	}
 	if processIsCorpse(pid) {
-		t.Fatal("a pid with no /proc entry read as a corpse: on darwin and the BSDs, where that is every pid, a live parent would read as gone and refuse the boot")
+		t.Fatalf("pid %d, which no process owns, read as a corpse: an unreadable parent must never refuse a boot", pid)
 	}
 }
 
@@ -323,7 +262,7 @@ func TestProcessIsCorpseIsUnsureWithoutAProcEntry(t *testing.T) {
 // through a shell. It probed with kill(pid, 0), which a zombie answers, so the
 // poll ran forever and the api outlived the supervisor it was watching.
 func TestWaitParentExitReturnsWhenTheWatchedProcessIsAZombie(t *testing.T) {
-	requireProc(t)
+	requireProcState(t)
 	pid := startChild(t, "/bin/sh", []string{"-c", "exit 0"}, nil)
 	waitState(t, pid, 'Z')
 	if pid == os.Getppid() {
@@ -367,7 +306,7 @@ func TestWaitParentExitKeepsWatchingALiveProcess(t *testing.T) {
 // it is measured: this process forks a helper that forks a grandchild and then
 // exits, and nothing here reaps the helper, leaving exactly the corpse.
 func TestWaitParentExitSeesADirectParentThatBecameAZombie(t *testing.T) {
-	requireProc(t)
+	requireProcState(t)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Skipf("cannot find this test binary: %v", err)

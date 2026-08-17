@@ -240,6 +240,31 @@ jobs:
       - name: bun tests
         run: bun run test
 
+  # borgo dev supervises the api on macOS too, and the watchdog's darwin branch
+  # cannot be reached from the ubuntu job: /proc answers there, kern.proc.pid
+  # only answers here. This is the only place the sysctl reading, the struct
+  # offsets it hardcodes and the zombie cases actually run. A separate job, so
+  # it runs beside the pipeline rather than in front of it, and scoped to the
+  # go tests that need a darwin kernel - everything else already runs on ubuntu
+  # and would only buy flakier runners.
+  go-macos:
+    if: github.event_name != 'schedule'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: build go core
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: watchdog tests
+        run: go test -race -count=1 -run '^(TestProcess|TestWaitParentExit|TestKinfo|TestProcStat|TestHelper)' .
+
   # the deploy story must keep building; a separate job so the image build
   # runs in parallel with the test pipeline
   docker:

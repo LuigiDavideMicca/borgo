@@ -3,9 +3,7 @@
 package borgo
 
 import (
-	"bytes"
 	"os"
-	"strconv"
 	"syscall"
 	"time"
 )
@@ -37,30 +35,13 @@ func processExited(pid int) bool {
 }
 
 // processIsCorpse reports whether pid names a process that has already exited
-// and is only waiting to be reaped. Uncertainty answers no: refusing a boot
-// needs certainty the parent is gone, and the watch still runs behind the
-// probe to catch what it missed. That is also what makes this safe off linux -
-// where there is no /proc/<pid>/stat the answer is always no, which is exactly
-// what this file did before.
-func processIsCorpse(pid int) bool {
-	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return false
-	}
-	// field 2 is the comm, in parentheses and unescaped, so a process called
-	// "my prog (x)" defeats any split on whitespace or on the first ")": only
-	// the last one is certainly the closing one
-	comm := bytes.LastIndexByte(stat, ')')
-	if comm < 0 {
-		return false
-	}
-	rest := bytes.TrimLeft(stat[comm+1:], " ")
-	if len(rest) == 0 {
-		return false
-	}
-	// Z is a corpse; X and x are the moment after, when it is being torn down
-	return rest[0] == 'Z' || rest[0] == 'X' || rest[0] == 'x'
-}
+// and is only waiting to be reaped. There is no portable way to ask, so each
+// platform answers it in its own file - /proc/<pid>/stat in watchdog_procfs.go,
+// kern.proc.pid in watchdog_darwin.go - and every one of them answers no when
+// it cannot tell. Uncertainty is "alive": refusing a boot needs certainty the
+// parent is gone, and the watch still runs behind the probe to catch what it
+// missed. On a platform with neither reading, processExited is exactly the
+// signal probe this file started as.
 
 // waitParentExit polls until the process named by pid is gone or stop closes,
 // reporting whether the process really exited - a cancelled watch learned
