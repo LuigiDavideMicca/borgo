@@ -551,7 +551,9 @@ describe("headResponse", () => {
       expect(head.status).toBe(get.status);
       expect(Number(get.length ?? get.bytes)).toBeGreaterThan(0);
     }
-  });
+    // six real servers: 18ms idle, but past bun's default 5s budget under load
+    // (measured: 5/5 failures at 16 burners on 8 cores, all "timed out")
+  }, 30_000);
 
   test("the render behind a head is cancelled, not left pumping", async () => {
     let pulls = 0;
@@ -824,7 +826,8 @@ describe("the response clock: keeping a socket warm", () => {
       const server = Bun.serve({ port: 0, idleTimeout, development: false, fetch: () => new Response("ok") });
       server.stop(true);
     }
-  });
+    // thirteen real servers, same budget problem as above
+  }, 30_000);
 
   // THE TWO CLOCKS ARE NOT THE SAME NUMBER, and coupling them is how the last
   // two revisions broke. The operator's knob bounds a client that has not
@@ -920,19 +923,33 @@ describe("the response clock: keeping a socket warm", () => {
       8,
       15,
     );
+    // Waited for, not timed. setInterval does not make up ticks it missed, so
+    // how many sweeps land in a fixed window is the machine's property, not
+    // this code's: measured 6-7 idle against 1-2 under 16 burners on 8 cores,
+    // where the fixed 120ms window failed 19/20 and always by falling short.
+    // The count asserted is unchanged; only its budget is explicit - and the
+    // test declares its own, since a wait longer than bun's default 5s would
+    // otherwise be cut by bun and not by the deadline below (measured: 4/12
+    // under 32 burners, "timed out after 5000ms").
+    const until = async (done: () => boolean) => {
+      const deadline = Date.now() + 10_000;
+      while (!done() && Date.now() < deadline) await Bun.sleep(15);
+    };
     warm.hold(new Request("http://app.test/stream"));
-    await Bun.sleep(120);
+    await until(() => calls.length > 2);
     expect(calls.length).toBeGreaterThan(2);
     // never raised, never varied - the value is the whole of the bound
     expect(new Set(calls)).toEqual(new Set([8]));
-    // and it stops the moment bun is done, leaving that value behind
+    // and it stops the moment bun is done, leaving that value behind. Waited
+    // for too: `calls.length === before` proves nothing across a window no
+    // sweep ran in, and the eviction is what makes it mean something.
     alive = false;
     const before = calls.length;
-    await Bun.sleep(120);
+    await until(() => warm.held() === 0);
     warm.stop();
-    expect(calls.length).toBe(before);
     expect(warm.held()).toBe(0);
-  });
+    expect(calls.length).toBe(before);
+  }, 30_000);
 
   test("with no deadline to keep warm against it is inert", async () => {
     let touched = 0;
@@ -1014,11 +1031,16 @@ describe("the response clock: keeping a socket warm", () => {
 
   type Run = { closedAt: number | null; seen: string };
 
+  // `enough` is for the cases that assert on bytes and never on closedAt: they
+  // are answered the moment the last byte they need arrives, instead of paying
+  // out the connection's remaining idle time. A case that measures WHEN the
+  // server closed must not pass it, and none does.
   function raw(
     port: number,
     write: string,
     cap: number,
     after?: (s: { write: (d: string) => void }) => () => void,
+    enough?: (seen: string) => boolean,
   ): Promise<Run> {
     return new Promise((resolve) => {
       const t0 = Date.now();
@@ -1026,10 +1048,12 @@ describe("the response clock: keeping a socket warm", () => {
       let done = false;
       let stop: (() => void) | undefined;
       let sock: { end: () => void } | undefined;
+      let capTimer: ReturnType<typeof setTimeout> | undefined;
       const fin = (closedAt: number | null) => {
         if (done) return;
         done = true;
         stop?.();
+        if (capTimer !== undefined) clearTimeout(capTimer);
         resolve({ closedAt, seen });
       };
       void Bun.connect({
@@ -1043,6 +1067,12 @@ describe("the response clock: keeping a socket warm", () => {
           },
           data: (_s, d) => {
             seen += new TextDecoder().decode(d);
+            if (enough?.(seen)) {
+              fin(null);
+              try {
+                sock?.end();
+              } catch {}
+            }
           },
           close: () => fin(Date.now() - t0),
           error: () => fin(Date.now() - t0),
@@ -1050,7 +1080,7 @@ describe("the response clock: keeping a socket warm", () => {
       }).catch(() => fin(Date.now() - t0));
       // resolve before closing, so the verdict is the timer's and not the close
       // event the timer itself provokes
-      setTimeout(() => {
+      capTimer = setTimeout(() => {
         fin(null);
         try {
           sock?.end();
@@ -1240,16 +1270,21 @@ describe("the response clock: keeping a socket warm", () => {
     expect(readTimeout({ BORGO_FRONT_READ_TIMEOUT: "3" })).toBe(3);
     expect(WHEEL_MIN_ARMED_SECONDS).toBeGreaterThan(3);
     try {
+      // the terminator is the whole verdict here, so each case ends on it
+      // rather than on the connection's idle time after it
+      const whole = (s: string) => s.includes('{"n":2}');
       const [plain, chunked, atFive, atThree] = await Promise.all([
-        raw(a.port, `GET /ndjson HTTP/1.1\r\n${KEEPALIVE}`, 32_000),
+        raw(a.port, `GET /ndjson HTTP/1.1\r\n${KEEPALIVE}`, 32_000, undefined, whole),
         raw(
           a.port,
           "POST /api/feed HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
             "5\r\nhello\r\n0\r\n\r\n",
           32_000,
+          undefined,
+          whole,
         ),
-        raw(five.port, `GET /sse HTTP/1.1\r\n${KEEPALIVE}`, 32_000),
-        raw(three.port, `GET /sse HTTP/1.1\r\n${KEEPALIVE}`, 32_000),
+        raw(five.port, `GET /sse HTTP/1.1\r\n${KEEPALIVE}`, 32_000, undefined, whole),
+        raw(three.port, `GET /sse HTTP/1.1\r\n${KEEPALIVE}`, 32_000, undefined, whole),
       ]);
       // both records - a truncated 200 would carry only the first
       expect(plain.seen).toContain('{"n":1}');
