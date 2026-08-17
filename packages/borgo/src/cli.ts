@@ -74,8 +74,10 @@ async function assetLine(path: string, note = "") {
 
 switch (command) {
   case "dev": {
-    // lazy: the server module resolves react from the app, which does not
-    // exist when the cli runs outside a project (e.g. bare `borgo`)
+    // lazy only to keep the watcher out of every other command's parse: dev.ts
+    // resolves no react of its own, measured. The import that genuinely cannot
+    // be hoisted is ./server in `start` below - it resolves react from the app
+    // at MODULE scope, so hoisting it breaks a bare `borgo` outside a project.
     const { dev } = await import("./dev");
     await framed(dev);
     break;
@@ -148,17 +150,23 @@ switch (command) {
     }
     // the re-exec'd half: exit when the supervisor does, whatever killed it.
     // Deliberately not process.ppid - a server started with nohup from a shell
-    // that then exits must keep serving, so only a borgo parent counts.
+    // that then exits must keep serving, so only a borgo parent counts. ppid is
+    // still read, but only to decide whether reparenting is admissible evidence
+    // about THIS pid; the pid watched is the env's, never the parent's.
+    //
+    // `try { process.kill(pid, 0) } catch { exit(0) }` was wrong in both
+    // directions here, and this is the production path: an EPERM read as death
+    // exits 0, the supervisor exits 0 with it, and `Restart=on-failure` in the
+    // systemd unit borgo writes does not restart a clean exit - the site is
+    // simply down. See dev.ts for the measurements behind the rule.
+    //
+    // On windows the poll is defence in depth rather than the only defence:
+    // measured, taskkill /F on this process's supervisor (a bun parent that
+    // spawned it) took this one down with it through bun's job object, with no
+    // /T. On posix nothing does that, which is why the poll exists at all.
     const supervisor = Number(process.env.BORGO_SUPERVISOR_PID);
-    if (supervisor > 0) {
-      setInterval(() => {
-        try {
-          process.kill(supervisor, 0);
-        } catch {
-          process.exit(0);
-        }
-      }, 2_000).unref();
-    }
+    const { watchParent } = await import("./dev");
+    watchParent(supervisor, () => process.exit(0))?.unref();
 
     // --front-only skips the go binary, for a split deployment where the
     // api runs elsewhere (point API_URL at it)
