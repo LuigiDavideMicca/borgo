@@ -494,3 +494,80 @@ describe("the two sites are wired to the reading and not to a bare probe", () =>
     expect(cli).not.toContain("serve-entry");
   });
 });
+
+// ---------------------------------------------------------------------------
+// WHY A REUSED PID CANNOT REACH ANY OF THIS - held, not assumed.
+//
+// A pid is not an identity: nothing in a bare `int` separates "the process that
+// spawned me" from "whatever the system later handed that number to". The one
+// answer no reused number can forge is reparenting, and it is available only
+// while `direct` is true - which holds because EVERY pid borgo hands out is the
+// spawner's OWN. Four sites do it: dev.ts spawns the go api and the front
+// server, cli.ts re-execs itself and spawns the go api.
+//
+// Break that - hand a supervisor's pid that is not the parent, or interpose a
+// shell between spawner and child - and `direct` is false, the bare probe is the
+// whole answer, and a reused pid reads as the parent still running on every
+// platform at once. Nothing else in the tree would fail; this does.
+// ---------------------------------------------------------------------------
+describe("every pid borgo hands a child is that child's direct parent", () => {
+  const dev = readFileSync(DEV_SRC, "utf8");
+  const cli = readFileSync(CLI_SRC, "utf8");
+  const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  test("all four spawn sites pass process.pid, and there are exactly four", () => {
+    const sites: Array<[string, string]> = [];
+    for (const [name, src] of [["dev.ts", dev], ["cli.ts", cli]] as const) {
+      for (const m of strip(src).matchAll(/BORGO_(?:PARENT|SUPERVISOR)_PID:\s*String\(([^)]*)\)/g)) {
+        sites.push([name, m[1].trim()]);
+      }
+    }
+    // the count is asserted too: a fifth site added without a pid that is the
+    // spawner's own would otherwise pass unread
+    expect(sites).toEqual([
+      ["dev.ts", "process.pid"],
+      ["dev.ts", "process.pid"],
+      ["cli.ts", "process.pid"],
+      ["cli.ts", "process.pid"],
+    ]);
+    // and the stripper has to leave the assignments behind, or an empty list
+    // reads identical to four correct ones
+    expect(strip(dev)).toContain("BORGO_PARENT_PID: String(process.pid)");
+  });
+
+  test("no site names a pid read from anywhere but this process", () => {
+    // the env is where a non-parent pid would come from: cli.ts READS
+    // BORGO_SUPERVISOR_PID (it is the watcher there) but must never re-emit a
+    // pid it did not mint itself
+    for (const [name, src] of [["dev.ts", dev], ["cli.ts", cli]] as const) {
+      const emitted = [...strip(src).matchAll(/BORGO_(?:PARENT|SUPERVISOR)_PID:\s*([^,\n}]*)/g)].map((m) => m[1].trim());
+      expect([name, emitted.filter((e) => !e.startsWith("String(process.pid)"))]).toEqual([name, []]);
+    }
+  });
+
+  // the source pins above say what borgo intends; this says the operating
+  // system agrees, on real processes, in the shape dev.ts spawns the front
+  // server with
+  test("a child spawned the way dev.ts spawns one computes direct = true", async () => {
+    const dir = scratch();
+    const child = join(dir, "child.ts");
+    writeFileSync(
+      child,
+      `import { writeFileSync } from "node:fs";\n` +
+        `const parentPid = Number(process.env.BORGO_PARENT_PID || 0);\n` +
+        `writeFileSync(${JSON.stringify(join(dir, "out").replaceAll("\\", "/"))},\n` +
+        `  JSON.stringify({ ppid: process.ppid, parentPid, direct: process.ppid === parentPid }));\n`,
+      "utf8",
+    );
+    const proc = track(
+      Bun.spawn([process.execPath, child], {
+        stdout: "ignore",
+        stderr: "ignore",
+        env: { ...process.env, BORGO_PARENT_PID: String(process.pid) },
+      }),
+    );
+    await withDeadline(proc.exited, 15_000, "the child never finished");
+    const got = JSON.parse(readFileSync(join(dir, "out"), "utf8"));
+    expect(got).toEqual({ ppid: process.pid, parentPid: process.pid, direct: true });
+  }, 25_000);
+});

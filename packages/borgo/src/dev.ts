@@ -182,7 +182,20 @@ export async function dev() {
   // only defence on that path, not defence in depth.
   //
   // The watched pid is process.ppid, so it is the direct parent by construction
-  // and the reparent branch always applies.
+  // - which on posix means the reparent branch answers here, and no reused pid
+  // can forge it.
+  //
+  // Windows never reparents, so that branch never fires there and the bare probe
+  // is the whole answer. This is the ONE watch in borgo where a reused pid could
+  // read a stranger as the launcher still running: everywhere else the pid is
+  // either a posix direct parent or a process inside bun's job object. It stays
+  // open on purpose. The launcher is a shell borgo did not start, so there is no
+  // identity to hand down; reading one would mean opening the parent through
+  // bun:ffi, and a wrong comparison there answers "gone" and kills a healthy dev
+  // session. Measured, the window does not close by hand anyway: the probe would
+  // have to land in the 2 s gap between the launcher's death and the next poll,
+  // and a freed pid came back after 740 spawns at the soonest (median 1540, 8
+  // trials) while this machine creates at most ~180 processes in 2 s.
   watchParent(process.ppid, () => process.exit(0));
 
   const goBin = `.borgo/${goBinName()}`;

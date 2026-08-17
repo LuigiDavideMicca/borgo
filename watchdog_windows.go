@@ -40,15 +40,31 @@ func waitParentExit(pid int, stop <-chan struct{}) bool {
 // (ERROR_INVALID_PARAMETER, for a pid no live process owns) really does mean
 // there is nothing left to wait for.
 //
-// The polling path re-probes a bare pid, and windows reuses pids. If the
+// The polling path re-probes a bare pid, and windows reuses pids: if the
 // unreachable parent exits and its number is handed to a process this one CAN
-// open, the poll takes the handle and waits on a stranger: the api outlives
-// its supervisor, which is the orphan this file exists to prevent, in the one
-// path that cannot see enough to tell. Closing it needs an identity the pid
-// does not carry - the parent's creation time, or a handle inherited at spawn
-// - and that is a change to how borgo dev starts the api, not to this wait.
-// The blocking path is not exposed to it: the handle is taken once, up front,
-// and names one process for as long as it is held.
+// open, the poll waits on a stranger. The blocking path is not exposed to it -
+// the handle is taken once, up front, and names one process object for as long
+// as it is held, whatever happens to the number.
+//
+// An earlier note here prescribed the cure as "a change to how borgo dev starts
+// the api". Measured, that is wrong twice over, so it is corrected rather than
+// carried:
+//
+//   - the api never reaches this poll. It is only entered after
+//     ERROR_ACCESS_DENIED, and a Bun.spawn'd api opens its borgo parent with
+//     SYNCHRONIZE without trouble - so it takes the handle path, which no reused
+//     pid can reach. TestAChildOpensItsOwnParentSoTheWaitTakesTheHandlePath
+//     holds that premise instead of assuming it.
+//   - and the api is not where the exposure is. The one watch on windows that
+//     nothing else covers is `borgo dev` watching its LAUNCHER, a shell borgo
+//     does not start and cannot hand anything to. Every process borgo does
+//     start is in bun's job object, which takes it down with its parent -
+//     measured for a bun child and a go child alike - so changing how the api
+//     is started reaches only the sites that were already covered.
+//
+// The window itself was measured rather than assumed: a freed pid came back
+// after 740 spawns at the soonest (median 1540, 8 trials), while this machine
+// creates at most ~180 processes inside one 2 s poll gap.
 func waitProcessExit(pid int, poll time.Duration, stop <-chan struct{}) bool {
 	for {
 		h, err := syscall.OpenProcess(syscall.SYNCHRONIZE, false, uint32(pid))

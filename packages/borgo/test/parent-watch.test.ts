@@ -216,15 +216,39 @@ describe("readParent, against processes that really exist", () => {
     expect(parentGone(process.pid, r)).toBe(false);
   });
 
+  // The second half of the name was never asserted, and it is the invariant the
+  // whole direct branch rests on: EVERY pid borgo hands a child is the spawner's
+  // own, so `direct` is true at every site and reparenting - which no reused pid
+  // can forge - is the answer. If Bun.spawn ever interposed a process (a shell,
+  // a shim), `direct` would be FALSE everywhere and the bare pid probe, which a
+  // reused number satisfies, would become borgo's only answer on every platform.
   test("a live child is alive, and its ppid is this process", async () => {
     const proc = track(
-      Bun.spawn([process.execPath, "-e", "await Bun.sleep(30_000)"], { stdout: "ignore", stderr: "ignore" }),
+      Bun.spawn([process.execPath, "-e", "console.log(process.ppid); await Bun.sleep(30_000)"], {
+        stdout: "pipe",
+        stderr: "ignore",
+      }),
     );
     await Bun.sleep(300);
     expect(parentGone(proc.pid, readParent(proc.pid, false))).toBe(false);
+
+    // one chunk off a reader, not `for await` and not Response.text(): the child
+    // holds stdout open for its whole sleep, so anything that waits for the
+    // stream to END would hang until the kill below
+    const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+    const reported = await withDeadline(
+      reader.read().then(({ value }) => Number(new TextDecoder().decode(value).trim())),
+      10_000,
+      "the child never reported its ppid",
+    );
+    reader.releaseLock();
+    // no interposed process: the child's parent is this very process, so the pid
+    // borgo passes in BORGO_PARENT_PID is the one getppid/process.ppid reports
+    expect(reported).toBe(process.pid);
+
     proc.kill();
     await withDeadline(proc.exited, 10_000, "the long-lived child never exited after kill");
-  });
+  }, 20_000);
 
   // the EPERM direction, on a process that really is alive and really is out of
   // reach. Both branches assert: the invariant is that a live system process is

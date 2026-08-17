@@ -208,3 +208,22 @@ func TestProcessExitedSaysNoForAnUnreachableProcess(t *testing.T) {
 		t.Fatal("a live process this one may not open read as exited: a supervisor at another elevation would refuse every boot")
 	}
 }
+
+// The premise under waitProcessExit's one exposed path, held here rather than
+// assumed. The poll that re-probes a bare pid - the only place a reused pid can
+// name a stranger - is reached ONLY after ERROR_ACCESS_DENIED. A child that can
+// open its own parent never enters it: it takes the handle up front, and a
+// handle names one process object for as long as it is held, whatever happens
+// to the number. Measured with a real `Bun.spawn`'d api, OpenProcess on the
+// borgo parent succeeded, so the api takes the immune path.
+//
+// If that ever stops being true - a spawn shape that drops SYNCHRONIZE, a
+// parent at another elevation becoming the normal case - the exposed poll
+// becomes the api's ordinary path and this goes red, which is the point.
+func TestAChildOpensItsOwnParentSoTheWaitTakesTheHandlePath(t *testing.T) {
+	h, err := syscall.OpenProcess(syscall.SYNCHRONIZE, false, uint32(os.Getppid()))
+	if err != nil {
+		t.Fatalf("this process cannot open its own parent (%v), so waitParentExit would poll a bare pid instead of holding a handle", err)
+	}
+	syscall.CloseHandle(h)
+}
