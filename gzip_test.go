@@ -1775,3 +1775,364 @@ func TestGzipDeliversTheBufferedBodyWholeWhateverTheEncoding(t *testing.T) {
 		}
 	})
 }
+
+// wireContentLengths returns the Content-Length lines of a response, in the
+// order they reached the socket, however their keys were spelled.
+func wireContentLengths(head string) []string {
+	var out []string
+	for _, line := range strings.Split(head, "\r\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if ok && strings.EqualFold(key, "content-length") {
+			out = append(out, strings.TrimSpace(value))
+		}
+	}
+	return out
+}
+
+// THE KEY A HEADER WAS SPELLED WITH DECIDED WHETHER THE CLIENT GOT A RESPONSE.
+//
+// h.Get and h.Values canonicalise the key they look up; net/http's writer
+// canonicalises nothing and emits the map as it finds it. So a Content-Length
+// assigned as w.Header()["content-length"] = is a line every client counts, and
+// one no guard here saw - while net/http, which sizes the body by the canonical
+// entry alone, put its own beside it. RFC 9110 8.6 has a recipient treat
+// contradictory lengths as unrecoverable, and net/http's Transport does: no
+// status, no body, nothing logged by anyone. Measured, that is all four
+// crossings, not the "contradicting line" it was registered as.
+//
+// One shape was worse than a blind spot, and it is the one this asserts hardest
+// on. A handler that sets only w.Header()["content-length"] = "4096" and writes
+// 4096 bytes is delivered whole by bare net/http, which drops the length when it
+// chunks. Through borgo above the buffer, startGzip deleted the canonical entry
+// before compressing and left that one describing the uncompressed body, beside
+// net/http's correct 42 - so borgo turned a working response into zero bytes,
+// for the gzip client only, which is the split this file exists to close.
+//
+// Direction of failure: what reaches the wire must be one Content-Length line,
+// and it must be the first value the wire would have carried - writeSubset sorts
+// the keys it emits, so byte order is wire order, and the first line is what a
+// recipient reads. Choosing the canonical spelling over the first line instead
+// would decide the body's size by how a key was capitalised, which is the defect
+// wearing the guard's coat.
+//
+// The assertion is the client's: a well-formed header block is not the point
+// unless somebody can read the body behind it.
+func TestGzipReadsContentLengthUnderEverySpellingOfItsKey(t *testing.T) {
+	stagings := []struct {
+		name string
+		set  func(h http.Header, size int)
+		want string // the value that must survive, "" for none
+	}{
+		{"lowercase alone", func(h http.Header, size int) {
+			h["content-length"] = []string{strconv.Itoa(size)}
+		}, "size"},
+		{"uppercase alone", func(h http.Header, size int) {
+			h["CONTENT-LENGTH"] = []string{strconv.Itoa(size)}
+		}, "size"},
+		{"canonical, then lowercase behind it", func(h http.Header, size int) {
+			h.Set("Content-Length", strconv.Itoa(size))
+			h["content-length"] = []string{"9999"}
+		}, "size"},
+		// "CONTENT-LENGTH" sorts before "Content-Length", so the handler's 9999
+		// is the line that reaches the wire first and the one in force
+		{"uppercase in front of canonical", func(h http.Header, size int) {
+			h.Set("Content-Length", strconv.Itoa(size))
+			h["CONTENT-LENGTH"] = []string{"9999"}
+		}, "9999"},
+		{"canonical twice and lowercase", func(h http.Header, size int) {
+			h.Add("Content-Length", strconv.Itoa(size))
+			h.Add("Content-Length", "9999")
+			h["content-length"] = []string{"7777"}
+		}, "size"},
+	}
+	for _, size := range []int{gzipMinBytes / 2, gzipMinBytes * 4} {
+		for _, st := range stagings {
+			t.Run(fmt.Sprintf("%dB/%s", size, st.name), func(t *testing.T) {
+				body := strings.Repeat("x", size)
+				handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					st.set(w.Header(), size)
+					w.Write([]byte(body))
+				}))
+				want := st.want
+				if want == "size" {
+					want = strconv.Itoa(size)
+				}
+
+				for _, ae := range []string{"identity", "gzip"} {
+					_, stdlibSaid, wire := serveAndDiagnose(t, ae, handler)
+					head, _, _ := strings.Cut(wire, "\r\n\r\n")
+					if lines := wireContentLengths(head); len(lines) > 1 {
+						t.Errorf("%s: %d Content-Length lines on the wire %q: a recipient must treat that as unrecoverable (RFC 9110 8.6)", ae, len(lines), lines)
+					}
+					if stdlibSaid != "" {
+						t.Errorf("%s: net/http complained: %q", ae, stdlibSaid)
+					}
+					// below the buffer the wrong length is dropped before the
+					// commit, so only the surviving-correct case is checked there
+					if ae == "identity" && want == strconv.Itoa(size) {
+						if lines := wireContentLengths(head); len(lines) == 1 && lines[0] != want {
+							t.Errorf("identity: Content-Length %q went out, want %q: the first line on the wire is the one in force", lines[0], want)
+						}
+					}
+
+					status, got, err := clientReads(t, ae, handler)
+					if want != strconv.Itoa(size) {
+						// the handler declared a length its body contradicts, past
+						// the point borgo can still drop it: net/http is left to
+						// stall the client, which is stdlib's own behaviour
+						continue
+					}
+					if err != nil {
+						t.Fatalf("%s: the client got no usable response: %v", ae, err)
+					}
+					if status != http.StatusOK {
+						t.Errorf("%s: status = %d, want 200", ae, status)
+					}
+					if got != body {
+						t.Errorf("%s: the client read %d bytes, want %d", ae, len(got), size)
+					}
+				}
+			})
+		}
+	}
+}
+
+// BORGO DESTROYED, FOR THE GZIP CLIENT ONLY, A RESPONSE STDLIB DELIVERS WHOLE.
+//
+// The single sharpest shape of the defect above, kept separate because it is the
+// one that is not a blind spot: the same handler, wrapped and bare, compared on
+// what the client ends up holding.
+//
+// Only the two gzip rows prove it. On identity the length never contradicts
+// anything, because net/http chunks and drops it - those rows are regression
+// guards, and they are here to keep the comparison honest, not to count.
+func TestGzipDoesNotUnmakeAResponseStdlibDelivers(t *testing.T) {
+	const size = gzipMinBytes * 4
+	for _, key := range []string{"content-length", "CONTENT-LENGTH"} {
+		for _, ae := range []string{"identity", "gzip"} {
+			t.Run(fmt.Sprintf("%s/%s", key, ae), func(t *testing.T) {
+				inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header()[key] = []string{strconv.Itoa(size)}
+					w.Write(bytes.Repeat([]byte("x"), size))
+				})
+				bareStatus, bare, bareErr := clientReads(t, ae, inner)
+				status, got, err := clientReads(t, ae, gzipMiddleware(inner))
+				if bareErr != nil || len(bare) != size {
+					t.Skipf("bare net/http does not deliver this shape either (%d, %d bytes, %v)", bareStatus, len(bare), bareErr)
+				}
+				if err != nil {
+					t.Fatalf("borgo unmade a response net/http delivers whole: %v", err)
+				}
+				if status != http.StatusOK || len(got) != size {
+					t.Errorf("borgo: status %d and %d bytes, net/http: status %d and %d bytes", status, len(got), bareStatus, len(bare))
+				}
+			})
+		}
+	}
+}
+
+// A STREAM AND A PRE-ENCODED BODY WERE COMPRESSED IF THE KEY WAS NOT CANONICAL.
+//
+// Both gates read the header by a canonical lookup, so a handler that assigned
+// text/event-stream or an encoding through the map walked through them and borgo
+// put Content-Encoding: gzip over a declared event stream and over a body that
+// said it was already coded. Measured on the socket, above the buffer, on both.
+//
+// net/http reads neither field for this question - Content-Type only to decide
+// whether to sniff, Content-Encoding only to suppress that - and its answer
+// never reaches the client, while the browser the stream is for and the decoder
+// the coding is for both fold the key. So folding it here takes nothing away
+// from the agreement c5f7713 was protecting: Content-Encoding is still read by
+// its first value, which is the half of that rule net/http actually shares.
+//
+// Four of the twelve rows prove it: the non-canonical spellings above the
+// buffer. Below it nothing is ever compressed whatever the gate answers, and
+// the canonical rows passed before the fix - eight regression guards, said
+// rather than counted.
+func TestGzipPassesThroughStreamsAndEncodingsUnderEverySpelling(t *testing.T) {
+	fields := []struct {
+		canonical string
+		value     string
+	}{
+		{"Content-Type", "text/event-stream"},
+		{"Content-Encoding", "br"},
+	}
+	for _, f := range fields {
+		for _, key := range []string{f.canonical, strings.ToLower(f.canonical), strings.ToUpper(f.canonical)} {
+			for _, size := range []int{gzipMinBytes / 2, gzipMinBytes * 4} {
+				t.Run(fmt.Sprintf("%s=%s/%dB", key, f.value, size), func(t *testing.T) {
+					handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header()[key] = []string{f.value}
+						w.Write(bytes.Repeat([]byte("x"), size))
+					}))
+					_, _, wire := serveAndDiagnose(t, "gzip", handler)
+					head, _, _ := strings.Cut(wire, "\r\n\r\n")
+					for _, line := range strings.Split(head, "\r\n") {
+						k, v, ok := strings.Cut(line, ":")
+						if ok && strings.EqualFold(k, "content-encoding") && strings.TrimSpace(v) == "gzip" {
+							t.Errorf("borgo compressed a response that declared %s: %s\n %q", key, f.value, strings.ReplaceAll(head, "\r\n", " | "))
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// THE HANDLER IS STILL NAMED WHEN THE LENGTH IT DECLARED WAS NOT CANONICAL.
+//
+// reportLengthMismatch reads the length at WriteHeader, before the commit that
+// normalises the key, so it needs the folded read of its own or the same wrong
+// declaration is reported under one spelling and passed over under another.
+//
+// The last two rows are the ones that price the order. Two spellings holding
+// different numbers put both on the wire, and the first line is the one in
+// force: "CONTENT-LENGTH" sorts before "Content-Length" and "content-length"
+// after it, so the same pair of numbers is a mismatch in one row and a correct
+// declaration in the other. Reading the wrong end reports a handler that is
+// right and passes over one that is wrong, in the same response.
+func TestGzipNamesAWrongContentLengthUnderEverySpelling(t *testing.T) {
+	const size = gzipMinBytes / 2
+	rows := []struct {
+		name   string
+		set    func(h http.Header)
+		report bool
+	}{
+		{"Content-Length", func(h http.Header) { h["Content-Length"] = []string{"9999"} }, true},
+		{"content-length", func(h http.Header) { h["content-length"] = []string{"9999"} }, true},
+		{"CONTENT-LENGTH", func(h http.Header) { h["CONTENT-LENGTH"] = []string{"9999"} }, true},
+		{"the wrong one reaches the wire first", func(h http.Header) {
+			h.Set("Content-Length", strconv.Itoa(size))
+			h["CONTENT-LENGTH"] = []string{"9999"}
+		}, true},
+		{"the right one reaches the wire first", func(h http.Header) {
+			h.Set("Content-Length", strconv.Itoa(size))
+			h["content-length"] = []string{"9999"}
+		}, false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			said := map[string]string{}
+			for _, ae := range []string{"identity", "gzip"} {
+				said[ae], _, _ = serveAndDiagnose(t, ae, gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					row.set(w.Header())
+					w.Write(bytes.Repeat([]byte("x"), size))
+				})))
+				if got := strings.Contains(said[ae], "but wrote"); got != row.report {
+					t.Errorf("%s: reported = %v, want %v (%q)", ae, got, row.report, said[ae])
+				}
+			}
+			if said["identity"] != said["gzip"] {
+				t.Errorf("the two encodings said different things\n identity: %q\n gzip:     %q", said["identity"], said["gzip"])
+			}
+		})
+	}
+}
+
+// WHAT IS LEFT CANONICAL ON PURPOSE, ASSERTED SO IT STAYS A DECISION.
+//
+// The sniffing gate follows net/http's, key included: bare net/http answers a
+// non-canonical content-type with its own sniffed line beside it, and borgo does
+// the same. Folding it here alone would give a gzip client a different
+// Content-Type from an identity one, which is the split, not the fix.
+//
+// Vary is not folded either, and the whole cost is asserted here: a second
+// Accept-Encoding line naming a field the first already names, with whatever the
+// handler varied on still in force beside it. Neither row is proof of a defect;
+// both are guards on a decision.
+func TestGzipLeavesTheseHeadersCanonicalOnPurpose(t *testing.T) {
+	t.Run("sniffing follows net/http, key included", func(t *testing.T) {
+		for _, ae := range []string{"identity", "gzip"} {
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header()["content-type"] = []string{"text/html; charset=utf-8"}
+				w.Write(bytes.Repeat([]byte("x"), gzipMinBytes/2))
+			})
+			_, _, bareWire := serveAndDiagnose(t, ae, inner)
+			_, _, wire := serveAndDiagnose(t, ae, gzipMiddleware(inner))
+			types := func(raw string) []string {
+				head, _, _ := strings.Cut(raw, "\r\n\r\n")
+				var out []string
+				for _, line := range strings.Split(head, "\r\n") {
+					if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(k, "content-type") {
+						out = append(out, strings.TrimSpace(v))
+					}
+				}
+				slices.Sort(out)
+				return out
+			}
+			if got, want := types(wire), types(bareWire); !slices.Equal(got, want) {
+				t.Errorf("%s: borgo typed the response %q, net/http %q", ae, got, want)
+			}
+		}
+	})
+
+	t.Run("an unseen vary costs one repeated line and nothing else", func(t *testing.T) {
+		_, _, wire := serveAndDiagnose(t, "identity", gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Del("Vary")
+			w.Header()["vary"] = []string{"*"}
+			w.Write(bytes.Repeat([]byte("x"), gzipMinBytes/2))
+		})))
+		head, _, _ := strings.Cut(wire, "\r\n\r\n")
+		var varies []string
+		for _, line := range strings.Split(head, "\r\n") {
+			if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(k, "vary") {
+				varies = append(varies, strings.TrimSpace(v))
+			}
+		}
+		slices.Sort(varies)
+		if !slices.Equal(varies, []string{"*", "Accept-Encoding"}) {
+			t.Errorf("Vary lines = %q, want the handler's own beside ours", varies)
+		}
+	})
+}
+
+// benchGzipHeaderCount prices a whole response by how many headers it carries,
+// which is what the folded reads are paid for in.
+func benchGzipHeaderCount(b *testing.B, n int, acceptEncoding string) {
+	body := bytes.Repeat([]byte("x"), gzipMinBytes*2)
+	h := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hd := w.Header()
+		hd.Set("Content-Type", "application/json")
+		hd.Set("Cache-Control", "public, max-age=60")
+		hd.Set("Content-Length", strconv.Itoa(len(body)))
+		for i := 3; i < n; i++ {
+			hd.Set(fmt.Sprintf("X-Pad-%d", i), "v")
+		}
+		w.Write(body)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept-Encoding", acceptEncoding)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		h.ServeHTTP(&discardWriter{header: http.Header{}}, req)
+	}
+}
+
+func BenchmarkGzipHeaders4Compressed(b *testing.B)  { benchGzipHeaderCount(b, 4, "gzip") }
+func BenchmarkGzipHeaders32Compressed(b *testing.B) { benchGzipHeaderCount(b, 32, "gzip") }
+func BenchmarkGzipHeaders4Identity(b *testing.B)    { benchGzipHeaderCount(b, 4, "identity") }
+func BenchmarkGzipHeaders32Identity(b *testing.B)   { benchGzipHeaderCount(b, 32, "identity") }
+
+// benchGzipHeaderReads isolates the three folded reads from everything else on
+// the response path.
+func benchGzipHeaderReads(b *testing.B, n int) {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	h.Set("Cache-Control", "public, max-age=60")
+	h.Set("Content-Length", "2048")
+	for i := 3; i < n; i++ {
+		h.Set(fmt.Sprintf("X-Pad-%d", i), "v")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if declaredLength(h) < 0 || declaresEventStream(h) || firstFieldValue(h, "Content-Encoding") != "" {
+			b.Fatal("unexpected")
+		}
+		oneContentLength(h)
+	}
+}
+
+func BenchmarkGzipHeaderReads4(b *testing.B)  { benchGzipHeaderReads(b, 4) }
+func BenchmarkGzipHeaderReads32(b *testing.B) { benchGzipHeaderReads(b, 32) }

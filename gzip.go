@@ -213,12 +213,38 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 	// makes a wrong one invisible on the compressed path
 	g.declared = declaredLength(h)
 	g.bodyless = g.bodyless || bodylessStatus(status)
-	// Content-Encoding stays on Get: net/http reads that one by its first value
-	// too (server.go: ce := header.Get("Content-Encoding")), so this gate and
-	// stdlib's sniffing gate agree about which responses are already encoded
-	if g.bodyless || declaresEventStream(h) || h.Get("Content-Encoding") != "" {
+	// Content-Encoding stays on the first value: net/http reads that one by its
+	// first value too (server.go: ce := header.Get("Content-Encoding")), so this
+	// gate and stdlib's sniffing gate agree about which responses are already
+	// encoded. Only the key is folded, which stdlib has no opinion on and every
+	// client does
+	if g.bodyless || declaresEventStream(h) || firstFieldValue(h, "Content-Encoding") != "" {
 		g.startPassthrough()
 	}
+}
+
+// firstFieldValue returns the field's first value on the wire, under whatever
+// spelling of the key the handler used, or "" for none.
+//
+// h.Get and h.Values canonicalise the key they look up; net/http's writer
+// canonicalises nothing and emits the map as it finds it, so a key assigned
+// through the map is a field every reader sees (RFC 9110 5.1) and a canonical
+// lookup does not.
+//
+// Byte order, not map order: writeSubset sorts the keys it emits, so the
+// smallest holds the line that arrives first - the one a reader taking a single
+// value takes. Map order would decide a response by a hash seed.
+func firstFieldValue(h http.Header, canonical string) string {
+	first := ""
+	for k := range h {
+		if sameField(k, canonical) && (first == "" || k < first) {
+			first = k
+		}
+	}
+	if v := h[first]; len(v) > 0 {
+		return v[0]
+	}
+	return ""
 }
 
 // declaresEventStream reports whether the response says it is an event stream,
@@ -233,16 +259,27 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 // value of one line, and every line the map holds goes on the wire, so every
 // line has to be read here.
 //
+// Under every spelling of the key too: net/http reads this field only to decide
+// whether to sniff and its answer never reaches the client, while the browser
+// the stream is for folds the key. h.Values saw the canonical entry alone, so a
+// text/event-stream assigned through the map got Content-Encoding: gzip over
+// it. Any spelling settles the answer, so map order is never read into.
+//
 // A value is matched whole, after its parameters and case-insensitively: media
 // types are case-insensitive (RFC 9110 8.3.1), and a single line holding two
 // comma-separated values is what an intermediary makes of two Content-Type
 // lines.
 func declaresEventStream(h http.Header) bool {
-	for _, line := range h.Values("Content-Type") {
-		for _, value := range strings.Split(line, ",") {
-			mediaType, _, _ := strings.Cut(value, ";")
-			if strings.EqualFold(strings.TrimSpace(mediaType), "text/event-stream") {
-				return true
+	for key, lines := range h {
+		if !sameField(key, "Content-Type") {
+			continue
+		}
+		for _, line := range lines {
+			for _, value := range strings.Split(line, ",") {
+				mediaType, _, _ := strings.Cut(value, ";")
+				if strings.EqualFold(strings.TrimSpace(mediaType), "text/event-stream") {
+					return true
+				}
 			}
 		}
 	}
@@ -255,13 +292,9 @@ func declaresEventStream(h http.Header) bool {
 // startGzip has deleted the header before net/http could read it, which is why
 // that one place repeats it.
 func declaredLength(h http.Header) int64 {
-	// indexed rather than Get: the key is already canonical, and this is the
-	// same lookup net/http makes when it decides what to put on the wire
-	v := h["Content-Length"]
-	if len(v) == 0 {
-		return -1
-	}
-	n, err := strconv.ParseInt(v[0], 10, 64)
+	// every spelling of the key: this reads what the response will carry, and
+	// oneContentLength has yet to run wherever the answer is taken before commit
+	n, err := strconv.ParseInt(firstFieldValue(h, "Content-Length"), 10, 64)
 	if err != nil || n < 0 {
 		return -1
 	}
@@ -310,15 +343,45 @@ func (g *gzipResponseWriter) commitHeader() {
 // it: keeping it states the choice the response has made rather than making
 // one, where keeping the last would contradict the bytes being sent. Identical
 // repeats are legal to a client and pass without a word.
+//
+// EVERY SPELLING, MOVED ONTO THE CANONICAL KEY. net/http sizes the body by
+// h["Content-Length"] alone but emits the map as it finds it, so a length
+// assigned through the map is a line the client counts and stdlib does not -
+// stdlib puts its own beside it, and the Transport then delivers no status and
+// no body at all, on all four crossings. Above the buffer it was worse:
+// startGzip deleted the canonical one and left that one describing the
+// uncompressed body, unmaking for the gzip client alone a response stdlib
+// delivers whole. Normalising here keeps every later read canonical, net/http's
+// own included.
 func oneContentLength(h http.Header) {
-	v := h["Content-Length"]
-	if len(v) < 2 {
+	keys, values, first := 0, 0, ""
+	for k, v := range h {
+		if !sameField(k, "Content-Length") {
+			continue
+		}
+		keys, values = keys+1, values+len(v)
+		if first == "" || k < first {
+			first = k
+		}
+	}
+	// the response that has nothing to settle pays one scan and no allocation
+	if keys == 0 || (keys == 1 && values <= 1 && first == "Content-Length") {
 		return
 	}
-	h.Set("Content-Length", v[0])
-	for _, other := range v[1:] {
-		if other != v[0] {
-			log.Printf("borgo: %d Content-Length lines %q, keeping %q", len(v), v, v[0])
+	var all []string
+	for _, k := range fieldKeys(h, "Content-Length") {
+		all = append(all, h[k]...)
+		// the keys the values were read out of, not the canonical one h.Del
+		// reaches, or the kept line would sit beside the ones it replaces
+		delete(h, k)
+	}
+	if len(all) == 0 {
+		return
+	}
+	h["Content-Length"] = all[:1]
+	for _, other := range all[1:] {
+		if other != all[0] {
+			log.Printf("borgo: %d Content-Length lines %q, keeping %q", len(all), all, all[0])
 			return
 		}
 	}
@@ -386,6 +449,13 @@ func (g *gzipResponseWriter) sendHeader() {
 // with no Vary: Accept-Encoding is one a shared cache hands to the next client
 // along, which may have no way to decode it. Added, never substituted: the
 // handler's own reasons for varying outlive ours.
+//
+// The key is not folded, and that is a limit with a measured reason. Vary is a
+// set of field names (RFC 9110 12.5.5), so the whole cost of missing a `vary`
+// assigned through the map is a second Accept-Encoding line naming the field
+// the first already named - measured on the wire, with the handler's own `*` or
+// `Cookie` still in force beside it. This guard cannot under-add, only repeat,
+// so folding would buy back a duplicate line at one map scan per response.
 func varyAcceptEncoding(h http.Header) {
 	for _, line := range h.Values("Vary") {
 		for _, field := range strings.Split(line, ",") {
@@ -477,7 +547,10 @@ func (g *gzipResponseWriter) startGzip() {
 	// how a handler turns sniffing off, and reading the first value alone both
 	// overrode that and replaced a second, real value standing behind it - so
 	// the same handler was typed one way for a client that asked for gzip and
-	// another for a client that did not
+	// another for a client that did not. The key stays canonical for the same
+	// reason the gate does: measured, borgo and bare net/http answer a
+	// non-canonical content-type identically, and folding it here alone would
+	// put the split back
 	if _, declared := h["Content-Type"]; !declared {
 		h.Set("Content-Type", http.DetectContentType(g.buf))
 	}
