@@ -114,6 +114,15 @@ function composeElement(route: Route, props: Record<string, unknown>) {
  * redacting that would rewrite legitimate links, so it is left alone and named
  * as a limit. What produces it there - `import.meta.dir` concatenation - is
  * refused at build time instead.
+ *
+ * AND THE JSON SPELLING, WHICH IS WHERE THE PROPS GO. A loader's return travels
+ * as json - window.__PROPS__, the ?__borgo=props answer, the action envelope,
+ * an island's data-borgo-props attribute - and json doubles every backslash, so
+ * `C:\\srv\\borgo\\app` on the wire is the same disclosure and the native needle
+ * cannot see it. Measured on a served page: __PROPS__ carried the root in both
+ * spellings while the stream around it was redacted. The escaped form is a
+ * needle of its own, and the same text scan runs on the props json, on the
+ * head a page computes from them, and on every json answer.
  */
 const REDACTED = "[redacted]";
 
@@ -122,7 +131,11 @@ export function localPathNeedles(root: string, platform: string = process.platfo
   const needles: string[] = [];
   // a drive-lettered root is not a url in either separator spelling; a posix
   // one is, so it contributes nothing here
-  if (platform === "win32") needles.push(root, root.replaceAll("\\", "/"));
+  if (platform === "win32") {
+    needles.push(root, root.replaceAll("\\", "/"));
+    const json = JSON.stringify(root).slice(1, -1);
+    if (json !== root) needles.push(json);
+  }
   // and the file:// url only when it is not already spelled by one of those:
   // `file:///C:/x/y` carries `C:/x/y` inside it, so scanning for it twice is a
   // third of the per-response cost spent on nothing. A root that percent-encodes
@@ -151,7 +164,6 @@ export async function* redactLocalPaths(
     return;
   }
   const patterns = needles.map((n) => Buffer.from(n, "utf8"));
-  const replacement = Buffer.from(REDACTED, "utf8");
   // a needle plus the byte after it, which decides whether the match is the
   // root or only a name that begins like it
   const overlap = Math.max(...patterns.map((p) => p.length));
@@ -175,16 +187,7 @@ export async function* redactLocalPaths(
     return false;
   };
 
-  const scrub = (buf: Buffer, atEnd: boolean): Buffer | null => {
-    let out: Buffer | null = null;
-    for (const pattern of patterns) {
-      const subject = out ?? buf;
-      if (subject.indexOf(pattern) === -1) continue;
-      const replaced = replaceRoots(subject, pattern, replacement, atEnd);
-      if (replaced) out = replaced;
-    }
-    return out;
-  };
+  const scrub = (buf: Buffer, atEnd: boolean) => scrubRoots(buf, patterns, atEnd);
 
   let carry: Buffer | null = null;
   for await (const chunk of source) {
@@ -216,6 +219,62 @@ export async function* redactLocalPaths(
     if (cleaned) onFound?.();
     yield cleaned ?? carry;
   }
+}
+
+/**
+ * The same redaction on a string that is whole before it is sent: the props
+ * json, the head computed from the props, a json answer. One criterion for
+ * both halves - the same needles, the same name boundary, through the same
+ * replaceRoots - so a document and the json beside it cannot disagree about
+ * what the root is.
+ *
+ * The healthy path allocates nothing: a string search per needle, and only a
+ * text that really carries one is copied into bytes and rebuilt.
+ */
+export function redactLocalPathText(
+  text: string,
+  needles: readonly string[],
+  onFound?: () => void,
+): string {
+  if (!text || !needles.some((n) => text.includes(n))) return text;
+  const cleaned = scrubRoots(
+    Buffer.from(text, "utf8"),
+    needles.map((n) => Buffer.from(n, "utf8")),
+    true,
+  );
+  if (!cleaned) return text;
+  onFound?.();
+  return cleaned.toString("utf8");
+}
+
+/**
+ * The props and the action envelope leave as json, outside the render's
+ * stream, so the same needles run over the serialised text. A clean value is
+ * handed back as the very same object; only one that really carries the root
+ * is re-read from its redacted text. That serialisation is the healthy path's
+ * whole cost, and jsonResponse pays it again: measured, and accepted over
+ * teaching compress.ts a second entry point.
+ */
+export function redactJsonValue(value: unknown, needles: readonly string[], onFound?: () => void): unknown {
+  if (!needles.length) return value;
+  let found = false;
+  const cleaned = redactLocalPathText(JSON.stringify(value), needles, () => (found = true));
+  if (!found) return value;
+  onFound?.();
+  return JSON.parse(cleaned);
+}
+
+const REPLACEMENT = Buffer.from(REDACTED, "utf8");
+
+function scrubRoots(buf: Buffer, patterns: readonly Buffer[], atEnd: boolean): Buffer | null {
+  let out: Buffer | null = null;
+  for (const pattern of patterns) {
+    const subject = out ?? buf;
+    if (subject.indexOf(pattern) === -1) continue;
+    const replaced = replaceRoots(subject, pattern, REPLACEMENT, atEnd);
+    if (replaced) out = replaced;
+  }
+  return out;
 }
 
 /**
@@ -267,6 +326,31 @@ function replaceRoots(
   if (!hit) return null;
   pieces.push(buf.subarray(from));
   return Buffer.concat(pieces);
+}
+
+/**
+ * A DOT-DIRECTORY ANYWHERE ABOVE THE FILE, WHICH compress.ts CANNOT SEE.
+ *
+ * isHiddenAsset refuses a hidden last segment and declares the other half:
+ * public/.git/config stayed servable, because a directory can only be judged
+ * against the url's root, and the root is known here. Measured on borgo's own
+ * front server before this: /.git/config and /.svn/entries answered 200 on
+ * both roads, the boot index and the live fallback.
+ *
+ * .well-known is exempt as the FIRST segment only. rfc 8615 defines a
+ * well-known uri as one whose path begins with /.well-known/, so a nested one
+ * is not the standard's; and it is exact, not folded, because the rfc's paths
+ * are case-sensitive and every acme client writes it lower-case. The renewal
+ * that fails is an expired certificate, which is the worse direction, so the
+ * root tree is asserted to pass before anything is asserted to fail.
+ */
+export function inHiddenDirectory(assetPath: string): boolean {
+  const segments = assetPath.split("/");
+  for (let i = 1; i < segments.length - 1; i++) {
+    const s = segments[i];
+    if (s.startsWith(".") && !(i === 1 && s === ".well-known")) return true;
+  }
+  return false;
 }
 
 // each topic is a subscription table entry held for the life of the socket:
@@ -445,14 +529,15 @@ export async function serve({
   // said once per page, not once per request: a leak is a defect the operator
   // fixes, and a line per visitor buries it
   const namedLeak = new Set<string>();
-  const noteLeak = (file: string) => {
-    if (namedLeak.has(file)) return;
-    namedLeak.add(file);
+  const noteLeak = (where: string, how: string) => {
+    if (namedLeak.has(where)) return;
+    namedLeak.add(where);
     console.error(
-      `  ${c.red(g.err)} pages/${file} rendered the path of this machine into the document ` +
+      `  ${c.red(g.err)} ${where} ${how} the path of this machine ` +
         `${c.dim(`${g.dot} redacted before it was sent ${g.dot} borgo serves public/: put the file there and name it absolutely`)}`,
     );
   };
+  const rendered = (file: string) => () => noteLeak(`pages/${file}`, "rendered into its document");
 
   const renderOptions: RenderPageOptions = {
     dev,
@@ -485,8 +570,9 @@ export async function serve({
           redactLocalPaths(
             (await renderToReadableStream(element, init)) as unknown as AsyncIterable<Uint8Array>,
             pathNeedles,
-            () => noteLeak(route.file),
+            rendered(route.file),
           ),
+        redactText: (text) => redactLocalPathText(text, pathNeedles, rendered(route.file)),
       },
       extraProps,
       extraCookies,
@@ -507,8 +593,12 @@ export async function serve({
     ? new Map()
     : buildAssetIndex("public", undefined, buildOutputs);
 
-  const sendJson = (req: Request, value: unknown, init?: ResponseInit) =>
-    dev ? Response.json(value, init) : jsonResponse(req, value, init);
+  const sendJson = (req: Request, value: unknown, init?: ResponseInit) => {
+    const clean = redactJsonValue(value, pathNeedles, () =>
+      noteLeak(new URL(req.url).pathname, "answered with json carrying"),
+    );
+    return dev ? Response.json(clean, init) : jsonResponse(req, clean, init);
+  };
 
   const actionOptions: ActionOptions = {
     dev,
@@ -568,6 +658,7 @@ export async function serve({
         !assetPath.includes("..") &&
         !assetPath.includes("\\") &&
         !assetPath.includes("\0") &&
+        !inHiddenDirectory(assetPath) &&
         (process.platform !== "win32" || !/[:*?"<>|]/.test(assetPath))
       ) {
         const indexed = findAsset(assetIndex, assetPath);

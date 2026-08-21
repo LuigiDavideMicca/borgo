@@ -1670,6 +1670,9 @@ export type RenderPageOptions = {
     element: import("react").ReactNode,
     init: { nonce?: string; onError: (error: unknown) => void },
   ) => Promise<AsyncIterable<Uint8Array>>;
+  // the props json and the head computed from the props are built outside
+  // that stream; production runs the same local-path redaction over both
+  redactText?: (text: string) => string;
   // injectable for tests; production passes none of these
   randomToken?: () => string;
   onError?: (value: unknown) => void;
@@ -1692,6 +1695,7 @@ export async function renderPage(
     runLoader,
     compose,
     renderToStream,
+    redactText = (text) => text,
     randomToken = () => crypto.randomUUID().replaceAll("-", ""),
     onError = console.error,
   } = options;
@@ -1720,7 +1724,7 @@ export async function renderPage(
   // through, so the whole component tree is walked for a document that can
   // never ship, and the request object stays resident. failing first costs
   // nothing and keeps the waste at zero.
-  const propsJson = route.module.hydrate === false ? "" : scriptJson(props);
+  const propsJson = route.module.hydrate === false ? "" : redactText(scriptJson(props));
 
   const head = resolveHead(route.module, props);
   const stream = await renderToStream(withCsrf(compose(route, props), csrfToken), {
@@ -1731,7 +1735,7 @@ export async function renderPage(
   });
 
   let start = shell.start;
-  const injected = headHtml(head);
+  const injected = redactText(headHtml(head));
   if (injected) {
     const [before, after] = head.title ? shell.headNoTitle : shell.head;
     start = before + injected + after;

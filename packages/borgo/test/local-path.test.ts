@@ -37,9 +37,16 @@ const through = (needles: string[], ...parts: string[]) =>
   collect(redactLocalPaths(stream(...parts), needles));
 
 describe("localPathNeedles", () => {
-  test("a windows root is both separator spellings, and the file url is not a third", () => {
+  test("a windows root is both separator spellings and the json one, and the file url is not a fourth", () => {
     const needles = localPathNeedles(ROOT_WIN, "win32");
-    expect(needles).toEqual([ROOT_WIN, "C:/srv/borgo/app"]);
+    expect(needles).toEqual([ROOT_WIN, "C:/srv/borgo/app", win("C:", "", "srv", "", "borgo", "", "app")]);
+  });
+
+  // the json spelling is what window.__PROPS__ and ?__borgo=props carry: every
+  // backslash doubled, so neither of the other two can find it there
+  test("the json spelling is exactly what JSON.stringify would write", () => {
+    const needles = localPathNeedles(ROOT_WIN, "win32");
+    expect(needles).toContain(JSON.stringify(ROOT_WIN).slice(1, -1));
   });
 
   // the saving is a third of the per-response cost: `file:///C:/srv/borgo/app`
@@ -230,7 +237,10 @@ describe("the guard is wired into the render path", () => {
     expect(wired).toContain("pathNeedles");
     // the page is named in the line the operator reads, so the wrapper has to
     // be built per render rather than shared
-    expect(wired).toContain("noteLeak(route.file)");
+    expect(wired).toContain("rendered(route.file)");
+    // the props json and the head are built outside that stream, and get the
+    // same needles through the text form
+    expect(wired).toContain("redactText: (text) => redactLocalPathText(text, pathNeedles");
   });
 
   test("the needles are resolved once, not per request", async () => {
