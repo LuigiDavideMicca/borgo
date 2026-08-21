@@ -25,12 +25,14 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isCorpse, parentGone, readParent, watchParent, type ParentReading } from "../src/dev";
+import { isCorpse, parentGone, readParent, watchParent, type ParentReading } from "../src/parent-watch";
 
 const PKG_DIR = join(import.meta.dir, "..");
 const DEV_SRC = join(PKG_DIR, "src", "dev.ts");
 const CLI_SRC = join(PKG_DIR, "src", "cli.ts");
-const DEV_URL = Bun.pathToFileURL(DEV_SRC).href;
+const ENTRY_SRC = join(PKG_DIR, "src", "serve-entry.ts");
+const WATCH_SRC = join(PKG_DIR, "src", "parent-watch.ts");
+const WATCH_URL = Bun.pathToFileURL(WATCH_SRC).href;
 
 // real /proc/<pid>/stat lines, captured on wsl2
 const LIVE = "7551 (python3) R 7547 7551 7551 34821 7551 4194560 1919 591 7 0 2 1 0 0 20 0 1 0 142863 20598784";
@@ -104,73 +106,47 @@ afterAll(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// THE PIN. dev.ts carries its own copy of the reading rather than importing
-// serve-entry.ts, and that is measured rather than preferred: serve-entry
-// imports ./server, which resolves react from the app at MODULE SCOPE, so a
-// top-level import of it from cli.ts makes a bare `borgo` outside a project
-// throw "Cannot find package 'react'". A divergence between the two halves of
-// the same framework is the defect this repository has already found more than
-// once, so the copies are held equal here instead of by discipline.
+// THE PIN. The reading used to live twice, in dev.ts and serve-entry.ts, held
+// equal by a test because importing serve-entry from cli.ts drags in ./server,
+// which resolves react from the app at MODULE SCOPE and breaks a bare `borgo`
+// outside a project. It now has one home, parent-watch.ts, which imports
+// node:fs and nothing else - so it is safe from cli.ts and a second copy has no
+// reason to exist. Held by source: a copy that came back would pass every
+// behavioural test above while diverging in silence.
 // ---------------------------------------------------------------------------
-// serve-entry -> ./server -> createRequire(cwd/package.json)("react") at module
-// scope, so it can only be imported from a directory that resolves react.
-// Restored immediately: the cwd is process-wide and other test files read it.
-const cwdBeforeImport = process.cwd();
-process.chdir(PKG_DIR);
-const front = await import("../src/serve-entry");
-process.chdir(cwdBeforeImport);
+describe("the reading has one home", () => {
+  const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const defines = /\bfunction (?:readParent|isCorpse|parentGone|watchParent)\(/g;
+  const watch = strip(readFileSync(WATCH_SRC, "utf8"));
+  const sites = [
+    ["dev.ts", strip(readFileSync(DEV_SRC, "utf8"))],
+    ["serve-entry.ts", strip(readFileSync(ENTRY_SRC, "utf8"))],
+    ["cli.ts", strip(readFileSync(CLI_SRC, "utf8"))],
+  ] as const;
 
-describe("dev.ts and serve-entry.ts answer the same question the same way", () => {
-  // every reading either half can be handed, including the ones only one
-  // platform ever produces
-  const table: ParentReading[] = [
-    reading(),
-    reading({ killError: "ESRCH" }),
-    reading({ killError: "EPERM" }),
-    reading({ killError: "UNKNOWN" }),
-    reading({ killError: null, stat: LIVE }),
-    reading({ killError: null, stat: CORPSE }),
-    reading({ killError: "EPERM", stat: CORPSE }),
-    reading({ killError: "EPERM", stat: LIVE }),
-    reading({ killError: null, stat: LIVE_UNESCAPED }),
-    reading({ killError: null, stat: CORPSE_UNESCAPED }),
-    reading({ direct: true, ppid: 1, killError: null, stat: LIVE }),
-    reading({ direct: true, ppid: 7683, killError: null, stat: LIVE }),
-    reading({ direct: true, ppid: 7683, killError: "ESRCH" }),
-    reading({ direct: false, ppid: 1, killError: null, stat: LIVE }),
-    reading({ direct: true, ppid: 1, killError: null, stat: null }),
-  ];
+  test("parent-watch.ts defines the four functions", () => {
+    const found = [...watch.matchAll(defines)].map((m) => m[0]).sort();
+    expect(found).toEqual(["function isCorpse(", "function parentGone(", "function readParent(", "function watchParent("]);
+  });
 
-  test("parentGone agrees on every reading, one by one", () => {
-    for (const r of table) {
-      expect([JSON.stringify(r), parentGone(7683, r)]).toEqual([JSON.stringify(r), front.parentGone(7683, r)]);
+  test("parent-watch.ts imports node:fs and nothing else", () => {
+    const imports = [...watch.matchAll(/^\s*import\b[^;]*?from\s*["']([^"']+)["']/gm)].map((m) => m[1]);
+    expect(imports).toEqual(["node:fs"]);
+  });
+
+  test("the three sites import from ./parent-watch", () => {
+    for (const [name, src] of sites) {
+      expect([name, /import\s*\{[^}]*\}\s*from\s*["']\.\/parent-watch["']|import\(["']\.\/parent-watch["']\)/.test(src)]).toEqual([name, true]);
     }
-    expect(table).toHaveLength(15);
   });
 
-  test("isCorpse agrees on every stat line, the parser traps included", () => {
-    const stats = [null, "", LIVE, CORPSE, LIVE_UNESCAPED, CORPSE_UNESCAPED, "42 (Zed) R 1 1", "42 (Z) S 1 1", "42 (sh) X 1", "42 (sh) x 1", "42 no parens Z", "42 (sh)"];
-    for (const s of stats) expect([s, isCorpse(s)]).toEqual([s, front.isCorpse(s)]);
-  });
-
-  test("readParent agrees about this very process", () => {
-    expect(readParent(process.pid, true)).toEqual(front.readParent(process.pid, true));
-  });
-
-  // the table above only covers the readings it lists. this catches a change to
-  // the decision itself - a branch added, removed or reordered in one half.
-  test("the three functions are the same code in both files", () => {
-    const strip = (fn: unknown) =>
-      String(fn)
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/^\s*\/\/.*$/gm, "")
-        .replace(/\s+/g, " ")
-        .trim();
-    expect(strip(parentGone)).toBe(strip(front.parentGone));
-    expect(strip(isCorpse)).toBe(strip(front.isCorpse));
-    expect(strip(readParent)).toBe(strip(front.readParent));
-    // and the stripper must actually be able to tell two functions apart
-    expect(strip(parentGone)).not.toBe(strip(isCorpse));
+  test("and none of them defines a copy", () => {
+    for (const [name, src] of sites) {
+      expect([name, [...src.matchAll(defines)].map((m) => m[0])]).toEqual([name, []]);
+    }
+    // the matcher has to be able to see a definition, or an empty list reads
+    // identical to a pass
+    expect([...watch.matchAll(defines)]).toHaveLength(4);
   });
 });
 
@@ -355,7 +331,7 @@ describe("site 1 - the dev watcher, in the shape dev() uses", () => {
     const watcher = join(dir, "watcher.ts");
     writeFileSync(
       watcher,
-      `import { watchParent } from ${JSON.stringify(DEV_URL)};\n` +
+      `import { watchParent } from ${JSON.stringify(WATCH_URL)};\n` +
         `import { writeFileSync } from "node:fs";\n` +
         `writeFileSync(${JSON.stringify(join(dir, "pid").replaceAll("\\", "/"))}, String(process.pid));\n` +
         `watchParent(process.ppid, () => process.exit(0), 200);\n` +
@@ -405,7 +381,7 @@ describe("site 2 - the re-exec'd borgo start, in the shape cli.ts uses", () => {
     const server = join(dir, "server.ts");
     writeFileSync(
       server,
-      `import { watchParent } from ${JSON.stringify(DEV_URL)};\n` +
+      `import { watchParent } from ${JSON.stringify(WATCH_URL)};\n` +
         `const supervisor = Number(process.env.BORGO_SUPERVISOR_PID);\n` +
         `watchParent(supervisor, () => process.exit(0), 200)?.unref();\n` +
         `setInterval(() => {}, 1_000);\n`,
@@ -432,7 +408,7 @@ describe("site 2 - the re-exec'd borgo start, in the shape cli.ts uses", () => {
     const server = join(dir, "server.ts");
     writeFileSync(
       server,
-      `import { watchParent } from ${JSON.stringify(DEV_URL)};\n` +
+      `import { watchParent } from ${JSON.stringify(WATCH_URL)};\n` +
         `const supervisor = Number(process.env.BORGO_SUPERVISOR_PID);\n` +
         `watchParent(supervisor, () => process.exit(0), 200)?.unref();\n` +
         `setInterval(() => {}, 1_000);\n`,
@@ -479,15 +455,17 @@ describe("the two sites are wired to the reading and not to a bare probe", () =>
   const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
   test("neither file still reads a parent with a bare kill probe", () => {
-    // exactly one in dev.ts, inside readParent, whose result is INSPECTED
-    // rather than caught and turned straight into an exit; none in cli.ts
-    for (const [name, src, want] of [["dev.ts", dev, 1], ["cli.ts", cli, 0]] as const) {
+    // exactly one, in parent-watch.ts inside readParent, whose result is
+    // INSPECTED rather than caught and turned straight into an exit; none in
+    // either site
+    const watch = readFileSync(WATCH_SRC, "utf8");
+    for (const [name, src, want] of [["parent-watch.ts", watch, 1], ["dev.ts", dev, 0], ["cli.ts", cli, 0]] as const) {
       expect([name, [...code(src).matchAll(/process\.kill\([^)]*,\s*0\)/g)].length]).toEqual([name, want]);
     }
     // and the stripper has to leave real code behind, or the count above is a
     // zero that reads identical to a pass
-    expect(code(dev)).toContain("process.kill(parentPid, 0)");
-    expect(code(dev)).not.toContain("try { process.kill(pid, 0) }");
+    expect(code(watch)).toContain("process.kill(parentPid, 0)");
+    expect(code(watch)).not.toContain("try { process.kill(pid, 0) }");
   });
 
   test("cli.ts does not import serve-entry, which would break a bare borgo", () => {

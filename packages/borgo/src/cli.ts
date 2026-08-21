@@ -158,14 +158,14 @@ switch (command) {
     // directions here, and this is the production path: an EPERM read as death
     // exits 0, the supervisor exits 0 with it, and `Restart=on-failure` in the
     // systemd unit borgo writes does not restart a clean exit - the site is
-    // simply down. See dev.ts for the measurements behind the rule.
+    // simply down. See parent-watch.ts for the measurements behind the rule.
     //
     // On windows the poll is defence in depth rather than the only defence:
     // measured, taskkill /F on this process's supervisor (a bun parent that
     // spawned it) took this one down with it through bun's job object, with no
     // /T. On posix nothing does that, which is why the poll exists at all.
     const supervisor = Number(process.env.BORGO_SUPERVISOR_PID);
-    const { watchParent } = await import("./dev");
+    const { watchParent } = await import("./parent-watch");
     watchParent(supervisor, () => process.exit(0))?.unref();
 
     // --front-only skips the go binary, for a split deployment where the

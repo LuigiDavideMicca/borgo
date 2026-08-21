@@ -27,19 +27,11 @@
 // ")" inside the field that the state character follows.
 import { afterAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
-
-// server.ts requires react through `createRequire(process.cwd()/package.json)`
-// at module scope, so serve-entry only imports from a directory that resolves
-// it. Restored immediately: the cwd is process-wide and other test files read
-// it. That this import does NOT boot a server is itself under test below.
-const cwd = process.cwd();
-const PKG_DIR = join(import.meta.dir, "..");
-process.chdir(PKG_DIR);
-const { isCorpse, parentGone, readParent } = await import("../src/serve-entry");
-process.chdir(cwd);
+import { isCorpse, parentGone, readParent } from "../src/parent-watch";
 
 type Reading = ReturnType<typeof readParent>;
 
+const PKG_DIR = join(import.meta.dir, "..");
 const ENTRY = join(PKG_DIR, "src", "serve-entry.ts");
 
 // real /proc/<pid>/stat lines, captured on wsl2
@@ -208,7 +200,10 @@ describe("readParent, against processes that really exist", () => {
     expect(parentGone(pid, r)).toBe(true);
     // and the reason is a probe that said so, not an empty reading
     expect(r.killError === null ? isCorpse(r.stat) : true).toBe(true);
-  });
+    // one bun spawn: 1 s under 16 burners, measured, past bun's 5 s default
+    // under a second set and other suites (red once in 12 at 5.25 s). The
+    // 10 s deadline above decides, so the budget sits above it.
+  }, 15_000);
 
   test("this process is alive about itself", () => {
     const r = readParent(process.pid, false);
@@ -309,9 +304,14 @@ describe("serve-entry as a process, spawned the way dev.ts spawns it", () => {
         env: { ...process.env, BORGO_DEV: "1", PORT: String(freePort()), BORGO_PARENT_PID: String(deadPid) },
       }),
     );
-    const code = await withDeadline(proc.exited, 15_000, "the front server never noticed its parent was gone");
+    // 4.5 s under 16 burners on 8 cores, measured; past 15 s with a second
+    // set of burners and three other suites on the same machine, where the
+    // 15 s deadline went red 3/12 on both arms of an unchanged watch - always
+    // as this deadline, never as a wrong exit code. The cost is the boot of
+    // ./server, not the 2 s poll, so the budget follows the boot.
+    const code = await withDeadline(proc.exited, 40_000, "the front server never noticed its parent was gone");
     expect(code).toBe(0);
-  }, 20_000);
+  }, 50_000);
 
   test("it keeps serving under a parent that is alive", async () => {
     const proc = track(
@@ -330,9 +330,10 @@ describe("serve-entry as a process, spawned the way dev.ts spawns it", () => {
     await withDeadline(proc.exited, 10_000, "the front server never exited after kill");
   }, 20_000);
 
-  // the readings above are importable only because the boot sits behind
-  // import.meta.main. Without it this import binds a port and never returns,
-  // and the whole file - this test included - hangs instead of failing.
+  // the boot sits behind import.meta.main. Without it this import binds a port
+  // and never returns, and the importing process hangs instead of exiting. The
+  // module exports nothing now that the readings live in parent-watch.ts, and
+  // that is asserted too: an export that came back would be a copy.
   test("importing the module does not boot a server", async () => {
     const proc = track(
       Bun.spawn(
@@ -340,7 +341,7 @@ describe("serve-entry as a process, spawned the way dev.ts spawns it", () => {
           process.execPath,
           "-e",
           `const m = await import(${JSON.stringify(Bun.pathToFileURL(ENTRY).href)});
-           console.log("IMPORTED:" + typeof m.parentGone + ":" + typeof m.isCorpse);`,
+           console.log("IMPORTED:" + typeof m + ":" + Object.keys(m).length);`,
         ],
         {
           cwd: PKG_DIR,
@@ -350,13 +351,14 @@ describe("serve-entry as a process, spawned the way dev.ts spawns it", () => {
         },
       ),
     );
+    // the same boot of ./server as above, the same budget
     const out = await withDeadline(
       new Response(proc.stdout as ReadableStream).text(),
-      15_000,
+      40_000,
       "the import never returned - the boot is not behind import.meta.main",
     );
     const code = await withDeadline(proc.exited, 5_000, "the importing process never exited");
-    expect(out).toContain("IMPORTED:function:function");
+    expect(out).toContain("IMPORTED:object:0");
     expect(code).toBe(0);
-  }, 20_000);
+  }, 50_000);
 });

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { parentGone, readParent } from "./parent-watch";
 import { serve } from "./server";
 import { resolveSwitches } from "./util";
 
@@ -17,82 +17,9 @@ import { resolveSwitches } from "./util";
 const switches = resolveSwitches(process.env);
 const dev = switches.dev;
 
-// WHAT A DEAD PARENT LOOKS LIKE, AND WHAT A LIVE ONE OUT OF REACH LOOKS LIKE.
-//
-// `try { process.kill(pid, 0) } catch { exit(0) }` was wrong in BOTH directions
-// at once, and the two are opposites. Measured, not reasoned:
-//
-//   - on linux, kill(pid, 0) SUCCEEDS on a process that has exited and whose
-//     status nobody collected: a corpse keeps its pid and keeps accepting
-//     signals. Read as alive, the front server outlives the dev session that
-//     started it and holds the port forever - the orphan this watch exists to
-//     prevent. (measured on wsl2: state Z in /proc, kill 0 = OK.)
-//   - on windows, kill(pid, 0) throws EPERM for a live process this one may not
-//     open - pid 4 does it here, and so would a supervisor at a different
-//     elevation or an EDR hooking the call. Read as dead, the watch shut the
-//     user's front server down mid-session under a perfectly healthy parent.
-//
-// The rule is watchdog_unix.go's, stated from this side: uncertainty answers
-// ALIVE. Only a probe that says "no such process" is certainty of death; EPERM
-// is a live process out of reach, exactly as the go side reads EPERM and
-// ERROR_ACCESS_DENIED. The corpse is read from /proc/<pid>/stat rather than
-// inferred from a signal, and where there is no /proc the answer degrades to
-// the signal alone - which is what this file did before, so no platform gate is
-// needed to add a branch whose only effect is on the platform it works on.
-export type ParentReading = {
-  /** parentPid was this process's parent when the watch started */
-  direct: boolean;
-  ppid: number;
-  /** the code process.kill(pid, 0) threw, or null when it succeeded */
-  killError: string | null;
-  /** /proc/<pid>/stat, or null off linux and for a pid that is gone */
-  stat: string | null;
-};
-
-export function readParent(parentPid: number, direct: boolean): ParentReading {
-  let killError: string | null = null;
-  try {
-    process.kill(parentPid, 0);
-  } catch (error) {
-    killError = (error as { code?: string }).code ?? "UNKNOWN";
-  }
-  // EPERM included on purpose: a corpse keeps the credentials that refused the
-  // signal, and /proc is readable regardless of them
-  let stat: string | null = null;
-  if (killError === null || killError === "EPERM") {
-    try {
-      stat = readFileSync(`/proc/${parentPid}/stat`, "utf8");
-    } catch {}
-  }
-  return { direct, ppid: process.ppid, killError, stat };
-}
-
-export function isCorpse(stat: string | null): boolean {
-  if (!stat) return false;
-  // field 2 is the comm, in parentheses and UNESCAPED, so a process called
-  // "my prog (x)" defeats any split on whitespace or on the first ")": only the
-  // last one is certainly the closing one
-  const close = stat.lastIndexOf(")");
-  if (close < 0) return false;
-  const state = stat.slice(close + 1).trimStart().charAt(0);
-  // Z is a corpse; X and x are the moment after, while it is torn down
-  return state === "Z" || state === "X" || state === "x";
-}
-
-export function parentGone(parentPid: number, reading: ParentReading): boolean {
-  // reparenting happens at the parent's EXIT, not at its reap - measured on
-  // linux, where the child's getppid had already changed while the parent still
-  // read as Z. It is also the one answer a recycled pid cannot forge. Windows
-  // never reparents, so this branch never fires there and the probe below is
-  // the whole answer.
-  if (reading.direct && reading.ppid !== parentPid) return true;
-  if (reading.killError !== null && reading.killError !== "EPERM") return true;
-  return isCorpse(reading.stat);
-}
-
-// import.meta.main, so that the readings above can be imported and asserted
-// without this module booting a server as a side effect of the import. dev.ts
-// spawns this file as the entry point (bun <path>), where it is true.
+// import.meta.main, so that this module can be imported without booting a
+// server as a side effect of the import. dev.ts spawns this file as the entry
+// point (bun <path>), where it is true.
 if (import.meta.main) {
   // die with the watcher: a force-killed dev session delivers no signal, and an
   // orphaned front server would hold the port forever. That is measured on
