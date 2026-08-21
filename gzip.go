@@ -647,6 +647,7 @@ func (g *gzipResponseWriter) startGzip() {
 func (g *gzipResponseWriter) startPassthrough() {
 	g.passthrough = true
 	g.commitHeader()
+	g.dropLengthShorterThan(g.written)
 	g.sendHeader()
 	if len(g.buf) > 0 {
 		g.noteWrite(g.rw.Write(g.buf))
@@ -732,6 +733,26 @@ func (g *gzipResponseWriter) dropLengthUnlessItDescribes(n int64) {
 	}
 	h := g.rw.Header()
 	if declared := declaredLength(h); declared >= 0 && declared != n {
+		h.Del("Content-Length")
+	}
+}
+
+// dropLengthShorterThan is the same rule at a commit the body has not finished
+// - the buffer overflowing, a Flush - where more bytes may follow, so only a
+// length the n bytes already written have outgrown is provably wrong. It was
+// declared out of reach "because the commit has already gone": measured, the
+// header leaves in sendHeader, after this, and the identity client above the
+// buffer got zero bytes under a length its body had already passed.
+//
+// No bodyless guard: a HEAD, 204 or 304 commits at WriteHeader or at a Flush
+// before any Write, with n zero, so nothing here can reach it.
+//
+// After commitHeader, not before: the commit clears the live header and restores
+// the WriteHeader snapshot, which undid a deletion made ahead of it, and it folds
+// every spelling onto the canonical key, the one h.Del reaches.
+func (g *gzipResponseWriter) dropLengthShorterThan(n int64) {
+	h := g.rw.Header()
+	if declared := declaredLength(h); declared >= 0 && declared < n {
 		h.Del("Content-Length")
 	}
 }

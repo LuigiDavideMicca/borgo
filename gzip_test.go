@@ -2557,3 +2557,95 @@ func TestGzipFoldingAFieldKeepsEveryValue(t *testing.T) {
 		})
 	}
 }
+
+// A LENGTH THE BODY HAD ALREADY OUTGROWN WENT OUT AT THE MID-BODY COMMIT.
+//
+// 31d37b7 dropped a Content-Length that does not describe the bytes about to
+// go out, but only in finish, and declared the identity path above the buffer
+// out of reach "because the commit has already gone". Measured, it had not:
+// the Write that overflows the buffer runs commitHeader and only then
+// sendHeader, with the whole body so far in hand. So a handler declaring 99 and
+// writing 4096 had its length shipped and net/http then refused the write
+// whole - status 200, zero bytes, unexpected EOF - where the same handler bare,
+// under a lowercase key, was delivered whole by chunking (a frame RFC 9112 6.2
+// forbids a sender to emit, and one that borgo made visible in 29428b1). Below
+// the buffer the same handler already got its body. The threshold decided.
+//
+// A mid-body commit does not know the final size, so only a length the body
+// has already passed is dropped: "correct in two writes" and "exact" are the
+// rows that keep the rule at "smaller than", not "different from" - a served
+// file that declares its size and writes it in pieces must keep it. "Too long"
+// is the declared limit that is real: at the commit the length is not yet
+// wrong, and past it the header has gone; the client stalls as under stock
+// net/http, and the log still names the handler.
+func TestGzipDropsALengthTheBodyOutgrewBeforeTheCommit(t *testing.T) {
+	const size = gzipMinBytes * 4
+	rows := []struct {
+		name       string
+		declared   int
+		write      func(w http.ResponseWriter, body []byte)
+		wantLength string // the Content-Length line an identity client sees, "" for none
+		wantBytes  int
+		wantEOF    bool // net/http's own outcome for a length still in force, matched not undone
+	}{
+		{"too short, one write", 99, func(w http.ResponseWriter, b []byte) {
+			w.Write(b)
+		}, "", size, false},
+		{"too short, committed by Flush below the buffer", 99, func(w http.ResponseWriter, b []byte) {
+			w.Write(b[:gzipMinBytes/2])
+			w.(http.Flusher).Flush()
+			w.Write(b[gzipMinBytes/2:])
+		}, "", size, false},
+		// larger than the buffer, smaller than the body: the count that decides
+		// is what the handler wrote, not what the buffer holds
+		{"too short, past the buffer", gzipMinBytes * 2, func(w http.ResponseWriter, b []byte) {
+			w.Write(b)
+		}, "", size, false},
+		{"exact", size, func(w http.ResponseWriter, b []byte) {
+			w.Write(b)
+		}, strconv.Itoa(size), size, false},
+		{"correct in two writes", 2 * size, func(w http.ResponseWriter, b []byte) {
+			w.Write(b)
+			w.Write(b)
+		}, strconv.Itoa(2 * size), 2 * size, false},
+		{"too long", 2 * size, func(w http.ResponseWriter, b []byte) {
+			w.Write(b)
+		}, strconv.Itoa(2 * size), size, true},
+	}
+	for _, row := range rows {
+		for _, key := range []string{"Content-Length", "content-length"} {
+			for _, ae := range []string{"identity", "gzip"} {
+				t.Run(fmt.Sprintf("%s/%s/%s", row.name, key, ae), func(t *testing.T) {
+					body := bytes.Repeat([]byte("x"), size)
+					handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header()[key] = []string{strconv.Itoa(row.declared)}
+						row.write(w, body)
+					}))
+					status, got, err := clientReads(t, ae, handler)
+					if status != http.StatusOK {
+						t.Errorf("status = %d, want 200", status)
+					}
+					if len(got) != row.wantBytes {
+						t.Errorf("the client read %d bytes, want %d", len(got), row.wantBytes)
+					}
+					wantEOF := row.wantEOF && ae == "identity"
+					if (err != nil) != wantEOF {
+						t.Errorf("client error = %v, want error: %v", err, wantEOF)
+					}
+					if ae != "identity" {
+						return
+					}
+					_, _, wire := serveAndDiagnose(t, ae, handler)
+					head, _, _ := strings.Cut(wire, "\r\n\r\n")
+					lines := wireContentLengths(head)
+					if row.wantLength == "" && len(lines) != 0 {
+						t.Errorf("Content-Length %q reached the wire over a body that had already outgrown it", lines)
+					}
+					if row.wantLength != "" && (len(lines) != 1 || lines[0] != row.wantLength) {
+						t.Errorf("Content-Length lines %q, want [%q]", lines, row.wantLength)
+					}
+				})
+			}
+		}
+	}
+}
