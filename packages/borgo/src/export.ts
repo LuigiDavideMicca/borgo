@@ -5,7 +5,7 @@
 // `export const prerenderPaths` returning the param sets.
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:net";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
 import { buildAssets, reportBuildFailure } from "./build";
@@ -202,10 +202,34 @@ export async function freePorts(count: number): Promise<number[]> {
   return ports;
 }
 
-// what serveAsset would answer 200 to, through its own predicate: a dotfile
-// borgo start refuses must not reach dist/site either, or the 404 masks the
-// exposure. On the file, never on a directory: public/.well-known/ goes whole.
-export const isExportedFile = (path: string): boolean => !isHiddenAsset(path);
+// The same rule as server.ts's inHiddenDirectory, spelled twice on purpose:
+// server.ts resolves react at module scope, so importing it here would make
+// `borgo export` depend on the app's node_modules before it has read a route.
+// export.test.ts holds the two against one corpus. A dot-directory in any
+// segment refuses, except .well-known as the FIRST segment, exact: rfc 8615
+// defines it at the root only.
+export function inHiddenDirectory(urlPath: string): boolean {
+  const segments = urlPath.split("/");
+  for (let i = 1; i < segments.length - 1; i++) {
+    const s = segments[i];
+    if (s.startsWith(".") && !(i === 1 && s === ".well-known")) return true;
+  }
+  return false;
+}
+
+// what serveAsset would answer 200 to, through the same two predicates: a
+// dotfile or a dot-directory borgo start refuses must not reach dist/site
+// either, or the 404 masks the exposure. `rel` is the path under public/, as
+// the url names it.
+export const isExportedFile = (rel: string): boolean => {
+  const url = `/${rel.replaceAll("\\", "/")}`;
+  return !isHiddenAsset(url) && !inHiddenDirectory(url);
+};
+
+// a directory is judged as the prefix it will be: `.git` refused whole, so
+// nothing under it is even visited; `.well-known` at the root goes through
+const isExportedDirectory = (rel: string): boolean =>
+  rel === "" || !inHiddenDirectory(`/${rel.replaceAll("\\", "/")}/`);
 
 const isDirectory = (path: string): boolean => {
   try {
@@ -216,7 +240,13 @@ const isDirectory = (path: string): boolean => {
 };
 
 export function copyPublic(src: string, dest: string): void {
-  cpSync(src, dest, { recursive: true, filter: (path) => isDirectory(path) || isExportedFile(path) });
+  cpSync(src, dest, {
+    recursive: true,
+    filter: (path) => {
+      const rel = relative(src, path);
+      return isDirectory(path) ? isExportedDirectory(rel) : isExportedFile(rel);
+    },
+  });
 }
 
 // a file plus its .gz/.br siblings is one asset; an orphan .gz/.br with no
@@ -226,7 +256,9 @@ export function countAssets(dir: string): { assets: number; precompressed: numbe
   let precompressed = 0;
   const files = new Set<string>();
   for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
-    if (entry.isFile() && isExportedFile(entry.name)) files.add(join(entry.parentPath, entry.name));
+    if (!entry.isFile()) continue;
+    const file = join(entry.parentPath, entry.name);
+    if (isExportedFile(relative(dir, file))) files.add(file);
   }
   for (const file of files) {
     const m = file.match(/\.(gz|br)$/);

@@ -17,6 +17,8 @@ import {
   exportSummary,
   fillPattern,
   freePorts,
+  inHiddenDirectory,
+  isExportedFile,
   markStaticExport,
   outputPath,
   planExport,
@@ -676,19 +678,80 @@ describe("an export ships what serveAsset would serve, and nothing else", () => 
     }
   });
 
-  test("a hidden directory that is not .well-known is left to serveAsset's rule", () => {
-    // declared, not desired: public/.git/config is served by borgo start
-    // today, so the export ships it too. Refusing it needs the url root, which
-    // is decided where the url is accepted; when that closes, this flips.
-    const { root, src, dest } = fixture();
+  // d819038 closed the dot-directory on borgo start, so an export that still
+  // shipped public/.git/config would be the masking the other way round: a
+  // 404 on the server, the file on the static host
+  const HIDDEN_DIRS = [".git/config", ".git/HEAD", ".svn/entries", "assets/.cache/x.js", "x/.well-known/y"];
+  const nested = () => {
+    const f = fixture();
+    for (const p of HIDDEN_DIRS) {
+      mkdirSync(join(f.src, p, ".."), { recursive: true });
+      writeFileSync(join(f.src, p), "x");
+    }
+    return f;
+  };
+
+  test("a dot-directory stays behind, and a nested .well-known is not the root's", () => {
+    const { root, src, dest } = nested();
     try {
-      mkdirSync(join(src, ".git"));
-      writeFileSync(join(src, ".git/config"), "x");
       copyPublic(src, dest);
-      expect(existsSync(join(dest, ".git/config"))).toBe(true);
+      expect(filesUnder(dest)).toEqual([...SHOWN].sort());
+      for (const p of HIDDEN_DIRS) expect(`${p}: ${existsSync(join(dest, p))}`).toBe(`${p}: false`);
+      // the directory itself is not created empty either
+      expect(existsSync(join(dest, ".git"))).toBe(false);
+      expect(existsSync(join(dest, "x/.well-known"))).toBe(false);
+      expect(existsSync(join(dest, ".well-known/security.txt"))).toBe(true);
+      expect(countAssets(src)).toEqual(countAssets(dest));
+      expect(countAssets(src)).toEqual({ assets: 4, precompressed: 2 });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("isExportedFile judges the path under public/ in either separator", () => {
+    for (const p of [".git/config", ".git\\config", "x/.well-known/y", ".well-known/.DS_Store", "assets/.cache/x.js"]) {
+      expect(`${p}: ${isExportedFile(p)}`).toBe(`${p}: false`);
+    }
+    for (const p of [".well-known/security.txt", ".well-known\\acme-challenge\\token", "assets/client.js"]) {
+      expect(`${p}: ${isExportedFile(p)}`).toBe(`${p}: true`);
+    }
+  });
+
+  // spelled twice because server.ts resolves react at module scope and an
+  // export must not depend on it before it has read a route; this is what
+  // keeps the two spellings one rule
+  test("the dot-directory rule is server.ts's, verbatim", async () => {
+    const cwd = process.cwd();
+    process.chdir(join(import.meta.dir, ".."));
+    const server = await import("../src/server");
+    process.chdir(cwd);
+    const corpus = [
+      "/.well-known/security.txt",
+      "/.well-known/acme-challenge/tok3n",
+      "/.well-known/deep/er/file",
+      "/.well-known/",
+      "/.git/config",
+      "/.git/",
+      "/.svn/entries",
+      "/assets/.cache/x.js",
+      "/a/b/.env.d/x",
+      "/x/.well-known/y.txt",
+      "/x/.well-known/",
+      "/.git/.well-known/y",
+      "/.WELL-KNOWN/security.txt",
+      "/.well-known.bak/x",
+      "//.git/config",
+      "/./.git/config",
+      "/logo.svg",
+      "/assets/client.js",
+      "/",
+    ];
+    const mine = corpus.map((u) => `${u}: ${inHiddenDirectory(u)}`);
+    const theirs = corpus.map((u) => `${u}: ${server.inHiddenDirectory(u)}`);
+    expect(mine).toEqual(theirs);
+    expect(mine).toContain("/.git/config: true");
+    expect(mine).toContain("/x/.well-known/y.txt: true");
+    expect(mine).toContain("/.well-known/security.txt: false");
   });
 
   const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
@@ -703,7 +766,7 @@ describe("an export ships what serveAsset would serve, and nothing else", () => 
         writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "dotfiles-scratch", private: true }));
         writeFileSync(join(dir, "style.scss"), "body { color: #3d2f24; }\n");
         writeFileSync(join(dir, "pages/index.tsx"), "export default () => <h1>dotfiles</h1>;\n");
-        for (const f of [...HIDDEN, ...SHOWN]) {
+        for (const f of [...HIDDEN, ...HIDDEN_DIRS, ...SHOWN]) {
           mkdirSync(join(dir, "public", f, ".."), { recursive: true });
           writeFileSync(join(dir, "public", f), "x");
         }
@@ -717,7 +780,8 @@ describe("an export ships what serveAsset would serve, and nothing else", () => 
         expect(run.exitCode).toBe(0);
         const site = join(dir, "dist/site");
         const shipped = filesUnder(site);
-        for (const f of HIDDEN) expect(shipped).not.toContain(f);
+        for (const f of [...HIDDEN, ...HIDDEN_DIRS]) expect(shipped).not.toContain(f);
+        expect(existsSync(join(site, ".git"))).toBe(false);
         expect(shipped).toContain(".well-known/security.txt");
         expect(shipped).toContain(".well-known/acme-challenge/token");
         expect(shipped).toContain("logo.svg");
