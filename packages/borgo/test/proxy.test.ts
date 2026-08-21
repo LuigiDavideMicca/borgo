@@ -261,28 +261,34 @@ describe("proxyRequest: the header deadline", () => {
     expect(performance.now() - t0).toBeLessThan(2000);
   });
 
+  // the attempt has to sit well inside the deadline and three of them well
+  // outside it; at 20 against 60 a sleep stretched past 60 by the machine read
+  // as a shared deadline (1/5 under 16 burners on 8 cores, 504 for 200)
+  const ATTEMPT_MS = 400;
+  const OWN_DEADLINE_MS = 1000;
+
   test("each retry gets its own deadline, and a slow success is not timed out", async () => {
     let calls = 0;
     const res = await proxyRequest(
       req(),
       opts({
-        deadlineMs: 60,
+        deadlineMs: OWN_DEADLINE_MS,
         retries: 3,
         fetchImpl: async () => {
           if (++calls < 3) {
-            await Bun.sleep(20);
+            await Bun.sleep(ATTEMPT_MS);
             throw refused();
           }
-          await Bun.sleep(20);
+          await Bun.sleep(ATTEMPT_MS);
           return new Response("ok");
         },
       }),
     );
-    // three attempts, 60ms of waiting in total: a deadline shared across the
-    // loop would have fired on the last one
+    // three attempts, 1200ms of waiting in total: a deadline shared across
+    // the loop would have fired on the last one
     expect(res.status).toBe(200);
     expect(calls).toBe(3);
-  });
+  }, 15_000);
 
   test("deadlineMs: 0 disables the deadline entirely", async () => {
     let signal: AbortSignal | null | undefined;
@@ -704,6 +710,14 @@ describe("proxyRequest: over a real socket", () => {
     const server = Bun.serve({ port: 0, fetch: handler });
     return { url: `http://localhost:${server.port}`, stop: () => server.stop(true) };
   };
+  // A real round trip, so the 50ms default is a budget the machine sets, not a
+  // property under test: measured 5/5 red under 16 burners on 8 cores, every
+  // one a 504 where a 200 or 502 was asserted. The tests that assert ON the
+  // deadline pass their own; these take a wide one, and declare a budget above
+  // bun's 5s so that it is the deadline that decides and not bun.
+  const LIVE_DEADLINE_MS = 10_000;
+  const LIVE_BUDGET_MS = 30_000;
+  const live = (over: Partial<ProxyOptions> = {}) => opts({ deadlineMs: LIVE_DEADLINE_MS, ...over });
 
   test("a buffered body arrives whole, with an honest content-length", async () => {
     let seen: { len: string | null; body: string } | undefined;
@@ -717,12 +731,12 @@ describe("proxyRequest: over a real socket", () => {
         headers: { "content-length": "11", "content-type": "text/plain" },
         body: "hello world",
       }),
-      opts({ target: `${up.url}/api/x` }),
+      live({ target: `${up.url}/api/x` }),
     );
     expect(res.status).toBe(200);
     expect(seen).toEqual({ len: "11", body: "hello world" });
     up.stop();
-  });
+  }, LIVE_BUDGET_MS);
 
   test("a streamed body arrives whole too, framed by bun and not by the client", async () => {
     let seen: { len: string | null; te: string | null; body: string } | undefined;
@@ -733,13 +747,13 @@ describe("proxyRequest: over a real socket", () => {
     const payload = "x".repeat(70_000);
     await proxyRequest(
       new Request("http://app.test/api/x", { method: "POST", body: payload }),
-      opts({ target: `${up.url}/api/x` }),
+      live({ target: `${up.url}/api/x` }),
     );
     expect(seen!.body).toBe(payload);
     // the client's own framing never reaches go; bun writes its own
     expect(seen!.te === "chunked" || seen!.len === String(payload.length)).toBe(true);
     up.stop();
-  });
+  }, LIVE_BUDGET_MS);
 
   test("a real refused connection retries and then answers 502", async () => {
     // bind and release a port, so nothing is listening on it
@@ -750,7 +764,7 @@ describe("proxyRequest: over a real socket", () => {
     let slept = 0;
     const res = await proxyRequest(
       req(),
-      opts({
+      live({
         target: `http://localhost:${port}/api/x`,
         retries: 2,
         sleep: async () => void slept++,
@@ -759,7 +773,7 @@ describe("proxyRequest: over a real socket", () => {
     expect(res.status).toBe(502);
     expect(await res.text()).toBe("api unreachable");
     expect(slept).toBe(2);
-  });
+  }, LIVE_BUDGET_MS);
 
   test("a real hung upstream is cut at the deadline", async () => {
     const up = await upstream(() => new Promise<Response>(() => {}));
@@ -778,19 +792,42 @@ describe("proxyRequest: over a real socket", () => {
     );
     const front = Bun.serve({
       port: 0,
-      fetch: (r) => proxyRequest(r, opts({ target: `${up.url}/api/x` })),
+      fetch: (r) => proxyRequest(r, live({ target: `${up.url}/api/x` })),
     });
+    // read to the end of the answer, not for a fixed 120ms: under load that
+    // window closed on an empty buffer (measured 5/5, Received: "")
     const wire = async (connection: string) => {
       const chunks: Uint8Array[] = [];
+      let settle = () => {};
+      const whole = () => {
+        const text = Buffer.concat(chunks).toString("latin1");
+        const split = text.indexOf("\r\n\r\n");
+        if (split < 0) return false;
+        const declared = /content-length:\s*(\d+)/i.exec(text.slice(0, split));
+        return declared !== null && text.length - split - 4 >= Number(declared[1]);
+      };
       const sock = await Bun.connect({
         hostname: "127.0.0.1",
         port: Number(front.port),
-        socket: { data: (_s, d) => void chunks.push(d) },
+        socket: {
+          data: (_s, d) => {
+            chunks.push(d);
+            if (whole()) settle();
+          },
+          close: () => settle(),
+        },
       });
       sock.write(
         `GET /api/x HTTP/1.1\r\nHost: app.test\r\nConnection: ${connection}\r\nX-Api-Key: k\r\n\r\n`,
       );
-      await Bun.sleep(120);
+      await new Promise<void>((resolve) => {
+        const cap = setTimeout(resolve, LIVE_DEADLINE_MS);
+        settle = () => {
+          clearTimeout(cap);
+          resolve();
+        };
+        if (whole()) settle();
+      });
       sock.end();
       return Buffer.concat(chunks).toString("latin1");
     };
@@ -808,7 +845,7 @@ describe("proxyRequest: over a real socket", () => {
     }
     front.stop(true);
     up.stop();
-  });
+  }, LIVE_BUDGET_MS);
 });
 
 describe("proxyRequest: event streams", () => {

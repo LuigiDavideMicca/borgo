@@ -100,8 +100,10 @@ function validator(envVar: string, exe: string): { path: string } | { skip: stri
 // antivirus scans a 49 MB unsigned exe on every launch, and docker's client
 // waits on a daemon that may not be up. Every test below that shells out to a
 // real tool gets this instead - a timeout that fires here is the tool being
-// missing or wedged, never the config being wrong.
-const EXTERNAL_TOOL_TIMEOUT = 120_000;
+// missing or wedged, never the config being wrong. Measured under 16 burners
+// on 8 cores: `docker compose config` 24-74s when it finished, and past 120s
+// twice in five whole-file runs; systemd-analyze through wsl 18-27s.
+const EXTERNAL_TOOL_TIMEOUT = 300_000;
 
 // stdout kept apart from stderr: caddy logs to stderr even when it succeeds,
 // and `caddy adapt`'s stdout is json that must parse on its own
@@ -493,7 +495,9 @@ describe("no generated file carries a key", () => {
         }
       }
     }
-  });
+    // 24 scaffolds through every target is disk work priced by the machine:
+    // 0.4s idle, 3-12s under 16 burners on 8 cores, past bun's default 5s
+  }, 30_000);
 
   // the key still has to come from somewhere for an app that has none: it is
   // offered on the terminal, which is not a file anything commits
@@ -838,7 +842,9 @@ describe("across every scaffold deploy init can meet", () => {
       // and nginx gives away no version
       expect(files["site.conf"]).toContain("server_tokens off;");
     }
-  });
+    // the same 24 scaffolds as above, the same disk price: 6.5-7.6s under 16
+    // burners on 8 cores, past bun's default 5s
+  }, 30_000);
 
   test("every unit is hardened and every compose is probed", () => {
     for (const spec of MATRIX) {
@@ -849,7 +855,7 @@ describe("across every scaffold deploy init can meet", () => {
       const parsed = Bun.YAML.parse(files["docker-compose.yml"]) as { services: { app: { healthcheck?: unknown } } };
       expect(parsed.services.app.healthcheck).toBeDefined();
     }
-  });
+  }, 30_000);
 });
 
 // AN EXAMPLE CONFIG NEVER CONTACTS AN OUTSIDE SERVICE IN THE NAME OF WHOEVER
