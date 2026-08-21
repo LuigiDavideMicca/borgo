@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
 import { buildAssets, reportBuildFailure } from "./build";
 import { banner, c, fmtMs, g } from "./colors";
-import { isHiddenAsset } from "./compress";
+import { inHiddenDirectory, isHiddenAsset } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD } from "./index";
 import type { Route } from "./router";
 import { goBinName, runBorgogen } from "./util";
@@ -200,21 +200,6 @@ export async function freePorts(count: number): Promise<number[]> {
   const ports = servers.map((s) => (s.address() as { port: number }).port);
   await Promise.all(servers.map((s) => new Promise((done) => s.close(done))));
   return ports;
-}
-
-// The same rule as server.ts's inHiddenDirectory, spelled twice on purpose:
-// server.ts resolves react at module scope, so importing it here would make
-// `borgo export` depend on the app's node_modules before it has read a route.
-// export.test.ts holds the two against one corpus. A dot-directory in any
-// segment refuses, except .well-known as the FIRST segment, exact: rfc 8615
-// defines it at the root only.
-export function inHiddenDirectory(urlPath: string): boolean {
-  const segments = urlPath.split("/");
-  for (let i = 1; i < segments.length - 1; i++) {
-    const s = segments[i];
-    if (s.startsWith(".") && !(i === 1 && s === ".well-known")) return true;
-  }
-  return false;
 }
 
 // what serveAsset would answer 200 to, through the same two predicates: a

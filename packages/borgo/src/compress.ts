@@ -29,6 +29,28 @@ export const isCompressiblePath = (path: string) => compressibleRe.test(path);
 export const isHiddenAsset = (path: string): boolean =>
   path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1).startsWith(".");
 
+/**
+ * The other half: a dot-directory anywhere above the file, judged against the
+ * url's root, which the caller passes. server.ts refuses with it before both
+ * roads and export.ts before copying public/; it lives here, in the one module
+ * both already import, so `borgo export` does not resolve react to get it.
+ *
+ * .well-known is exempt as the FIRST segment only. rfc 8615 defines a
+ * well-known uri as one whose path begins with /.well-known/, so a nested one
+ * is not the standard's; and it is exact, not folded, because the rfc's paths
+ * are case-sensitive and every acme client writes it lower-case. The renewal
+ * that fails is an expired certificate, which is the worse direction, so the
+ * root tree is asserted to pass before anything is asserted to fail.
+ */
+export function inHiddenDirectory(urlPath: string): boolean {
+  const segments = urlPath.split("/");
+  for (let i = 1; i < segments.length - 1; i++) {
+    const s = segments[i];
+    if (s.startsWith(".") && !(i === 1 && s === ".well-known")) return true;
+  }
+  return false;
+}
+
 // What a build vouched for: where it wrote, and the byte length of each output
 // whose name carries its own content hash. A list rather than a pattern - see
 // readBuildOutputs in build.ts for the measurement that killed the pattern -

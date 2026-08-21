@@ -17,7 +17,6 @@ import {
   exportSummary,
   fillPattern,
   freePorts,
-  inHiddenDirectory,
   isExportedFile,
   markStaticExport,
   outputPath,
@@ -26,6 +25,7 @@ import {
   requestResidue,
   unsafeParamReason,
 } from "../src/export";
+import { inHiddenDirectory } from "../src/compress";
 import { CSRF_FIELD } from "../src/index";
 import { createSecurity } from "../src/util";
 import { buildDefine } from "../src/build";
@@ -717,14 +717,14 @@ describe("an export ships what serveAsset would serve, and nothing else", () => 
     }
   });
 
-  // spelled twice because server.ts resolves react at module scope and an
-  // export must not depend on it before it has read a route; this is what
-  // keeps the two spellings one rule
-  test("the dot-directory rule is server.ts's, verbatim", async () => {
-    const cwd = process.cwd();
-    process.chdir(join(import.meta.dir, ".."));
-    const server = await import("../src/server");
-    process.chdir(cwd);
+  // one rule, one home: compress.ts, which neither resolves react nor needs the
+  // app's node_modules. neither caller may grow its own spelling back.
+  test("the dot-directory rule has one home, and both callers import it", async () => {
+    for (const f of ["server.ts", "export.ts"]) {
+      const source = await Bun.file(join(import.meta.dir, `../src/${f}`)).text();
+      expect(`${f}: ${source.includes("function inHiddenDirectory")}`).toBe(`${f}: false`);
+      expect(source).toMatch(/import \{[^}]*\binHiddenDirectory\b[^}]*\} from "\.\/compress"/);
+    }
     const corpus = [
       "/.well-known/security.txt",
       "/.well-known/acme-challenge/tok3n",
@@ -747,9 +747,9 @@ describe("an export ships what serveAsset would serve, and nothing else", () => 
       "/",
     ];
     const mine = corpus.map((u) => `${u}: ${inHiddenDirectory(u)}`);
-    const theirs = corpus.map((u) => `${u}: ${server.inHiddenDirectory(u)}`);
-    expect(mine).toEqual(theirs);
     expect(mine).toContain("/.git/config: true");
+    expect(isExportedFile(".git/config")).toBe(false);
+    expect(isExportedFile(".well-known/security.txt")).toBe(true);
     expect(mine).toContain("/x/.well-known/y.txt: true");
     expect(mine).toContain("/.well-known/security.txt: false");
   });

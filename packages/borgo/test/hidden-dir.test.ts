@@ -1,18 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
-// server.ts resolves react from process.cwd() at module scope; same dance as
-// local-path.test.ts, restored at once
-const cwd = process.cwd();
-process.chdir(join(import.meta.dir, ".."));
-const { inHiddenDirectory } = await import("../src/server");
-process.chdir(cwd);
+import { inHiddenDirectory } from "../src/compress";
 
 /**
  * WHICH URLS A DOT-DIRECTORY REFUSES, AND THE ONE IT MUST NOT.
  *
- * compress.ts refuses a hidden LAST segment and says so: a hidden directory
- * above it needs the url's root, which only the server has. Measured before
+ * isHiddenAsset refuses a hidden LAST segment; this is the other half, a
+ * directory above it, judged against the url's root the caller passes. Measured before
  * this on borgo's own front server, public/.git/config and public/.svn/entries
  * answered 200 on both roads - the boot index and the live fallback.
  *

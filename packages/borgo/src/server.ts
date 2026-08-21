@@ -16,6 +16,7 @@ import { banner, c, fmtMs, g, statusColor } from "./colors";
 import {
   buildAssetIndex,
   findAsset,
+  inHiddenDirectory,
   jsonResponse,
   serveAsset,
   serveIndexed,
@@ -326,31 +327,6 @@ function replaceRoots(
   if (!hit) return null;
   pieces.push(buf.subarray(from));
   return Buffer.concat(pieces);
-}
-
-/**
- * A DOT-DIRECTORY ANYWHERE ABOVE THE FILE, WHICH compress.ts CANNOT SEE.
- *
- * isHiddenAsset refuses a hidden last segment and declares the other half:
- * public/.git/config stayed servable, because a directory can only be judged
- * against the url's root, and the root is known here. Measured on borgo's own
- * front server before this: /.git/config and /.svn/entries answered 200 on
- * both roads, the boot index and the live fallback.
- *
- * .well-known is exempt as the FIRST segment only. rfc 8615 defines a
- * well-known uri as one whose path begins with /.well-known/, so a nested one
- * is not the standard's; and it is exact, not folded, because the rfc's paths
- * are case-sensitive and every acme client writes it lower-case. The renewal
- * that fails is an expired certificate, which is the worse direction, so the
- * root tree is asserted to pass before anything is asserted to fail.
- */
-export function inHiddenDirectory(assetPath: string): boolean {
-  const segments = assetPath.split("/");
-  for (let i = 1; i < segments.length - 1; i++) {
-    const s = segments[i];
-    if (s.startsWith(".") && !(i === 1 && s === ".well-known")) return true;
-  }
-  return false;
 }
 
 // each topic is a subscription table entry held for the life of the socket:
