@@ -30,8 +30,12 @@ Every question has a flag, so nothing has to be answered interactively. Every *o
 | git | `--git` / `--no-git` | yes | yes |
 | docker | `--docker` / `--no-docker` | yes | yes |
 | vscode | `--vscode` / `--no-vscode` | yes | yes |
+| install | `--install` / `--no-install` | yes | no |
+| start | `--start` / `--no-start` | yes | no |
 
-`--yes` (`-y`) takes every default without asking a thing.
+`--yes` (`-y`) takes every default without asking a thing — in a terminal that includes installing and starting.
+
+- **install** and **start** — one question in the prompt, two flags. Both default to on in a terminal and off anywhere else, so a scaffold step in CI exits on its own. `--install` runs `bun install` and `go mod tidy`; `--start` implies `--install` and then blocks on `bun run dev`, in a script too — it is a request for a server, and it gets one. `--no-install` also answers start: without dependencies there is nothing to start, so the manual steps are printed instead.
 
 - **tailwind** — the scaffold arrives wired for Tailwind v4: the deps, a `style.css`, and the `--tailwind` flag appended to the three scripts that build CSS — `dev`, `build` and `start`. `doctor` does not take it and does not get it.
 - **linter** — `biome` writes `biome.json`; `eslint` writes a flat `eslint.config.js` plus `.prettierrc`. Either way you get the same two scripts, `bun run lint` and `bun run format`, and a fresh scaffold passes its own lint.
