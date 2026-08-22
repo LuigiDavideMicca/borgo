@@ -21,6 +21,8 @@ Every process borgo starts watches the one that started it and exits with it. Ki
 
 This is not a nicety. Before it existed, a force-killed session left an API process holding `.borgo/api.exe`, and the next `borgo dev` could not swap the binary in; you had to find the orphan in the task manager. If you see that symptom now, `borgo doctor` names the process for you.
 
+One gap is known and left open on purpose. On Windows, `borgo dev` watches its own launcher — the shell you typed into, which borgo did not start — by pid alone, and Windows reuses pids. If that shell dies and the number is handed to another process within one poll, the watch keeps waiting on a stranger. Measured, a freed pid comes back after 740 spawns at the soonest while one poll window sees about 180, so it takes a machine spawning several hundred processes a second to reach. Closing it means reading the launcher's creation time through a native call, and a wrong answer there kills a healthy dev session — the opposite direction, and the more expensive one. Until the margin is shown to shrink in practice, the gap stays. Every process borgo itself starts is unaffected: those sit in a job object that takes them down with their parent.
+
 ## Styling
 
 The default pipeline compiles the single root `style.scss` into `public/assets/style.css` — expanded in dev, compressed in production. Plain CSS is valid SCSS, so you do not need to know Sass to use it.
