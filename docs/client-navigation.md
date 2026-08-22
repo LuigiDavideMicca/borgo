@@ -72,5 +72,7 @@ Every failure mode falls back to something that works rather than to a broken pa
 | A redirect chain exceeds ten hops | full navigation, rather than looping forever |
 | A redirect with a `javascript:` or `data:` scheme | refused; a navigation falls back to a full load of the link target, a form submit reloads |
 | The server answers a submit with something unparseable | reload, so the page reflects whatever the mutation did |
+| A submit is refused with `413` before the action ran (`BORGO_MAX_BODY`, or a proxy's body limit) | **no reload** — the form keeps what was typed and an overlay says nothing was saved and why; see [form actions](pages-and-routing.md#form-actions) |
+| A submit gets `403` (stale CSRF token) or `405` (no action on that page) | native resubmit, so the browser shows the real error |
 
-The runtime never leaves a mutation in an unknown state silently: if it cannot interpret the answer, it goes and asks the server again.
+The runtime never leaves a mutation in an unknown state silently: if it cannot interpret the answer, it goes and asks the server again. The one deliberate exception is the `413`: there the server has already said that nothing ran, and a reload would only destroy the draft.

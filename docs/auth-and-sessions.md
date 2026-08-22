@@ -6,7 +6,7 @@ The complete flow — register, login, protected page, logout — is wired in `e
 
 ## Sessions
 
-Sessions are a JSON payload HMAC-signed with `SESSION_SECRET`, stored in an http-only cookie — no server-side storage, expiry signed in (set `SESSION_SECURE=1` behind https):
+Sessions are a JSON payload HMAC-signed with `SESSION_SECRET`, stored in an http-only cookie — no server-side storage, expiry signed in. Behind https set `SESSION_SECURE=1` (or `true`; the grammar is Go's `strconv.ParseBool`, case-sensitive, and a value it cannot read — `yes`, `on` — stops the boot rather than issuing an insecure cookie):
 
 ```go no-check
 type Session struct{ User string `json:"user"` }
@@ -184,4 +184,4 @@ The trade that buys: no session store, no lookup per request, and a server that 
 
 ## Caching
 
-Not auth, but usually decided together: `borgo.Cache(w, 5*time.Minute)` for anything public, `borgo.NoCache(w)` for anything personalized — see [caching in the deploy guide](deploy.md#caching). Call `Cache` *after* anything that sets a cookie: it downgrades itself to `private` when it sees one, and it cannot see a cookie that has not been set yet.
+Not auth, but usually decided together: `borgo.Cache(w, 5*time.Minute)` for anything public, `borgo.NoCache(w)` for anything personalized — see [caching in the deploy guide](deploy.md#caching). A response that carries `Set-Cookie` is made `private` whichever order the handler calls the two in: `Cache` checks for a cookie as it runs, and `SetSession`/`ClearSession` run the same guard, as does the middleware `borgo.Serve` installs when the headers commit. The order only matters on a mux borgo does not own — wrap it in `borgo.Middleware` and the guarantee comes with it.

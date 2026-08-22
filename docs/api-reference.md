@@ -27,6 +27,8 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `Handle(pattern string, h http.HandlerFunc)` | Registers a handler under a `"METHOD /path"` pattern. Panics on a malformed pattern, a nil handler, a duplicate, or a call after `Serve`. | stable |
 | `Serve()` | Mounts every registered route, adds `GET /healthz` unless an app route claims it, listens on `API_PORT`, handles signals and graceful shutdown. Blocks, and calls `log.Fatal` if the listener fails. | stable |
 | `ServeContext(ctx) error` | The same server, ended by cancelling `ctx` and returning the error instead of exiting. For embedding in a larger program, and for tests. | stable |
+| `Middleware(h http.Handler) http.Handler` | The chain `Serve` installs around its own routes — panic recovery, gzip, and the guard that makes a response carrying `Set-Cookie` say `Cache-Control: private` as its headers commit. For an app mounting borgo handlers on a mux of its own; `Serve` is defined in terms of it. | stable |
+| `CheckEnv() error` | The startup validation `Serve` and `ServeContext` run: `BORGO_HASH_SLOTS`, `SESSION_SECURE`, the push variables, and `SESSION_SECRET` length. For an embedder that never calls either and still wants a typo to fail at boot rather than on the first request. | stable |
 | `Version` | The released version this binary was built from, kept honest by a test that reads the release manifest. | stable |
 
 `Serve` was provisional in 0.20 only in its *shape*: returning nothing and calling `log.Fatal` made it impossible to embed or to exercise from a test. 0.21 added `ServeContext` beside it rather than changing it, so both are stable and `Serve` stays the one you want when the process exists to be the server.
@@ -83,7 +85,9 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `SSEStream` | One open SSE response. | stable |
 | `(*SSEStream).Send(event string, data any) error` | Writes one named event with a JSON payload. Rejects newlines in the event name. | stable |
 | `(*SSEStream).Ping() error` | Writes a comment line so proxies do not close an idle stream. | stable |
-| `(*SSEStream).Done() <-chan struct{}` | Closes on client disconnect or server shutdown. A stream handler must return when it fires. | stable |
+| `(*SSEStream).Done() <-chan struct{}` | Closes on client disconnect, server shutdown, or `Close`. A stream handler must return when it fires. | stable |
+| `(*SSEStream).Close()` | Ends the stream from the handler's side: fires `Done` and refuses every later `Send` and `Ping` with `ErrStreamClosed`. Idempotent, safe from any goroutine. For a handler that detached the request context and so has a stream no disconnect or shutdown will ever end. Writes nothing to the client. | stable |
+| `ErrStreamClosed` | What `Send` and `Ping` return after `Close`. A stream ended by disconnect or shutdown reports the connection's own error instead — watch `Done` for those. | stable |
 | `SSEHub` | Broadcasts events to every connected client. | stable |
 | `NewSSEHub() *SSEHub` | Constructor. | stable |
 | `(*SSEHub).Publish(event string, data any)` | Sends to every subscriber; slow clients skip rather than block the publisher. | stable |
@@ -112,7 +116,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | Export | What it is for | Stability |
 | --- | --- | --- |
 | `redirect(to: string, status = 303)` | Builds a redirect `Response` for a loader or action. | stable |
-| `subscribe(topic, onEvent)` | Opens a WebSocket channel on a topic, with reconnect and backoff. Returns a `Channel`. | stable |
+| `subscribe(topic, onEvent, options?)` | Opens a WebSocket channel on a topic, with reconnect and backoff. Returns a `Channel`. `options.onRefused(reason)` fires once when the relay refuses the origin — the one close that will not change on a redial — and the channel is over. | stable |
 | `Island({ name, props, client })` | Renders a hydration marker for a component in `islands/`. `client` is `"load"` or `"visible"`. | stable |
 | `CsrfField()` | Renders the hidden CSRF input a `<form method="post">` needs. | stable |
 | `registerServiceWorker(path = "/sw.js")` | Registers a service worker in production only; no-ops in dev, on the server and where unsupported. | stable |
@@ -135,6 +139,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `Head` | `{ title?, meta? }`. Will grow optional fields (`link`, `script`); growth is additive. | stable |
 | `HydrateMode` | `boolean \| "visible"`. | stable |
 | `Channel<T>` | `{ publish(...), close() }` returned by `subscribe`. | stable |
+| `SubscribeOptions` | `{ onRefused? }`, the third argument of `subscribe`. | stable |
 | `IslandProps` | Props of `<Island>`. | stable |
 | `ApiClient` | The typed `api(...)` function's type. | stable |
 | `ApiOptions<K>` | `{ query?, headers?, timeout?, body, params }` — `body` and `params` become required when the route declares them. | stable |
@@ -154,6 +159,7 @@ Imported by the generated `.borgo/routes.gen.tsx` for `type Route`. Since 0.21 n
 | Export | What it is for | Stability |
 | --- | --- | --- |
 | `safeDecode(s)` | `decodeURIComponent` that returns the input unchanged on a malformed escape. | internal |
+| `safeHeadAttrs(meta)` | Filters a `head.meta` entry down to the attribute pairs safe to render. | internal |
 | `filePathToPattern`, `matchRoute`, `resolveHead` | File path → route pattern, pattern matching with params, and `head` resolution — shared between the build, the SSR server and the browser runtime. | internal |
 | `Route`, `PageModule`, `LayoutModule`, `LoaderContext`, `ActionContext`, `PrerenderContext`, `Head`, `HydrateMode` | Type re-exports. | see root entry |
 
@@ -169,7 +175,8 @@ The browser runtime. Imported by the generated client entries (`.borgo/client.ts
 | `mountIslands({ createElement, hydrateRoot, islands })` | Hydrates `<Island>` markers on a page that ships no page bundle. | internal |
 | `redirectUrl(raw)` | Parses a redirect target, rejecting anything that is not `http:`/`https:`. | internal |
 | `asProps(value)` | Coerces an untrusted loader payload to a props object. | internal |
-| `ClientPageModule`, `ClientRoute`, `MountOptions`, `MountIslandsOptions` | Types of the above. `ClientRoute` appears in generated code. | internal |
+| `propsPathEnabled()`, `devUpdatePlan(files, current)`, `actionOutcome(res)`, `tooLargeDetail(res)` | Whether the `?__borgo=props` path was compiled in; what a dev update does to the page on screen; how an action response is classified (`action`, `raw`, `too-large`, `unknown`); the detail text of a 413. | internal |
+| `ClientPageModule`, `ClientRoute`, `MountOptions`, `MountIslandsOptions`, `ActionOutcome` | Types of the above. `ClientRoute` appears in generated code. | internal |
 
 ### `borgo-framework/internal`
 
@@ -213,7 +220,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `PORT` (`3000`) | front server; Go, to find the front server for `Push` | Front server port. | stable |
 | `API_PORT` (`3501`) | Go server; front server, to build the proxy target | Go API port. A value that is not a port number (0-65535, digits only) is refused before the Go server binds. | stable |
 | `SESSION_SECRET` | Go | HMAC key for signed-cookie sessions. At least 32 bytes. Missing is logged at startup and fails session routes per request; **shorter than 32 bytes is fatal at startup** — see [sessions](auth-and-sessions.md#sessions). | stable |
-| `SESSION_SECURE` | Go and front server | `1`/`true` adds `Secure` to the session and CSRF cookies; `0`/`false` and unset do not. Both halves parse it with the same grammar and **refuse a value that is neither** at startup, rather than reading it as "not secure". | stable |
+| `SESSION_SECURE` | Go and front server | Adds `Secure` to the session and CSRF cookies. The grammar is exactly Go's `strconv.ParseBool`, case-sensitive: `1`, `t`, `T`, `true`, `TRUE`, `True` mean on; `0`, `f`, `F`, `false`, `FALSE`, `False` mean off; unset means off. Both halves read that alphabet and **refuse anything else at startup** — `yes`, `on`, `Yes` included — rather than reading it as "not secure". The same grammar governs every boolean switch below (`BORGO_CSRF`, `BORGO_SECURITY_HEADERS`, `BORGO_METRICS`, `BORGO_WS_ALLOW_NO_ORIGIN`, `BORGO_PUSH_INSECURE`). | stable |
 | `BORGO_PUSH_KEY` | Go and front server | Shared secret for `Push` across hosts. On the front server it *replaces* the loopback check. On the Go side it is held back rather than sent over cleartext to another machine — see `BORGO_PUSH_INSECURE`. | stable |
 | `BORGO_PUSH_INSECURE` | Go | `1`/`true` lets `BORGO_PUSH_KEY` travel over `http://` to a host that is not this one, for a private network you control. Unset, or anything it cannot parse, means no — a value it cannot read is refused rather than treated as absent. | stable |
 | `NO_COLOR` | Go and front server | Any value disables ANSI colour. | stable |
@@ -264,7 +271,9 @@ The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` i
 | `BORGO_CHANGED` | Carries the changed file **set** into the dev fallback server — newline-separated, because a path may contain a comma or a space but not a newline. Two saves inside one debounce window announce both; carrying only the first meant the browser, which ignores an update naming a page other than the one on screen, could apply nothing at all. | internal |
 | `BORGO_STATIC` | Set to `1` by `borgo export` for the build it drives, and substituted into the client bundle as a `define` rather than read at runtime — it is what compiles the `?__borgo=props` navigation path out of an exported site, where there is no server to ask for props. Not something to set by hand. | internal |
 | `BORGO_DEV` | Set by the dev loop for `serve-entry.ts`. | internal |
+| `BORGO_DEBUG` | `1` is the `--debug` flag for a build that has no command line. Read by the build alone, and only `1` — it is not one of the boolean switches above. | internal |
 | `BORGO_FORCE_PROMPT` | Test hook: forces `create-borgo`'s interactive path. | internal |
+| `BORGO_SPAWN_TIMEOUT_MS` | Test hook: overrides the deadlines `create-borgo` gives the tools it spawns. | internal |
 | `NODE_ENV` | Not read at runtime — it is a build-time `define` substituted into client bundles. | internal |
 
 `DB_PATH`, which appears in the deploy samples and the example app, is the *application's* variable, not borgo's.
@@ -283,7 +292,7 @@ Run from an app root — the directory holding `pages/`.
 | `borgo export` | Static site into `dist/site/`. | stable |
 | `borgo deploy init <caddy\|nginx\|systemd\|compose>` | Writes a deploy config. | stable |
 | `borgo pwa init` | Writes `public/manifest.webmanifest` and a service worker. | stable |
-| `borgo doctor` | Runs fourteen checks over the toolchain (bun, a bun shim shadowing it, go, node, docker), the machine (both ports, disk space) and the project (api binary, generated types, `node_modules`, app deps, write access, playwright browsers). Checks that do not apply return nothing; informational ones (node, docker, the shim note) report without affecting the exit code. | stable |
+| `borgo doctor` | Runs fifteen checks over the toolchain (bun, a bun shim shadowing it, an `engines.bun` range in `package.json` borgo cannot read as a minimum, go, node, docker), the machine (both ports, disk space) and the project (api binary, generated types, `node_modules`, app deps, write access, playwright browsers). Checks that do not apply return nothing; informational ones (node, docker, the shim note) report without affecting the exit code. | stable |
 | `borgo` / `borgo --help` / `-h` / `--version` / `-v` | Banner and usage; exits 0. An unknown command exits 1. | stable |
 
 | Flag | Applies to | What it does | Stability |
@@ -291,6 +300,9 @@ Run from an app root — the directory holding `pages/`.
 | `--tailwind` | any command (parsed globally) | Hands the CSS pipeline to Tailwind (the `@tailwindcss/postcss` plugin); sets `BORGO_TAILWIND=1` for children. | stable |
 | `--front-only` | `start` | Skips the Go binary, for split deployments. | stable |
 | `--force` | `pwa init`, `deploy init` | Overwrites existing files. | stable |
+| `--debug` | any command (parsed globally) | Prints the stack and the `cause` chain behind a build failure instead of the one-line report. `BORGO_DEBUG=1` does the same for a build with no command line, such as the dev loop's own rebuilds. | stable |
+
+An argument a command does not know — a stray positional or an unknown `--option` — is refused before the command runs, with usage; a build that ignored it would exit 0 having done something other than what was asked.
 
 The exit codes are part of the contract: `build` exits 1 if `borgogen` or `go build` fails, `start` exits with the api's own code if the api dies, `doctor` and `export` exit with their own status.
 
@@ -298,23 +310,27 @@ The exit codes are part of the contract: `build` exits 1 if `borgogen` or `go bu
 
 | Form | What it does | Stability |
 | --- | --- | --- |
-| `bunx create-borgo@latest <name>` | Scaffolds a new app. In an interactive terminal it asks six questions — template, Tailwind, linter, git, docker, vscode; anywhere else (CI, piped stdin) it takes the defaults without blocking. | stable |
+| `bunx create-borgo@latest <name>` | Scaffolds a new app. In an interactive terminal it asks seven questions — template, Tailwind, linter, git, docker, vscode, and whether to install dependencies and start the dev server; anywhere else (CI, piped stdin) it takes the defaults without blocking. | stable |
 | `--template <base\|minimal\|full>`, `-t`, `--template=<x>` | Picks a template; default `base`. | stable |
 | `--tailwind` / `--no-tailwind` | Wires Tailwind, or declines without prompting. Default off. | stable |
 | `--linter <biome\|eslint\|none>`, `--linter=<x>` / `--no-linter` | Writes the chosen linter's config and the `lint` / `format` scripts. Default `none`. | stable |
 | `--git` / `--no-git` | `git init` plus an initial commit. Default on. | stable |
 | `--docker` / `--no-docker` | Keeps `Dockerfile`, `docker-compose.yml` and `.dockerignore`. Default on. | stable |
 | `--vscode` / `--no-vscode` | Writes `.vscode/extensions.json` and `settings.json`. Default on. | stable |
-| `--yes` / `-y` | Takes every default without opening stdin. | stable |
+| `--install` / `--no-install` | Runs `bun install` and `go mod tidy` after scaffolding. Default **on in a terminal, off everywhere else**, so a scaffold step in CI exits on its own. `--no-install` also settles `--start`: without dependencies the run prints the manual steps and exits. | stable |
+| `--start` / `--no-start` | Installs, then hands over to the dev server. Same default rule as `--install`; `--start` in a script is honoured, because it is a request to block on a server. | stable |
+| `--yes` / `-y` | Takes every default without opening stdin — the *terminal's* defaults when run in one, so `-y` in a terminal installs and starts too. | stable |
 | `--help` / `-h` | Usage. | stable |
 
-Every *on/off* option has a `--no-` twin. `--template` and `--linter` take a value instead, and only `--linter` has a `--no-` form (`--no-linter` means `none`).
+Every *on/off* option has a `--no-` twin (`--no-tailwind`, `--no-git`, `--no-docker`, `--no-vscode`, `--no-install`, `--no-start`). `--template` and `--linter` take a value instead, and only `--linter` has a `--no-` form (`--no-linter` means `none`). Install and start are one question at the prompt because they are one intent, and two flags because a script that wants the dependencies without a server that never exits has no other way to say so.
 
 An unknown argument is an error, not a silently ignored token.
 
 ### `borgogen`
 
 Invoked as `go tool borgogen`, wired through the app's `go.mod` `tool` directive. It takes no flags and reads the working directory. **stable** as a command; its *output* is a contract covered in [api stability](api-stability.md).
+
+The names it writes into `.borgo/api-types.d.ts` are part of that output. A Go struct becomes an interface of the same name as `encoding/json` writes it; where it is read differently — every struct handed to `Bind`, since the decoder makes every property optional and nullable — it gets a second declaration under `<Name>$Request`, and where a pointer-receiver marshaler makes the written shape depend on position, a `<Name>$Addressable`. `$` cannot occur in a Go identifier, so neither suffix can collide with a type of yours. A Go type whose name is a TypeScript reserved word, or one of the two generics the file uses (`Array`, `Record`), is renamed with its package as a prefix — `type null struct{…}` in `api` comes out `ApiNull` — rather than emitted as a declaration that would break the whole file. The rules are in [the typed bridge](typed-bridge.md#the-request-side-what-the-decoder-accepts).
 
 ## File conventions
 

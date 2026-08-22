@@ -172,6 +172,8 @@ What the action returns decides what happens next:
 
 On hydrated pages the runtime enhances the form: the action runs over `fetch` and the page re-renders in place, keeping your scroll position. A redirect back to the same page refreshes it where you are; a redirect elsewhere becomes a client-side navigation. Without JavaScript — or on a `hydrate = false` page — the identical form falls back to the classic post cycle. Both paths are real, and both are tested.
 
+One refusal is handled differently, because it happens *before* the action runs: a body over the size limit (`BORGO_MAX_BODY` on the front server, or a reverse proxy's own `client_max_body_size`) is answered `413`, and on a hydrated page the runtime does **not** reload. Reloading would empty the form and throw away the one thing the server had said. Instead the page stays as it is, with everything typed still in it, and an overlay explains that nothing was saved and why — quoting the server's own text when it is prose rather than an HTML error page. This is not a dev-only overlay; it is the production behaviour of an enhanced form. Two other answers the action never produced, a `403` (stale CSRF token) and a `405` (a post to a page without an action), fall back to a native submit so the real error is the one you see.
+
 Forms the runtime cannot re-render in place stay native: a `GET` form, a cross-origin target, a post to `/api/...`. To force the classic full-page submit on any form, add `data-borgo-native`:
 
 ```tsx

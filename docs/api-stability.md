@@ -48,7 +48,7 @@ Breaking:
 
 Not breaking:
 
-- Adding a new exported function, type or struct field.
+- Adding a new exported function, type or struct field — `(*SSEStream).Close()` and `ErrStreamClosed`, `Middleware`, `CheckEnv` and `ServeContext` all arrived this way, beside what existed.
 - Adding an optional field to a struct users construct with field names (which is how `Auth` is documented and used).
 - Loosening a limit, or making an error message clearer.
 - Anything about unexported symbols.
@@ -65,7 +65,7 @@ Breaking:
 
 Not breaking:
 
-- Adding an export, an optional property, or a new overload that accepts strictly more.
+- Adding an export, an optional property, or a new overload that accepts strictly more — `subscribe` gaining an optional third argument (`{ onRefused }`) is the model: every existing call still compiles.
 - Changing anything reachable only through `borgo-framework/internal`, `/router`, `/runtime`, `/refresh-runtime` or `/package.json`, all of which are internal. `/internal` most of all: it exists because generated code has to import `registerCsrf`, `registerIslands` and `withCsrf` from somewhere, and its name is the whole disclaimer.
 - Making an inferred type *more* precise, where the extra precision only rejects code that was already wrong. (This one is a judgement call. If it turns real apps red, it is breaking regardless of who was right.)
 
@@ -80,7 +80,7 @@ Breaking:
 
 Not breaking:
 
-- New commands, new flags, new subcommands.
+- New commands, new flags, new subcommands — `--debug`, or one more check in `borgo doctor`.
 - Changing what the banner or the build table looks like.
 
 ### Generated output
@@ -97,6 +97,9 @@ Breaking:
 Not breaking:
 
 - The exact formatting: whitespace, key order, comment wording, the header line. CI compares regenerated output against the committed copy, so formatting changes do produce a diff and a `chore:` commit — that is a repository chore, not a user-facing break.
+- A *more precise* mapping that only rejects bodies the server already refused, or accepts ones it already took — the same judgement call as the npm rule above, and held to the same test: if it turns a real app red, it is breaking regardless.
+
+The worked example, because it is the most recent one: request types. A struct handed to `Bind` used to render as the same interface as the response, with every field required. `encoding/json` requires none of them — an absent or `null` field is not an error — so the type refused `{}`, a body the server accepts. The fix renders the request side as `<Name>$Request` with every property optional and nullable, and is **breaking by this page's own rule**: a caller that constructed its body inline compiles unchanged, but one that declared a variable of the old type name (`const body: TaskCreate = …`) does not, and a green `tsc` turned red. It shipped as a `fix!:` with a `BREAKING CHANGE:` trailer, which under `bump-minor-pre-major` lands as a 0.x minor. After 1.0, the same change is a major — the generated *names* are part of the contract, and `$Request` and `$Addressable` are the two suffixes it reserves. What borgo will not do is leave a type that lies in the direction that costs a compile error for a request that works; the [typed bridge](typed-bridge.md#the-request-side-what-the-decoder-accepts) lists the seven places the request type still cannot be exact, and each is pinned by a test so that a change in either direction is noticed rather than believed.
 
 ### File conventions
 
