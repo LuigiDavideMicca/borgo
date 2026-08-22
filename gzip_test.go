@@ -2649,3 +2649,153 @@ func TestGzipDropsALengthTheBodyOutgrewBeforeTheCommit(t *testing.T) {
 		}
 	}
 }
+
+// takingWriter accepts at most cap bytes of body and refuses the rest with an
+// error, the way a connection that died mid-write does: a short count and an
+// error on the same call.
+type takingWriter struct {
+	header http.Header
+	cap    int
+	took   int
+}
+
+func (w *takingWriter) Header() http.Header { return w.header }
+func (w *takingWriter) WriteHeader(int)     {}
+func (w *takingWriter) Write(p []byte) (int, error) {
+	n := min(len(p), w.cap-w.took)
+	w.took += n
+	if n < len(p) {
+		return n, io.ErrClosedPipe
+	}
+	return n, nil
+}
+
+// THE LOG NAMED 4000 BYTES OVER A WIRE THAT CARRIED 3900.
+//
+// g.written counted what the handler offered before the write ran, so a
+// connection that took part of a write and refused the rest left a line that
+// measured the handler's call, not the body, and a handler that retried the
+// refused tail - what a connection that has died invites - was accused of
+// outgrowing its length. What the body took is the count that is true on both
+// sides: named when the handler is wrong, silent when the connection is.
+func TestLengthReportCountsWhatTheBodyTook(t *testing.T) {
+	const size = 4000
+	body := strings.Repeat("x", size)
+	cases := []struct {
+		name     string
+		declared int
+		cap      int
+		h        func(w http.ResponseWriter)
+		want     string
+	}{
+		{"too small, the wire took less than offered", 3000, 3900, func(w http.ResponseWriter) {
+			w.Write([]byte(body))
+		}, "borgo: Content-Length 3000 but wrote 3900 bytes"},
+		{"right, the handler retries the refused tail", size, 3900, func(w http.ResponseWriter) {
+			n, _ := w.Write([]byte(body))
+			w.Write([]byte(body[n:]))
+		}, ""},
+		{"right, the wire took everything", size, size, func(w http.ResponseWriter) {
+			w.Write([]byte(body))
+		}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out bytes.Buffer
+			flags := log.Flags()
+			log.SetOutput(&out)
+			log.SetFlags(0)
+			defer func() {
+				log.SetOutput(os.Stderr)
+				log.SetFlags(flags)
+			}()
+			rw := &takingWriter{header: http.Header{}, cap: c.cap}
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", strconv.Itoa(c.declared))
+				c.h(w)
+			})).ServeHTTP(rw, req)
+			got := strings.TrimSpace(out.String())
+			if got != c.want {
+				t.Errorf("log = %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	// the one refusal that is the handler's: net/http refuses whole the write
+	// that outgrows the declared length, where startGzip deleted that length
+	// and the same bytes went through. Counted as taken, identity would fall
+	// silent while gzip named the handler - the split the report exists to
+	// close, so these are counted as offered on both roads
+	t.Run("outgrown in pieces says the same thing on both encodings", func(t *testing.T) {
+		handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "3900")
+			for i := 0; i < size; i += 100 {
+				w.Write([]byte(body[i : i+100]))
+			}
+		}))
+		said := map[string]string{}
+		for _, ae := range []string{"identity", "gzip"} {
+			said[ae], _, _ = serveAndDiagnose(t, ae, handler)
+			said[ae] = strings.TrimSpace(said[ae])
+		}
+		want := "borgo: Content-Length 3900 but wrote 4000 bytes"
+		for ae, got := range said {
+			if got != want {
+				t.Errorf("%s: log = %q, want %q", ae, got, want)
+			}
+		}
+	})
+}
+
+// VARY STAYS CANONICAL, MEASURED AGAIN.
+//
+// bd65cd2 folded Content-Encoding and Content-Type in commitHeader and left
+// Vary alone on a measured reason: it is a set of field names (RFC 9110
+// 12.5.5), so a spelling the guard cannot see costs one repeated line and
+// nothing else. Two declared limits in this file fell when re-measured, so the
+// reason is measured here on the wire, across the spelling that sorts before
+// the canonical key and the one that sorts after, and for a client that folds
+// the lines the way a cache does.
+func TestVaryUnderAnySpellingStillNamesAcceptEncoding(t *testing.T) {
+	cases := []struct {
+		key, value string
+		wantLines  []string
+	}{
+		{"vary", "Cookie", []string{"Vary: Accept-Encoding", "vary: Cookie"}},
+		{"VARY", "Cookie", []string{"VARY: Cookie", "Vary: Accept-Encoding"}},
+		{"vary", "Accept-Encoding", []string{"Vary: Accept-Encoding", "vary: Accept-Encoding"}},
+		{"VARY", "*", []string{"VARY: *", "Vary: Accept-Encoding"}},
+	}
+	body := strings.Repeat("x", 4096)
+	for _, c := range cases {
+		t.Run(c.key+"="+c.value, func(t *testing.T) {
+			handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				delete(w.Header(), "Vary")
+				w.Header()[c.key] = []string{c.value}
+				w.Write([]byte(body))
+			}))
+			var got []string
+			for _, line := range wireHeaderLines(t, handler) {
+				if sameField(strings.SplitN(line, ":", 2)[0], "Vary") {
+					got = append(got, line)
+				}
+			}
+			if !slices.Equal(got, c.wantLines) {
+				t.Errorf("Vary lines on the wire = %q, want %q", got, c.wantLines)
+			}
+			// what a cache reads: every line, joined, under one key
+			srv := httptest.NewServer(handler)
+			defer srv.Close()
+			res, err := http.Get(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res.Body.Close()
+			joined := strings.Join(res.Header.Values("Vary"), ",")
+			if !strings.Contains(joined, "Accept-Encoding") || (c.value != "Accept-Encoding" && !strings.Contains(joined, c.value)) {
+				t.Errorf("client holds Vary %q: the handler's %q or Accept-Encoding is gone", joined, c.value)
+			}
+		})
+	}
+}

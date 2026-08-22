@@ -2,6 +2,7 @@ package borgo
 
 import (
 	"compress/gzip"
+	"errors"
 	"io"
 	"log"
 	"maps"
@@ -172,7 +173,7 @@ type gzipResponseWriter struct {
 	buf         []byte
 	gz          *gzip.Writer
 	declared    int64 // Content-Length the handler set, -1 when it set none
-	written     int64 // bytes the handler passed to Write
+	written     int64 // bytes the body took, not bytes the handler offered
 	compress    bool  // the client accepts gzip; only what a full buffer becomes
 	bodyless    bool  // no body can exist: HEAD, 204, 304
 	passthrough bool
@@ -214,7 +215,7 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 	g.declared = declaredLength(h)
 	g.bodyless = g.bodyless || bodylessStatus(status)
 	if g.bodyless || declaresEventStream(h) || declaresEncoding(h) {
-		g.startPassthrough()
+		g.startPassthrough(0)
 	}
 }
 
@@ -522,9 +523,11 @@ func (g *gzipResponseWriter) sendHeader() {
 // The key is not folded, and this is the one write here left canonical. Vary is
 // a set of field names (RFC 9110 12.5.5), so a `vary` assigned through the map
 // costs one repeated Accept-Encoding line and nothing else - measured on the
-// wire and at the client, with the handler's own `*` or `Cookie` still in force
-// beside it. This guard can only repeat itself, never under-add, where an
-// unfolded Content-Encoding cost the response.
+// wire and at the client (again 2026-08-22, after ec6cefe and 396b40f, under
+// the spelling that sorts before the canonical key and the one after), with
+// the handler's own `*` or `Cookie` still in force beside it. This guard can
+// only repeat itself, never under-add, where an unfolded Content-Encoding cost
+// the response.
 func varyAcceptEncoding(h http.Header) {
 	for _, line := range h.Values("Vary") {
 		for _, field := range strings.Split(line, ",") {
@@ -541,12 +544,11 @@ func (g *gzipResponseWriter) Write(p []byte) (int, error) {
 	if g.status == 0 {
 		g.WriteHeader(http.StatusOK)
 	}
-	g.written += int64(len(p))
 	if g.passthrough {
-		return g.noteWrite(g.rw.Write(p))
+		return g.send(g.rw, p)
 	}
 	if g.gz != nil {
-		return g.noteWrite(g.gz.Write(p))
+		return g.send(g.gz, p)
 	}
 	// buffer only what the decision needs. Appending the whole slice before
 	// testing the threshold copied the entire body of a handler that writes it
@@ -554,6 +556,7 @@ func (g *gzipResponseWriter) Write(p []byte) (int, error) {
 	// identity path too. Past the decision the bytes go straight out.
 	split := min(len(p), max(gzipMinBytes-len(g.buf), 0))
 	g.buf = append(g.buf, p[:split]...)
+	g.written += int64(split)
 	if len(g.buf) < gzipMinBytes {
 		return len(p), nil
 	}
@@ -563,7 +566,7 @@ func (g *gzipResponseWriter) Write(p []byte) (int, error) {
 	if g.compress {
 		g.startGzip()
 	} else {
-		g.startPassthrough()
+		g.startPassthrough(int64(len(p) - split))
 	}
 	n, err := g.writeCommitted(p[split:])
 	return split + n, err
@@ -576,15 +579,30 @@ func (g *gzipResponseWriter) writeCommitted(p []byte) (int, error) {
 		return 0, nil
 	}
 	if g.gz != nil {
-		return g.noteWrite(g.gz.Write(p))
+		return g.send(g.gz, p)
 	}
-	return g.noteWrite(g.rw.Write(p))
+	return g.send(g.rw, p)
 }
 
-// noteWrite remembers that the destination refused bytes, which is the one way
-// a body can come up short without the handler being at fault.
-func (g *gzipResponseWriter) noteWrite(n int, err error) (int, error) {
-	if err != nil {
+// send writes past the commit point and counts what the destination accepted,
+// not what the handler offered: the log named 4000 bytes over a wire that
+// carried 3900, and a handler retrying a refused tail was accused of outgrowing
+// its length on a connection that had died. A connection refusing bytes is the
+// one way a body comes up short without the handler at fault.
+//
+// Except ErrContentLength, which is the handler's own: net/http refuses whole
+// the write that outgrows the declared length, where startGzip has deleted that
+// length and the same bytes go through. Counted as offered they keep the two
+// encodings saying the same thing, which is what the report exists for.
+func (g *gzipResponseWriter) send(w io.Writer, p []byte) (int, error) {
+	n, err := w.Write(p)
+	switch {
+	case err == nil:
+		g.written += int64(n)
+	case errors.Is(err, http.ErrContentLength):
+		g.written += int64(len(p))
+	default:
+		g.written += int64(n)
 		g.writeFailed = true
 	}
 	return n, err
@@ -600,7 +618,7 @@ func (g *gzipResponseWriter) Flush() {
 	if g.gz != nil {
 		g.gz.Flush()
 	} else if !g.passthrough {
-		g.startPassthrough()
+		g.startPassthrough(0)
 	}
 	if f, ok := g.rw.(http.Flusher); ok {
 		f.Flush()
@@ -640,19 +658,29 @@ func (g *gzipResponseWriter) startGzip() {
 	} else {
 		g.gz = gzip.NewWriter(g.rw)
 	}
-	g.noteWrite(g.gz.Write(g.buf))
-	g.buf = nil
+	g.sendBuffered(g.gz)
 }
 
-func (g *gzipResponseWriter) startPassthrough() {
+// startPassthrough commits identity. pending is what the Write forcing the
+// commit still holds past the buffer: the handler's bytes already, so a length
+// they outgrow is already wrong.
+func (g *gzipResponseWriter) startPassthrough(pending int64) {
 	g.passthrough = true
 	g.commitHeader()
-	g.dropLengthShorterThan(g.written)
+	g.dropLengthShorterThan(g.written + pending)
 	g.sendHeader()
-	if len(g.buf) > 0 {
-		g.noteWrite(g.rw.Write(g.buf))
-		g.buf = nil
+	g.sendBuffered(g.rw)
+}
+
+// sendBuffered ships the buffer, already counted when the handler wrote it.
+func (g *gzipResponseWriter) sendBuffered(w io.Writer) {
+	if len(g.buf) == 0 {
+		return
 	}
+	counted := g.written
+	g.send(w, g.buf)
+	g.written = counted
+	g.buf = nil
 }
 
 // finish is the single commit policy both encodings obey: a response already
@@ -707,6 +735,8 @@ func (g *gzipResponseWriter) finish() {
 	g.commitHeader()
 	g.dropLengthUnlessItDescribes(int64(len(g.buf)))
 	g.sendHeader()
+	// the outcome is not read: reportLengthMismatch has already spoken and
+	// nothing after this line decides anything (measured 2026-08-22)
 	if len(g.buf) > 0 {
 		g.rw.Write(g.buf)
 	}
