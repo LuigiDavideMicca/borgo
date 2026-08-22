@@ -21,7 +21,8 @@ import { join } from "node:path";
 // Restored immediately: the cwd is process-wide and other test files read it.
 const cwd = process.cwd();
 process.chdir(join(import.meta.dir, ".."));
-const { MAX_WS_TOPICS, MAX_WS_TOPIC_LENGTH, wsTopicRefusal } = await import("../src/server");
+const { MAX_WS_TOPICS, MAX_WS_TOPIC_LENGTH, WS_CLOSE_ORIGIN_REFUSED, wsOriginRefusal, wsTopicRefusal } =
+  await import("../src/server");
 process.chdir(cwd);
 
 const topics = (n: number, length = 4) =>
@@ -98,5 +99,54 @@ describe("no /ws refusal is silent", () => {
     // the value says nothing about WHICH of the topics on the wire it was
     const source = await Bun.file(join(import.meta.dir, "../src/server.ts")).text();
     expect(source).toContain("topics is not a decodable query value: ${JSON.stringify(part.slice(0, 40))}");
+  });
+});
+
+// THE ORIGIN REFUSAL IS THE ONE THE CLIENT CAN READ. Measured on a live front
+// server (examples/tasks, bun client, Origin http://evil.example): the bare 403
+// arrived as 1002 "Expected 101 status code" and was redialled 6 times in 60 s,
+// forever after at 30 s. Upgrading and closing with 4403 arrives as code 4403
+// with the reason intact, one dial, and a socket that received none of the 20
+// messages published into its topic while it existed. Chromium could not be
+// measured cross-origin on loopback: a page from another origin is stopped
+// before the handshake (net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS, 1006).
+// The 400s stay 400s: those are programming errors settled at the call site.
+describe("the origin refusal reaches the client as a close frame", () => {
+  test("the code is in the 4xxx application range, and the reason names origin and host", () => {
+    expect(WS_CLOSE_ORIGIN_REFUSED).toBe(4403);
+    const why = wsOriginRefusal("http://evil.example", "app.test");
+    expect(why).toContain('"http://evil.example"');
+    expect(why).toContain("app.test");
+  });
+
+  test("no Origin at all names the switch that would accept it", () => {
+    const why = wsOriginRefusal(null, "app.test");
+    expect(why).toContain("BORGO_WS_ALLOW_NO_ORIGIN");
+    expect(why).toContain("wsAllowNoOrigin");
+  });
+
+  test("the client's own string is truncated in the reason", () => {
+    const why = wsOriginRefusal("http://" + "x".repeat(5000), "app.test");
+    expect(why.length).toBeLessThan(300);
+  });
+
+  test("the /ws handler upgrades the refused origin instead of answering 403, logs it, and open() closes it before any subscribe", async () => {
+    const source = await Bun.file(join(import.meta.dir, "../src/server.ts")).text();
+    const start = source.indexOf('if (url.pathname === "/ws") {');
+    const end = source.indexOf('if (req.method === "POST" && url.pathname === "/__borgo/publish")', start);
+    const block = source.slice(start, end);
+    const refusal = block.indexOf("if (!allowed) {");
+    expect(refusal).toBeGreaterThan(0);
+    const branch = block.slice(refusal, block.indexOf("}", block.indexOf("return secure(new Response(\"forbidden\"", refusal)));
+    expect(branch).toContain("console.error(");
+    expect(branch).toContain('server.upgrade(req, { data: { kind: "refused", reason: why } })');
+    // the 403 is only the fallback for an upgrade bun itself declined
+    expect(branch.indexOf("server.upgrade")).toBeLessThan(branch.indexOf("status: 403"));
+
+    // the refused socket is closed at the top of open(), above the subscribe loop
+    const open = source.slice(source.indexOf("      open(ws) {"), source.indexOf("      close(ws) {"));
+    const closeAt = open.indexOf("ws.close(WS_CLOSE_ORIGIN_REFUSED, ws.data.reason)");
+    expect(closeAt).toBeGreaterThan(0);
+    expect(closeAt).toBeLessThan(open.indexOf("ws.subscribe("));
   });
 });

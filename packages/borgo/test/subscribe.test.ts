@@ -21,7 +21,7 @@ class FakeWS {
   sent: string[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((e: { code: number; reason: string }) => void) | null = null;
   constructor(public url: string) {
     FakeWS.instances.push(this);
   }
@@ -31,10 +31,10 @@ class FakeWS {
   close() {
     this.readyState = FakeWS.CLOSING;
   }
-  /** the server went away, or the close handshake finished */
-  drop() {
+  /** the server went away, or the close handshake finished; a browser reports 1006 */
+  drop(code = 1006, reason = "") {
     this.readyState = FakeWS.CLOSED;
-    this.onclose?.();
+    this.onclose?.({ code, reason });
   }
   open() {
     this.readyState = FakeWS.OPEN;
@@ -182,6 +182,78 @@ describe("subscribe", () => {
     } finally {
       dial.restore();
     }
+  });
+
+  // THE ONE CLOSE THAT IS FINAL, AND ONLY THAT ONE. The relay answers an origin
+  // it does not accept by upgrading and closing with 4403 and a reason - the
+  // only refusal whose code reaches the client (a 400 or a 403 arrives as 1006
+  // with nothing). Direction, written before the test: a permanent refusal
+  // generates no further traffic; a non-permanent close never stops retrying.
+  // The test above is the guard for the second half and must stay as it is.
+  test("a 4403 close is final: no redial, the reason reaches the caller", () => {
+    const dial = withFakeTimers();
+    try {
+      const refusals: string[] = [];
+      const channel = subscribe("chat", () => {}, { onRefused: (reason) => refusals.push(reason) });
+      expect(FakeWS.instances.length).toBe(1);
+      const reason = 'origin "http://other.test" is not this server (app.test): /ws accepts the page\'s own origin only';
+      FakeWS.instances[0].drop(4403, reason);
+      // nothing scheduled, and a timer that somehow fired would still not dial
+      expect(dial.pending.length).toBe(0);
+      for (const timer of dial.pending) timer.fn();
+      expect(FakeWS.instances.length).toBe(1);
+      expect(refusals).toEqual([reason]);
+      // the channel is over: a publish after the verdict is dropped, not queued
+      channel.publish("msg", 1);
+      expect(FakeWS.instances[0].sent).toEqual([]);
+      channel.close();
+    } finally {
+      dial.restore();
+    }
+  });
+
+  test("without a handler the verdict is still said, once, on the console", () => {
+    const dial = withFakeTimers();
+    const said: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => said.push(args.join(" "));
+    try {
+      subscribe("chat", () => {});
+      FakeWS.instances[0].drop(4403, "origin refused");
+      expect(said).toEqual(['subscribe("chat"): origin refused']);
+      expect(dial.pending.length).toBe(0);
+    } finally {
+      console.error = realError;
+      dial.restore();
+    }
+  });
+
+  test("a close one code away from the verdict is not final: 4402, 4404 and 1006 all redial", () => {
+    const dial = withFakeTimers();
+    try {
+      for (const code of [4402, 4404, 1006, 1002]) {
+        FakeWS.instances.length = 0;
+        dial.pending.length = 0;
+        const channel = subscribe("chat", () => {});
+        FakeWS.instances[0].drop(code, "whatever");
+        expect(dial.pending.length).toBe(1);
+        dial.pending[0].fn();
+        expect(FakeWS.instances.length).toBe(2);
+        channel.close();
+      }
+    } finally {
+      dial.restore();
+    }
+  });
+
+  test("the client's final code and the relay's are the same number", async () => {
+    const dir = import.meta.dir;
+    const client = await Bun.file(`${dir}/../src/index.ts`).text();
+    const server = await Bun.file(`${dir}/../src/server.ts`).text();
+    const clientCode = /const CLOSE_ORIGIN_REFUSED = (\d+);/.exec(client)?.[1];
+    const serverCode = /export const WS_CLOSE_ORIGIN_REFUSED = (\d+);/.exec(server)?.[1];
+    expect(clientCode).toBeDefined();
+    expect(clientCode).toBe(serverCode!);
   });
 
   test("close during the reconnect backoff cancels the redial for good", () => {

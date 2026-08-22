@@ -43,6 +43,18 @@ export type Channel<T extends string = string> = {
   close(): void;
 };
 
+// onRefused fires once, when the relay closed the handshake with a verdict that
+// will not change (the page's origin is not the server's); the channel is over
+export type SubscribeOptions = { onRefused?: (reason: string) => void };
+
+// the relay's close code for an origin it does not accept (WS_CLOSE_ORIGIN_REFUSED
+// in src/server.ts, pinned by subscribe.test.ts like MAX_TOPIC_LENGTH below).
+// The one close the client may treat as final: it is configuration, it is the
+// same on every dial, and - measured - it is the only refusal whose code and
+// reason arrive at the client intact. Every other close is "the server will be
+// back": a 1006, a 1002, a restart are indistinguishable from here
+const CLOSE_ORIGIN_REFUSED = 4403;
+
 // "topic/event" -> payload type. borgogen fills this in from borgo.Push
 // calls through the generated .borgo/api-types.d.ts; browser-published
 // events are declared the same way in any app .d.ts file.
@@ -87,14 +99,17 @@ const MAX_TOPIC_LENGTH = 128;
 export function subscribe<T extends string>(
   topic: T,
   onEvent: (...args: TopicEvents<T>) => void,
+  options?: SubscribeOptions,
 ): Channel<T>;
 export function subscribe<T extends string>(
   topic: T,
   onEvent: (event: TopicEventName<T>) => void,
+  options?: SubscribeOptions,
 ): Channel<T>;
 export function subscribe(
   topic: string,
   onEvent: (...args: any[]) => void,
+  options: SubscribeOptions = {},
 ): Channel {
   // THE RELAY REFUSES THESE, AND ITS REFUSAL REACHES THE BROWSER AS "connection
   // closed" - a message that names nothing. The name is known here, at the call,
@@ -152,10 +167,21 @@ export function subscribe(
         if (msg.topic === topic) onEvent(msg.event, msg.data);
       } catch {}
     };
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+      if (closed) return;
+      // the origin verdict is the one close that is final: the relay said so in
+      // a frame that arrives intact, and dialling again changes nothing but the
+      // server's log. Reported once; a page with no handler still sees it
+      if (event.code === CLOSE_ORIGIN_REFUSED) {
+        closed = true;
+        const reason = event.reason || "the relay refused this page's origin";
+        if (options.onRefused) options.onRefused(reason);
+        else console.error(`subscribe(${JSON.stringify(topic)}): ${reason}`);
+        return;
+      }
       // an unreachable server would otherwise be dialled once a second for as
       // long as the tab stays open; backoff resets on the next successful open
-      if (!closed) retry = setTimeout(connect, Math.min(30_000, 1_000 * 2 ** attempts++));
+      retry = setTimeout(connect, Math.min(30_000, 1_000 * 2 ** attempts++));
     };
   };
   connect();

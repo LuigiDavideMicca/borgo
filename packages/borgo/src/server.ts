@@ -373,6 +373,32 @@ export function wsTopicRefusal(topics: string[]): string | null {
   return refusals.length ? refusals.join("; ") : null;
 }
 
+/**
+ * THE ORIGIN REFUSAL IS A CLOSE FRAME, NOT A 403 - AND THE 400s STAY 400s.
+ *
+ * Measured against this server, with a bun client and with Chromium: a 403 on
+ * the handshake arrives as 1002 "Expected 101 status code" (bun) or 1006 with
+ * an empty reason (browser), and nothing else - the same shape as a 400 and as
+ * a server that is down. A browser whose Origin is not this server's redialled
+ * every 30 seconds for the life of the tab, for a refusal identical every time,
+ * against the server of whoever got the configuration wrong - and the client
+ * could neither compute that refusal nor read it. The one thing that DOES reach
+ * the client intact is a close frame: upgrade, then close with this code and a
+ * reason naming the origin and the switch, the two things an operator can change.
+ * The socket exists for one tick and is subscribed to nothing.
+ *
+ * Every other refusal on /ws stays a 400: the comma, the caps, the undecodable
+ * part are programming errors, and subscribe() refuses them at the call site
+ * before the first dial. Two causes, two transports. The client treats exactly
+ * this code as final and every other close as "the server will be back".
+ */
+export const WS_CLOSE_ORIGIN_REFUSED = 4403;
+export function wsOriginRefusal(origin: string | null, host: string): string {
+  return origin === null
+    ? "no Origin header on the handshake: a non-browser client needs BORGO_WS_ALLOW_NO_ORIGIN=yes (wsAllowNoOrigin)"
+    : `origin ${JSON.stringify(origin.slice(0, 80))} is not this server (${host}): /ws accepts the page's own origin only`;
+}
+
 // `switches` is resolved by whoever called us when there is a caller that can
 // resolve it earlier - serve-entry does, above the try whose catch would
 // otherwise serve a refused value from a bound port. The default is for the
@@ -726,7 +752,11 @@ export async function serve({
   const badRequest = (why: string) =>
     new Response(why, { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 
-  type SocketData = { kind: "dev" } | { kind: "app"; topics: string[] };
+  // "refused" lives for one tick: wsOriginRefusal above says why it is not a 403
+  type SocketData =
+    | { kind: "dev" }
+    | { kind: "app"; topics: string[] }
+    | { kind: "refused"; reason: string };
   const wsTopic = (topic: string) => "borgo:ws:" + topic;
   const publishCount = (topic: string) => {
     server.publish(
@@ -817,6 +847,10 @@ export async function serve({
       // 16mb default would make one socket a broadcast amplifier
       maxPayloadLength: 1024 * 1024,
       open(ws) {
+        if (ws.data?.kind === "refused") {
+          ws.close(WS_CLOSE_ORIGIN_REFUSED, ws.data.reason);
+          return;
+        }
         if (ws.data?.kind === "app") {
           for (const topic of ws.data.topics) ws.subscribe(wsTopic(topic));
           for (const topic of ws.data.topics) publishCount(topic);
@@ -833,6 +867,7 @@ export async function serve({
         }
       },
       close(ws) {
+        if (ws.data?.kind === "refused") return;
         if (ws.data?.kind === "app") {
           const topics = ws.data.topics;
           setTimeout(() => topics.forEach(publishCount), 0);
@@ -898,7 +933,12 @@ export async function serve({
           forwardedProto: req.headers.get("x-forwarded-proto"),
           allowNoOrigin: switches.wsAllowNoOrigin,
         });
-        if (!allowed) return secure(new Response("forbidden", { status: 403 }));
+        if (!allowed) {
+          const why = wsOriginRefusal(req.headers.get("origin"), url.host);
+          console.error(`  ${c.red(g.err)} /ws refused: ${why}`);
+          if (server.upgrade(req, { data: { kind: "refused", reason: why } })) return undefined as never;
+          return secure(new Response("forbidden", { status: 403 }));
+        }
         // split on the ENCODED comma. searchParams decodes %2C first, and the
         // split then turned one topic named "a,b" into the two topics "a" and
         // "b" - a socket that upgrades, reports counts, and delivers nothing.
