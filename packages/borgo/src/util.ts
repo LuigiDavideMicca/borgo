@@ -803,6 +803,20 @@ export type DeadlineHost = {
  * application keeps its stream open, on purpose. Nothing here tries to
  * distinguish a live subscriber from a client that stopped reading without
  * closing, because the only way to do that is to truncate feeds.
+ *
+ * THE FIRST SWEEP CAN BE TOO LATE, in exactly one regime. What the first byte
+ * leaves on the connection is `idleTimeout`, and inside the wheel's dead zone
+ * (property 2) that expires at the next 4s tick, whose phase belongs to the
+ * process and not to this request: measured at T=3 and T=4, a stream whose
+ * first tick fell before the 2s sweep closed at 4000ms minus the phase (1958,
+ * 1473, 946, 476ms), with ZERO re-arms logged - nothing was starved, the
+ * keep-warm had simply not run yet. So below WHEEL_MIN_ARMED_SECONDS `hold`
+ * arms at once; at 5 and above the leftover is two ticks, 4s at the least,
+ * and the first sweep always precedes it, so ordinary traffic stays untouched
+ * (measured: 8.01s at T=8, 32.03s at T=30, with and without this). The cost,
+ * confined to the dead zone: a connection that served a fast request idles
+ * KEEP_WARM_SECONDS rather than a knob bun was never honouring there - the
+ * same 12s bun grants a fresh connection for free.
  */
 export function createKeepWarm(
   // a thunk, not the server: this is built before Bun.serve returns, so that a
@@ -813,8 +827,12 @@ export function createKeepWarm(
   getHost: () => DeadlineHost,
   seconds: number,
   intervalMs: number = KEEP_WARM_INTERVAL_MS,
+  // what a write leaves behind: the server's idleTimeout, from the same
+  // environment serve() builds it from
+  idleSeconds: number = readTimeout(process.env),
 ): { hold(req: Request): void; held(): number; stop(): void } {
   if (seconds <= 0) return { hold: () => {}, held: () => 0, stop: () => {} };
+  const armOnHold = idleSeconds < WHEEL_MIN_ARMED_SECONDS;
   const inFlight = new Set<Request>();
   const timer = setInterval(() => {
     if (!inFlight.size) return;
@@ -827,7 +845,10 @@ export function createKeepWarm(
   // the sweep must not be a reason for the process to stay up
   timer.unref?.();
   return {
-    hold: (req) => void inFlight.add(req),
+    hold: (req) => {
+      inFlight.add(req);
+      if (armOnHold && getHost().requestIP(req) !== null) getHost().timeout(req, seconds);
+    },
     held: () => inFlight.size,
     stop: () => clearInterval(timer),
   };

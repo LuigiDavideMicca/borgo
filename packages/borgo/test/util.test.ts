@@ -1142,6 +1142,8 @@ describe("the response clock: keeping a socket warm", () => {
         requestIP: (r) => server.requestIP(r),
       }),
       keepWarmSeconds({ BORGO_FRONT_READ_TIMEOUT: env }),
+      KEEP_WARM_INTERVAL_MS,
+      readTimeout({ BORGO_FRONT_READ_TIMEOUT: env }),
     );
     return { server, warm, seen, port: server.port!, t0, arms };
   }
@@ -2088,4 +2090,147 @@ describe("cspSetting punctuation is not a way back into the defect", () => {
     expect(cspSetting("upgrade-insecure-requests;")).toBe("upgrade-insecure-requests;");
     expect(cspSetting("block-all-mixed-content;")).toBe("block-all-mixed-content;");
   });
+});
+
+// The first sweep is 2s away and the wheel ticks every 4s on a phase the
+// process fixed long before this request: inside the dead zone the value the
+// first byte leaves expires at the next tick, which half the time is before the
+// keep-warm has ever run. Measured at T=3 and T=4: closed at 4000ms minus the
+// phase, zero re-arms. So a server and its stream are started at three offsets
+// spanning the whole tick period, and at least one lands in the window.
+describe("the first sweep is not the first arm inside the dead zone", () => {
+  const enc = new TextEncoder();
+
+  test("against the counting fake: armed at hold below the wheel's minimum, not above it", () => {
+    const calls: number[] = [];
+    let alive = true;
+    const host = () => ({ timeout: (_r: Request, s: number) => calls.push(s), requestIP: () => (alive ? { address: "::1" } : null) });
+    const req = () => new Request("http://app.test/stream");
+    for (const idle of [1, 3, WHEEL_MIN_ARMED_SECONDS - 1]) {
+      const warm = createKeepWarm(host, KEEP_WARM_SECONDS, 60_000, idle);
+      warm.hold(req());
+      warm.stop();
+    }
+    expect(calls).toEqual([KEEP_WARM_SECONDS, KEEP_WARM_SECONDS, KEEP_WARM_SECONDS]);
+    // at the minimum and above the first byte leaves at least two ticks, so
+    // ordinary traffic is not touched before its first sweep
+    for (const idle of [WHEEL_MIN_ARMED_SECONDS, 8, 30, READ_TIMEOUT_MAX]) {
+      const warm = createKeepWarm(host, KEEP_WARM_SECONDS, 60_000, idle);
+      warm.hold(req());
+      warm.stop();
+    }
+    expect(calls).toHaveLength(3);
+    // and never on an exchange bun is already done with (property 4)
+    alive = false;
+    const warm = createKeepWarm(host, KEEP_WARM_SECONDS, 60_000, 3);
+    warm.hold(req());
+    warm.stop();
+    expect(calls).toHaveLength(3);
+  });
+
+  test("a stream at 3 and at 4 survives whatever the wheel's phase is", async () => {
+    const SILENCE_MS = 10_000;
+    const OFFSETS = [0, 1_350, 2_700];
+    const T0 = Date.now();
+    const serverAt = (env: string) => {
+      let warm!: ReturnType<typeof createKeepWarm>;
+      const arms: number[] = [];
+      const side = { cancelled: null as number | null };
+      const server = Bun.serve({
+        port: 0,
+        idleTimeout: readTimeout({ BORGO_FRONT_READ_TIMEOUT: env }),
+        development: false,
+        fetch(req) {
+          if (requestFullyRead(req)) warm.hold(req);
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(c) {
+                c.enqueue(enc.encode('{"n":1}\n'));
+                setTimeout(() => {
+                  try {
+                    c.enqueue(enc.encode('{"n":2}\n'));
+                    c.close();
+                  } catch {}
+                }, SILENCE_MS);
+              },
+              cancel() {
+                side.cancelled = Date.now() - T0;
+              },
+            }),
+            { headers: { "Content-Type": "application/x-ndjson" } },
+          );
+        },
+      });
+      warm = createKeepWarm(
+        () => ({
+          timeout: (r, s) => {
+            arms.push(Date.now() - T0);
+            server.timeout(r, s);
+          },
+          requestIP: (r) => server.requestIP(r),
+        }),
+        keepWarmSeconds({ BORGO_FRONT_READ_TIMEOUT: env }),
+        KEEP_WARM_INTERVAL_MS,
+        readTimeout({ BORGO_FRONT_READ_TIMEOUT: env }),
+      );
+      return { server, warm, arms, side, port: server.port! };
+    };
+    type Srv = ReturnType<typeof serverAt>;
+    const servers: Srv[] = [];
+    const stream = (env: string, startAt: number) =>
+      new Promise<{ env: string; s: Srv; startedAt: number; closedAt: number | null; seen: string }>((resolve) => {
+        setTimeout(() => {
+          const s = serverAt(env);
+          servers.push(s);
+          const startedAt = Date.now() - T0;
+          let seen = "";
+          let done = false;
+          const fin = (closedAt: number | null) => {
+            if (done) return;
+            done = true;
+            resolve({ env, s, startedAt, closedAt, seen });
+          };
+          void Bun.connect({
+            hostname: "127.0.0.1",
+            port: s.port,
+            socket: {
+              open(sock) {
+                sock.write("GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n");
+              },
+              data(sock, d) {
+                seen += new TextDecoder().decode(d);
+                if (seen.includes('{"n":2}')) {
+                  fin(null);
+                  try {
+                    sock.end();
+                  } catch {}
+                }
+              },
+              close: () => fin(Date.now() - T0),
+              error: () => fin(Date.now() - T0),
+            },
+          }).catch(() => fin(Date.now() - T0));
+          setTimeout(() => fin(null), SILENCE_MS + 8_000);
+        }, startAt);
+      });
+    try {
+      const runs = await Promise.all(["3", "4"].flatMap((env) => OFFSETS.map((at) => stream(env, at))));
+      for (const r of runs) {
+        if (!r.seen.includes('{"n":2}')) {
+          console.log(
+            `TRUNCATED T=${r.env} started=${r.startedAt} closedAt=${r.closedAt} cancelled=${r.s.side.cancelled} arms=[${r.s.arms.join(" ")}]`,
+          );
+        }
+      }
+      for (const r of runs) {
+        expect(r.seen).toContain("200 OK");
+        expect(r.seen).toContain('{"n":2}');
+      }
+    } finally {
+      for (const s of servers) {
+        s.warm.stop();
+        s.server.stop(true);
+      }
+    }
+  }, 60_000);
 });
