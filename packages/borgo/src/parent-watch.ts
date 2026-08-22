@@ -80,6 +80,20 @@ export function parentGone(parentPid: number, reading: ParentReading): boolean {
 }
 
 /**
+ * The line printed once, at boot, when the pid in the env is not this
+ * process's parent: a hand-set BORGO_PARENT_PID / BORGO_SUPERVISOR_PID is
+ * accepted - the pid watched is the env's, never the parent's - but it turns
+ * the reparent branch off on every platform at once, and whoever set it should
+ * learn that here rather than from an orphan. Null when pid == ppid, so the
+ * normal boot prints nothing. Called after the boot probe, never before: a pid
+ * already gone exits silently, and is not also reported as a mismatch.
+ */
+export function describeParentMismatch(parentPid: number, ppid: number, name = "BORGO_PARENT_PID"): string | null {
+  if (parentPid === ppid) return null;
+  return `${name}=${parentPid} is not this process's parent (${ppid}): the reparent branch is off, only the probe is watching`;
+}
+
+/**
  * Polls until the process named by parentPid is gone, then calls onGone.
  *
  * `direct` is captured once, at boot, while the parent is still there to be
@@ -92,9 +106,14 @@ export function watchParent(
   parentPid: number,
   onGone: () => void,
   intervalMs = 2_000,
+  name = "BORGO_PARENT_PID",
 ): ReturnType<typeof setInterval> | null {
   if (!(parentPid > 1)) return null;
   const direct = process.ppid === parentPid;
+  // probe first, as serve-entry and the go side do: a pid already gone is the
+  // first tick's exit, not a mismatch to report on the way there
+  const mismatch = describeParentMismatch(parentPid, process.ppid, name);
+  if (mismatch && !parentGone(parentPid, readParent(parentPid, direct))) console.error(mismatch);
   return setInterval(() => {
     if (parentGone(parentPid, readParent(parentPid, direct))) onGone();
   }, intervalMs);

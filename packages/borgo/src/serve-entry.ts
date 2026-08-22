@@ -1,4 +1,4 @@
-import { parentGone, readParent } from "./parent-watch";
+import { describeParentMismatch, parentGone, readParent } from "./parent-watch";
 import { serve } from "./server";
 import { resolveSwitches } from "./util";
 
@@ -35,6 +35,10 @@ if (import.meta.main) {
     // spawn racing the probe - it is a supervisor that died in between, and
     // the first tick would hand it 2 s of the port
     if (parentGone(parentPid, readParent(parentPid, direct))) process.exit(0);
+    // after the probe: a pid already gone exits above, silently, and is not
+    // also reported as a mismatch
+    const mismatch = describeParentMismatch(parentPid, process.ppid);
+    if (mismatch) console.error(mismatch);
     setInterval(() => {
       if (parentGone(parentPid, readParent(parentPid, direct))) process.exit(0);
     }, 2_000);

@@ -447,7 +447,7 @@ describe("the two sites are wired to the reading and not to a bare probe", () =>
   });
 
   test("borgo start watches BORGO_SUPERVISOR_PID through watchParent, unref'd", () => {
-    expect(cli).toContain("watchParent(supervisor, () => process.exit(0))?.unref()");
+    expect(cli).toContain('watchParent(supervisor, () => process.exit(0), 2_000, "BORGO_SUPERVISOR_PID")?.unref()');
     expect(cli).toContain('Number(process.env.BORGO_SUPERVISOR_PID)');
   });
 
@@ -550,4 +550,62 @@ describe("every pid borgo hands a child is that child's direct parent", () => {
     const got = JSON.parse(readFileSync(join(dir, "out"), "utf8"));
     expect(got).toEqual({ ppid: process.pid, parentPid: process.pid, direct: true });
   }, 25_000);
+});
+
+// THE P3 ON THE REAL SITES: the mismatch line exists, comes after the probe,
+// and never prints on the parent.
+describe("the parent mismatch line, where the watch starts", () => {
+  const boot = async (parentPid: number, name?: string) => {
+    const script = `
+      const { watchParent } = await import(${JSON.stringify(WATCH_URL)});
+      const t = watchParent(${parentPid}, () => process.exit(7), 50${name ? ", " + JSON.stringify(name) : ""});
+      await Bun.sleep(200);
+      if (t) clearInterval(t);
+      process.exit(t ? 0 : 3);
+    `;
+    const proc = track(Bun.spawn([process.execPath, "-e", script], { stdout: "ignore", stderr: "pipe" }));
+    const err = await new Response(proc.stderr).text();
+    const code = await withDeadline(proc.exited, 10_000, "the booting child never exited");
+    return { err, code };
+  };
+
+  test("watchParent on the real parent prints nothing", async () => {
+    // the child's ppid is this process; what it watches is exactly that
+    const { err, code } = await boot(process.pid);
+    expect(err).toBe("");
+    expect(code).toBe(0);
+  });
+
+  test("watchParent on a live pid that is not the parent prints the line, once, and keeps watching", async () => {
+    const other = track(Bun.spawn([process.execPath, "-e", "await Bun.sleep(30000)"], { stdout: "ignore", stderr: "ignore" }));
+    try {
+      const { err, code } = await boot(other.pid, "BORGO_SUPERVISOR_PID");
+      expect(err.split("BORGO_SUPERVISOR_PID=").length - 1).toBe(1);
+      expect(err).toContain(`BORGO_SUPERVISOR_PID=${other.pid} is not this process's parent (${process.pid})`);
+      expect(code).toBe(0);
+    } finally {
+      other.kill();
+    }
+  });
+
+  test("a pid already gone is the probe's exit, not a mismatch line", async () => {
+    const dead = track(Bun.spawn([process.execPath, "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" }));
+    await withDeadline(dead.exited, 10_000, "the short-lived child never exited");
+    await Bun.sleep(300);
+    const { err, code } = await boot(dead.pid);
+    expect(code).toBe(7);
+    // the line would claim a branch is off for a watch that is over before it began
+    expect(err).not.toContain("is not this process's parent");
+  });
+
+  test("serve-entry.ts reports the mismatch after the boot probe, and the three sites use the one function", () => {
+    const entry = readFileSync(ENTRY_SRC, "utf8");
+    const probe = entry.indexOf("if (parentGone(parentPid, readParent(parentPid, direct))) process.exit(0);");
+    const mismatch = entry.indexOf("describeParentMismatch(parentPid, process.ppid)");
+    expect(probe).toBeGreaterThan(-1);
+    expect(mismatch).toBeGreaterThan(probe);
+    const watch = readFileSync(WATCH_SRC, "utf8");
+    expect(watch).toContain("if (mismatch && !parentGone(parentPid, readParent(parentPid, direct))) console.error(mismatch);");
+    expect(readFileSync(CLI_SRC, "utf8")).toContain('"BORGO_SUPERVISOR_PID")');
+  });
 });

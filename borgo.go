@@ -480,6 +480,20 @@ func envParentPID() (int, error) {
 	return pid, nil
 }
 
+// warnParentMismatch prints one line, at boot, when BORGO_PARENT_PID is not
+// this process's parent. A hand-set pid is accepted - the pid watched is the
+// env's, never the parent's - but it turns waitParentExit's getppid branch off
+// on every platform at once, and whoever set it should learn that here rather
+// than from an orphan. Silent when pid == ppid or nobody is watching, so the
+// normal boot prints nothing. Called after the processExited probe, never
+// before: a pid already gone refuses the boot and is not also a mismatch.
+func warnParentMismatch(pid, ppid int) {
+	if pid <= 0 || pid == ppid {
+		return
+	}
+	log.Printf("borgo: BORGO_PARENT_PID=%d is not this process's parent (%d): the reparent branch is off, only the probe is watching", pid, ppid)
+}
+
 // newServer configures the http server borgo.Serve runs. ReadHeaderTimeout
 // caps slow-header (slowloris) clients; IdleTimeout reclaims kept-alive
 // connections. Read and write timeouts stay 0 by design: they are wall-clock
@@ -588,6 +602,7 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 		// reports the abort to its caller as a clean nil
 		return fmt.Errorf("borgo: parent process %d has already exited; not starting", parentPID)
 	}
+	warnParentMismatch(parentPID, os.Getppid())
 	// bind before mounting rather than inside ListenAndServe: a port already in
 	// use is then a refusal like the others, with the registry untouched and no
 	// banner printed for a server that never came up

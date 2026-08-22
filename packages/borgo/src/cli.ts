@@ -166,7 +166,7 @@ switch (command) {
     // /T. On posix nothing does that, which is why the poll exists at all.
     const supervisor = Number(process.env.BORGO_SUPERVISOR_PID);
     const { watchParent } = await import("./parent-watch");
-    watchParent(supervisor, () => process.exit(0))?.unref();
+    watchParent(supervisor, () => process.exit(0), 2_000, "BORGO_SUPERVISOR_PID")?.unref();
 
     // --front-only skips the go binary, for a split deployment where the
     // api runs elsewhere (point API_URL at it)

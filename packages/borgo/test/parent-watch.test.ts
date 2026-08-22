@@ -27,7 +27,7 @@
 // ")" inside the field that the state character follows.
 import { afterAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { isCorpse, parentGone, readParent } from "../src/parent-watch";
+import { describeParentMismatch, isCorpse, parentGone, readParent } from "../src/parent-watch";
 
 type Reading = ReturnType<typeof readParent>;
 
@@ -383,4 +383,31 @@ describe("serve-entry as a process, spawned the way dev.ts spawns it", () => {
     expect(out).toContain("IMPORTED:object:0");
     expect(code).toBe(0);
   }, 50_000);
+});
+
+// THE P3: a hand-set pid that is not the parent is accepted, and said.
+//
+// Measured before this existed: serve-entry booted with BORGO_PARENT_PID naming
+// a live bun process that was not its parent printed nothing, read direct=false
+// and gone=false, and ran on the probe alone - the one branch a recycled pid
+// can fool, off on every platform at once, and nobody told. It stays accepted:
+// the pid watched is the env's, never the parent's. One line at boot, only when
+// pid != ppid, so the normal boot stays silent and the line gets read.
+describe("describeParentMismatch: silent for the parent, one line for anyone else", () => {
+  test("pid == ppid is the normal boot and prints nothing", () => {
+    expect(describeParentMismatch(4321, 4321)).toBe(null);
+    expect(describeParentMismatch(process.ppid, process.ppid)).toBe(null);
+  });
+
+  test("a pid that is not the parent names both pids and what is left watching", () => {
+    const line = describeParentMismatch(100, 200);
+    expect(line).toContain("BORGO_PARENT_PID=100");
+    expect(line).toContain("parent (200)");
+    expect(line).toContain("reparent branch is off");
+    expect(line).toContain("only the probe is watching");
+  });
+
+  test("the variable named is the one that was set", () => {
+    expect(describeParentMismatch(100, 200, "BORGO_SUPERVISOR_PID")).toStartWith("BORGO_SUPERVISOR_PID=100 ");
+  });
 });

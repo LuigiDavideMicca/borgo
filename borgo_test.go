@@ -1,12 +1,15 @@
 package borgo
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -173,4 +176,108 @@ func TestHandleRecoversAndStaysUsable(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("registry deadlocked after a rejected pattern")
 	}
+}
+
+// THE P3: a hand-set BORGO_PARENT_PID that is not the parent is accepted, and
+// said. Measured before this existed: an api booted under a live pid that was
+// not its parent printed nothing and ran on the probe alone, the getppid
+// branch of waitParentExit off on every platform at once, nobody told. The
+// pid stays the env's, never the parent's; one line at boot, only on mismatch,
+// so the normal boot stays silent and the line gets read. serve-entry.ts says
+// the same line under the same condition.
+func TestWarnParentMismatch(t *testing.T) {
+	capture := func(pid, ppid int) string {
+		var logs strings.Builder
+		log.SetOutput(&logs)
+		defer log.SetOutput(os.Stderr)
+		warnParentMismatch(pid, ppid)
+		return logs.String()
+	}
+	if got := capture(4321, 4321); got != "" {
+		t.Fatalf("the parent itself printed %q, want silence", got)
+	}
+	if got := capture(0, 4321); got != "" {
+		t.Fatalf("no watch printed %q, want silence", got)
+	}
+	got := capture(100, 200)
+	for _, want := range []string{"BORGO_PARENT_PID=100", "parent (200)", "reparent branch is off", "only the probe is watching"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("mismatch line %q lacks %q", got, want)
+		}
+	}
+}
+
+// The line comes out of a real boot, after the probe: a pid already gone is
+// the refusal it always was, with no mismatch line beside it, and the parent
+// itself boots silent.
+func TestServeContextSaysParentMismatchAfterTheProbe(t *testing.T) {
+	boot := func(t *testing.T, pid int) (logs string, err error) {
+		t.Helper()
+		restoreRegistry(t)
+		var sb strings.Builder
+		log.SetOutput(&sb)
+		defer log.SetOutput(os.Stderr)
+		port := freePort(t)
+		t.Setenv("API_PORT", port)
+		t.Setenv("BORGO_PARENT_PID", strconv.Itoa(pid))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		errCh := make(chan error, 1)
+		go func() { errCh <- ServeContext(ctx) }()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			select {
+			case err := <-errCh:
+				return sb.String(), err
+			default:
+			}
+			if res, err := http.Get("http://127.0.0.1:" + port + "/healthz"); err == nil {
+				res.Body.Close()
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("ServeContext neither came up nor refused")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		cancel()
+		select {
+		case err := <-errCh:
+			return sb.String(), err
+		case <-time.After(15 * time.Second):
+			t.Fatal("ServeContext did not return after its context was cancelled")
+			return "", nil
+		}
+	}
+	const line = "is not this process's parent"
+
+	t.Run("the real parent boots silent", func(t *testing.T) {
+		logs, err := boot(t, os.Getppid())
+		if err != nil {
+			t.Fatalf("ServeContext returned %v under a live parent", err)
+		}
+		if strings.Contains(logs, line) {
+			t.Fatalf("the parent itself was reported as a mismatch:\n%s", logs)
+		}
+	})
+	t.Run("a live pid that is not the parent is said once", func(t *testing.T) {
+		// this process: alive, certainly not its own parent
+		logs, err := boot(t, os.Getpid())
+		if err != nil {
+			t.Fatalf("ServeContext returned %v: a mismatch is an advisory, never a refusal", err)
+		}
+		want := "BORGO_PARENT_PID=" + strconv.Itoa(os.Getpid()) + " is not this process's parent (" + strconv.Itoa(os.Getppid()) + ")"
+		if n := strings.Count(logs, line); n != 1 || !strings.Contains(logs, want) {
+			t.Fatalf("want exactly one line containing %q, got %d in:\n%s", want, n, logs)
+		}
+	})
+	t.Run("a pid already gone is the refusal, not a mismatch", func(t *testing.T) {
+		logs, err := boot(t, deadPID(t))
+		if err == nil || !strings.Contains(err.Error(), "has already exited") {
+			t.Fatalf("ServeContext returned %v, want the already-exited refusal", err)
+		}
+		if strings.Contains(logs, line) {
+			t.Fatalf("a dead pid was also reported as a mismatch:\n%s", logs)
+		}
+	})
 }
