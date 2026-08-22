@@ -29,7 +29,7 @@ If you are developing against a local borgo checkout, uncomment the `replace` di
 - `bun run build` — production client assets in `public/assets/` and the Go API binary in `dist/`
 - `bun run start` — run from the build output (supervises both processes)
 - `bun run export` — prerender the statically exportable pages into `dist/site/`
-- `bun run doctor` — diagnose the environment (bun, go, ports, stale processes, generated types) with a fix per failing check
+- `bun run doctor` — diagnose the environment (bun and go versions, the bun shim on `PATH`, node, docker, the two ports and who holds them, disk space, the generated types, your dependencies, write access) with a fix beside each failing check
 
 The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the blessed deploy configs) and `pwa init` (manifest and service worker) — run them with `bunx borgo <cmd>`. The [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) covers reverse proxy samples, systemd, and split-service setups.
 
