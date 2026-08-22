@@ -261,6 +261,7 @@ describe("apiCsrfRejects", () => {
     test("safe methods are untouched, token or no token", () => {
       for (const method of ["GET", "HEAD", "OPTIONS"]) {
         expect(apiCsrfRejects(call(method, { cookie: armed }), enforced)).toBe(false);
+        expect(apiCsrfRejects(call(method, { cookie: armed, token: "wrong" }), enforced)).toBe(false);
       }
     });
 

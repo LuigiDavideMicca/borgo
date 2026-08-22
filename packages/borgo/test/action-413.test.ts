@@ -52,6 +52,7 @@ const routes = [
     }),
     pattern: "/document",
   },
+  { ...route({ action: async () => ({ saved: true }) }), pattern: "/forbidden" },
 ];
 
 beforeAll(() => {
@@ -73,7 +74,9 @@ beforeAll(() => {
       // the escape hatch: an action answering with something of its own
       if (url.pathname === "/custom") return new Response("mine", { status: 200 });
       const target: RouteMatch | null = matchRoute(url.pathname, routes);
-      const answered = await runAction(req, target, actionOptions(CAP));
+      const options = actionOptions(CAP);
+      if (url.pathname === "/forbidden") options.csrfRejects = async () => true;
+      const answered = await runAction(req, target, options);
       return answered ?? new Response("no action", { status: 405 });
     },
   });
@@ -180,5 +183,11 @@ describe("a 413 an enhanced submit receives", () => {
     expect(res.status).toBe(405);
     expect(actionOutcome(res.clone())).toBe("unknown");
     await res.text();
+    // a csrf 403 is a marked action answer: the runtime's own branch, neither
+    // the overlay nor a reload
+    const refused = await submit("/forbidden", 8);
+    expect(refused.status).toBe(403);
+    expect(actionOutcome(refused.clone())).toBe("action");
+    await refused.text();
   });
 });

@@ -1736,7 +1736,10 @@ describe("reportBuildFailure", () => {
   });
 
   test("a thrown non-error is still a message and not a trace", () => {
-    expect(captured("go build died")).toContain("go build died");
+    const out = captured("go build died");
+    expect(out).toContain("go build died");
+    expect(out).not.toMatch(/^\s+at /m);
+    expect(out).not.toContain("Error:");
   });
 });
 

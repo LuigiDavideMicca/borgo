@@ -1605,9 +1605,10 @@ func TestWhereTheRequestTypeCannotBeExact(t *testing.T) {
 		{`{"blob":"!!!"}`, false, "a string that is not base64"},
 		{`{"quoted":"x"}`, false, "a quoted value that is not a number"},
 		// the other direction, and the only one: json.Number also accepts a
-		// numeric string, and typing it "number | string" to admit that would
-		// admit every non-numeric string with it - trading one body the server
-		// takes for a whole class of bodies it refuses. It stays number
+		// numeric string. `number | string` would admit every string; the
+		// template literal `${number}` admits only what TypeScript parses as a
+		// number - which is not what Go does: see TestNumericStringIsNotJSONNumber
+		// for the nine forms tsc takes and encoding/json refuses. It stays number
 		{`{"amount":"7"}`, true, "a numeric string into a json.Number"},
 		// an unknown key is ignored by the decoder and refused by tsc, which
 		// refuses it twice over: as an excess property on a fresh literal, and -
@@ -1630,5 +1631,58 @@ func TestWhereTheRequestTypeCannotBeExact(t *testing.T) {
 		if accepted == rows[i].decodes {
 			t.Errorf("%s (%s): tsc and encoding/json agree now, so this is no longer an inexactness to document", rows[i].body, rows[i].why)
 		}
+	}
+}
+
+// `${number}` looks like the exact type for a json.Number string: it takes "7"
+// and refuses "abc". It is not. TypeScript's idea of a numeric string is its own
+// literal grammar; encoding/json's is the JSON number grammar. Each string below
+// is a body one side takes and the other refuses, measured here so the choice
+// to emit plain number rests on the difference, not on the memory of one.
+func TestNumericStringIsNotJSONNumber(t *testing.T) {
+	types := generate(t, "inbound") + "export type Numeric = { amount?: number | `${number}` };\n"
+	rows := []struct {
+		value string
+		go_   bool
+		tsc   bool
+	}{
+		{`"7"`, true, true},
+		{`"-7"`, true, true},
+		{`"7.5"`, true, true},
+		{`"1e3"`, true, true},
+		{`"abc"`, false, false},
+		{`""`, false, false},
+		{`"NaN"`, false, false},
+		{`"Infinity"`, false, false},
+		// JSON has no whitespace, sign prefix, bare dot, radix or leading zero
+		{`" 7"`, false, true},
+		{`"7 "`, false, true},
+		{`"+7"`, false, true},
+		{`".5"`, false, true},
+		{`"7."`, false, true},
+		{`"0x10"`, false, true},
+		{`"0b11"`, false, true},
+		{`"0o7"`, false, true},
+		{`"07"`, false, true},
+	}
+	bodies := make([]string, len(rows))
+	for i, r := range rows {
+		bodies[i] = `{"amount":` + r.value + `}`
+		var v struct{ Amount json.Number }
+		if got := json.Unmarshal([]byte(bodies[i]), &v) == nil; got != r.go_ {
+			t.Errorf("%s: encoding/json accepted it = %v, want %v", r.value, got, r.go_)
+		}
+	}
+	wider := 0
+	for i, accepted := range typecheckBodies(t, types, "Numeric", bodies) {
+		if accepted != rows[i].tsc {
+			t.Errorf("%s: tsc accepted `${number}` = %v, want %v", rows[i].value, accepted, rows[i].tsc)
+		}
+		if accepted && !rows[i].go_ {
+			wider++
+		}
+	}
+	if wider == 0 {
+		t.Error("`${number}` is now exactly json.Number: emit it, and retire the pin in TestWhereTheRequestTypeCannotBeExact")
 	}
 }

@@ -1108,6 +1108,10 @@ describe("the response clock: keeping a socket warm", () => {
   // a server wired exactly as serve() wires one, at a stated env value
   function warmServer(env: string, handler?: (req: Request) => Response | Promise<Response>) {
     const seen: Record<string, boolean> = {};
+    // every re-arm, as ms since the server came up: the diagnostic a
+    // truncation is read against
+    const t0 = Date.now();
+    const arms: Array<[string, number, number]> = [];
     let warm!: ReturnType<typeof createKeepWarm>;
     const server = Bun.serve({
       port: 0,
@@ -1129,8 +1133,17 @@ describe("the response clock: keeping a socket warm", () => {
         return new Response("ok");
       },
     });
-    warm = createKeepWarm(() => server, keepWarmSeconds({ BORGO_FRONT_READ_TIMEOUT: env }));
-    return { server, warm, seen, port: server.port! };
+    warm = createKeepWarm(
+      () => ({
+        timeout: (r, s) => {
+          arms.push([new URL(r.url).pathname, Date.now() - t0, s]);
+          server.timeout(r, s);
+        },
+        requestIP: (r) => server.requestIP(r),
+      }),
+      keepWarmSeconds({ BORGO_FRONT_READ_TIMEOUT: env }),
+    );
+    return { server, warm, seen, port: server.port!, t0, arms };
   }
 
   // Everything that must be CUT or RECLAIMED, at 8 and at 30, all at once.
@@ -1223,8 +1236,16 @@ describe("the response clock: keeping a socket warm", () => {
   // than twice the deadline, and past bun's own 12s bound as well.
   test("a response silent far longer than the deadline is not truncated", async () => {
     const SILENCE_MS = 20_000;
-    const slowStream = () =>
-      new Response(
+    const T0 = Date.now();
+    // what the server side saw, per stream: when it wrote, when bun cancelled
+    // it (a cancel during the silence is bun cutting the socket, nothing else
+    // closes it), and whether the second write even landed
+    type Side = { opened: number; cancelled: number | null; wrote2: number | null };
+    const sides: Record<string, Side> = {};
+    const slowStream = (name: string) => {
+      const side: Side = { opened: Date.now() - T0, cancelled: null, wrote2: null };
+      sides[name] = side;
+      return new Response(
         new ReadableStream<Uint8Array>({
           start(c) {
             // NOT text/event-stream: the Content-Type allowlist that used to
@@ -1234,18 +1255,23 @@ describe("the response clock: keeping a socket warm", () => {
               try {
                 c.enqueue(enc.encode('{"n":2}\n'));
                 c.close();
+                side.wrote2 = Date.now() - T0;
               } catch {}
             }, SILENCE_MS);
+          },
+          cancel() {
+            side.cancelled = Date.now() - T0;
           },
         }),
         { headers: { "Content-Type": "application/x-ndjson" } },
       );
+    };
 
     // the plain case, and V1: the same stream answering a CHUNKED post, whose
     // body the proxy streams through rather than buffering. onBodyRead used to
     // stay silent for that shape and the answer was cut at the deadline.
     const a = warmServer("8", (req) => {
-      if (req.method !== "POST") return slowStream();
+      if (req.method !== "POST") return slowStream("plain");
       return proxyRequest(req, {
         target: "http://upstream.test/api/feed",
         deadlineMs: 0,
@@ -1254,7 +1280,7 @@ describe("the response clock: keeping a socket warm", () => {
         onBodyRead: () => a.warm.hold(req),
         fetchImpl: async (_url, init) => {
           await new Response((init as { body?: BodyInit }).body ?? null).arrayBuffer();
-          return slowStream();
+          return slowStream("chunked");
         },
       });
     });
@@ -1264,8 +1290,8 @@ describe("the response clock: keeping a socket warm", () => {
     // 5, the setting with the least margin. Both values are now honoured
     // verbatim and both streams survive, because the keep-warm arms its own
     // number - 3 is inside the wheel's dead zone and the stream lives anyway.
-    const five = warmServer("5", () => slowStream());
-    const three = warmServer("3", () => slowStream());
+    const five = warmServer("5", () => slowStream("five"));
+    const three = warmServer("3", () => slowStream("three"));
     expect(readTimeout({ BORGO_FRONT_READ_TIMEOUT: "5" })).toBe(5);
     expect(readTimeout({ BORGO_FRONT_READ_TIMEOUT: "3" })).toBe(3);
     expect(WHEEL_MIN_ARMED_SECONDS).toBeGreaterThan(3);
@@ -1286,6 +1312,31 @@ describe("the response clock: keeping a socket warm", () => {
         raw(five.port, `GET /sse HTTP/1.1\r\n${KEEPALIVE}`, 32_000, undefined, whole),
         raw(three.port, `GET /sse HTTP/1.1\r\n${KEEPALIVE}`, 32_000, undefined, whole),
       ]);
+      // a truncation prints its timeline: when the client saw the close, when
+      // bun cancelled the stream, and every re-arm on that server, all in ms
+      // from the same origin. The gap between the last re-arm and the cancel
+      // against the armed seconds is what names the mechanism.
+      const timeline = (name: string, run: Run, s: ReturnType<typeof warmServer>) => {
+        const side = sides[name];
+        const off = s.t0 - T0;
+        const arms = s.arms.map(([p, at, sec]) => `${p}@${at + off}:${sec}`).join(" ");
+        return `${name}: closedAt=${run.closedAt} opened=${side?.opened} wrote2=${side?.wrote2} cancelled=${side?.cancelled} arms=[${arms}]`;
+      };
+      for (const [name, run, s] of [
+        ["plain", plain, a],
+        ["chunked", chunked, a],
+        ["five", atFive, five],
+        ["three", atThree, three],
+      ] as const) {
+        if (!whole(run.seen)) console.log("TRUNCATED", timeline(name, run, s));
+      }
+      // and the starvation that did NOT truncate: the widest gap between two
+      // sweeps on each server, whenever a tick was lost
+      for (const s of [a, five, three]) {
+        const gaps = s.arms.map(([, at], i) => (i ? at - s.arms[i - 1]![1] : 0));
+        const widest = Math.max(0, ...gaps);
+        if (widest > KEEP_WARM_INTERVAL_MS * 2) console.log(`SWEEPGAP ${widest}ms over ${s.arms.length} re-arms`);
+      }
       // both records - a truncated 200 would carry only the first
       expect(plain.seen).toContain('{"n":1}');
       expect(plain.seen).toContain('{"n":2}');

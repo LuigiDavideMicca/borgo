@@ -163,7 +163,8 @@ describe("subscribe", () => {
   test("a handshake that never opened keeps being retried, so a server that comes back is picked up", () => {
     const dial = withFakeTimers();
     try {
-      const channel = subscribe("chat", () => {});
+      const seen: Array<[string, unknown]> = [];
+      const channel = subscribe("chat", (event: string, data: unknown) => seen.push([event, data]));
       // four refusals in a row, none of which ever reached open()
       for (let i = 0; i < 4; i++) {
         FakeWS.instances.at(-1)!.drop();
@@ -176,6 +177,7 @@ describe("subscribe", () => {
       const healthy = FakeWS.instances.at(-1)!;
       healthy.onmessage?.({ data: JSON.stringify({ topic: "chat", event: "msg", data: 1 }) });
       expect(healthy.readyState).toBe(FakeWS.OPEN);
+      expect(seen).toEqual([["msg", 1]]);
       channel.close();
     } finally {
       dial.restore();

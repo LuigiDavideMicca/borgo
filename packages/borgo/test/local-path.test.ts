@@ -218,6 +218,19 @@ describe("redactLocalPaths", () => {
   test("multi-byte characters are not cut in half by the held-back tail", async () => {
     const doc = "<p>caffè è più però — perché</p>".repeat(4);
     expect(await through(NEEDLES, doc)).toBe(doc);
+    // the string-level split above can never land inside a character: cut the
+    // bytes at every offset, so every multi-byte sequence is halved at least once
+    const bytes = enc.encode(doc);
+    expect(bytes.length).toBeGreaterThan(doc.length);
+    for (let cut = 1; cut < bytes.length; cut++) {
+      const halves = [bytes.subarray(0, cut), bytes.subarray(cut)];
+      const it: AsyncIterable<Uint8Array> = {
+        async *[Symbol.asyncIterator]() {
+          yield* halves;
+        },
+      };
+      expect(await collect(redactLocalPaths(it, NEEDLES))).toBe(doc);
+    }
   });
 });
 
