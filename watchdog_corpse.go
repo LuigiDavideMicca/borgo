@@ -165,3 +165,79 @@ func reportKinfoAnomaly(pid int, what string) {
 	}
 	kinfoAnomalyLogf("borgo: reading kern.proc.pid.%d: %s; from here on every parent reads as alive on macOS, which is what this platform did before the check existed - an api can outlive the supervisor that started it", pid, what)
 }
+
+// bsdKinfoLayout is where one BSD kernel puts the pid and the state inside the
+// bytes kern.proc.pid returns, and how many of them one reading must be.
+type bsdKinfoLayout struct {
+	size    int  // bytes one reading must be, exactly
+	pidOff  int  // int32 pid, little-endian on every arch covered
+	statOff int  // one byte of state
+	corpse  byte // the state a collected-but-unreaped process shows
+	dead    byte // a second dead state, or corpse again where there is none
+	sized   bool // the reading opens with its own byte count as an int32
+}
+
+// freebsd's struct kinfo_proc on LP64 (amd64, arm64): KINFO_PROC_SIZE, which
+// the kernel also writes into ki_structsize as the first int32, so a reading
+// is checked against its own header before anything else is read from it.
+// SZOMB is 5; 6 is SWAIT, a living state, so only 5 counts. The numbers are
+// held against the C layout at compile time in watchdog_bsd_freebsd.go.
+const (
+	freebsdKinfoSize    = 1088 // sizeof(struct kinfo_proc)
+	freebsdKinfoPidOff  = 72   // offsetof(ki_pid)
+	freebsdKinfoStatOff = 388  // offsetof(ki_stat)
+	freebsdSZomb        = 5
+)
+
+var freebsdKinfo = bsdKinfoLayout{
+	size:    freebsdKinfoSize,
+	pidOff:  freebsdKinfoPidOff,
+	statOff: freebsdKinfoStatOff,
+	corpse:  freebsdSZomb,
+	dead:    freebsdSZomb,
+	sized:   true,
+}
+
+// openbsd's struct kinfo_proc is fixed-width by design, the same bytes on
+// every arch, and grows only at the tail; the caller passes the element size
+// it knows and gets that many bytes. So this asks for a prefix that ends at
+// p_comm, past p_stat, and never depends on the whole struct's size for the
+// release it runs on. SZOMB is 5; SDEAD 6 is the moment before it, both dead.
+// The numbers are held against the C layout in watchdog_bsd_openbsd.go.
+const (
+	openbsdKinfoPrefix  = 312 // offsetof(p_comm): the bytes asked for
+	openbsdKinfoPidOff  = 108 // offsetof(p_pid)
+	openbsdKinfoStatOff = 304 // offsetof(p_stat)
+	openbsdSZomb        = 5
+	openbsdSDead        = 6
+)
+
+var openbsdKinfo = bsdKinfoLayout{
+	size:    openbsdKinfoPrefix,
+	pidOff:  openbsdKinfoPidOff,
+	statOff: openbsdKinfoStatOff,
+	corpse:  openbsdSZomb,
+	dead:    openbsdSDead,
+}
+
+// bsdKinfoCorpse decides from one kern.proc.pid reading on freebsd or openbsd:
+// n is what the kernel says it wrote, errno 0 on success. Every unsure answer
+// is alive - failed call, wrong length, pid that does not match - so a wrong
+// layout leaves the platform where kill(pid, 0) alone left it, and nothing
+// here can refuse a boot without a full reading naming the pid asked about.
+func bsdKinfoCorpse(l bsdKinfoLayout, pid, n int, buf []byte, errno int) bool {
+	if pid <= 0 || errno != 0 || n != l.size || len(buf) < n {
+		return false
+	}
+	if l.pidOff < 0 || l.statOff < 0 || l.pidOff+4 > n || l.statOff >= n {
+		return false
+	}
+	if l.sized && int(binary.LittleEndian.Uint32(buf)) != l.size {
+		return false
+	}
+	if int(int32(binary.LittleEndian.Uint32(buf[l.pidOff:]))) != pid {
+		return false
+	}
+	st := buf[l.statOff]
+	return st == l.corpse || st == l.dead
+}

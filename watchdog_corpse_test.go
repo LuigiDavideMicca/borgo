@@ -141,7 +141,11 @@ func TestKinfoProcCorpseRefusesAReadingAboutAnotherPid(t *testing.T) {
 // pid is an int and p_pid is 32 bits: a pid that only matches once truncated
 // is not a match.
 func TestKinfoProcCorpseRefusesAPidThatOnlyMatchesTruncated(t *testing.T) {
-	const wide = 1<<32 + 4242
+	var hi int64 = 1<<32 + 4242
+	if int64(int(hi)) != hi {
+		t.Skip("pid is 32 bits here, nothing to truncate")
+	}
+	wide := int(hi)
 	if kinfoProcCorpse(wide, kinfoBuf(4242, darwinSZOMB)) {
 		t.Fatalf("pid %d was answered by a reading about pid 4242", wide)
 	}
@@ -383,5 +387,203 @@ func TestKinfoLayoutIsTheOneThatWasCrossChecked(t *testing.T) {
 	const want = "648 36 40 5"
 	if got != want {
 		t.Fatalf("kinfo_proc layout is now %q, was %q: re-check it against darwin's headers for both architectures before changing this", got, want)
+	}
+}
+
+// freebsd's and openbsd's layouts, written out again rather than taken from
+// the code under test, for the same reason darwin's are. These are the whole
+// BSD answer that can be tested from here: no kernel of either is available to
+// this package's tests, so the syscall, the mib and the C layout's agreement
+// with these numbers rest on the compile-time witnesses in the tagged files.
+const (
+	bsdFreebsdSize    = 1088
+	bsdFreebsdPidOff  = 72
+	bsdFreebsdStatOff = 388
+	bsdOpenbsdSize    = 312
+	bsdOpenbsdPidOff  = 108
+	bsdOpenbsdStatOff = 304
+	bsdSZOMB          = 5
+	bsdOpenbsdSDEAD   = 6
+	bsdFreebsdSWAIT   = 6
+)
+
+// freebsdBuf builds one freebsd reading: the whole struct, opening with its
+// own size as the kernel writes it into ki_structsize
+func freebsdBuf(pid int, state byte) []byte {
+	buf := make([]byte, bsdFreebsdSize)
+	binary.LittleEndian.PutUint32(buf, bsdFreebsdSize)
+	binary.LittleEndian.PutUint32(buf[bsdFreebsdPidOff:], uint32(int32(pid)))
+	buf[bsdFreebsdStatOff] = state
+	return buf
+}
+
+// openbsdBuf builds one openbsd reading: the prefix this code asks for
+func openbsdBuf(pid int, state byte) []byte {
+	buf := make([]byte, bsdOpenbsdSize)
+	binary.LittleEndian.PutUint32(buf[bsdOpenbsdPidOff:], uint32(int32(pid)))
+	buf[bsdOpenbsdStatOff] = state
+	return buf
+}
+
+type bsdCase struct {
+	name   string
+	layout bsdKinfoLayout
+	size   int
+	pidOff int
+	build  func(pid int, state byte) []byte
+	dead   []byte
+	alive  []byte
+}
+
+func bsdCases() []bsdCase {
+	return []bsdCase{
+		{"freebsd", freebsdKinfo, bsdFreebsdSize, bsdFreebsdPidOff, freebsdBuf,
+			[]byte{bsdSZOMB},
+			[]byte{0, 1, 2, 3, 4, bsdFreebsdSWAIT, 7}},
+		{"openbsd", openbsdKinfo, bsdOpenbsdSize, bsdOpenbsdPidOff, openbsdBuf,
+			[]byte{bsdSZOMB, bsdOpenbsdSDEAD},
+			[]byte{0, 1, 2, 3, 4, 7}},
+	}
+}
+
+func TestBsdKinfoCorpseSeesACorpse(t *testing.T) {
+	for _, c := range bsdCases() {
+		for _, st := range c.dead {
+			if !bsdKinfoCorpse(c.layout, 4242, c.size, c.build(4242, st), 0) {
+				t.Errorf("%s: state %d read as alive: the api boots under a supervisor that has already exited", c.name, st)
+			}
+		}
+	}
+}
+
+func TestBsdKinfoCorpseSaysNoForEveryLivingState(t *testing.T) {
+	for _, c := range bsdCases() {
+		for _, st := range c.alive {
+			if bsdKinfoCorpse(c.layout, 4242, c.size, c.build(4242, st), 0) {
+				t.Errorf("%s: living state %d read as a corpse: every boot is refused", c.name, st)
+			}
+		}
+	}
+}
+
+// A misparse - offsets pointing into some other field - has to read as alive,
+// and the pid in the struct is the guard: a reading about another pid, or one
+// that only matches once truncated to 32 bits, is not about the parent.
+func TestBsdKinfoCorpseRefusesAReadingAboutAnotherPid(t *testing.T) {
+	for _, c := range bsdCases() {
+		if bsdKinfoCorpse(c.layout, 4242, c.size, c.build(99, bsdSZOMB), 0) {
+			t.Errorf("%s: a reading naming pid 99 answered the question about pid 4242", c.name)
+		}
+		var hi int64 = 1<<32 + 4242
+		if int64(int(hi)) != hi {
+			continue
+		}
+		if bsdKinfoCorpse(c.layout, int(hi), c.size, c.build(4242, bsdSZOMB), 0) {
+			t.Errorf("%s: pid %d was answered by a reading about pid 4242", c.name, hi)
+		}
+	}
+}
+
+// A failed call, or a reading that is not the exact length, is a layout this
+// code does not know - including the kernel saying it wrote more or less than
+// the buffer holds, and a zero-length success, which is how a pid nobody owns
+// comes back.
+func TestBsdKinfoCorpseRefusesAFailedOrOddSizedReading(t *testing.T) {
+	for _, c := range bsdCases() {
+		full := c.build(4242, bsdSZOMB)
+		cases := []struct {
+			what  string
+			n     int
+			buf   []byte
+			errno int
+		}{
+			{"ESRCH", c.size, full, 3},
+			{"EPERM", c.size, full, 1},
+			{"ENOMEM", c.size, full, 12},
+			{"nothing written", 0, full, 0},
+			{"one byte short", c.size - 1, full, 0},
+			{"one byte long", c.size + 1, append(append([]byte{}, full...), 0), 0},
+			{"n past the buffer", c.size, full[:c.size-1], 0},
+		}
+		for _, k := range cases {
+			if bsdKinfoCorpse(c.layout, 4242, k.n, k.buf, k.errno) {
+				t.Errorf("%s: %s read as a corpse", c.name, k.what)
+			}
+		}
+	}
+}
+
+// freebsd's reading opens with its own byte count, and a header that does not
+// say what this code believes is a struct from another release.
+func TestBsdKinfoCorpseRefusesAFreebsdStructOfAnotherSize(t *testing.T) {
+	buf := freebsdBuf(4242, bsdSZOMB)
+	binary.LittleEndian.PutUint32(buf, bsdFreebsdSize+8)
+	if bsdKinfoCorpse(freebsdKinfo, 4242, bsdFreebsdSize, buf, 0) {
+		t.Fatal("a kinfo_proc whose ki_structsize is not this code's read as a corpse")
+	}
+}
+
+// SZOMB next to the state byte, on either side, must not count
+func TestBsdKinfoCorpseDoesNotFindTheStateNextToIt(t *testing.T) {
+	for _, c := range bsdCases() {
+		for _, off := range []int{c.layout.statOff - 1, c.layout.statOff + 1} {
+			buf := c.build(4242, 0)
+			buf[off] = bsdSZOMB
+			if bsdKinfoCorpse(c.layout, 4242, c.size, buf, 0) {
+				t.Errorf("%s: SZOMB at offset %d read as the state", c.name, off)
+			}
+		}
+	}
+}
+
+func TestBsdKinfoCorpseRefusesANonPid(t *testing.T) {
+	for _, c := range bsdCases() {
+		for _, pid := range []int{0, -1} {
+			if bsdKinfoCorpse(c.layout, pid, c.size, c.build(pid, bsdSZOMB), 0) {
+				t.Errorf("%s: pid %d read as a corpse", c.name, pid)
+			}
+		}
+	}
+}
+
+// An arch with no cross-checked layout is a zero layout, and nothing can make
+// it a corpse - not even a reading that would be one under every other layout.
+func TestBsdKinfoCorpseIsUnsureWithAZeroLayout(t *testing.T) {
+	buf := freebsdBuf(4242, bsdSZOMB)
+	if bsdKinfoCorpse(bsdKinfoLayout{}, 4242, 0, buf, 0) || bsdKinfoCorpse(bsdKinfoLayout{}, 4242, len(buf), buf, 0) {
+		t.Fatal("a zero layout read a corpse")
+	}
+}
+
+// The layouts pinned, as darwin's are: a change to any of these numbers is a
+// change to what byte the watchdog calls the state of a supervisor.
+func TestBsdKinfoLayoutsAreTheOnesThatWereCrossChecked(t *testing.T) {
+	pin := func(l bsdKinfoLayout) string {
+		return fmt.Sprintf("%d %d %d %d %d %v", l.size, l.pidOff, l.statOff, l.corpse, l.dead, l.sized)
+	}
+	for _, c := range []struct{ name, want, got string }{
+		{"freebsd", "1088 72 388 5 5 true", pin(freebsdKinfo)},
+		{"openbsd", "312 108 304 5 6 false", pin(openbsdKinfo)},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s kinfo_proc layout is now %q, was %q: re-check it against the headers before changing this", c.name, c.got, c.want)
+		}
+	}
+}
+
+// A layout whose offsets point past the bytes it asks for is a layout this
+// code does not know, and it answers alive rather than reading past the end.
+func TestBsdKinfoCorpseRefusesALayoutThatPointsPastTheReading(t *testing.T) {
+	buf := make([]byte, 16)
+	binary.LittleEndian.PutUint32(buf, 4242)
+	for _, l := range []bsdKinfoLayout{
+		{size: 16, pidOff: 0, statOff: 16},
+		{size: 16, pidOff: 0, statOff: -1},
+		{size: 16, pidOff: 13, statOff: 4},
+		{size: 16, pidOff: -1, statOff: 4},
+	} {
+		if bsdKinfoCorpse(l, 4242, 16, buf, 0) {
+			t.Errorf("layout %+v read a corpse out of 16 bytes that only name the pid", l)
+		}
 	}
 }
