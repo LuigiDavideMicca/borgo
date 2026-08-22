@@ -265,7 +265,9 @@ describe("readParent and watchParent, on real pids", () => {
     const pid = proc.pid;
     await withDeadline(proc.exited, 10_000, "the short-lived child never exited");
     await Bun.sleep(300);
-    expect(readParent(pid, false).killError).not.toBe(null);
+    const r = readParent(pid, false);
+    expect(r.killError).not.toBe(null);
+    expect(parentGone(pid, r)).toBe(true);
   });
 
   test("watchParent refuses a pid that cannot be a parent, and starts no timer", () => {

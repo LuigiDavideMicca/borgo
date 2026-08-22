@@ -291,26 +291,48 @@ describe("readParent, against processes that really exist", () => {
 // that BINDS THE FALLBACK PORT and keeps running - exactly the process that
 // must not be left holding it.
 describe("serve-entry as a process, spawned the way dev.ts spawns it", () => {
-  test("it exits by itself when the pid it was given is already dead", async () => {
+  // the probe runs before serve(): a parent already dead at boot must never
+  // see the port bound, not merely exit at the first 2 s tick. The port is
+  // knocked on for the whole life of the process; one accepted connection is
+  // the 2 s of port the probe exists to close.
+  test("it exits by itself when the pid it was given is already dead, before ever binding the port", async () => {
     const corpse = track(Bun.spawn([process.execPath, "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" }));
     const deadPid = corpse.pid;
     await withDeadline(corpse.exited, 10_000, "the child that should die did not");
 
+    const port = freePort();
+    const started = performance.now();
     const proc = track(
       Bun.spawn([process.execPath, ENTRY], {
         cwd: PKG_DIR,
         stdout: "ignore",
         stderr: "ignore",
-        env: { ...process.env, BORGO_DEV: "1", PORT: String(freePort()), BORGO_PARENT_PID: String(deadPid) },
+        env: { ...process.env, BORGO_DEV: "1", PORT: String(port), BORGO_PARENT_PID: String(deadPid) },
       }),
     );
+    let bound = 0;
+    let done = false;
+    void proc.exited.then(() => (done = true));
+    const knock = (async () => {
+      while (!done) {
+        try {
+          const sock = await Bun.connect({ hostname: "127.0.0.1", port, socket: { data() {} } });
+          sock.end();
+          bound++;
+        } catch {}
+        await Bun.sleep(50);
+      }
+    })();
     // 4.5 s under 16 burners on 8 cores, measured; past 15 s with a second
     // set of burners and three other suites on the same machine, where the
     // 15 s deadline went red 3/12 on both arms of an unchanged watch - always
     // as this deadline, never as a wrong exit code. The cost is the boot of
     // ./server, not the 2 s poll, so the budget follows the boot.
     const code = await withDeadline(proc.exited, 40_000, "the front server never noticed its parent was gone");
+    await knock;
+    console.log(`dead parent: front exited in ${Math.round(performance.now() - started)} ms, port accepted ${bound} connections`);
     expect(code).toBe(0);
+    expect(bound).toBe(0);
   }, 50_000);
 
   test("it keeps serving under a parent that is alive", async () => {

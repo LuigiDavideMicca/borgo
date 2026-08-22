@@ -30,6 +30,11 @@ if (import.meta.main) {
   if (parentPid > 1) {
     // read once, at boot, while the parent is still there to be recognised
     const direct = process.ppid === parentPid;
+    // probe before binding, as the go side does before mounting: dev.ts names
+    // its own pid and then spawns, so a parent already gone here is never the
+    // spawn racing the probe - it is a supervisor that died in between, and
+    // the first tick would hand it 2 s of the port
+    if (parentGone(parentPid, readParent(parentPid, direct))) process.exit(0);
     setInterval(() => {
       if (parentGone(parentPid, readParent(parentPid, direct))) process.exit(0);
     }, 2_000);
