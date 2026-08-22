@@ -8,9 +8,14 @@ import (
 	"time"
 )
 
-// parentPollInterval is how often waitParentExit re-probes the parent; it
-// matches the windows sibling's poll.
-const parentPollInterval = 2 * time.Second
+// parentPollInterval is how often waitParentExit re-probes the parent, and so
+// the longest an api serves after its supervisor died. The direct branch is a
+// poll too - reparenting is the evidence, getppid is how often it is read - and
+// every process borgo starts is on it. It matches the tick the windows handle
+// wait uses, not that sibling's 2 s poll, which only an unopenable parent
+// reaches. Measured on wsl2: getppid 272 ns a call, kill(0) plus /proc/stat
+// 24 us, so four a second is nothing on either branch.
+const parentPollInterval = 250 * time.Millisecond
 
 // processExited reports whether the process is already gone, asked and answered
 // now: a cancellable wait reused as a synchronous probe answers the

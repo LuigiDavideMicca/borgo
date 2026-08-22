@@ -9,7 +9,10 @@ import (
 )
 
 // parentPollInterval is how often waitParentExit re-probes a parent whose
-// handle it cannot open; it matches the unix sibling's poll.
+// handle it cannot open. No process borgo starts reaches it (see below), and
+// the pid-reuse window measured there is sized to it, so it is not lowered
+// with the unix sibling's: the real path here is the handle wait and its
+// parentWaitTick.
 const parentPollInterval = 2 * time.Second
 
 // parentWaitTick bounds each blocking wait on an open handle. The wait itself
