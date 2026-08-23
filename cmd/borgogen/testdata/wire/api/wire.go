@@ -69,9 +69,10 @@ type Tagged struct {
 	} `json:"many"`
 }
 
-// A float key is not a key encoding/json can name: json.Marshal(Keys{}) fails
-// with "json: unsupported type: map[float64]int" even with the map nil, so
-// there is no shape to promise for fees. An integer key is fine.
+// A float key is not a key encoding/json can name the same way twice: through
+// go1.26 Marshal refuses the whole value, since go1.27 it writes the number
+// quoted. There is no shape to promise for fees that holds on both. An integer
+// key is fine on either.
 type Keys struct {
 	Fees  map[float64]int `json:"fees"`
 	Sizes map[uint8]int   `json:"sizes"`

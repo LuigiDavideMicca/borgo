@@ -763,13 +763,20 @@ func TestAnonymousStructWithPromotedTextMarshaler(t *testing.T) {
 	}
 }
 
-// encoding/json names an object key from a string or an integer and refuses the
-// whole value for anything else - a float key included, which is numeric but not
-// a key. Typing it Record<string, number> promised a response that never comes.
+// encoding/json names an object key from a string or an integer. A float key is
+// neither, and the two toolchains borgo supports disagree on what happens next:
+// through go1.26 Marshal refuses the whole value, since go1.27 it writes the
+// number quoted. unknown is the only type true under both - Record<string,
+// number> promises a response the older toolchain never sends. The switch is the
+// assertion: a third behaviour is one nobody here has reasoned about, and it
+// stops the suite instead of quietly widening what borgogen promises.
 func TestFloatMapKeysAreUnknown(t *testing.T) {
-	if _, err := json.Marshal(wireapi.Keys{}); err == nil ||
-		!strings.Contains(err.Error(), "unsupported type: map[float64]int") {
-		t.Fatalf("want encoding/json to refuse a float map key, got %v", err)
+	body, err := json.Marshal(wireapi.Keys{Fees: map[float64]int{1.5: 2}})
+	switch {
+	case err != nil && strings.Contains(err.Error(), "map[float64]int"):
+	case err == nil && strings.Contains(string(body), `"fees":{"1.5":2}`):
+	default:
+		t.Fatalf("a float map key did something neither toolchain does: body=%s err=%v", body, err)
 	}
 
 	types := generate(t, "wire")
