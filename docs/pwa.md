@@ -31,30 +31,30 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 }
 ```
 
-The manifest references `/icon-192.png` and `/icon-512.png`, which you supply — a browser will install the app without them, but it will not look like yours.
+The manifest references `/logo.svg` (the one `create-borgo` ships, `sizes: any`) plus `/icon-192.png` and `/icon-512.png`, which you supply — a browser will install the app without the PNGs, but it will not look like yours. `short_name` is the app name cut to 12 characters, which is what a home screen shows.
 
 ## What the generated worker does
 
 It caches **build output only**: the JavaScript chunks and stylesheet that `borgo build` produced, listed in `/assets/precache.json` together with a `stamp`:
 
 ```json
-{ "stamp": "8713…", "assets": ["/assets/client.js", "/assets/style.css", "…"] }
+{ "stamp": "1774…", "assets": ["/assets/_404-wntesq1k.js", "/assets/client-1274rfa1.js", "/assets/style-cw1yqzrb.css", "…"] }
 ```
 
-The stamp is a hash of that content, so it changes exactly when the build output changes — and *does not* change when a rebuild produces identical bytes.
+The list is the build's own emitted names — every `.js` output, hashed, plus the stylesheet under the name it was actually written as, never `style.css`, because `cache.addAll` rejects the whole install on one missing URL, and an install that never completes is a worker that can never replace the one already holding the previous deploy. The stamp is a hash of that content, so it changes exactly when the build output changes — and *does not* change when a rebuild produces identical bytes.
 
 The worker does **not** read that stamp at runtime. It carries its own copy, as the first line of code in the file:
 
 ```js
-const BUILD = "8713…";
+const BUILD = "1774…";
 const CACHE = "app-" + BUILD;
 ```
 
-`borgo build` rewrites that one line in `public/sw.js` on every production build, and rewriting it is the entire mechanism. A service worker reinstalls only when **its own bytes** change: the browser byte-compares the file it fetches against the one it is running, and if they are identical it keeps the old worker and never fires `install` again. A worker that read the stamp from `precache.json` would have fixed bytes, so `install` — the only thing that fills a cache — would run once ever and `activate` — the only thing that prunes — would never run again. Every deploy after the first would be shadowed by the first one's cache, for as long as the site data lives.
+`borgo build` rewrites that one line in `public/sw.js` on every production build (a `pwa init` run *after* a build starts from that build's stamp, so the worker is installable at once; before any build it says `"unbuilt"`), and rewriting it is the entire mechanism. A service worker reinstalls only when **its own bytes** change: the browser byte-compares the file it fetches against the one it is running, and if they are identical it keeps the old worker and never fires `install` again. A worker that read the stamp from `precache.json` would have fixed bytes, so `install` — the only thing that fills a cache — would run once ever and `activate` — the only thing that prunes — would never run again. Every deploy after the first would be shadowed by the first one's cache, for as long as the site data lives.
 
-So: on install the worker fills `app-<BUILD>`; on activate it deletes every other `app-*` cache and claims open tabs; on fetch it answers same-origin `/assets/` requests out of `app-<BUILD>` specifically (never a bare `caches.match`, which searches every cache oldest-first and would answer for a deploy that has not been pruned yet), falling through to the network for everything else.
+So: on install the worker fills `app-<BUILD>` and calls `skipWaiting()`, so it takes over as soon as it is ready rather than waiting for every tab to close; on activate it deletes every other `app-*` cache and claims open tabs; on fetch it answers same-origin `/assets/` requests out of `app-<BUILD>` specifically (never a bare `caches.match`, which searches every cache oldest-first and would answer for a deploy that has not been pruned yet), falling through to the network for everything else.
 
-`sw.js` is served from the site root with `Cache-Control: no-cache`, so a browser re-checks it on every deploy rather than running last week's worker.
+`sw.js` is served from the site root with `Cache-Control: no-cache`, so a browser re-checks it on every deploy rather than running last week's worker. Its ETag is weak and built from size and mtime, which is exactly the pair a byte-substituted file of equal length under a preserved mtime keeps — so do not rely on the validator to notice an edit that kept the length; the restamped `BUILD` line is what moves the bytes, and it is what the browser's own byte comparison reads.
 
 ### If you edit `sw.js`, keep the `BUILD` line
 
@@ -81,7 +81,7 @@ if (event.request.mode === "navigate") {
 
 `registerServiceWorker(path = "/sw.js")` no-ops server-side, in browsers without support, and **in development**. That last one is deliberate: a caching worker attached to a dev server will serve you yesterday's chunks while you edit, and you will spend an afternoon convincing yourself that fast refresh is broken. Production builds register normally.
 
-The dev guard has one hole, and it fails open. It reads a flag the server writes into the props script — so on a page with `hydrate = false`, which ships no props script, the flag is absent and the call registers the worker even under `borgo dev`. Such a page can still run islands, and an island is exactly where you would call this. If you register from an island, put the page's own `hydrate` back on, or guard the call yourself.
+The guard reads `window.__BORGO_DEV__`, which the server writes into the props script — and, on a page with `hydrate = false`, which ships no props script, into the zero-JS dev client it injects in its place. That second write is there for one reason: such a page can still run islands, an island is exactly where you would call this, and before it existed the flag was absent there and the call registered a caching worker over a dev session. Every page that can run the call now carries the flag.
 
 If you need to test the worker locally, run a production build: `bun run build && bun run start`.
 

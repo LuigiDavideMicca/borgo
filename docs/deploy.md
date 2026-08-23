@@ -219,8 +219,8 @@ ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
-ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectKernelModules=yes
 ProtectClock=yes
 ProtectHostname=yes
 RestrictSUIDSGID=yes
@@ -288,15 +288,23 @@ Route labels are the matched route *pattern*, not each concrete URL — and the 
 
 `BORGO_PUSH_KEY` authenticates `borgo.Push` to the front server. Go sends it as a header, so whoever can read the connection can read the key — and a key that leaks authenticates the leaker.
 
-Go therefore refuses to send it when it cannot establish that the connection protects it. `https://` is fine. So is any address that is this machine — `127.0.0.1`, `localhost`, `::1` — because `borgo start` puts both halves on one box and nothing leaves it. What is refused is cleartext to a *different* host:
+Go therefore refuses to send it when it cannot establish that the connection protects it. `https://` is fine. So is any address that is this machine — `127.0.0.1`, `localhost`, `::1` — because `borgo start` puts both halves on one box and nothing leaves it. What is refused is cleartext to a *different* host. `borgo.Serve` says so at boot, before it binds — the process still starts, because the api may have other work — and every `borgo.Push` then returns the refusal as its error:
 
 ```
-push refused: FRONT_URL is http:// to a host that is not this machine,
-so BORGO_PUSH_KEY would cross the network in clear. Use https://, or set
-BORGO_PUSH_INSECURE=1 if that network is one you control.
+borgo: every borgo.Push will fail: front:3000 is not this machine and FRONT_URL is http://,
+so BORGO_PUSH_KEY would cross the network in clear. Use https, or BORGO_PUSH_INSECURE=1
+if that network is one you control
 ```
 
-`BORGO_PUSH_INSECURE=1` is the answer when the network really is yours: a compose network, a private VPC, two containers on one host. It is not a workaround for a missing certificate on the public internet — there the key is readable by anyone on the path, and so is everything else you push.
+```
+borgo.Push: BORGO_PUSH_KEY is set and FRONT_URL is http://front:3000, so the key would
+cross the network in clear: use https, a front server on this machine, or set
+BORGO_PUSH_INSECURE=1 to send it anyway
+```
+
+"This machine" is read literally: `127.0.0.1`, `::1`, any loopback address `net.ParseIP` accepts, and the name `localhost` (case-insensitive, root dot tolerated). The `inet_aton` short forms — `127.1`, `2130706433`, `0x7f000001` — are deliberately *not* loopback here: Go hands none of them to `connect()` as an address, it looks them up as names, and a verdict of "this machine" for something a resolver answers would authorise the key to travel to whatever the answer is. Write `127.0.0.1`. A `BORGO_PUSH_INSECURE` that is not a boolean is fatal at boot, by name, rather than read as "no".
+
+`BORGO_PUSH_INSECURE=1` is the answer when the network really is yours: a compose network, a private VPC, two containers on one host. The boot then logs the opposite line — that the key crosses the network in clear on every push — so a skimmed log reads the right way round. It is not a workaround for a missing certificate on the public internet — there the key is readable by anyone on the path, and so is everything else you push.
 
 A push is also refused when the front server **redirects** it, whatever the escape hatch says. A redirect is the destination choosing where the key goes next, and the check that cleared the first hop knows nothing about the second — `https://front` answering `307` towards somewhere else would hand the key over encrypted and still hand it over. So if your front server sits behind a proxy that redirects `http` to `https`, point `FRONT_URL` at the front server itself rather than at the proxy; the push is an internal call and has no reason to travel through the redirect.
 
@@ -331,7 +339,7 @@ The refusal is deliberate and it is new in 0.21: before, the key went out over w
 | `BORGO_HASH_SLOTS` | `max(1, GOMAXPROCS/2)` | go server: password hashes that may run at once. One costs ~140 ms of cpu, so the cap is what keeps a login flood from starving every other route. A value that is not a positive integer is refused at startup rather than ignored |
 | `NO_COLOR` | unset | disable ANSI colors in logs |
 
-The Go timeouts are duration strings (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot; the front server's three — `BORGO_MAX_BODY` in bytes, `BORGO_API_TIMEOUT` in milliseconds, `BORGO_FRONT_READ_TIMEOUT` in seconds — are plain numbers. The first two now fail loudly too, and that changed in 0.21: a typo used to be replaced by the default, which is the wrong direction here, because `0` in both of them means *no limit*. `BORGO_API_TIMEOUT=0.5` did not shorten the timeout — rounding down reached `0` and removed it. A value that cannot be read is refused before a port is bound, naming the variable. `DB_PATH` in the samples above is the app's own variable, not the framework's.
+The Go timeouts are duration strings (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot; the front server's three — `BORGO_MAX_BODY` in bytes, `BORGO_API_TIMEOUT` in milliseconds, `BORGO_FRONT_READ_TIMEOUT` in seconds — are plain numbers. The booleans — `SESSION_SECURE`, `BORGO_CSRF`, `BORGO_METRICS`, `BORGO_SECURITY_HEADERS`, `BORGO_WS_ALLOW_NO_ORIGIN` — share one grammar on both halves: `1`/`true` and `0`/`false` in Go's `strconv.ParseBool` spellings (`t`/`f`/`True` included); anything else is refused at boot naming the variable, and a control character such as the `` a Windows-authored `.env` carries is shown in the refusal rather than swallowed. The first two numbers now fail loudly too, and that changed in 0.21: a typo used to be replaced by the default, which is the wrong direction here, because `0` in both of them means *no limit*. `BORGO_API_TIMEOUT=0.5` did not shorten the timeout — rounding down reached `0` and removed it. A value that cannot be read is refused before a port is bound, naming the variable. `DB_PATH` in the samples above is the app's own variable, not the framework's.
 
 > **Why `BORGO_FRONT_READ_TIMEOUT` spells out `FRONT`.** `borgo start` hands both children one environment, so a variable both halves read cannot mean one thing. That knob was `BORGO_IDLE_TIMEOUT` once, and Go still reads that name as a duration: `=2m` gave Go two minutes and left the front server silently on 30 seconds, while `=120` gave the front server two minutes and stopped the Go binary from starting. Renaming it to `BORGO_READ_TIMEOUT` reproduced the defect exactly, since the Go server reads that name too, same grammar, same refusal. A rename moves a collision; `FRONT` is what closes it, and a test now fails the build if either half is ever pointed back at the other's variable. Neither old name is honoured as an alias.
 >

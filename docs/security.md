@@ -6,7 +6,7 @@ The short version: borgo ships a locked-down default posture — security header
 
 ## Security headers
 
-Every rendered document leaves the front server with three headers set (only if the response does not already carry them, so you can override any of them per route):
+Every rendered document leaves the front server with three headers set (only if the response does not already carry them, so you can override any of them per route). The front server's *own* answers on `/api/*` carry them too — the `403` of a failed csrf check, the `413` over `BORGO_MAX_BODY`, the `502`/`504` of an api that did not answer — because a response borgo writes is borgo's to protect; what the Go handler itself returns passes through untouched, and it is Go's to set (`borgo.Serve` already sends `nosniff` on its own errors).
 
 | Header | Value |
 | --- | --- |
@@ -162,11 +162,11 @@ This defends against **cookie tossing**. A cookie on a sibling subdomain (`blog.
 | Request body read by the front server | 32 MB | `BORGO_MAX_BODY` (bytes, `0` for no limit) |
 | Waiting for the Go API's response headers | 30 s | `BORGO_API_TIMEOUT` (ms, `0` disables) |
 | Reading a client's request headers (Go) | 5 s | `BORGO_READ_HEADER_TIMEOUT` |
-| Idle keep-alive connection (Go) | 2 m | `BORGO_IDLE_TIMEOUT` (duration; malformed panics at boot) |
-| Reading a client's request headers and body (front server) | 30 s | `BORGO_FRONT_READ_TIMEOUT` (seconds, max 255, `0` disables; a positive value under 1 s becomes 1 s and is announced at boot; malformed is silently ignored) |
+| Idle keep-alive connection (Go) | 2 m | `BORGO_IDLE_TIMEOUT` (duration; malformed is refused before the port binds — `borgo.Serve` exits naming the variable, `ServeContext` returns the error) |
+| Reading a client's request headers and body (front server) | 30 s | `BORGO_FRONT_READ_TIMEOUT` (seconds, max 255, `0` disables; a positive value under 1 s becomes 1 s and is announced at boot; malformed is silently replaced by 30) |
 | Whole-request read/write deadline (Go) | none | `BORGO_READ_TIMEOUT` (duration), `BORGO_WRITE_TIMEOUT` |
 
-Over the `Bind` cap the client gets a `413`; a missing or non-JSON `Content-Type` gets a `415`. Both come from `borgo.BindError`.
+Over the `Bind` cap the client gets a `413`; a missing or non-JSON `Content-Type` gets a `415`. Both come from `borgo.BindError`. Over `BORGO_MAX_BODY` the front server answers its own `413` before anything reaches Go, and it counts the bytes as they arrive — a body with no `Content-Length`, chunked, is cut at the same byte as one that declared its size, so the declaration is not what the limit reads.
 
 The whole-request deadlines are deliberately unset. They are wall-clock limits on an entire exchange, so any value would eventually kill a legitimate server-sent-events stream or a slow upload. Header timeouts stop slowloris without that cost, `Bind` bounds the body, and if you set the deadlines anyway, `borgo.SSE` clears them on its own connection so streams survive.
 
@@ -180,13 +180,15 @@ The front server's own read deadline is the internet-facing one, and it has its 
 
 `Content-Type` was tried as the discriminator and was wrong in kind — it truncated every long-lived response outside the allowlist, and granted the exemption only after the handler had already resolved, which is too late for anything slower than the deadline. The cost that remains: a request whose body borgo never finished reading keeps its deadline for its whole life, so a proxied upload too large to buffer is still cut, and a form action's own render is not kept warm. There is also one declared limitation on streams under heavy load — see [realtime](realtime.md#streams-and-server-timeouts).
 
-**The two halves deliberately do not share a name for any of this.** They parse with different grammars — Go a duration, the front server whole seconds — and fail in different directions: Go panics at boot on a value it cannot parse, the front server silently keeps 30 s. `borgo start` gives both children one environment, so a shared name would mean one of them is never getting what you wrote; that is why the front server's knob is `BORGO_FRONT_READ_TIMEOUT` and Go's are `BORGO_READ_TIMEOUT` and `BORGO_IDLE_TIMEOUT`. See the [environment reference](deploy.md#environment-reference).
+**The two halves deliberately do not share a name for any of this.** They parse with different grammars — Go a duration, the front server whole seconds — and fail in different directions: Go refuses to boot on a value it cannot parse, the front server silently keeps 30 s. `borgo start` gives both children one environment, so a shared name would mean one of them is never getting what you wrote; that is why the front server's knob is `BORGO_FRONT_READ_TIMEOUT` and Go's are `BORGO_READ_TIMEOUT` and `BORGO_IDLE_TIMEOUT`. See the [environment reference](deploy.md#environment-reference).
 
 A hung Go handler cannot take the front server with it: past `BORGO_API_TIMEOUT` the request answers `504` and the upstream body is cancelled.
 
 ## Realtime surface
 
-WebSocket upgrades on `/ws` are refused when the `Origin` header names a different scheme or host, because browsers attach cookies to WebSocket handshakes regardless of origin — without the check, any page on the internet could open a socket as your logged-in user. **An absent `Origin` is refused too**, as of 0.21: admitting it meant the one header an attacker can simply leave out switched the check off. Non-browser clients send none and are now refused; `BORGO_WS_ALLOW_NO_ORIGIN=1` admits them, and admits every other originless caller with them. A client may subscribe to at most 32 topics of at most 128 characters, and a single message is capped at 1 MB.
+A WebSocket on `/ws` whose `Origin` header names a different scheme or host is refused, because browsers attach cookies to WebSocket handshakes regardless of origin — without the check, any page on the internet could open a socket as your logged-in user. **An absent `Origin` is refused too**, as of 0.21: admitting it meant the one header an attacker can simply leave out switched the check off. Non-browser clients send none and are now refused; `BORGO_WS_ALLOW_NO_ORIGIN=1` admits them, and admits every other originless caller with them.
+
+The shape of that refusal matters to whoever reads the client's log. A non-101 answer to a handshake reaches the browser as close code `1006` with no reason, indistinguishable from a server that is down, so the origin refusal is not a `403`: the handshake completes, and the socket is closed at once with code `4403` and a reason naming the origin it saw and the switch that would admit it — `origin "http://evil.example" is not this server (app.example.com): /ws accepts the page's own origin only`. The socket is subscribed to nothing and lives one tick. borgo's own client treats exactly that code as final (`onRefused` fires, once) rather than redialling a refusal every 30 seconds for the life of the tab — see [realtime](realtime.md#websocket-topics). Every other refusal on the handshake stays a `400`: a client may subscribe to at most 32 topics of at most 128 characters, and a single message is capped at 1 MB.
 
 Go pushes to browsers through `/__borgo/publish` on the front server. Without a shared key that endpoint accepts loopback traffic only — but behind a reverse proxy on the same box, *every* request arrives from loopback, so borgo additionally refuses anything carrying forwarding headers. In any deployment where Go and the front server are not the same machine, set a key on both sides:
 
