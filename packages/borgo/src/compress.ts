@@ -7,41 +7,20 @@ const compressibleRe = /\.(js|mjs|css|html|htm|svg|json|map|txt|xml|webmanifest)
 
 export const isCompressiblePath = (path: string) => compressibleRe.test(path);
 
-/**
- * A file whose own name starts with a dot is not public content, and public/
- * collects them by accident: .DS_Store, which carries the whole listing of the
- * directory it sits in - including names nothing links to - .gitkeep, an
- * editor's .swp, an .env somebody dropped, and the .borgo-doctor-<pid> a killed
- * doctor leaves behind. Measured before this: every one of them answered 200.
- *
- * The last segment only, and never a directory. public/.well-known/ is a
- * standard (rfc 8615) whose whole point is being fetched - acme http-01 renews
- * a certificate through it, security.txt and the app-association files live
- * there - and it is served today. A rule that read the segments instead would
- * have to carry an allowlist to keep it, and an allowlist can be wrong; this
- * one cannot reach it at all. What it does not reach either is a hidden
- * directory that is *not* .well-known - public/.git/config stays servable -
- * and that is the declared half, because refusing it needs the url's root,
- * which is known where the url is accepted and not here.
- *
- * Both separators: a caller on windows passes a path a join() built.
- */
+// a file whose own name starts with a dot is not public content: .DS_Store
+// (the directory's whole listing), .swp, a dropped .env, a killed doctor's
+// probe all answered 200. last segment only, never a directory: .well-known/
+// (rfc 8615) must stay served, and an allowlist can be wrong where this cannot
+// reach it. a hidden directory that is not .well-known needs the url's root,
+// which is known where the url is accepted: inHiddenDirectory. both separators, a join() built the path
 export const isHiddenAsset = (path: string): boolean =>
   path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1).startsWith(".");
 
-/**
- * The other half: a dot-directory anywhere above the file, judged against the
- * url's root, which the caller passes. server.ts refuses with it before both
- * roads and export.ts before copying public/; it lives here, in the one module
- * both already import, so `borgo export` does not resolve react to get it.
- *
- * .well-known is exempt as the FIRST segment only. rfc 8615 defines a
- * well-known uri as one whose path begins with /.well-known/, so a nested one
- * is not the standard's; and it is exact, not folded, because the rfc's paths
- * are case-sensitive and every acme client writes it lower-case. The renewal
- * that fails is an expired certificate, which is the worse direction, so the
- * root tree is asserted to pass before anything is asserted to fail.
- */
+// the other half, judged against the url's root the caller passes; here, in
+// the one module server.ts and export.ts both import, so `borgo export` does
+// not resolve react to get it. .well-known is exempt as the FIRST segment only
+// (rfc 8615: a well-known uri begins with /.well-known/) and exact, not folded:
+// the rfc's paths are case-sensitive and every acme client writes it lower-case
 export function inHiddenDirectory(urlPath: string): boolean {
   const segments = urlPath.split("/");
   for (let i = 1; i < segments.length - 1; i++) {
@@ -51,15 +30,12 @@ export function inHiddenDirectory(urlPath: string): boolean {
   return false;
 }
 
-// What a build vouched for: where it wrote, and the byte length of each output
-// whose name carries its own content hash. A list rather than a pattern - see
-// readBuildOutputs in build.ts for the measurement that killed the pattern -
-// and a length rather than a bare name, because `immutable` is a claim about
-// bytes and a name alone cannot keep it.
+// where a build wrote, and the byte length of each output whose name carries
+// its content hash: a list, not a pattern (readBuildOutputs in build.ts), and a
+// length, not a bare name, because `immutable` is a claim about bytes
 export type BuildOutputs = { dir: string; sizes: ReadonlyMap<string, number> };
 
-// no build has vouched for anything, so nothing is pinned. every default in
-// this file points here on purpose.
+// no build has vouched for anything, so nothing is pinned: every default here points at it
 export const NO_BUILD_OUTPUTS: BuildOutputs = { dir: "", sizes: new Map() };
 
 const IMMUTABLE = "public, max-age=31536000, immutable";
@@ -68,107 +44,57 @@ const asUrl = (path: string) => path.replaceAll("\\", "/");
 
 const isServiceWorker = (url: string) => url === "public/sw.js" || url.endsWith("/public/sw.js");
 
-/**
- * The byte length the build recorded for this exact path, or null if no build
- * vouched for it.
- *
- * The directory is compared whole, not by segment name. Gating on
- * `/(^|\/)assets\//` accepted *any* folder called assets: measured on the wire,
- * /copy/assets/index-n12gjnyv.js and /deep/nested/assets/index-n12gjnyv.js were
- * pinned for a year on bytes the bundler never saw, because their basename was
- * in the manifest and an ancestor happened to be spelled "assets". Every
- * bundle an app copies into public/ ships such a folder. The build knows the
- * one directory it wrote, so it records it and this compares against that.
- */
+// the byte length the build recorded for this exact path, or null. the
+// directory is compared whole, not by segment name: gating on `assets/`
+// pinned /copy/assets/index-n12gjnyv.js and /deep/nested/assets/... for a year
+// on bytes the bundler never saw, and every bundle an app copies into public/ ships such a folder
 export function recordedSize(path: string, outputs: BuildOutputs): number | null {
   const dir = asUrl(outputs.dir).replace(/\/+$/, "");
   if (!dir) return null;
   const url = asUrl(path);
   if (!url.startsWith(dir + "/")) return null;
   const name = url.slice(dir.length + 1);
-  // directly in the output directory: the manifest keys are filenames, and a
-  // deeper path is a different file whatever it is called
+  // directly in the output directory: the manifest keys are filenames
   if (!name || name.includes("/")) return null;
   return outputs.sizes.get(name) ?? null;
 }
 
-// null when the build never vouched for this path. a service worker is named
-// explicitly and never pinned: it controls every url in its scope, so it must
-// keep revalidating even if the rules around it are ever loosened.
+// null when the build never vouched for this path. a service worker is never
+// pinned: it controls every url in its scope, whatever the rules around it become
 export const pinnedSizeFor = (path: string, outputs: BuildOutputs): number | null =>
   isServiceWorker(asUrl(path)) ? null : recordedSize(path, outputs);
 
-/**
- * The one place a year is granted, and it is granted against the disk - twice.
- *
- * The manifest vouches for a *name*; whatever occupies that name would
- * otherwise inherit the year. Measured: a recorded chunk deleted and recreated
- * with different bytes after boot was still served `immutable`. Comparing the
- * recorded length turns "this name was once hashed" into "this file is still
- * the file that was hashed", which is the claim `immutable` actually makes.
- *
- * Two lengths, not one, and neither alone is enough. Checking only the identity
- * file pinned a replaced sibling: 749 -> 75 bytes, and the stale 75 shipped
- * `immutable` to every client that sent Accept-Encoding, which is nearly all of
- * them. Checking only the representation sent would let a partial deploy that
- * rewrote the identity file and left the .gz behind keep pinning that .gz - and
- * `immutable` is a promise about the *url*, which no longer holds one content
- * once its representations disagree. So a sibling is pinned only when it is
- * itself vouched for and the identity beside it still is too.
- *
- * Length, not a per-request digest, and not mtime. A digest would read every
- * asset on every hit. mtime moves whenever a deploy copies a file that did not
- * change, so it would unpin the entire bundle on every release - the strict
- * failure, permanently on. Length survives a copy and moves with almost any
- * edit. What it does not catch is a replacement of exactly the same byte
- * length under a name that already carried a matching content hash, which is
- * the residual hole and is documented as such.
- *
- * DECLARED LIMITATION - the length is compared, and then the bytes are sent;
- * the two are not atomic. A file rewritten in the window between them goes out
- * under a directive granted for its previous contents. Measured under a loop
- * rewriting public/assets in place beneath a running server: 22 responses in
- * 10,628 on the indexed path and 7 in 11,230 on the live path, the latter 204s
- * with an empty body pinned for a year.
- *
- * It is not closed here because it cannot be closed by the handle. Holding the
- * file open does not help: an in-place rewrite truncates the same inode, and a
- * descriptor opened before it reports the new length afterwards (measured:
- * 1000 -> 20 bytes through one fd). Closing it means reading every asset into
- * memory to measure the bytes actually sent - a per-request cost this path
- * exists to avoid, since `new Response(Bun.file(...))` streams off the disk and
- * never through the process.
- *
- * The trigger is a deploy that rewrites public/assets in place. For a
- * content-addressed name that is already the hash lying about its bytes - the
- * residual above - so the exposure a correct build adds is the transient one:
- * during the rewrite a client may cache a truncated or oversized body for a
- * year. Deploying into a new directory and swapping, which is what the
- * Dockerfile does, does not reach this window at all.
- */
+// the one place a year is granted, and against the disk twice: the manifest
+// vouches for a name, and whatever occupies it would inherit the year (a
+// recorded chunk recreated after boot was served `immutable`). two lengths:
+// the identity alone pinned a replaced sibling (749 -> 75 stale bytes to
+// every client sending Accept-Encoding), the sent one alone would let a
+// partial deploy keep pinning a leftover .gz, and `immutable` is a promise
+// about the url. length, not a digest (a read per hit) and not mtime (moves
+// on every copying deploy, unpinning the whole bundle). residual: a same-
+// length replacement under a hashed name. DECLARED LIMITATION: compare then
+// send is not atomic; under a loop rewriting public/assets in place, 22
+// responses in 10,628 indexed and 7 in 11,230 live went out under the previous
+// contents' directive. not closable by the handle: an in-place rewrite
+// truncates the same inode and an open fd reports the new length (1000 -> 20
+// through one fd); closing it means reading every asset into memory. deploying
+// into a new directory and swapping, as the Dockerfile does, never reaches the window
 const vouched = (pinnedSize: number | null, sizeOnDisk: number | null): boolean =>
   pinnedSize !== null && pinnedSize === sizeOnDisk;
 
 export const pinPolicy = (
   sent: number | null,
   sentSize: number | null,
-  // defaults collapse to one check when the representation being sent *is* the
-  // identity, which is the only case where the two questions are the same one
+  // defaults collapse to one check when the representation sent IS the identity
   identity: number | null = sent,
   identitySize: number | null = sentSize,
 ): string =>
   vouched(sent, sentSize) && vouched(identity, identitySize) ? IMMUTABLE : "no-cache";
 
-// picks the first server-preferred encoding the client accepts (q > 0).
-//
-// the parameter name is matched case-insensitively, like the coding name beside
-// it: rfc 9110 5.6.6 makes parameter names case-insensitive, so "gzip;Q=0" is a
-// client refusing gzip in a spelling no less valid than "gzip;q=0". Matching
-// only the lowercase one left the refusal unread and the quality at its default
-// 1 - so every asset, every json payload and every rendered document went out
-// compressed to a client that had just said it cannot decode gzip. gzip.go's
-// refusesCoding folds the same name for the same reason; the two halves negotiate
-// the same header and must read it the same way.
+// the first server-preferred encoding the client accepts (q > 0). the
+// parameter name folds case: rfc 9110 5.6.6 makes it case-insensitive, so
+// "gzip;Q=0" is a refusal, and reading only "q" sent gzip to a client that
+// said it cannot decode it. gzip.go's refusesCoding folds the same way
 export function pickEncoding(
   acceptEncoding: string | null,
   preferred: readonly string[],
@@ -200,9 +126,8 @@ export async function precompressAssets(dir: string) {
     // what serveAsset refuses is only build time here: the same rule, not a copy of it
     if (!entry.isFile() || !isCompressiblePath(entry.name) || isHiddenAsset(entry.name)) continue;
     const path = join(entry.parentPath, entry.name);
-    // the listing is a snapshot: a `borgo dev` rebuilding the same app
-    // deletes stale hashed chunks, and a file that vanished between the
-    // scan and the read is not a reason to fail the whole build
+    // the listing is a snapshot: `borgo dev` deletes stale hashed chunks, and a
+    // file gone between scan and read is not a reason to fail the build
     let raw: Buffer;
     try {
       raw = Buffer.from(await Bun.file(path).arrayBuffer());
@@ -221,32 +146,14 @@ export async function precompressAssets(dir: string) {
   }
 }
 
-// size and mtime, base36. the suffix keeps one url's encodings from
-// revalidating each other.
-//
-// Weak, because size and mtime are weak. rfc 9110 §8.8.1 asks a strong
-// validator to change whenever the content changes observably, and this pair
-// does not: two files of equal length share the size half, and every tool that
-// copies a file with its date - cp -p, rsync -t, tar, a reproducible build,
-// docker's COPY - carries the mtime half across unchanged. Measured on
-// public/sw.js, the file that controls every url in its scope: one byte
-// substituted at constant length under a preserved mtime produced a byte-equal
-// tag, so an If-None-Match holding the old bytes 304s on the new ones.
-//
-// W/ does not make that revalidation exact - the weak comparison still matches
-// and the 304 still goes out - and nothing available per request can, since the
-// only evidence a request has is the same size and mtime. What it buys is that
-// the header stops claiming an equality it cannot check, and that the tag is
-// disqualified from If-Range, the one place a wrong match splices new bytes
-// onto an old prefix rather than merely reusing a stale file no-cache will
-// recheck anyway.
-//
-// The build's content hash is not the missing strong validator. It vouches for
-// a name at build time, and deciding per request whether the disk still holds
-// what it hashed lands back on size and mtime - see assetCacheControl, where
-// that same claim is checked against a length for exactly this reason, and the
-// residual hole it declares is this one. It also covers only the build's own
-// output directory: sw.js is deliberately outside it and never pinned.
+// size and mtime, base36; the suffix keeps one url's encodings from
+// revalidating each other. weak because the pair is: equal lengths share the
+// size half and cp -p, rsync -t, tar, docker COPY carry the mtime across, so
+// one byte substituted at constant length under a preserved mtime gave a
+// byte-equal tag on public/sw.js. W/ does not make the 304 exact, nothing per
+// request can; it stops claiming an equality it cannot check and disqualifies
+// the tag from If-Range, where a wrong match splices bytes. the build's hash
+// vouches for a name at build time, not for the disk per request (assetCacheControl)
 export const assetEtag = (size: number, mtimeMs: number, suffix: string): string =>
   `W/"${size.toString(36)}-${Math.floor(mtimeMs).toString(36)}${suffix}"`;
 
@@ -254,21 +161,10 @@ const WEAK = /^W\//;
 const isWeak = (validator: string) => WEAK.test(validator);
 const strong = (validator: string) => validator.replace(WEAK, "");
 
-// pinnedSize is the byte length the build recorded for *this representation's*
-// file, or null if no build vouched for it. Per variant, not per url: the
-// directive travels on the response, and the response carries these bytes.
-//
-// `etag`, `size` and `lastModified` on these two types are what boot saw.
-// Nothing is *served* from them - see serveIndexed, which re-stats the file it
-// is about to send - but they are read: they are the snapshot the asset tests
-// compare the live headers against.
-//
-// `mtimeMs` sat here beside them and was read by nobody at all. It was written
-// once per file by buildAssetIndex, from the same stat `lastModified` is
-// derived from, and every mtime in this file's request paths comes off a live
-// stat instead. A field nobody reads is a field somebody will read believing
-// it is current, which for an mtime is exactly the mistake serveIndexed exists
-// to avoid.
+// pinnedSize is per variant, not per url: the directive travels on the
+// response, and the response carries these bytes. `etag` and `size` are what
+// boot saw: nothing is served from them (serveIndexed re-stats), the asset
+// tests compare live headers against them
 export type AssetVariant = {
   path: string;
   encoding?: "br" | "gzip";
@@ -286,12 +182,9 @@ export type AssetInfo = {
   type: string;
 };
 
-// one walk of the served directory at boot, so a request never stats the disk
-// to learn whether a file - or its .br/.gz sibling - is there, and every asset
-// gets an etag it can be revalidated against. only used in production: dev
-// rebuilds assets in place under stable names, where a cached etag would pin
-// the browser to yesterday's bundle. anything written after boot is simply not
-// in here and falls back to a live lookup.
+// one walk at boot, so a request never stats the disk for a file or its
+// .br/.gz sibling. production only: dev rebuilds under stable names, where a
+// cached etag would pin yesterday's bundle. written after boot means a live lookup
 export function buildAssetIndex(
   dir: string,
   caseInsensitive?: boolean,
@@ -313,16 +206,14 @@ export function buildAssetIndex(
     } catch {}
   }
 
-  // measured on the names just read, not guessed from the platform - see
-  // foldsCase. The directory being indexed is the one that has to answer, and
-  // it is not always the one the process runs on.
+  // measured on the names just read, not guessed from the platform: the
+  // directory indexed is not always the one the process runs on
   const folds = caseInsensitive ?? foldsCase(files.keys());
 
   const base = dir.replaceAll("\\", "/").replace(/\/+$/, "");
   const tag = (path: string, suffix: string) => {
     const file = files.get(path)!;
-    // same formula the request path uses, or the snapshot etag and the
-    // served one disagree for a file nobody touched
+    // same formula as the request path, or the snapshot etag and the served one disagree
     return assetEtag(file.size, file.mtimeMs, suffix);
   };
 
@@ -361,78 +252,36 @@ export function buildAssetIndex(
       type: Bun.file(path).type,
     };
     index.set(url, info);
-    // the folded alias findAsset falls back to, where the filesystem folds
-    // too. never over a real url: an exact match is always the right answer.
+    // the folded alias findAsset falls back to, never over a real url
     if (folds) {
       const folded = url.toLowerCase();
       if (folded !== url && !index.has(folded)) index.set(folded, info);
     }
   }
-  // so a lookup cannot read this index under the opposite rule from the one it
-  // was built with - the wrong-file answer 91fb092 pinned
+  // a lookup must not read this index under the opposite rule from the one it was built with
   foldingOf.set(index, folds);
   return index;
 }
 
-// An asset may be reused without asking only when its url is a promise about
-// its bytes; everything else must be revalidated first. rfc 9111 §4.2.2 lets a
-// cache invent a freshness lifetime when none is given, and browsers commonly
-// take ~10% of (now - Last-Modified), so an asset untouched for 100 days is
-// heuristically fresh for ~10. The document is private, no-store and therefore
-// always fresh, so a returning browser fetches today's html after a deploy and
-// runs yesterday's /assets/client.js against today's ssr markup and today's
-// props shape, without ever asking. no-cache is "revalidate before reuse", not
-// no-store: the etag beside it turns each revalidation into a bodyless 304.
-//
-// What counts as that promise is decided by three facts, none of which a name
-// can supply on its own, because every previous version of this rule accepted a
-// name as proof and every one of them was wrong on the wire:
-//
-//   1. the bundler put this file's own content hash into its name
-//      (build.ts nameCarriesHash). The rule before that was
-//      `-[a-z0-9]{8}\.(js|css)` under assets/, which any eight-letter word
-//      satisfies - /assets/stripe-checkout.js and /assets/hero-carousel.js
-//      were pinned for a year, and google-analytics.js escaped only because
-//      "analytics" is nine characters;
-//   2. it sits in the one directory the build wrote, compared whole. Gating on
-//      a path segment called "assets" pinned /copy/assets/… and
-//      /deep/nested/assets/… - bytes the bundler never saw - and every bundle
-//      an app copies into public/ ships such a folder;
-//   3. the file *about to be sent* still has the byte length the build
-//      recorded for it. The manifest vouches for a name, and whatever occupies
-//      that name would otherwise inherit the year: a recorded chunk deleted and
-//      recreated after boot was served `immutable` on bytes nobody had ever
-//      hashed. The representation matters as much as the url - checking the
-//      identity file while shipping a replaced .gz pinned 75 stale bytes where
-//      749 had been vouched for, and since nearly every client sends
-//      Accept-Encoding that was the common case, not a corner of it. Each
-//      encoding is therefore vouched for separately, on AssetVariant.
-//
-// The comment that once defended (1) claimed assets/ was build-owned;
-// build.ts says the opposite in its own words - it is "also where an app drops
-// an analytics snippet or a vendored widget" - and the inventory exists at all
-// because the sweep had already been burned by the identical assumption.
-//
-// how this fails if it is wrong: an asset that really is content-addressed
-// loses its year - `.borgo/` not copied into an image, an app upgrading from a
-// borgo that recorded no sizes, public/assets holding a different build than
-// the manifest describes, or a file legitimately rewritten to a new length -
-// and pays one conditional request per asset per load. That is a performance
-// regression and it surfaces only in a measurement. The other direction now
-// needs all three facts at once, for the exact file being sent. What survives
-// it is a replacement of exactly the recorded byte length under a name that
-// already carried a matching content hash inside the build's own directory,
-// and the rewrite window declared on pinPolicy. Doubt resolves toward
-// revalidating: every degradation of the manifest pins nothing, a sibling the
-// build did not measure is never pinned even when its identity file is, a
-// recorded length of zero is dropped rather than stored, and an asset nobody
-// can vouch for is never cached.
+// rfc 9111 §4.2.2 lets a cache invent a freshness lifetime, and browsers take
+// ~10% of (now - Last-Modified): an asset untouched for 100 days is fresh for
+// ~10, so a returning browser runs yesterday's /assets/client.js against
+// today's ssr markup without asking. no-cache is "revalidate before reuse",
+// and the etag turns each revalidation into a 304. a year needs three facts
+// at once, none of which a name supplies: the bundler put this file's content
+// hash in its name (`-[a-z0-9]{8}` pinned /assets/stripe-checkout.js), it sits
+// in the one directory the build wrote, compared whole (a segment called
+// "assets" pinned /copy/assets/...), and the file ABOUT TO BE SENT still has
+// the recorded length, per representation (a replaced .gz pinned 75 stale bytes
+// where 749 were vouched for). failure direction: a content-addressed asset
+// losing its year (`.borgo/` not in the image, an older manifest) costs one
+// conditional request per load and shows only in a measurement; what survives
+// is a same-length replacement under a hashed name, and the rewrite window on pinPolicy
 export function assetCacheControl(
   sentPath: string,
   outputs: BuildOutputs = NO_BUILD_OUTPUTS,
   sentSize: number | null = null,
-  // the identity file behind the representation being sent. Defaults to the
-  // representation itself, which is what it is whenever no sibling was chosen.
+  // the identity file behind the representation sent; itself when no sibling was chosen
   identity: { path: string; size: number | null } = { path: sentPath, size: sentSize },
 ): string {
   return pinPolicy(
@@ -450,9 +299,7 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
   if (ifNoneMatch !== null) {
     if (ifNoneMatch.trim() === "*") return true;
     // §8.8.3.2: if-none-match compares weakly, so the marker comes off both
-    // sides. Stripping only the client's was equivalent while every tag we sent
-    // was strong; the moment they are not, a client echoing our own W/"..."
-    // stops matching it and every asset revalidation becomes a full download.
+    // sides, or a client echoing our own W/"..." never matches
     for (const candidate of ifNoneMatch.split(",")) {
       if (strong(candidate.trim()) === strong(etag)) return true;
     }
@@ -461,43 +308,23 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
   const ifModifiedSince = req.headers.get("if-modified-since");
   if (!ifModifiedSince) return false;
   const since = Date.parse(ifModifiedSince);
-  // http dates resolve to one second: compare truncated.
-  //
-  // DECLARED LIMITATION - a rewrite inside the second of the date we sent 304s
-  // over changed bytes (measured: 500 -> 9999 bytes at +997ms). Reachable only
-  // by a client that sent no etag, bounded to that one second, and self-healing
-  // on the next revalidation no-cache forces. rfc 9110 §8.8.2.2's mitigation -
-  // refuse a date 304 while mtime is in the current second - is declined
-  // because it makes the answer depend on the wall clock at request time.
+  // DECLARED LIMITATION: http dates resolve to one second, so a rewrite inside
+  // the second of the date sent 304s over changed bytes (500 -> 9999 bytes at
+  // +997ms). reachable only without an etag, bounded to that second, self-healing
+  // on the next revalidation. rfc 9110 §8.8.2.2's mitigation (refuse a date 304
+  // while mtime is in the current second) is declined: it makes the answer depend on the wall clock
   return !Number.isNaN(since) && Math.floor(mtimeMs / 1000) * 1000 <= since;
 }
 
-// rfc 9110 §13.1.5: If-Range makes a range request conditional on the client
-// still holding the representation it started downloading. if the validator
-// does not match, the range must be ignored and the whole representation sent
-// - otherwise the client splices new bytes onto an old prefix and calls the
-// result a file. the mismatch is not exotic here: the same url negotiates to
-// a different encoding on every Accept-Encoding, so a resume that arrives
-// without the accept-encoding the first request carried is asking for a range
-// of the brotli file to be filled from the identity one.
-//
-// §13.1.5 wants the strong comparison, so a weak validator on either side can
-// never authorise a range. Ours are all weak now (see assetEtag), which makes
-// this refuse every If-Range on an asset: a resume pays a full body instead of
-// splicing a prefix onto bytes its validator cannot tell apart from it. That is
-// a bandwidth regression confined to interrupted downloads - a bare Range with
-// no If-Range is untouched, so media seeking is unaffected - and it is the
-// direction the rfc requires. The check is written as the rule rather than as
-// today's answer, so a validator that ever earns strength gets ranges back.
-//
-// Only the etag is accepted, and the date deliberately is not. Each
-// representation reports its own mtime now, but an http date resolves to one
-// second and a url's representations routinely land inside the same one, so a
-// date cannot be relied on to name which - and a date that names the wrong one
-// authorises exactly the splice above. Measured before this rule: a 416
-// declaring a 6400-byte resource to be 35 bytes long, and a 206 handing brotli
-// bytes to a client assembling plain css. rfc 9110 §13.1.5 allows a date
-// validator; it does not require one.
+// rfc 9110 §13.1.5: a range conditional on the client still holding the
+// representation it started; on mismatch the whole representation goes, or
+// the client splices new bytes onto an old prefix. not exotic here: the same
+// url negotiates to a different encoding per Accept-Encoding. the rfc wants
+// the strong comparison, so a weak validator on either side never authorises
+// a range: ours are all weak (assetEtag), so every If-Range on an asset pays a
+// full body; a bare Range is untouched. only the etag, never the date: a url's
+// representations routinely land inside the same second (measured: a 416
+// declaring a 6400-byte resource 35 bytes long, a 206 handing brotli bytes to a client assembling css)
 export function isRangeStale(req: Request, etag: string): boolean {
   const ifRange = req.headers.get("if-range");
   if (ifRange === null || !req.headers.has("range")) return false;
@@ -513,27 +340,15 @@ const statOf = (path: string) => {
   }
 };
 
-// windows resolves paths case-insensitively and so does macos by default; the
-// index is an exact-match Map, and the two disagree. /OK.TXT missed the index
-// and fell through to the live serveAsset, which opened the very same file off
-// the very same filesystem - past the precomputed .br/.gz variants, past the
-// etag, past the cache policy the index holds for it. The aliases are built
-// where the filesystem is case-insensitive and nowhere else: on a
-// case-sensitive one /OK.TXT and /ok.txt are two different files, and folding
-// them would serve the wrong one.
-//
-// The platform is now only the fallback, because it is not the question. An
-// APFS volume formatted case-sensitive, a case-sensitive NTFS directory and a
-// network share all make this wrong on exactly the machines whose owner chose
-// it deliberately. Measured on a case-sensitive directory with real bun and
-// only assets/Logo.png on disk: this constant folds, the index invents
-// /assets/logo.png and /assets/LOGO.PNG, and both answer 200 with Logo.png's
-// bytes where the filesystem says nothing is there.
+// the platform is only the fallback, not the question: an APFS volume
+// formatted case-sensitive, a case-sensitive NTFS directory and a network share
+// all make it wrong. measured on a case-sensitive directory with only
+// assets/Logo.png on disk: folding invents /assets/logo.png and /assets/LOGO.PNG,
+// both 200 with Logo.png's bytes where the filesystem says nothing is there
 export const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
 
-// the other spelling of a name, in ascii only: ß uppercases to two characters
-// and a dotless ı is not the fold any filesystem applies, so a probe built out
-// of them would test something other than case
+// ascii only: ß uppercases to two characters and a dotless ı is not the fold
+// any filesystem applies
 const flipAscii = (name: string): string | null => {
   let flipped = "";
   let moved = false;
@@ -549,31 +364,14 @@ const flipAscii = (name: string): string | null => {
   return moved ? flipped : null;
 };
 
-/**
- * Whether the directory these paths came from folds case - asked of the disk
- * instead of of process.platform.
- *
- * Read-only, and that is the point: a checkout mounted ro and a container with
- * a read-only volume are exactly where a write probe would fail, and the answer
- * there has to be today's guess rather than an error. One statSync, 0.018 ms
- * against 0.229 ms for the write+stat+unlink it replaces and 0.22 ms for the
- * one-file index that calls it.
- *
- * Two spellings that fold together are proof, not a probe: no case-insensitive
- * filesystem can hold both, and folding an index that contains them would lose
- * one of the two whatever the disk says. Otherwise one name is flipped and
- * stat'ed - only its last segment, so the answer is about the directory the
- * file is in and not about some ancestor that may sit on another mount.
- *
- * The direction it fails in is chosen. Answering "case-sensitive" on a
- * filesystem that folds costs the indexed path: the lookup misses and
- * server.ts's live Bun.file() opens the file anyway (measured), so the url
- * still answers 200, without the precomputed variants and without the pin.
- * Answering "case-insensitive" on one that does not fold invents a resource:
- * a url with no file behind it is served another file's bytes. So every
- * uncertainty here resolves toward not folding, and the fallback - an empty
- * directory, or names with no ascii letter in them - is the caller's guess.
- */
+// asked of the disk, read-only: a checkout mounted ro is where a write probe
+// would fail. one statSync, 0.018 ms against 0.229 ms for write+stat+unlink.
+// two spellings that fold together are proof: no folding filesystem can hold
+// both. otherwise one name is flipped and stat'ed, last segment only, so the
+// answer is about this directory and not an ancestor on another mount.
+// failure direction chosen: "case-sensitive" on a folding disk only loses the
+// indexed path (the live Bun.file() still answers 200), "case-insensitive" on
+// one that does not fold serves another file's bytes, so doubt resolves toward not folding
 export function foldsCase(
   paths: Iterable<string>,
   fallback: boolean = CASE_INSENSITIVE_FS,
@@ -594,10 +392,8 @@ export function foldsCase(
   return statOf(probe) !== null;
 }
 
-// what buildAssetIndex measured for the index it returned. An index and the
-// lookups over it have to fold the same way or /LOGO.PNG is answered with
-// logo.png's bytes on a filesystem that keeps the two apart; a copy of an
-// index is not the index, so it falls back to the guess.
+// an index and the lookups over it have to fold the same way, or /LOGO.PNG is
+// answered with logo.png's bytes where the two are kept apart; a copy of an index falls back to the guess
 const foldingOf = new WeakMap<Map<string, AssetInfo>, boolean>();
 
 export const indexFoldsCase = (index: Map<string, AssetInfo>): boolean =>
@@ -613,130 +409,88 @@ export function findAsset(
   return index.get(url.toLowerCase());
 }
 
-// the indexed path: the variants already chosen from the snapshot, and the
-// stats that say what those files are right now - which is where the etag,
-// the date and the length all come from
+// the indexed path: variants chosen from the snapshot, etag, date and length
+// from a live stat
 export function serveIndexed(req: Request, info: AssetInfo): Response {
   let variant = info.identity;
   if (info.variants.length) {
-    // negotiate against the encodings this asset actually has, not against
-    // every encoding borgo knows: offering br for a file that only has a .gz
-    // makes "accept-encoding: br, gzip" resolve to br, miss, and fall through
-    // to identity - shipping the raw bytes past a compressed sibling that is
-    // sitting right there. Server preference still decides between the ones
-    // that do exist, which is why the order here is fixed and not the index's.
+    // negotiate against the encodings this asset has: offering br for a file
+    // with only a .gz makes "br, gzip" resolve to br, miss, and ship identity
+    // past the sibling. the order here is server preference, not the index's
     const available = ["br", "gzip"].filter((e) => info.variants.some((v) => v.encoding === e));
     const encoding = pickEncoding(req.headers.get("accept-encoding"), available);
     if (encoding) variant = info.variants.find((v) => v.encoding === encoding) ?? variant;
   }
-  // the index was taken at boot, and the disk moved on: a `borgo dev` writing
-  // over the same public/assets, a deploy swapping files in place. one stat
-  // settles all three consequences at once, which is why it is a stat and not
-  // the existsSync that used to be here:
-  //   - a precompressed sibling that is gone degrades to the identity file
-  //     rather than 500ing for an asset still sitting on disk;
-  //   - an identity that is gone too is a 404. `new Response(Bun.file(missing))`
-  //     is answered by bun's own fallback page instead: 67,016 bytes of html
-  //     whose base64 payload decodes to the absolute path of the file on the
-  //     server, under the ambient NODE_ENV that `borgo start` in a plain shell
-  //     leaves unset. serve() also runs with development:false and an error
-  //     handler so no other route can leak it either, but the index is the one
-  //     that *knows* the file may be gone;
-  //   - the length below is the file's, not the snapshot's. bun recomputes
-  //     Content-Length from the file on a GET and ignores what we set, so a
-  //     stale index made HEAD and GET disagree about the same url (measured
-  //     1400 against 5600) - a HEAD wrong by any factor, which is what a HEAD
-  //     is asked for in the first place.
+  // the index was taken at boot and the disk moved on (`borgo dev` writing
+  // over public/assets, a deploy swapping files in place): one stat settles a
+  // gone sibling (degrade to identity), a gone identity (404, where
+  // `new Response(Bun.file(missing))` is bun's own 67,016-byte fallback page
+  // whose base64 payload decodes to the file's absolute path), and the length
+  // below (bun recomputes Content-Length from the file on a GET and ignores
+  // ours, so a stale index made HEAD and GET disagree, 1400 against 5600)
   let live = statOf(variant.path);
   if (!live && variant.encoding) {
     variant = info.identity;
     live = statOf(variant.path);
   }
   if (!live) return new Response("not found", { status: 404 });
-  // the identity behind the sent representation: its recorded length for the
-  // pin, and its absence for the 404. A sibling whose identity file is gone is
-  // refused, because serveAsset refuses it and a restart would too - serving
-  // it made one url answer 200 or 404 by Accept-Encoding alone.
+  // a sibling whose identity file is gone is refused, as serveAsset and a
+  // restart would: serving it made one url answer 200 or 404 by Accept-Encoding alone
   const identityLive = variant.encoding ? statOf(info.identity.path) : live;
   if (!identityLive) return new Response("not found", { status: 404 });
 
   const headers = new Headers();
-  // the recorded length is the build's claim; whether the file on disk is
-  // still that file only this stat can say. Both halves: with the identity
-  // untouched at its recorded length and index-n12gjnyv.js.gz replaced
-  // 749 -> 75 bytes, the 75 stale bytes went out `immutable`.
-  //
-  // unconditional - the `if` that used to guard it shipped production's
-  // unhashed assets with no policy at all.
+  // the recorded length is the build's claim; whether the file on disk is still
+  // that file only this stat can say, both halves: a .gz replaced 749 -> 75
+  // beside an untouched identity went out `immutable`. unconditional, for unhashed assets too
   headers.set(
     "Cache-Control",
     pinPolicy(variant.pinnedSize, live.size, info.identity.pinnedSize, identityLive.size),
   );
   if (info.compressible) headers.set("Vary", "Accept-Encoding");
-  // set before the 304 return: a 304 updates a cache's stored headers, and
-  // serveAsset states them there, so the two paths must not differ on it
+  // set before the 304 return: a 304 updates a cache's stored headers
   if (variant.encoding) {
     headers.set("Content-Encoding", variant.encoding);
     headers.set("Content-Type", info.type);
   }
-  // Both validators off `live` - the file whose bytes are going out - never off
-  // the index, and never off the identity when a sibling was chosen. Wrong in
-  // this direction it is silent: stale bytes 304 forever. Measured on the wire,
-  // once per mistake: ETag "gf-msf40zn3" (gf = 591) on a 557-byte body; and a
-  // .gz replaced 323 -> 95 with the identity untouched, answering 304 to
-  // If-Modified-Since at +0s, +2s and +5s.
+  // both validators off `live`, the file whose bytes are going out, never off
+  // the index or the identity: wrong in this direction it is silent, stale
+  // bytes 304 forever (a .gz replaced 323 -> 95 answered 304 at +0s, +2s, +5s)
   const etag = assetEtag(live.size, live.mtimeMs, variant.encoding ? `-${variant.encoding}` : "");
   headers.set("ETag", etag);
   headers.set("Last-Modified", new Date(live.mtimeMs).toUTCString());
   if (isNotModified(req, etag, live.mtimeMs)) {
     return new Response(null, { status: 304, headers });
   }
-  // a HEAD is answered from the headers alone, and dropping the body drops
-  // the length bun would have computed from the file: without this every
-  // HEAD claims Content-Length: 0 for a file a GET returns in full. the live
-  // size, so the two answers agree even when the index does not.
+  // a HEAD is answered from the headers alone, and dropping the body drops the
+  // length bun computes from the file: without this every HEAD says Content-Length: 0
   headers.set("Content-Length", String(live.size));
-  // bun turns a Range into a 206 off a Bun.file body, and never consults
-  // If-Range while doing it. a stream body is how the refusal is spelled:
-  // bun ranges files, not streams, so a validator that no longer matches
-  // gets the whole representation as a plain 200 - still off the disk,
-  // never through memory.
+  // bun turns a Range into a 206 off a Bun.file body and never consults
+  // If-Range: a stream body is how the refusal is spelled, bun ranges files,
+  // not streams, so the whole representation goes out as a 200, still off the disk
   if (isRangeStale(req, etag)) {
-    // a stream body also loses the content type bun derives from a file, and
-    // under the global nosniff a typeless stylesheet is a refused stylesheet;
-    // for an encoded variant this re-sets the same value as above.
-    //
-    // it loses the Content-Length too, whatever we set: measured on bun
-    // 1.3.14, an explicit Content-Length on a stream body is dropped and the
-    // response goes out chunked, so this 200 is chunked while the 206 beside
-    // it is length-framed. Both are legal framings of a complete body and the
-    // client gets every byte either way; the only lever that suppresses bun's
-    // range handling on a *file* body is a Content-Range header, which rfc
-    // 9110 §14.4 gives meaning to on 206 and 416 alone. Trading a legal
-    // framing difference for a header that has no meaning in a 200 - or for
-    // reading the whole asset through memory - is the worse deal.
+    // a stream body loses the type bun derives from a file, and under nosniff a
+    // typeless stylesheet is a refused stylesheet. it loses the Content-Length
+    // too (bun 1.3.14 drops an explicit one on a stream and goes chunked): a
+    // legal framing difference, accepted over a Content-Range on a 200 (rfc
+    // 9110 §14.4 gives it meaning on 206 and 416 alone) or reading the asset through memory
     headers.set("Content-Type", info.type);
     return new Response(Bun.file(variant.path).stream(), { headers });
   }
   return new Response(Bun.file(variant.path), { headers });
 }
 
-// dev, and anything written into public/ after boot. the index cannot cover
-// these - it is a boot-time snapshot - but everything it does for an asset has
-// to happen here too, from a live stat instead of the snapshot: this path
-// negotiates the same br/gz variants off the same url, so it is exposed to the
-// same cross-encoding range splice serveIndexed refuses, and until now it
-// emitted no validator a client could even have sent to be checked.
+// dev, and anything written into public/ after boot: the same br/gz
+// negotiation off the same url, so the same cross-encoding range splice
+// serveIndexed refuses, from a live stat instead of the snapshot
 export function serveAsset(
   req: Request,
   path: string,
   asset: ReturnType<typeof Bun.file>,
   { dev, outputs = NO_BUILD_OUTPUTS }: { dev: boolean; outputs?: BuildOutputs },
 ): Response {
-  // and here too, not only in the index. Dropping a dotfile from the boot
-  // snapshot alone removes it from no url at all: the caller's fallback opens
-  // the same file live and answers 200 - measured, on all seven of them. The
-  // two paths have to refuse it together or neither does.
+  // here too, not only in the index: dropping a dotfile from the boot snapshot
+  // alone removes it from no url, the fallback opens the same file live
   if (isHiddenAsset(path)) return new Response("not found", { status: 404 });
 
   let base: { size: number; mtimeMs: number };
@@ -774,30 +528,25 @@ export function serveAsset(
     }
   }
 
-  // after negotiation: what is vouched for is the representation going out.
-  // Checking the identity instead pinned whatever bytes a replaced .gz held.
-  // The fallback here used to be `dev ? ... : ""` - armed where a stale asset
-  // costs an afternoon, disarmed where it survives a deploy.
+  // after negotiation: what is vouched for is the representation going out,
+  // and in dev too, where a stale asset costs an afternoon
   headers.set(
     "Cache-Control",
     assetCacheControl(sentPath, outputs, size, { path, size: base.size }),
   );
 
-  // `mtimeMs` is the sent representation's, like the etag: the identity's date
-  // on a sibling's bytes 304s a replaced .gz until someone touches the
-  // identity, which a sibling-only deploy never does
+  // the sent representation's, like the etag: the identity's date on a
+  // sibling's bytes 304s a replaced .gz until someone touches the identity
   headers.set("ETag", etag);
   headers.set("Last-Modified", new Date(mtimeMs).toUTCString());
   if (isNotModified(req, etag, mtimeMs)) {
     return new Response(null, { status: 304, headers });
   }
-  // same reason as in serveIndexed: a HEAD keeps the headers and loses the
-  // body bun would have measured
+  // a HEAD keeps the headers and loses the body bun would have measured
   headers.set("Content-Length", String(size));
   if (isRangeStale(req, etag)) {
-    // a stream body is how a range is refused: bun ranges files, not streams,
-    // and it never consults If-Range on its own. the type goes back on because
-    // a stream body loses the one bun derives from a file
+    // a stream body is how a range is refused (bun ranges files, not streams,
+    // and never consults If-Range); the type goes back on, a stream loses it
     headers.set("Content-Type", asset.type);
     return new Response(file.stream(), { headers });
   }
@@ -806,11 +555,9 @@ export function serveAsset(
 
 const encoder = new TextEncoder();
 
-// the ssr document: shell head, react's own stream, shell tail. pull-based on
-// purpose - react is asked for the next chunk only when the consumer has room,
-// so a slow client throttles the render instead of letting a whole document
-// pile up in memory, and a client that goes away ends the render through the
-// iterator's return() instead of paying for a page nobody will read
+// pull-based: react is asked for the next chunk only when the consumer has
+// room, so a slow client throttles the render, and a client that goes away
+// ends it through the iterator's return()
 export function documentStream(
   head: string,
   chunks: AsyncIterable<Uint8Array>,
@@ -847,23 +594,18 @@ export function documentStream(
   });
 }
 
-// runtime: gzip a stream with a sync flush per chunk, so every react flush
-// reaches the client immediately and streamed ssr stays progressive
+// a sync flush per chunk, so every react flush reaches the client and streamed ssr stays progressive
 export function gzipStream(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
   const gzip = createGzip({ flush: constants.Z_SYNC_FLUSH });
-  // an explicit reader: the pump holds the source's lock, so a client
-  // disconnect must cancel through the reader, never through the source -
-  // cancelling a locked stream throws, and from bun's cancel callback that
-  // used to take the whole server process down
+  // the pump holds the source's lock, so a disconnect must cancel through the
+  // reader: cancelling a locked stream throws, and from bun's cancel callback
+  // that took the whole server process down
   const reader = source.getReader();
   let cancelled = false;
   // gzip pushes its output from a 'data' handler, which cannot consult the
-  // consumer's queue - so the pump has to be the one that waits. without this
-  // the loop below reads the source as fast as zlib will take the writes, and
-  // documentStream's whole point (react is pulled only when the consumer has
-  // room) is lost the moment a response is compressed, which in production is
-  // every response. resumed from pull(), and from cancel() so a client that
-  // goes away while the pump is parked does not strand the reader.
+  // consumer's queue, so the pump is the one that waits; otherwise react is
+  // pulled as fast as zlib takes the writes and documentStream's backpressure
+  // is lost on every compressed response. resumed from pull() and from cancel()
   let resume: (() => void) | null = null;
   const wake = () => {
     const r = resume;

@@ -40,25 +40,13 @@ import {
   type BuildOutputs,
 } from "../src/compress";
 
-// A DEADLINE AGAINST A HANG, NOT A PERFORMANCE BUDGET.
-//
-// Three tests here cost whatever the machine has left: brotli at max quality,
-// a recursive mkdtemp/rmSync pair, and a 600 kB document pushed through zlib
-// with a sync flush per chunk. Measured on one machine while other work ran,
-// the same pump took 180 ms warm, 2 s cold and 21.8 s under contention - two
-// orders of magnitude, on identical code. Against bun's unstated 5000 ms they
-// went red on a busy machine and green on a quiet one: measured by alternating
-// this file against its own HEAD version, run for run, HEAD failed in the same
-// rounds and the same tests, so what the red named was the load and never the
-// diff. A test that reddens for that teaches rerunning instead of reading.
-//
-// The number is deliberately far above the worst measurement rather than close
-// to it, because none of the three proves anything about speed: contention
-// makes the pump produce LESS, which is the direction its assertion wants, and
-// the other two compare file contents, which a slow disk cannot change. What
-// the deadline still catches is the failure it is for - a pump that never
-// finishes - and each of the three is shown by mutation to still kill the
-// defect it was written for.
+// a deadline against a hang, not a performance budget: brotli at max
+// quality, a recursive mkdtemp/rmSync pair and a 600 kB document through zlib
+// with a sync flush per chunk took 180 ms warm, 2 s cold and 21.8 s under
+// contention on one machine, and went red against bun's 5000 ms on load
+// alone. far above the worst measurement because none of the three proves
+// anything about speed: contention makes the pump produce LESS, the direction
+// its assertion wants, and the others compare file contents
 const CONTENDED = 60_000;
 
 describe("pickEncoding", () => {
@@ -76,12 +64,8 @@ describe("pickEncoding", () => {
     ["curl --compressed", "deflate, gzip, br, zstd", ["br", "gzip"], "br"],
 
     // rfc 9110 5.6.6: parameter names are case-insensitive, so "Q=0" is a
-    // refusal in a spelling no less valid than "q=0". Only the lowercase one was
-    // matched, which left the refusal unread and the quality at its default 1 -
-    // so an asset, a json payload and a rendered document all went out gzip- or
-    // brotli-encoded to a client that had just said it cannot decode them. The
-    // coding name beside it was already folded; the parameter was not. gzip.go's
-    // refusesCoding folds both, and the two halves read the same header.
+    // refusal; reading only "q" sent gzip to a client that said it cannot decode
+    // it. gzip.go's refusesCoding folds both
     ["uppercase Q=0 is still a refusal", "gzip;Q=0", ["gzip"], null],
     ["uppercase Q=0 with space", "gzip; Q=0.00", ["gzip"], null],
     ["uppercase Q=0 falls through to the next coding", "br;Q=0, gzip", ["br", "gzip"], "gzip"],
@@ -106,11 +90,8 @@ describe("asset classification", () => {
     }
   });
 
-  // The old rule read the *shape* of a name: `-[a-z0-9]{8}\.(js|css)` under
-  // assets/. Any eight-letter word satisfies that, so these three were served
-  // `immutable` for a year off a real production build, and updating one in
-  // place left every browser that had seen it holding the old copy with no
-  // revalidation. Nothing about a name can settle this; only the build knows.
+  // a rule reading the shape of a name (`-[a-z0-9]{8}\.(js|css)` under assets/)
+  // pinned these three for a year: any eight-letter word satisfies it
   const OUT: BuildOutputs = {
     dir: "public/assets",
     sizes: new Map([
@@ -144,9 +125,8 @@ describe("asset classification", () => {
     expect(assetCacheControl("public/assets/style.css", OUT, 100)).toBe("no-cache");
   });
 
-  // the manifest vouches for bytes, not for a name. a recorded chunk deleted
-  // and recreated after boot keeps the name and the entry, and used to inherit
-  // the year with them
+  // the manifest vouches for bytes, not for a name: a chunk recreated after
+  // boot keeps the name and the entry
   test("a recorded name at the wrong length is not the file that was hashed", () => {
     expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, 101)).toBe("no-cache");
     expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, 0)).toBe("no-cache");
@@ -154,10 +134,8 @@ describe("asset classification", () => {
     expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, null)).toBe("no-cache");
   });
 
-  // The directory is matched whole. Gating on a path *segment* called "assets"
-  // pinned /copy/assets/… and /deep/nested/assets/… on the wire - bytes the
-  // bundler never saw - because the basename was recorded and some ancestor
-  // happened to be spelled the same. Every bundle copied into public/ ships one.
+  // the directory is matched whole: a path segment called "assets" pinned
+  // /copy/assets/... on the wire, and every bundle copied into public/ ships one
   test("only the build's own output directory, not any folder spelled assets", () => {
     for (const path of [
       "public/copy/assets/client-50dbnr0a.js",
@@ -172,11 +150,8 @@ describe("asset classification", () => {
     }
   });
 
-  // readBuildOutputs drops manifest keys carrying a separator, so this can only
-  // arrive from a BuildOutputs built in code - which the type permits. "Only
-  // files directly in the output directory" has to hold either way, or the
-  // reader's filter is the single thing standing between a crafted manifest
-  // and a pinned path somewhere else in the tree.
+  // readBuildOutputs drops manifest keys carrying a separator, but the type
+  // permits one: "directly in the output directory" has to hold here too
   test("a manifest key with a separator still cannot reach below the directory", () => {
     const sneaky: BuildOutputs = {
       dir: "public/assets",
@@ -185,10 +160,9 @@ describe("asset classification", () => {
     expect(assetCacheControl("public/assets/sub/client-50dbnr0a.js", sneaky, 100)).toBe("no-cache");
   });
 
-  // Both lengths, and neither alone. Checking only the identity pinned a
-  // replaced .gz (749 -> 75 bytes, shipped `immutable`); checking only the
-  // representation would keep pinning a .gz whose identity file a partial
-  // deploy had already rewritten, and `immutable` is a promise about the url.
+  // both lengths: the identity alone pinned a replaced .gz (749 -> 75 bytes,
+  // `immutable`); the representation alone would keep pinning a .gz whose
+  // identity a partial deploy had rewritten
   test("a sibling is pinned only when it and its identity are both vouched for", () => {
     const out: BuildOutputs = {
       dir: "public/assets",
@@ -366,12 +340,8 @@ describe("buildAssetIndex", () => {
     expect(buildAssetIndex(join(tmpdir(), "borgo-does-not-exist-" + Date.now())).size).toBe(0);
   });
 
-  // The index is a boot-time snapshot, and every field it carries is a fact
-  // about a file as it was then. `mtimeMs` was one of them and nothing ever
-  // read it - not serveIndexed, which re-stats the file it is about to send,
-  // and not a test. Named as a set, so a field that arrives without a reader
-  // has to be argued for here rather than accumulate quietly beside the ones
-  // that are load-bearing.
+  // named as a set, so a field that arrives without a reader has to be argued
+  // for here: `mtimeMs` sat beside these and nothing ever read it
   test("carries no field nobody reads", async () => {
     await withAssets(async (dir) => {
       await Bun.write(join(dir, "assets/style.css"), "body{color:red}");
@@ -604,22 +574,15 @@ describe("gzipStream", () => {
     expect(gunzipSync(Buffer.concat(chunks)).toString()).toBe("shell ".repeat(200) + "late chunk");
   });
 
-  // THE WINDOW IS MEASURED, NOT ASSUMED.
-  //
-  // "wait and check nothing was produced" only proves something if a pump with
-  // nothing holding it back would have produced in that wait. Measured: with
-  // the pump's wait deleted, a warm process lets 290 of 300 chunks escape in
-  // 150 ms and a cold one lets 0 - so on a cold or contended machine this test
-  // passed while the defect it exists for was present. A targeted `bun test -t`
-  // run is cold by construction, which is how the mutation first came back
-  // green. So the window is derived from the cost of a chunk on this machine
-  // at this moment, and the calibration that measures it also warms the code
-  // it is about to judge.
+  // the window is measured, not assumed: with the pump's wait deleted, a warm
+  // process lets 290 of 300 chunks escape in 150 ms and a cold one lets 0, so
+  // a fixed wait passed on a cold machine (a targeted `bun test -t` run is
+  // cold by construction). the window is derived from the cost of a chunk
+  // here and now, and the calibration warms the code it is about to judge
   test("a stalled client throttles the render instead of buffering the page", async () => {
-    // documentStream is pull-based so a slow client paces react; in production
-    // every document is compressed, and gzip's output is pushed from a 'data'
-    // handler that cannot see the consumer's queue. the pump has to be the one
-    // that waits, or wrapping the stream silently undoes the backpressure.
+    // in production every document is compressed, and gzip's output is pushed
+    // from a 'data' handler that cannot see the consumer's queue: the pump has
+    // to be the one that waits, or wrapping the stream undoes the backpressure
     const TOTAL = 300;
     const document = (total: number) => {
       const counted = { produced: 0 };
@@ -641,9 +604,8 @@ describe("gzipStream", () => {
       return { counted, stream: gzipStream(documentStream("<head>", source, "</body>")) };
     };
 
-    // what one chunk costs when the consumer never stops reading. Twice, and
-    // the slower of the two, because the run being judged comes after these and
-    // a window sized from an optimistic cost is a window that proves nothing.
+    // what one chunk costs when the consumer never stops reading: twice, the
+    // slower of the two, since the judged run comes after these
     let perChunkMs = 0;
     for (let i = 0; i < 2; i++) {
       const { stream } = document(60);
@@ -746,10 +708,8 @@ describe("isRangeStale", () => {
 
   test("a validator that still matches lets the range through", () => {
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": ETAG }), ETAG)).toBe(false);
-    // the date is NOT accepted: every encoding variant of one url shares it,
-    // so honouring it authorises a range of the brotli file to be spliced into
-    // an identity download - measured, before this rule, as a 206 of brotli
-    // bytes handed to a client assembling plain css
+    // the date is NOT accepted: every encoding variant of one url shares it
+    // (measured before: a 206 of brotli bytes handed to a client assembling css)
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": LM }), ETAG)).toBe(true);
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": ` ${ETAG} ` }), ETAG)).toBe(false);
   });
@@ -769,9 +729,8 @@ describe("isRangeStale", () => {
 
   test("a weak validator can never authorise a range", () => {
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": `W/${ETAG}` }), ETAG)).toBe(true);
-    // and weak on *our* side is the same refusal, echoed back exactly. This is
-    // the live clause, not the one above: every tag borgo emits is weak, so a
-    // client that quotes the validator it was given still gets the whole body.
+    // weak on our side is the same refusal: every tag borgo emits is weak, so a
+    // client quoting the validator it was given still gets the whole body
     const weak = assetEtag(591, 1_770_000_000_000, "");
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": weak }), weak)).toBe(true);
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": weak.replace("W/", "") }), weak)).toBe(
@@ -780,20 +739,11 @@ describe("isRangeStale", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// THE VALIDATOR, MEASURED ON REAL FILES
-//
-// The etag is size and mtime. Both halves are forgeable by ordinary tools, so
-// this block writes the files rather than the numbers: every case below is a
-// real stat of a real file, served through the real production path.
-//
-// What is asserted, per case, is the *outcome* of a conditional request:
-// If-None-Match alone, If-Modified-Since alone, and the two together (rfc 9110
-// §13.1.3: when both are present the etag decides and the date is ignored).
-// Where the outcome is a 304 on bytes the client does not have, it is asserted
-// as such and the validator is required to have declared itself weak - which is
-// the whole of what this pair can honestly promise.
-// ---------------------------------------------------------------------------
+// the validator on real files: both halves are forgeable by ordinary tools,
+// so every case below is a real stat, served through the production path.
+// asserted per case: If-None-Match alone, If-Modified-Since alone, both
+// (rfc 9110 §13.1.3: the etag decides). a 304 on bytes the client does not
+// have is asserted as such, with the validator required to have declared itself weak
 describe("asset validators, on real files", () => {
   let dir: string;
   let index: Map<string, AssetInfo>;
@@ -928,9 +878,8 @@ describe("asset validators, on real files", () => {
       ims: 304,
       both: 304,
     });
-    // the bytes really are the same, so this 304 is correct. It is listed
-    // because it is the mechanism, not the bug: preserving the mtime is what
-    // the tool is *for*, which is what makes case 1 and case 4 reachable.
+    // correct, and listed because preserving the mtime is what the tool is for:
+    // it is what makes case 1 and case 4 reachable
     expect(readFileSync(at("copy.txt")).equals(readFileSync(at("origin.txt")))).toBe(true);
   });
 
@@ -943,10 +892,8 @@ describe("asset validators, on real files", () => {
     expect(after.etag).not.toBe(before.etag);
     // the etag moved, so a client holding the old one is served the body...
     expect(conditional("/dated.txt", before.etag, before.date).inm).toBe(200);
-    // ...but a date-only client is told nothing changed, because the file now
-    // claims to predate what that client holds. This is the direction that
-    // hurts: back-dating is what tar and restored backups do, and a client
-    // that revalidates by date alone never learns the file moved.
+    // a date-only client is told nothing changed: back-dating is what tar and
+    // restored backups do
     expect(serve("/dated.txt", { "if-modified-since": heldDate }).status).toBe(304);
     // both headers: the etag decides and the date is ignored (§13.1.3)
     expect(serve("/dated.txt", { "if-none-match": before.etag, "if-modified-since": heldDate })
@@ -967,18 +914,15 @@ describe("asset validators, on real files", () => {
     expect(after.etag).toBe(before.etag);
     expect(after.date).toBe(before.date);
 
-    // so every conditional shape 304s over changed bytes. This is the defect,
-    // stated rather than hidden: size and mtime cannot see this edit, and no
-    // per-request check can, because size and mtime are all a request has.
+    // every conditional shape 304s over changed bytes: size and mtime are all a request has
     expect(conditional("/edited.txt", before.etag, before.date)).toEqual({
       inm: 304,
       ims: 304,
       both: 304,
     });
 
-    // THE PROPERTY, in the only form this validator can keep: it does not
-    // claim to be exact. A strong tag here would be a promise that these two
-    // bodies are byte-identical, and they are not.
+    // THE PROPERTY: the tag does not claim to be exact; a strong tag here
+    // would promise two bodies byte-identical that are not
     expect(isWeak(after.etag)).toBe(true);
     // and a weak tag can never authorise a range, so the one failure that
     // corrupts rather than staling - a resume splicing new bytes onto an old
@@ -1030,13 +974,8 @@ describe("asset validators, on real files", () => {
       ims: 304,
       both: 304,
     });
-    // ctime is the metadata clock: it never runs backwards, and a chmod is
-    // exactly the event that advances it while the content stands still. A
-    // validator built on it would have charged a full download for a
-    // permission bit - and for every backup and hardlink besides. Whether this
-    // particular filesystem advances it is not asserted (windows does not),
-    // because the reason ctime is out is that it moves for non-content events
-    // wherever it moves at all.
+    // ctime advances on a chmod, a backup, a hardlink, while the content stands
+    // still; whether this filesystem advances it is not asserted (windows does not)
     expect(statSync(at("moded.txt")).ctimeMs).toBeGreaterThanOrEqual(ctimeBefore);
   });
 
@@ -1105,10 +1044,8 @@ describe("asset validators, on real files", () => {
   });
 
   test("a client echoing the weak validator still gets its 304", () => {
-    // the weak comparison strips the marker from both sides. Stripping only
-    // the client's side - which was enough while every tag was strong - would
-    // turn every asset revalidation into a full download the moment they were
-    // not, and the cost would show up as bandwidth, not as a failure.
+    // the weak comparison strips the marker from both sides: client-side alone
+    // turns every revalidation into a full download once our tags are weak
     const { etag } = validators("/site.css");
     const r = (h: Record<string, string>) => new Request("http://app.test/site.css", { headers: h });
     expect(isNotModified(r({ "if-none-match": etag }), etag, 0)).toBe(true);
@@ -1117,18 +1054,9 @@ describe("asset validators, on real files", () => {
   });
 });
 
-// THE BRANCH THAT ONLY EVER RAN IN PRODUCTION.
-//
-// CASE_INSENSITIVE_FS is injected into both buildAssetIndex and findAsset, and
-// every test in this repository took the default - which on the machine borgo
-// is developed on is `true`. The `false` half is the one Linux runs, and it is
-// the one nothing had ever executed.
-//
-// Measured difference between the two, with `assets/Logo.png` the only file on
-// disk: with `true` the index carries two keys, `/assets/Logo.png` and the
-// folded `/assets/logo.png`, and all three of Logo.png, logo.png and LOGO.PNG
-// answer. With `false` the index carries one key and only the exact spelling
-// answers - the other two 404.
+// the `false` half of CASE_INSENSITIVE_FS is the one linux runs: with
+// assets/Logo.png alone on disk, `true` answers Logo.png, logo.png and
+// LOGO.PNG, `false` answers the exact spelling only
 describe("findAsset where the filesystem tells the cases apart", () => {
   const withDir = async (fn: (dir: string) => Promise<void>) => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-case-"));
@@ -1166,10 +1094,8 @@ describe("findAsset where the filesystem tells the cases apart", () => {
     });
   });
 
-  // NTFS cannot hold both spellings, so the index is built by hand - which is
-  // the reason the flag is a parameter and not a read of process.platform.
-  // Each url has to keep its own file: folding here would hand a request for
-  // one of them the bytes of the other.
+  // NTFS cannot hold both spellings, so the index is built by hand: folding
+  // here would hand a request for one of them the bytes of the other
   test("both spellings of one name stay two assets", async () => {
     await withDir(async (dir) => {
       await Bun.write(join(dir, "assets/Logo.png"), "maiuscolo");
@@ -1185,11 +1111,8 @@ describe("findAsset where the filesystem tells the cases apart", () => {
     });
   });
 
-  // the hazard the folding comment names, pinned: an index built where the
-  // cases are distinct, read as though they were not, hands back the wrong
-  // file. Nothing ships this combination - server.ts lets both default to the
-  // same constant - but findAsset takes the flag from its caller, so the
-  // behaviour is written down rather than left to be rediscovered.
+  // an index built where the cases are distinct, read as though they were not,
+  // hands back the wrong file; findAsset takes the flag from its caller
   test("reading a case-sensitive index case-insensitively serves the wrong file", async () => {
     await withDir(async (dir) => {
       await Bun.write(join(dir, "assets/Logo.png"), "maiuscolo");
@@ -1228,12 +1151,8 @@ describe("findAsset where the filesystem tells the cases apart", () => {
   });
 });
 
-// A DOT ON THE FILE, NEVER ON THE DIRECTORY.
-//
-// The rule has to refuse what public/ collects by accident and keep what rfc
-// 8615 puts there on purpose, and it has to do it without an allowlist - an
-// allowlist is a name that can be misspelled, and misspelling this one breaks
-// certificate renewal.
+// a dot on the file, never on the directory, without an allowlist: a
+// misspelled allowlist breaks certificate renewal
 describe("isHiddenAsset", () => {
   const hidden = [
     ".DS_Store",
@@ -1270,13 +1189,9 @@ describe("isHiddenAsset", () => {
   });
 });
 
-// THE CONSTANT WAS A CONJECTURE ABOUT THE PROCESS, AND THE QUESTION IS ABOUT
-// THE DIRECTORY.
-//
-// process.platform is wrong on every deliberate choice: an APFS volume
+// process.platform is wrong on every deliberate choice (an APFS volume
 // formatted case-sensitive, a case-sensitive NTFS directory, a share mounted
-// on windows. foldsCase asks the disk instead, read-only, off the names the
-// index has just read.
+// on windows): foldsCase asks the disk, read-only, off the names just read
 describe("foldsCase", () => {
   const withDir = async (fn: (dir: string) => Promise<void>) => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-folds-"));
@@ -1367,12 +1282,8 @@ describe("foldsCase", () => {
   });
 });
 
-// A LOOKUP MUST NOT READ AN INDEX UNDER THE RULE IT WAS NOT BUILT WITH.
-//
-// 91fb092 pinned the wrong-file answer that combination produces and called it
-// unreachable because server.ts let both default to one constant. The
-// measurement removed that constant from one of the two, so the agreement is
-// now carried by the index itself.
+// a lookup must not read an index under the rule it was not built with: the
+// agreement is carried by the index itself, not by a shared constant
 describe("findAsset takes its rule from the index it is given", () => {
   const withDir = async (fn: (dir: string) => Promise<void>) => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-fold-of-"));
@@ -1412,16 +1323,10 @@ describe("findAsset takes its rule from the index it is given", () => {
   });
 });
 
-// EXECUTED ON A GENUINELY CASE-SENSITIVE FILESYSTEM.
-//
-// fsutil marks an NTFS directory case-sensitive without admin rights and real
-// bun respects it: with only Logo.png on disk, existsSync("logo.png") is false
-// and readdirSync returns one name. Everything below is the production path
-// running there, not a flag injected on a filesystem that folds.
-//
-// It does not run off windows, and it does not run if the attribute cannot be
-// set - the coexistence assertion in the first test is what stops a directory
-// that quietly stayed case-insensitive from passing the rest.
+// on a genuinely case-sensitive filesystem: fsutil marks an NTFS directory
+// case-sensitive without admin rights and bun respects it (existsSync("logo.png")
+// false with only Logo.png on disk). windows only, and the coexistence assertion
+// in the first test stops a directory that quietly stayed case-insensitive from passing the rest
 const caseSensitiveDir = (): string | null => {
   if (process.platform !== "win32") return null;
   const dir = mkdtempSync(join(tmpdir(), "borgo-cs-"));

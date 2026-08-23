@@ -31,14 +31,10 @@ const collect = async (it: AsyncIterable<Uint8Array>): Promise<string> => {
   return dec.decode(Buffer.concat(parts.map((p) => Buffer.from(p))));
 };
 
-/**
- * THE PROPS A HEALTHY LOADER RETURNS, AND EVERY SHAPE A WIDER RULE WOULD
- * MISREAD. A documentation page's data: another machine's path with the
- * backslashes json doubles, the bare words "drive C:", an https url with a
- * double slash, a path that shares the root's prefix and diverges inside the
- * last name, the root's own trailing segment alone, and a file:// mention.
- * All of it has to come back as the very same string.
- */
+// a healthy loader's props, with every shape a wider rule would misread:
+// another machine's path with the backslashes json doubles, "drive C:", an
+// https url with a double slash, a path sharing the root's prefix, the root's
+// trailing segment alone, a file:// mention. all of it comes back as the same string
 const HEALTHY_PROPS = {
   install: win("C:", "Users", "alice", "projects", "site"),
   cache: win("C:", "ProgramData", "borgo"),

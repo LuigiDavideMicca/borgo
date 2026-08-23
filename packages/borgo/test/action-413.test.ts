@@ -5,19 +5,10 @@ import { matchRoute, type PageModule, type Route } from "../src/router";
 import { actionOutcome, tooLargeDetail } from "../src/runtime";
 import { runAction, type ActionOptions, type RouteMatch } from "../src/util";
 
-// AN OVERSIZED ENHANCED SUBMIT RELOADED THE PAGE.
-//
-// The body limit refuses before the action runs, so its 413 carries no X-Borgo
-// marker - and the runtime read "no marker" as "a custom response", whose
-// documented handling is location.reload(). The form emptied, nothing was
-// saved, and the one sentence the server had written (which limit, and its
-// value) went out with the document.
-//
-// Everything below runs against a real bun server answering with util.ts's own
-// runAction over real http: the 413 asserted on is the one the server writes,
-// and the Response handed to actionOutcome is the one fetch returns, not a
-// hand-built stand-in. A `new Response(null, {status: 413})` would pass these
-// tests against a server that never answers that way.
+// the body limit refuses before the action runs, so its 413 carries no X-Borgo
+// marker, and an unmarked response means "custom", whose handling is reload.
+// everything below runs against a real bun server over real http: a
+// `new Response(null, {status: 413})` would pass against a server that never answers that way
 
 const CAP = 64;
 
@@ -142,23 +133,17 @@ describe("a 413 an enhanced submit receives", () => {
     await custom.text();
   });
 
-  // the one assertion here that cannot come off the wire: no server writes a
-  // marked 413 today, so reading the marker first is indistinguishable from
-  // reading the status first - both classify every real response identically,
-  // and swapping them leaves this file and the dom file green. What the order
-  // is for is the day util.ts gains an envelope for the refusal, and only a
-  // response built by hand can ask about that day
+  // no server writes a marked 413 today, so reading the marker first is
+  // indistinguishable from the status first on the wire: only a response built
+  // by hand can pin the order, for the day util.ts gains an envelope for the refusal
   test("a 413 that ever gains a marker is still a refusal, not an action answer", () => {
     expect(actionOutcome(new Response("too big", { status: 413, headers: { "X-Borgo": "action" } }))).toBe("too-large");
     expect(actionOutcome(new Response("too big", { status: 413, headers: { "X-Borgo": "raw" } }))).toBe("too-large");
   });
 
-  // the branch itself lives inside mount(), which needs a document, a form and
-  // a react root: action-413-dom.test.ts runs it against one and asserts what
-  // the person at the form sees. This stays because it is cheap and it pins the
-  // shape - but on its own it is not evidence: drop the `return;` ending the
-  // branch and every line below still holds while the page reloads and the form
-  // empties. Measured, not assumed.
+  // the branch lives inside mount(): action-413-dom.test.ts runs it against a
+  // dom. this pins the shape only: drop the `return;` ending the branch and
+  // every line below still holds while the page reloads
   test("the too-large answer is wired to the overlay, ahead of the reload", () => {
     const src = readFileSync(join(import.meta.dir, "../src/runtime.ts"), "utf8");
     const submit = src.slice(src.indexOf("const outcome = actionOutcome(res)"));

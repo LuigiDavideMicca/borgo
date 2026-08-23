@@ -37,12 +37,8 @@ function quietly<T>(fn: () => T): { value: T; out: string } {
   }
 }
 
-/**
- * A project directory as `create-borgo` would leave one, for every axis that
- * changes what `deploy init` writes: which template it came from, whether the
- * app has ports and a signing key of its own, and whether the docker
- * artefacts are there at all (`create-borgo --no-docker` writes neither).
- */
+// a project directory as `create-borgo` would leave one, on every axis that
+// changes what `deploy init` writes (`--no-docker` writes neither docker artefact)
 type Scaffold = {
   template: "base" | "full" | "minimal";
   port?: string;
@@ -86,23 +82,17 @@ function generated(spec: Scaffold): { dir: string; files: Record<string, string>
   return { dir, files, out };
 }
 
-// an external validator, or the reason it is not here. The binaries are never
-// in the repo: point the variables at them to make these run. A test that
-// cannot reach its tool says so and stops - it does not assert a weaker thing
-// and call it a pass.
+// the binaries are never in the repo: point the variables at them. a test that
+// cannot reach its tool says so and stops, it does not assert a weaker thing
 function validator(envVar: string, exe: string): { path: string } | { skip: string } {
   const path = process.env[envVar] || Bun.which(exe);
   return path ? { path } : { skip: `${exe} not found - set ${envVar} to run this` };
 }
 
-// bun's 5s default is a budget for our own code, not for spawning somebody
-// else's binary: `caddy adapt` alone takes ~10s cold on a machine whose
-// antivirus scans a 49 MB unsigned exe on every launch, and docker's client
-// waits on a daemon that may not be up. Every test below that shells out to a
-// real tool gets this instead - a timeout that fires here is the tool being
-// missing or wedged, never the config being wrong. Measured under 16 burners
-// on 8 cores: `docker compose config` 24-74s when it finished, and past 120s
-// twice in five whole-file runs; systemd-analyze through wsl 18-27s.
+// spawning somebody else's binary is not our 5s budget: `caddy adapt` ~10s cold
+// behind antivirus, `docker compose config` 24-74s under 16 burners on 8 cores
+// and past 120s twice in five runs, systemd-analyze through wsl 18-27s. a
+// timeout here is the tool missing or wedged, never the config being wrong
 const EXTERNAL_TOOL_TIMEOUT = 300_000;
 
 // stdout kept apart from stderr: caddy logs to stderr even when it succeeds,
@@ -161,10 +151,7 @@ describe("templates", () => {
     }
   });
 
-  // `listen 443 ssl;` with no certificate directive anywhere in the file is
-  // not a config with a TODO in it: `nginx -t` hard-fails on it, so the file
-  // borgo generated could not start nginx at all. The comment said "point
-  // ssl_certificate at your certs" and there was nothing to point.
+  // `nginx -t` hard-fails on `listen 443 ssl;` with no certificate directive
   test("nginx ships the certificate lines it tells you to set", () => {
     const out = nginxConf(ctx);
     expect(out).toContain("listen 443 ssl;");
@@ -181,10 +168,7 @@ describe("templates", () => {
     expect(out).toContain("uncomment");
   });
 
-  // Two proxies written by one command described two different apps: nginx
-  // capped bodies at 32m, the Caddyfile capped nothing at all, and the app
-  // behind both refuses anything over 1 MiB. The cap is not a taste, it is a
-  // fact about borgo.Bind - so it is read from the Go source, not retyped.
+  // the cap is a fact about borgo.Bind, so it is read from the Go source, not retyped
   test("both proxies cap the body where borgo.Bind does", () => {
     const go = readFileSync(join(repoRoot, "borgo.go"), "utf8");
     const shift = go.match(/^const bindLimit = 1 << (\d+)$/m)?.[1];
@@ -230,10 +214,8 @@ describe("templates", () => {
     }
   });
 
-  // the scaffolded app persists nothing, so the compose file mounts nothing:
-  // a volume that exists because the generator always writes one is a volume
-  // whose permissions bite the first time somebody uses it. What it carries
-  // instead is the whole recipe, commented, next to the line it is about.
+  // a volume the generator always writes is one whose permissions bite the
+  // first app that uses it: the recipe is carried commented instead
   test("compose mounts no volume, and says exactly what adding one takes", () => {
     const out = composeYml(ctx);
     expect(out).toContain("DB_PATH: /data/app.db");
@@ -312,11 +294,8 @@ describe("deployInit", () => {
 });
 
 describe("the outbound request cap", () => {
-  // bun reads BUN_CONFIG_MAX_HTTP_REQUESTS once, at process start, so it can
-  // only be set by whatever launches the server. Every launch surface borgo
-  // writes therefore has to carry it, and dropping it from one of them is a
-  // silent ceiling on concurrent event streams - the kind of regression that
-  // shows up as "sse stops working past a few hundred users", months later.
+  // bun reads BUN_CONFIG_MAX_HTTP_REQUESTS once, at process start, so only the
+  // launcher can set it: every launch surface borgo writes has to carry it
   const carriesCap = (s: string) => /BUN_CONFIG_MAX_HTTP_REQUESTS[=:]\s*"?\d+/.test(s);
 
   test("the configs deploy init writes set it", () => {
@@ -352,10 +331,8 @@ describe("the outbound request cap", () => {
   });
 });
 
-// A cli that ignores an argument does the wrong thing and exits 0, which the
-// operator cannot tell from having done the right thing. `borgo <deploy|pwa>
-// init` refused unknown arguments through parseInitArgv; every other command
-// took whatever it was handed and dropped it.
+// a cli that ignores an argument does the wrong thing and exits 0, which the
+// operator cannot tell from the right thing
 describe("argument refusals", () => {
   describe("parseInitArgv", () => {
     test("init alone, and init with a target, are accepted", () => {
@@ -368,8 +345,7 @@ describe("argument refusals", () => {
       expect(parseInitArgv(["init", "--tailwind"], 0).ok).toBe(true);
     });
 
-    // the old parser was argv.filter(a => !a.startsWith("--")), which drops a
-    // flag and keeps its value: the value then read as the target
+    // `argv.filter(a => !a.startsWith("--"))` would drop the flag and keep its value
     test("a flag's value is never mistaken for a positional", () => {
       expect(parseInitArgv(["init", "nginx", "--port", "8080"], 1)).toEqual({
         ok: false,
@@ -408,10 +384,7 @@ describe("argument refusals", () => {
       expect(unknownArg("start", ["--front-only", "--tailwind"])).toBeNull();
     });
 
-    // each of these ran and exited 0 having done something other than what was
-    // asked: the port stayed 3000, the build was not minified, no tailwind was
-    // compiled. A flag borgo does not know is a flag its user believes is doing
-    // something.
+    // a flag borgo does not know is a flag its user believes is doing something
     test("a flag borgo does not know is refused, not ignored", () => {
       expect(unknownArg("start", ["--port", "4000"])).toBe('unknown option "--port"');
       expect(unknownArg("build", ["--minify"])).toBe('unknown option "--minify"');
@@ -441,10 +414,9 @@ describe("argument refusals", () => {
     });
   });
 
-  // the wiring: the refusal has to be reached before any command runs, or it is
-  // a function nobody calls. The argv it is handed may be filtered first (the
-  // globals the cli reads off the whole line for itself), so what is asserted
-  // is the call and its position, not one spelling of its argument.
+  // the refusal has to be reached before any command runs. the argv may be
+  // filtered first (the globals the cli reads for itself), so what is asserted
+  // is the call and its position, not one spelling of its argument
   test("the cli refuses before it dispatches", () => {
     const src = readFileSync(join(import.meta.dir, "../src/cli.ts"), "utf8");
     expect(src).toMatch(/unknownArg\(command, process\.argv\.slice\(3\)/);
@@ -452,14 +424,8 @@ describe("argument refusals", () => {
   });
 });
 
-// A GENERATED ARTEFACT NEVER CONTAINS A SECRET.
-//
-// `deploy init systemd` used to write `Environment=SESSION_SECRET=<48 real
-// characters>` into borgo.service whenever the app had no key of its own -
-// into the project directory, beside the .env that create-borgo goes out of
-// its way to gitignore and dockerignore, and into neither ignore file itself.
-// The next `git add .` commits the key and the next `docker build` bakes it
-// into a layer. The unit now loads the .env instead and carries no key at all.
+// a unit file lands in the project directory, where `git add .` commits it and
+// `docker build` bakes it into a layer: the key lives in .env, which the unit loads
 describe("no generated file carries a key", () => {
   const key = "K".repeat(48);
 
@@ -473,9 +439,8 @@ describe("no generated file carries a key", () => {
     }
   });
 
-  // the two branches used to differ by a whole comment block and a live key:
-  // an artefact that varies with the environment it was generated in is an
-  // artefact whose review tells you nothing about the next one
+  // an artefact that varies with the environment it was generated in is one
+  // whose review tells you nothing about the next
   test("and the unit is the same file either way", () => {
     expect(systemdUnit({ ...ctx, secret: null })).toBe(systemdUnit({ ...ctx, secret: key }));
   });
@@ -548,9 +513,7 @@ describe("no generated file carries a key", () => {
   });
 });
 
-// EXPOSURE, NOT AN EVENT. The unit ran a public service as www-data with no
-// hardening whatever - `systemd-analyze security` scored it 9.0 UNSAFE - and
-// that was true of every operator who ever ran the command, always.
+// `systemd-analyze security` scores the unit 9.0 UNSAFE without the set
 describe("the systemd unit is hardened", () => {
   // a real ini read, not toContain: a directive in a comment is not a setting,
   // and a directive after [Install] is not in [Service]
@@ -612,13 +575,8 @@ describe("the systemd unit is hardened", () => {
   }, EXTERNAL_TOOL_TIMEOUT);
 });
 
-// RESTART=UNLESS-STOPPED ONLY EVER SEES THE PROCESS EXIT.
-//
-// The front server answering "degraded" with the api down is a process that is
-// perfectly alive, so nothing in the compose file noticed - while deploy.md
-// has a whole section built around /healthz. And /healthz answers 200 in both
-// states deliberately, so the probe has to read the body: a status-code check
-// is the check that never fires.
+// restart: unless-stopped only sees the process exit, and /healthz answers 200
+// with the api down on purpose: the probe has to read the body
 describe("the container artefacts have a healthcheck", () => {
   type Compose = {
     services: {
@@ -672,10 +630,7 @@ describe("the container artefacts have a healthcheck", () => {
   }, EXTERNAL_TOOL_TIMEOUT);
 });
 
-// X-REAL-IP WAS FORGEABLE THROUGH BOTH GENERATED PROXIES, AND THE TWO DID NOT
-// EVEN AGREE ON X-FORWARDED-FOR: nginx appended (so the first value was the
-// client's own invention), Caddy replaced. Two policies out of one command.
-// Both now write both headers from the peer they read the request from.
+// both proxies write both headers from the peer; set, never appended
 describe("the forwarding headers are the proxy's, not the client's", () => {
   test("nginx sets both from $remote_addr and appends nothing", () => {
     const out = nginxConf(ctx);
@@ -751,12 +706,8 @@ describe("the forwarding headers are the proxy's, not the client's", () => {
   }, EXTERNAL_TOOL_TIMEOUT);
 });
 
-// THE OPERATOR'S SHELL IS NOT THE APP'S CONFIGURATION.
-//
-// projectContext read process.env.PORT, so an operator with PORT=5173 left
-// over from an afternoon of something else got 5173 baked into the unit file,
-// the compose file and the proxy in front of them - a deployment that works
-// from one terminal, with nothing in any of the three files to say why.
+// an exported PORT left over in the shell must not be baked into every
+// generated file: nothing in the files would say why they work from one terminal
 describe("the ports come from the app, not from the shell", () => {
   const shell = (vars: Record<string, string | undefined>, fn: () => void) => {
     const before = { PORT: process.env.PORT, API_PORT: process.env.API_PORT };
@@ -858,16 +809,10 @@ describe("across every scaffold deploy init can meet", () => {
   }, 30_000);
 });
 
-// AN EXAMPLE CONFIG NEVER CONTACTS AN OUTSIDE SERVICE IN THE NAME OF WHOEVER
-// TRIES IT.
-//
-// `example.com { ... }` with no tls directive is not an unfinished config: it
-// is a real ACME order against Let's Encrypt for a domain the operator does
-// not own, placed from the operator's own account, retried for thirty days.
-// The absence of an issuer in the adapted json is exactly the defect, so none
-// of this may be asserted as an absence - `not.toContain("acme")` passed on
-// the broken file, because the broken file named no issuer at all. Every
-// assertion below names the issuer it wants.
+// `example.com { }` without tls is a real ACME order against Let's Encrypt from
+// the operator's account, retried for thirty days. the defect is an ABSENT
+// issuer in the adapted json, so nothing here may be asserted as an absence:
+// `not.toContain("acme")` passes on the broken file
 describe("the example Caddyfile issues from a local CA, not from Let's Encrypt", () => {
   test("the file carries tls internal, and says which line goes when the domain is real", () => {
     const out = caddyfile(ctx);
@@ -909,9 +854,9 @@ describe("the example Caddyfile issues from a local CA, not from Let's Encrypt",
     }
   }, EXTERNAL_TOOL_TIMEOUT);
 
-  // the discriminator: without that one line the adapted config names no
-  // issuer at all, which is how caddy spells "the public default". If this
-  // ever stops holding, the test above has stopped proving anything.
+  // the discriminator: without that line the adapted config names no issuer,
+  // which is how caddy spells "the public default". if this stops holding,
+  // the test above has stopped proving anything
   test("dropping the line is what puts the public issuer back", async () => {
     const caddy = validator("BORGO_TEST_CADDY", "caddy");
     if ("skip" in caddy) return void console.log(`skipped: ${caddy.skip}`);
@@ -933,13 +878,8 @@ describe("the example Caddyfile issues from a local CA, not from Let's Encrypt",
   }, EXTERNAL_TOOL_TIMEOUT);
 });
 
-// THE GUIDE AND THE GENERATOR ARE ONE ARTEFACT.
-//
-// deploy.md prints every one of these files as the thing borgo writes, and a
-// reader edits the page's version into their server. Two copies of a config
-// drift the moment one of them is fixed - which is how the page came to
-// document a 32m body cap, an X-Forwarded-For that appends, and a unit with a
-// live signing key in it, long after any of that was a good idea.
+// deploy.md prints every one of these files, and a reader edits the page's
+// version into their server: two copies drift the moment one is fixed
 describe("deploy.md prints what deploy init writes", () => {
   const page = readFileSync(join(repoRoot, "docs/deploy.md"), "utf8");
   const blocks = [...page.matchAll(/```(\w+)\n([\s\S]*?)```/g)].map(([, lang, body]) => ({ lang, body }));

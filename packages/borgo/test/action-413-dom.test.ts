@@ -4,19 +4,11 @@ import { matchRoute, type PageModule, type Route } from "../src/router";
 import { runAction, type ActionOptions, type RouteMatch } from "../src/util";
 import type { ClientRoute, MountOptions } from "../src/runtime";
 
-// THE HALF OF THE 413 FIX A HEADLESS RUNNER COULD NOT SEE.
-//
-// action-413.test.ts pins the classification against a real server and then
-// reads runtime.ts's source for the wiring - which passes on code that does not
-// work. Drop the `return;` ending the too-large branch and every source
-// assertion still holds while execution falls through to `res.json()` on a body
-// tooLargeDetail already drained, throws, and lands in the catch:
-// `location.reload()`. The original defect, restored, under a green suite.
-//
-// So this file runs mount() against a dom and asserts what the person at the
-// form sees: the overlay appears, the page does not reload, the typed text
-// survives. The 413 is still the server's own, over real http; only the browser
-// is emulated - happy-dom cannot show that Chrome paints the overlay.
+// action-413.test.ts reads runtime.ts's source for the wiring, which passes on
+// code that does not work: drop the `return;` ending the too-large branch and
+// execution falls through to `res.json()` on a drained body, into the catch,
+// `location.reload()`. this runs mount() against a dom and asserts what the
+// person at the form sees; the 413 is still the server's own, over real http
 
 const CAP = 64;
 
@@ -183,8 +175,7 @@ describe("what an oversized enhanced submit puts on screen", () => {
   });
 
   // without this the two above prove nothing: `reloads === 0` also holds when
-  // the spy is never reached. an unmarked answer that is NOT a refusal is the
-  // documented escape hatch and still reloads - the road the 413 used to take
+  // the spy is never reached. an unmarked non-refusal still reloads
   test("an unmarked custom answer still reloads, and shows no overlay", async () => {
     const { button } = putForm("/custom", "small");
     button.click();

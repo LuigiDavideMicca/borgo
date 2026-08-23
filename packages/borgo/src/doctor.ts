@@ -1,6 +1,4 @@
-// borgo doctor: diagnoses the environment an app runs in. every check is a
-// pure function over an injectable DoctorEnv, so the logic is unit-testable
-// without touching the real machine.
+// borgo doctor: every check is a pure function over an injectable DoctorEnv
 import {
   closeSync,
   existsSync,
@@ -16,9 +14,8 @@ import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { banner, c, g } from "./colors";
 
-// info marks a check whose bad news is worth printing but is not a broken
-// environment: no docker on a machine that never builds an image is fine.
-// these never count towards the exit code, and never render red.
+// info: bad news worth printing that is not a broken environment; never counts
+// towards the exit code, never renders red
 export type Check = { name: string; ok: boolean; detail: string; fix?: string; info?: boolean };
 
 export type DoctorEnv = {
@@ -34,17 +31,13 @@ export type DoctorEnv = {
   readFile: (path: string) => string | null;
   resolve: (spec: string) => string | null;
   openForWrite: (path: string) => "ok" | "busy";
-  // borgo creates these directories on demand, so a missing one is probed at
-  // its nearest existing ancestor: what fails a read-only checkout is the
-  // mkdir, and that is the parent's permission
   probeWrite: (dir: string) => "ok" | "denied";
   diskFree: (path: string) => number | null;
   isPortFree: (port: number) => Promise<boolean>;
 };
 
-// the nearest existing ancestor of dir, since borgo creates these directories
-// on demand: what fails a read-only checkout is the mkdir, and that is the
-// parent's permission
+// the nearest existing ancestor, since borgo creates these directories on
+// demand: what fails a read-only checkout is the mkdir, the parent's permission
 export function probeTarget(dir: string, exists: (path: string) => boolean): string {
   let target = dir;
   while (target && !exists(target)) {
@@ -55,20 +48,8 @@ export function probeTarget(dir: string, exists: (path: string) => boolean): str
   return target || ".";
 }
 
-/**
- * Whether the probe file could be written. That question only.
- *
- * It used to be `write; remove; return "ok"` inside one try, so a directory
- * that took the write and refused the delete answered "denied" - the diagnosis
- * of a read-only checkout, printed for a machine that writes perfectly well,
- * and doctor exits 1 on it. Measured on windows with delete denied by ACL:
- * "denied", and `.borgo-doctor-<pid>` still sitting there afterwards, which is
- * itself the proof the write had worked.
- *
- * So the removal moves to a finally and stops being evidence. A check that
- * writes to find out whether it can write cleans up on every branch, including
- * the one where it decides the answer is no.
- */
+// whether the probe could be written, that question only: a directory that
+// takes the write and refuses the delete is not a read-only checkout
 export function probeWriteWith(
   probe: string,
   write: (path: string) => void,
@@ -80,32 +61,24 @@ export function probeWriteWith(
   } catch {
     return "denied";
   } finally {
-    // a probe that cannot be removed is not the caller's answer, and throwing
-    // from here would replace it
+    // a probe that cannot be removed is not the answer, and throwing here would replace it
     try {
       remove(probe);
     } catch {}
   }
 }
 
-// what the probe writes, so a residue can be identified by reading it rather
-// than by trusting its name
+// so a residue is identified by reading it, not by trusting its name
 export const PROBE_MARK = "borgo doctor write probe\n";
 
 const PROBE_NAME = /^\.borgo-doctor-[0-9]+$/;
 
-/**
- * Residues of runs killed between the write and the removal. The window is two
- * adjacent syscalls - 333 us against a 679 ms doctor - but a residue never
- * heals, because the name carries the pid. Measured for one left in
- * public/assets: buildAssetIndex serves it at a public url, and `borgo export`
- * copies it into dist/site and counts it as an asset.
- *
- * A diagnostic removes only what it can prove it wrote, and this one runs in
- * the user's project: exact name, whole content equal to the mark, and only in
- * a directory doctor was already writing into. Anything else is left alone,
- * including the empty residues older versions wrote.
- */
+// residues of runs killed between the write and the removal (two adjacent
+// syscalls, but the name carries the pid so a residue never heals, and one in
+// public/assets is served at a public url and exported). a diagnostic removes
+// only what it can prove it wrote: exact name, content equal to the mark, and
+// only in a directory doctor was already writing into - the empty residues
+// older versions wrote are left alone
 export function sweepProbes(
   dir: string,
   names: string[],
@@ -175,10 +148,8 @@ export const realEnv = (): DoctorEnv => ({
       return null;
     }
   },
-  // the pid stays in the name: measured on windows, two doctors sharing one
-  // fixed name collide on the write with EPERM - the same code a real denial
-  // raises - 96 times in 3000, which is a read-only checkout reported for a
-  // directory that writes perfectly well
+  // the pid stays in the name: two doctors on one fixed name collide on the
+  // write with EPERM, the same code a real denial raises (96 times in 3000 on windows)
   probeWrite: (dir) => {
     const target = probeTarget(dir, existsSync);
     const answer = probeWriteWith(
@@ -214,8 +185,8 @@ export const realEnv = (): DoctorEnv => ({
       return null;
     }
   },
-  // a running executable cannot be opened for write on windows; that is
-  // exactly the lock that makes dev's binary swap fail with EPERM
+  // a running executable cannot be opened for write on windows: the lock that
+  // makes dev's binary swap fail with EPERM
   openForWrite: (path) => {
     try {
       closeSync(openSync(path, "r+"));
@@ -224,11 +195,10 @@ export const realEnv = (): DoctorEnv => ({
       return (error as { code?: string }).code === "ENOENT" ? "ok" : "busy";
     }
   },
-  // no host: the probe binds the wildcard address, which collides with a
-  // holder on any interface. pinning it to 127.0.0.1 misses the common case
-  // on windows - a server bound to 0.0.0.0 without SO_EXCLUSIVEADDRUSE (go's
-  // net.Listen, so borgo's own api) lets a loopback-only bind succeed, and the
-  // port reads back "free" while the api is answering on it
+  // no host: the wildcard bind collides with a holder on any interface. pinned
+  // to 127.0.0.1 it misses the common case on windows: a server bound to 0.0.0.0
+  // without SO_EXCLUSIVEADDRUSE (go's net.Listen, so borgo's own api) lets a
+  // loopback-only bind succeed, and the port reads back "free"
   isPortFree: (port) =>
     new Promise((resolve) => {
       const server = createServer();
@@ -273,42 +243,26 @@ const packageJson = (d: DoctorEnv): Record<string, unknown> | null => {
   }
 };
 
-// the comparators that put a floor under a range. Anything else is either a
-// ceiling or a form with no single floor at all, and both are refused by name
-// rather than read for whichever number appears first in them.
+// the comparators that put a floor under a range; a ceiling or a form with no
+// single floor is refused by name rather than read for the first number in it
 export const SUPPORTED_RANGES = ">=1.3.0, >1.3.0, ^1.3.0, ~1.3.0 or 1.3.0, optionally followed by an upper bound";
 
-/**
- * The lowest version a range admits, or null when it declares no floor we read.
- *
- * This used to be `parseVersion` over the whole string, which returns the first
- * version it can find and never looks at what is in front of it. So `"<1.5.0"`
- * - a *ceiling*, the app saying it cannot run on 1.5 yet - was read as "at
- * least 1.5.0", and `borgo doctor` exited 1 on a machine whose bun was exactly
- * what the app asked for. A comparator borgo cannot read is refused out loud
- * instead: an unread range must not become a requirement nobody wrote.
- *
- * A hyphen range ("1.2.3 - 2.0.0") and a two-comparator range (">=1.3.2 <2")
- * both begin with their floor, which is why the first token is the one read.
- */
+// the lowest version a range admits, or null when it declares no floor we read:
+// a ceiling like "<1.5.0" must not become a requirement nobody wrote. hyphen
+// and two-comparator ranges both begin with their floor, so the first token is read
 export function declaredFloor(range: string): string | null {
-  // an alternation's floor is the lowest of its branches, not the first one
-  // written: "^2 || ^1.2" read left to right would fail every machine the app
-  // is happy on. Refused rather than half-read.
+  // an alternation's floor is the lowest branch, not the first: "^2 || ^1.2"
+  // read left to right fails every machine the app is happy on
   if (range.includes("||")) return null;
   const first = range.trim().split(/\s+/)[0] ?? "";
   const m = first.match(/^(?:>=|>|\^|~|=)?v?(\d+)\.(\d+)(?:\.(\d+))?$/);
-  // ">1.4.2" admits 1.4.3 and not 1.4.2, and is read as a floor of 1.4.2: the
-  // one version of error it can produce is a green check on the exact release
-  // the app excluded, where reading it as no floor at all drops the whole
-  // declaration
+  // ">1.4.2" is read as a floor of 1.4.2: the one error it can produce is a
+  // green check on the exact release excluded, where no floor drops the declaration
   return m ? `${Number(m[1])}.${Number(m[2])}.${Number(m[3] ?? 0)}` : null;
 }
 
-// the app may ask for a newer bun than the framework does; it may not ask for
-// an older one. a declared floor below borgo's is not a relaxation, it is a
-// green check on a bun that `borgo build` will fail on, so the higher of the
-// two wins.
+// a declared floor below borgo's is not a relaxation, it is a green check on
+// a bun that `borgo build` will fail on, so the higher of the two wins
 export function bunMinimum(d: DoctorEnv): { min: string; source: string; unreadable?: string } {
   const engines = packageJson(d)?.engines as { bun?: string } | undefined;
   const declared = typeof engines?.bun === "string" ? engines.bun.trim() : "";
@@ -325,9 +279,8 @@ export function bunMinimum(d: DoctorEnv): { min: string; source: string; unreada
   return { min: floor, source: "package.json engines.bun" };
 }
 
-// a declared range borgo could not read is a note, not a failure: the machine
-// is fine, the check simply fell back to borgo's own minimum, and the operator
-// is the only one who can say whether that is what they meant
+// a range borgo could not read is a note, not a failure: the check fell back
+// to borgo's own minimum, and only the operator can say whether that was meant
 export function checkEnginesBun(d: DoctorEnv): Check | null {
   const { unreadable } = bunMinimum(d);
   if (!unreadable) return null;
@@ -340,13 +293,11 @@ export function checkEnginesBun(d: DoctorEnv): Check | null {
   };
 }
 
-// an npm-installed bun is a wrapper under node_modules, not the real binary:
-// it runs, but the bin shims it spawns cannot find bun and the whole thing
-// fails with "bun is not installed"
+// an npm-installed bun is a wrapper under node_modules: it runs, but the bin
+// shims it spawns cannot find bun and fail with "bun is not installed"
 const underNodeModules = (path: string) => /[\\/]node_modules[\\/]/.test(path);
 
-// npm and nvm-for-windows install their wrappers as .cmd/.ps1/.bat next to
-// node.exe. the official bun installer only ever writes bun.exe.
+// npm and nvm-for-windows install .cmd/.ps1/.bat wrappers; the official installer writes only bun.exe
 const isCmdShim = (path: string) => /\.(cmd|bat|ps1)$/i.test(path);
 
 export function checkBun(d: DoctorEnv): Check {
@@ -388,10 +339,8 @@ export function checkBun(d: DoctorEnv): Check {
   return { name, ok: true, detail: `${version} ${g.dot} ${found}` };
 }
 
-// the shim resolves *and* a real bun.exe is installed somewhere else on PATH:
-// everything works until something spawns a bin shim, so this is a note and
-// not a failure - unlike the case checkBun already fails on, where the shim is
-// all there is. reported separately so the version check still runs.
+// the shim resolves *and* a real bun.exe is elsewhere on PATH: everything works
+// until something spawns a bin shim, so a note, reported apart from the version check
 export function checkBunShim(d: DoctorEnv): Check | null {
   const found = d.which("bun");
   if (!found || !isCmdShim(found)) return null;
@@ -406,9 +355,7 @@ export function checkBunShim(d: DoctorEnv): Check | null {
   };
 }
 
-// borgo needs no node at all; a plugin, a lint step or a playwright install
-// might, and "is node even here" is the first thing anyone asks when one of
-// them fails. purely informational either way.
+// borgo needs no node; a plugin, a lint step or a playwright install might
 export function checkNode(d: DoctorEnv): Check {
   const name = "node";
   const found = d.which("node");
@@ -431,8 +378,7 @@ export function checkNode(d: DoctorEnv): Check {
   };
 }
 
-// the scaffold ships a Dockerfile and a compose file. not having docker is a
-// perfectly good state to be in - knowing before `borgo deploy` is not.
+// not having docker is a perfectly good state to be in; knowing before `borgo deploy` is not
 export function checkDocker(d: DoctorEnv): Check {
   const name = "docker";
   const found = d.which("docker");
@@ -460,9 +406,8 @@ export function checkDocker(d: DoctorEnv): Check {
   return { name, ok: true, info: true, detail: `server ${server} ${g.dot} ${found}` };
 }
 
-// a read-only checkout, a synced folder that lost its permissions, an
-// antivirus holding public/assets: every one of them surfaces later as a
-// build that fails halfway with an errno nobody reads
+// a read-only checkout, a synced folder, an antivirus holding public/assets:
+// every one surfaces later as a build that fails halfway with an errno nobody reads
 export function checkWritable(d: DoctorEnv): Check | null {
   if (!d.exists("package.json")) return null;
   const name = "write access";
@@ -515,8 +460,7 @@ const playwrightBrowsersDir = (d: DoctorEnv): string => {
   return d.platform === "darwin" ? `${home}/Library/Caches/ms-playwright` : `${home}/.cache/ms-playwright`;
 };
 
-// only for apps that actually use it: an install of ~400 MB of browsers is
-// not something to nag a plain app about
+// only for apps that use it: ~400 MB of browsers is not something to nag a plain app about
 export function checkPlaywright(d: DoctorEnv): Check | null {
   const pkg = packageJson(d);
   if (!pkg) return null;
@@ -559,9 +503,8 @@ export function checkGo(d: DoctorEnv): Check {
 }
 
 export function parseNetstatPid(out: string, port: number): string | null {
-  // the state column is localized ("LISTENING", "IN ASCOLTO", "ABHÖREN"...):
-  // recognize a listening row by shape instead, a tcp local address on the
-  // port with the wildcard foreign address :0
+  // the state column is localized ("LISTENING", "IN ASCOLTO", "ABHÖREN"): a
+  // listening row is recognised by shape, local address on the port and foreign :0
   for (const line of out.split("\n")) {
     const m = line.match(/^\s*TCP\s+\S+:(\d+)\s+\S+:0\s/);
     if (!m || Number(m[1]) !== port) continue;
@@ -585,26 +528,12 @@ export function portHolder(d: DoctorEnv, port: number): { pid: string; name: str
   return pid && /^\d+$/.test(pid) ? { pid, name } : null;
 }
 
-// the images `borgo dev` and `borgo start` run under: the bun front server,
-// and the go api binary, which is `api` in dev (.borgo/api) and dist/api in a
-// build. lsof truncates long command names, so these are compared as the short
-// image names both platforms report.
+// the bun front server, and the go api binary: `api` in dev (.borgo/api) and
+// dist/api in a build. lsof truncates long command names, so short image names
 const OWN_IMAGES = new Set(["bun", "api", "borgo"]);
 
-/**
- * Whether the holder of a port *could* be one of ours, by image name alone.
- *
- * It cannot be more than that, and the old name (`isOwnProcess`) claimed it
- * was. Every bun on the machine is called bun: a scratch script holding :3000
- * matched, doctor called it "in use by borgo itself", filed it as a note and
- * exited 0 - on a machine where `borgo dev` cannot bind. The one command that
- * exists to say what is in the way said nothing was.
- *
- * What a port check verifies is that the port is taken and which image took
- * it. It does not verify who started that image, so nothing downstream may
- * assert it: this decides which *advice* to print, never whether the occupied
- * port counts.
- */
+// by image name alone: every bun on the machine is called bun, so this decides
+// which advice to print, never whether the occupied port counts
 export function looksLikeOwnImage(image: string): boolean {
   const base = image.replaceAll("\\", "/").split("/").pop() ?? image;
   return OWN_IMAGES.has(base.toLowerCase().replace(/\.exe$/, ""));
@@ -618,10 +547,8 @@ export async function checkPort(d: DoctorEnv, port: number, label: string, envVa
     return { name, ok: false, detail: "in use", fix: `free it, or set ${envVar} to another port` };
   }
   const kill = d.platform === "win32" ? `taskkill /F /PID ${holder.pid}` : `kill ${holder.pid}`;
-  // an occupied port is a failure whoever holds it, because `borgo dev` cannot
-  // bind it either way. Recognising the image is worth a line of advice and
-  // nothing else - printed as the condition it is ("if that is your own"),
-  // never as a fact about a process doctor never identified.
+  // an occupied port is a failure whoever holds it: recognising the image is
+  // worth a line of advice, printed as the condition it is, never as a fact
   const advice = looksLikeOwnImage(holder.name)
     ? `nothing to fix if that is your own borgo ${g.dot} otherwise ${kill}`
     : kill;
@@ -633,19 +560,9 @@ export async function checkPort(d: DoctorEnv, port: number, label: string, envVa
   };
 }
 
-/**
- * The port a variable asks for, or null when it does not name one.
- *
- * `Number(d.env.PORT || 3000)` was handed straight to net.listen, so `PORT=abc`
- * did not print "port NaN" - it threw ERR_INVALID_ARG_VALUE out of doctor and
- * killed the run with a stack trace, and `PORT=70000` did the same with a
- * RangeError. A diagnostic dying on the environment it was asked to diagnose
- * reports nothing at all.
- *
- * 0 is refused with them: it binds, so the check read "port 0 free", but it
- * names no port - `borgo dev` passes it through and then waits forever on
- * localhost:0 for a server that bound something random.
- */
+// `Number(raw)` handed straight to net.listen throws on `abc` (ERR_INVALID_ARG_VALUE)
+// and on 70000 (RangeError), killing the diagnostic. 0 is refused too: it binds,
+// but names no port, and `borgo dev` would wait forever on localhost:0
 export function resolvePort(raw: string | undefined, fallback: number): number | null {
   if (!raw) return fallback;
   const n = Number(raw);
@@ -676,29 +593,16 @@ export function checkApiBinary(d: DoctorEnv): Check {
   const image = "api" + (d.platform === "win32" ? ".exe" : "");
   const bin = `.borgo/${image}`;
   if (!d.exists(bin)) return { name, ok: true, detail: "no dev binary yet" };
-  // only windows locks a running executable against replacement; elsewhere
-  // dev's rename swap works regardless (and open(r+) on a running elf would
-  // report a false ETXTBSY "busy")
+  // only windows locks a running executable against replacement; open(r+) on
+  // a running elf would report a false ETXTBSY "busy"
   if (d.platform !== "win32") return { name, ok: true, detail: `${bin} swappable` };
   if (d.openForWrite(bin) === "busy") {
-    // What the probe establishes is that the file will not open for writing
-    // right now. Not what holds it: openForWrite calls every error but ENOENT
-    // "busy", so an antivirus, a sync client, a backup agent and a lost write
-    // permission all arrive here looking exactly like a running api.
-    //
-    // It used to read `locked by a running "api" process, dev cannot swap in
-    // a new build`, and both halves went past that evidence. The second was
-    // false in the commonest case: during a healthy `borgo dev` the holder is
-    // dev's own api, which dev kills before the rename and then retries for
-    // two seconds - so doctor printed red and exited 1 over a session that
-    // was working. Windows only by the guard above, so there is no other
-    // platform to branch on.
-    //
-    // A note, not a failure, and for the reason opposite to the ports above:
-    // there an occupied port stops `borgo dev` whoever holds it, so the
-    // verified fact is itself the failure. Here the verified fact stops
-    // nothing on its own, and whether it stops anything at all is exactly
-    // what this check cannot see.
+    // the probe establishes only that the file will not open for writing now,
+    // not what holds it: an antivirus, a sync client or a lost write permission
+    // all look like a running api. during a healthy `borgo dev` the holder is
+    // dev's own api, which dev kills before the rename and retries for two
+    // seconds, so this is a note: unlike a port, the verified fact stops
+    // nothing on its own
     return {
       name,
       ok: false,
@@ -717,9 +621,7 @@ export function checkApiTypes(d: DoctorEnv): Check | null {
   const fix = "go tool borgogen (borgo dev and borgo build run it for you)";
   const generated = d.mtime(types);
   if (generated === null) return { name, ok: false, detail: `${types} is missing`, fix };
-  // the whole tree, not just the top level: borgogen reads every .go file
-  // under api/, so an app that keeps handlers in api/users/ was reported
-  // "fresh" no matter how far behind the generated types had fallen
+  // the whole tree: borgogen reads every .go file under api/, at any depth
   for (const file of d.listTree("api")) {
     if (!file.endsWith(".go")) continue;
     const changed = d.mtime(`api/${file}`);
@@ -803,7 +705,7 @@ export async function runChecks(d: DoctorEnv): Promise<Check[]> {
   return results.filter((r): r is Check => r !== null);
 }
 
-/** informational bad news is a note, never a failure: it stays out of the exit code */
+// a note is never a failure: it stays out of the exit code
 export const isFailure = (r: Check) => !r.ok && !r.info;
 
 export async function doctor(d: DoctorEnv = realEnv()): Promise<number> {
@@ -811,8 +713,7 @@ export async function doctor(d: DoctorEnv = realEnv()): Promise<number> {
   const results = await runChecks(d);
   const width = Math.max(...results.map((r) => r.name.length));
   for (const r of results) {
-    // three states, three marks: a note is neither green nor red, so an
-    // absent docker cannot read as a broken machine
+    // a note is neither green nor red, so an absent docker cannot read as a broken machine
     const mark = r.ok ? c.sage(g.ok) : r.info ? c.blue(g.dot) : c.red(g.err);
     const detail = r.ok || r.info ? c.dim(r.detail) : r.detail;
     console.log(`  ${mark} ${r.name.padEnd(width)}  ${detail}`);

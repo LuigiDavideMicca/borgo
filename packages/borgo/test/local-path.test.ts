@@ -10,8 +10,7 @@ const { localPathNeedles, redactLocalPaths } = await import("../src/server");
 process.chdir(cwd);
 
 // built from pieces so the fixture cannot lie: a "\\" inside a template is one
-// backslash, and every earlier version of this file that wrote paths inline was
-// measuring a string with `\U` and `\t` in it rather than a windows path
+// backslash, and a path written inline is a string with `\U` and `\t` in it
 const BS = String.fromCharCode(92);
 const win = (...parts: string[]) => parts.join(BS);
 
@@ -59,10 +58,8 @@ describe("localPathNeedles", () => {
     expect(needles).toContain("file:///C:/My%20Apps/site");
   });
 
-  // THE DECLARED LIMIT, IN A TEST SO IT CANNOT BE FORGOTTEN. On linux the root
-  // is a bare absolute path, which is textually a perfectly good root-relative
-  // url - redacting it would rewrite legitimate links - so only the file:// url
-  // is a needle there.
+  // the declared limit: on linux the root is a bare absolute path, textually a
+  // root-relative url, so only the file:// url is a needle there
   test("a posix root is only its file url, never the bare path", () => {
     const needles = localPathNeedles(ROOT_POSIX, "linux");
     expect(needles).toEqual(["file:///srv/borgo/app"]);
@@ -77,23 +74,12 @@ describe("localPathNeedles", () => {
 describe("redactLocalPaths", () => {
   const NEEDLES = localPathNeedles(ROOT_WIN, "win32");
 
-  /**
-   * THE TEST THAT DECIDES WHETHER THIS GUARD MAY EXIST AT ALL.
-   *
-   * It sits on every html response in production, so the one thing it must
-   * never do is rewrite a document that is merely ABOUT paths. The page below
-   * is a realistic documentation page and carries, on purpose, every shape a
-   * wider rule would misread:
-   *
-   *   - a code block showing another machine's path, backslashes and all
-   *   - an https url with a double slash in it
-   *   - the bare text "drive C:" and a bare "file://" mention
-   *   - a root-relative asset url, which is the documented way to do this
-   *   - a path that shares a long prefix with the server's root and diverges
-   *   - the root's own trailing segment on its own, out of context
-   *
-   * Every one of them has to come back byte for byte.
-   */
+  // the test that decides whether this guard may exist at all: it sits on
+  // every html response, so it must never rewrite a document merely ABOUT
+  // paths. every shape a wider rule would misread, byte for byte: another
+  // machine's path, an https url with a double slash, the bare text "drive C:"
+  // and "file://", a root-relative asset url, a path sharing a long prefix
+  // with the root, the root's own trailing segment alone
   const HEALTHY =
     "<main><h1>installing</h1>" +
     `<pre>cd ${win("C:", "Users", "alice", "projects", "site")}\nborgo dev</pre>` +
@@ -160,9 +146,8 @@ describe("redactLocalPaths", () => {
     expect(calls).toBe(1);
   });
 
-  // FOUND BY THE HEALTHY PAGE ABOVE, NOT BY READING THE CODE. The first shape
-  // of this guard matched the root as a bare prefix and turned
-  // C:\srv\borgo\application into [redacted]lication.
+  // found by the healthy page above: a bare prefix match turned
+  // C:\srv\borgo\application into [redacted]lication
   test("a directory that only begins like the root is left alone", async () => {
     for (const near of ["application", "apps", "app2", "app-old", "app.bak"]) {
       const doc = `<code>C:/srv/borgo/${near}/x</code>`;
@@ -170,11 +155,9 @@ describe("redactLocalPaths", () => {
     }
   });
 
-  // FOUND BY A MUTATION AND NOT BY A TEST. `replaceRoots` copies an unbounded
-  // match through untouched and goes on looking; a mutation that dropped those
-  // bytes instead stayed green, because no document here held a near miss AND a
-  // real root at once - and a near miss on its own never reaches that code, the
-  // whole rebuild is thrown away when nothing was bounded.
+  // found by a mutation: `replaceRoots` copies an unbounded match through
+  // untouched and goes on looking, and a near miss on its own never reaches
+  // that code, so only a near miss AND a real root at once can tell
   test("a near miss and a real root in one document, both handled", async () => {
     const doc = "<code>C:/srv/borgo/application/x</code><img src=\"C:/srv/borgo/app/y.png\"/>";
     expect(await through(NEEDLES, doc)).toBe(
@@ -234,13 +217,9 @@ describe("redactLocalPaths", () => {
   });
 });
 
-// REGRESSION GUARD, NOT A PROOF, AND LABELLED AS ONE. Whether the guard is
-// actually on the render path was measured by hand against a live production
-// server - a hydrate=false page came back as src="[redacted]/pages/probe.png"
-// and _500.tsx with it - and there is no test here that boots a server on a
-// port. This only keeps the wiring from being deleted without anyone noticing:
-// a mutation that unhooked redactLocalPaths from renderToStream reddened
-// nothing at all.
+// regression guard, not a proof: whether the guard is on the render path was
+// measured by hand against a live server, and nothing here boots one. a
+// mutation that unhooked redactLocalPaths from renderToStream reddened nothing
 describe("the guard is wired into the render path", () => {
   test("renderToStream hands its stream through redactLocalPaths, per page", async () => {
     const source = await Bun.file(join(import.meta.dir, "../src/server.ts")).text();

@@ -309,9 +309,8 @@ describe("subscribe", () => {
       lines.close();
     });
 
-    // an over-long name used to be dialled forever: the relay's 400 arrives as
-    // 1002/1006, the same shape as a server down. The cap is duplicated in
-    // index.ts and pinned to server.ts's by the coupling test below
+    // the relay's 400 arrives as 1002/1006, the same shape as a server down,
+    // so an over-long name would be dialled forever
     test("an over-long name never reaches the wire, and says why", () => {
       const long = "x".repeat(129);
       expect(() => subscribe(long, () => {})).toThrow("is 129 characters");
@@ -330,10 +329,8 @@ describe("subscribe", () => {
     });
 
     test("the client's cap and the relay's are the same number", async () => {
-      // index.ts is browser code and cannot import the server to ask, so it
-      // carries a copy. This is what keeps the copy honest: the two sources are
-      // read and compared, and a change to either one alone fails here rather
-      // than in a page that stops connecting.
+      // index.ts is browser code and cannot import the server, so it carries a
+      // copy: the two sources are read and compared
       const dir = import.meta.dir;
       const client = await Bun.file(`${dir}/../src/index.ts`).text();
       const server = await Bun.file(`${dir}/../src/server.ts`).text();

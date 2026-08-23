@@ -1,18 +1,8 @@
-// EVERY /ws REFUSAL NAMES ITS TRUE CAUSE, AND WRITES IT WHERE SOMEONE READS IT.
-//
-// A refused upgrade is the one answer the client cannot show anyone. Measured
-// against a live front server (examples/tasks, a real socket, a bun client): a
-// 400 on the handshake arrives as close code 1002 "Expected 101 status code"
-// and nothing else - no status, no body - and the spec gives a browser 1006
-// with an empty reason for the same shape.
-// So the two places the cause exists are the response body (for curl, and for
-// anything that is not a handshake) and the server's own log. A refusal that
-// fills neither is a support ticket; one that fills them with the wrong cause
-// is worse, because it sends the caller to fix something that is not broken.
-//
-// That is what a 129-character topic used to get: status 400, body "too many
-// topics" - a count the request did not have - and nothing in the log at all,
-// while the comma refusal one branch up logged and named itself correctly.
+// a refused upgrade is the one answer the client cannot show anyone: measured
+// live, a 400 on the handshake arrives as close code 1002 "Expected 101 status
+// code" and nothing else, a browser gets 1006 with an empty reason. so the
+// cause exists in the response body (curl) and in the server's log, and a
+// refusal filling them with the wrong cause sends the caller to fix what is not broken
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
@@ -37,7 +27,7 @@ describe("what /ws refuses, and what it says about it", () => {
     const why = wsTopicRefusal(["x".repeat(MAX_WS_TOPIC_LENGTH + 1)])!;
     expect(why).toContain("129 characters");
     expect(why).toContain(`over the ${MAX_WS_TOPIC_LENGTH}`);
-    // the sentence that used to come back, for a request holding one topic
+    // the count's sentence, for a request holding one topic
     expect(why).not.toContain("too many topics");
   });
 
@@ -73,9 +63,7 @@ describe("what /ws refuses, and what it says about it", () => {
 // ------------------------------------------------------------ coupling guard
 
 describe("no /ws refusal is silent", () => {
-  // the defect was never the sentence alone - it was a 400 written with nothing
-  // said anywhere a human looks. This reads the handler itself, because the
-  // guarantee is about the SITE of every refusal and not about one of them.
+  // the guarantee is about the SITE of every refusal, so the handler itself is read
   test("every 400 the /ws handler returns is logged first", async () => {
     const source = await Bun.file(join(import.meta.dir, "../src/server.ts")).text();
     const start = source.indexOf('if (url.pathname === "/ws") {');
@@ -102,15 +90,12 @@ describe("no /ws refusal is silent", () => {
   });
 });
 
-// THE ORIGIN REFUSAL IS THE ONE THE CLIENT CAN READ. Measured on a live front
-// server (examples/tasks, bun client, Origin http://evil.example): the bare 403
-// arrived as 1002 "Expected 101 status code" and was redialled 6 times in 60 s,
-// forever after at 30 s. Upgrading and closing with 4403 arrives as code 4403
-// with the reason intact, one dial, and a socket that received none of the 20
-// messages published into its topic while it existed. Chromium could not be
-// measured cross-origin on loopback: a page from another origin is stopped
-// before the handshake (net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS, 1006).
-// The 400s stay 400s: those are programming errors settled at the call site.
+// the origin refusal is the one the client can read. measured live (bun
+// client, Origin http://evil.example): a bare 403 arrived as 1002 and was
+// redialled 6 times in 60 s, forever after at 30 s; upgrading and closing
+// with 4403 arrives with the reason intact, one dial, and none of the 20
+// messages published into its topic meanwhile. chromium cannot be measured
+// cross-origin on loopback (ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS, 1006)
 describe("the origin refusal reaches the client as a close frame", () => {
   test("the code is in the 4xxx application range, and the reason names origin and host", () => {
     expect(WS_CLOSE_ORIGIN_REFUSED).toBe(4403);

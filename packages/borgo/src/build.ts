@@ -20,11 +20,8 @@ const outDir = "public/assets";
 const genDir = ".borgo";
 const buildModePath = `${genDir}/build-mode`;
 
-// which kind of build last wrote public/assets. `borgo start` must not
-// silently serve what `borgo dev` left there (dev react, no precompression),
-// nor what `borgo export` left there: an export build compiles the props
-// endpoint out of the bundle, so every client navigation under `borgo start`
-// would degrade to a full document reload with nothing on screen to say why.
+// which build last wrote public/assets: an export build has the props endpoint
+// compiled out, so served by `borgo start` every navigation is a full reload
 export type BuildMode = "dev" | "production" | "export";
 
 export function buildModeFor(dev: boolean, env: NodeJS.ProcessEnv = process.env): BuildMode {
@@ -32,10 +29,7 @@ export function buildModeFor(dev: boolean, env: NodeJS.ProcessEnv = process.env)
   return env.BORGO_STATIC === "1" ? "export" : "production";
 }
 
-// `recorded` separates "no build has run here" from "a build-mode is on disk
-// and it is not one borgo writes" - an empty file, a truncated one, a `DEV`
-// some editor upper-cased. Both are unknown, and the two lines they earn name
-// different things to go and look at.
+// `recorded`: a stamp is on disk but says nothing borgo writes (empty, truncated, `DEV`)
 export type BuildModeRead = { mode: BuildMode | null; recorded: boolean };
 
 export function readBuildMode(path = buildModePath): BuildModeRead {
@@ -55,19 +49,8 @@ export function assetsBuildMode(path = buildModePath): BuildMode | null {
   return readBuildMode(path).mode;
 }
 
-/**
- * Why `borgo start` has to rebuild before serving, or null to serve what is here.
- *
- * The guard used to be `mode === "dev" || mode === "export"`, so every way of
- * not knowing - no file, an empty one, garbage, `DEV` - fell through to
- * serving. That is the guard failing toward the outcome it exists to prevent:
- * an unreadable stamp is the state a dev tree reaches by having its `.borgo`
- * half-copied, and the reward for guessing right is nothing while the cost of
- * guessing wrong is a development bundle on a production port, silently.
- *
- * So only the stamp that says "production" in so many words is served. Doubt
- * rebuilds: the price is one build.
- */
+// only a stamp that says "production" is served; doubt rebuilds. An unreadable
+// stamp is what a half-copied `.borgo` looks like, and the price is one build
 export function rebuildBeforeServing(read: BuildModeRead = readBuildMode()): string | null {
   if (read.mode === "production") return null;
   if (read.mode === "dev") return "public/assets holds a dev build";
@@ -77,8 +60,6 @@ export function rebuildBeforeServing(read: BuildModeRead = readBuildMode()): str
     : "nothing here records which build public/assets holds";
 }
 
-// the mark a build leaves on the tree while it is running, removed only when
-// it has written everything it promises. See buildLeftUnfinished.
 const incompletePath = `${genDir}/build-incomplete`;
 
 export function markBuildStarted(path = incompletePath) {
@@ -90,20 +71,9 @@ export function clearBuildMark(path = incompletePath) {
   rmSync(path, { force: true });
 }
 
-/**
- * Whether the last build here stopped somewhere in the middle.
- *
- * generateManifest writes `.borgo/routes.gen.tsx` before anything can fail, so
- * the very first thing a failed build did was to erase the evidence that it was
- * needed: the boot after it found a manifest and a public/assets from the last
- * build that worked, decided there was nothing to do, and served the old assets
- * without a word. An error that deletes its own cause is worse than one that
- * stays - the operator reads the failure once, fixes nothing, restarts, and is
- * told everything is fine.
- *
- * The mark is written before the manifest and removed after the last byte of a
- * successful build, so the state in between is legible to whoever boots next.
- */
+// generateManifest writes routes.gen.tsx before anything can fail, so without
+// this mark a failed build erases the evidence it was needed and the next boot
+// serves the previous public/assets without a word
 export function buildLeftUnfinished(path = incompletePath): boolean {
   return existsSync(path);
 }
@@ -111,11 +81,7 @@ export function buildLeftUnfinished(path = incompletePath): boolean {
 const dynamicSegments = (pattern: string) =>
   pattern.split("/").filter((s) => s.startsWith(":")).length;
 
-// paths the front server answers before the route table is consulted at all:
-// everything under /api/ is proxied to go, /__borgo/ is the dev channel and
-// the push endpoint, and the last three are borgo's own. a page generated for
-// one of them is dead code that the startup route table still prints as if it
-// worked, so it is called out where it is generated.
+// paths the front server answers before the route table is consulted
 const RESERVED_PREFIXES: Array<[string, string]> = [
   ["/api/", "proxied to the go api"],
   ["/__borgo/", "borgo's own dev and push endpoints"],
@@ -124,10 +90,8 @@ const RESERVED_PATHS: Array<[string, string]> = [
   ["/ws", "the websocket endpoint"],
   ["/healthz", "the health probe"],
 ];
-// the server only claims /metrics with BORGO_METRICS=1 (server.ts asks
-// metricsEnabled, which is why this asks the same function rather than
-// repeating the variable name). listing it unconditionally called a perfectly
-// reachable page dead on every build that never enabled metrics.
+// the same function the server's switches use, not the variable name: /metrics
+// is only claimed with BORGO_METRICS=1
 const METRICS_PATH: [string, string] = ["/metrics", "the metrics endpoint (BORGO_METRICS=1)"];
 
 export type DeadRoute = { pattern: string; file: string; owner: string };
@@ -147,10 +111,8 @@ export function reservedRoutes(
   return dead;
 }
 
-// the warning, printed wherever a route table is about to be believed. it used
-// to live inside generateManifest alone, which is the one place `borgo start`
-// on a pre-built tree never reaches: the startup table listed the dead route
-// like any other and nothing said it could never answer.
+// printed wherever a route table is about to be believed: `borgo start` on a
+// pre-built tree never reaches generateManifest
 export function warnDeadRoutes(
   pages: Array<{ pattern: string; file: string }>,
   env: NodeJS.ProcessEnv = process.env,
@@ -171,18 +133,11 @@ async function writeIfChanged(path: string, content: string) {
   if (current !== content) await Bun.write(path, content);
 }
 
-// the hydrate export must be a literal so it can be read without executing the
-// page - which means the text is all there is, and the text lies. `//` and
-// `/* */` hold code that is not code, string and template literals hold text
-// that looks like code, and a regex literal holds quotes that are not quotes.
-// scanCode blanks the comments (keeping every offset, so line anchors still
-// mean lines) and reports where the surviving literals are, so a match inside
-// one can be told from a real export.
+// the hydrate export is read without executing the page, so comments, string
+// literals and regex literals (quotes that are not quotes) must be told apart
 type Scan = { code: string; strings: Array<[number, number]> };
 
-// where a `/` starts a regex rather than divides: after an operator, an
-// opening bracket, a statement end, or one of the keywords that can only be
-// followed by an expression
+// a `/` starts a regex after an operator, an opener, a statement end or these keywords
 const REGEX_BEFORE = /(?:^|[^\p{L}\p{N}_$])(return|typeof|instanceof|in|of|case|do|else|yield|await|void|delete|new|throw)$/u;
 
 function regexCanStart(tail: string): boolean {
@@ -192,16 +147,13 @@ function regexCanStart(tail: string): boolean {
 }
 
 export function scanCode(source: string): Scan {
-  // split(""), not [...source]: code units, so every index below is the index
-  // String.prototype.indexOf and RegExp.lastIndex speak
+  // split(""), not [...source]: code units, the indices indexOf and lastIndex speak
   const chars = source.split("");
   const strings: Array<[number, number]> = [];
-  // blanked, not removed: every later offset - and every `^` in a multiline
-  // match - has to keep meaning what it meant in the original source
+  // blanked, not removed: offsets and line anchors must keep their meaning
   const blank = (from: number, to: number) => {
     for (let k = from; k < to && k < chars.length; k++) if (chars[k] !== "\n") chars[k] = " ";
   };
-  // the last few significant characters, which is all `regexCanStart` reads
   let tail = "";
   const push = (ch: string) => {
     tail = (tail + ch).slice(-12);
@@ -238,10 +190,8 @@ export function scanCode(source: string): Scan {
           closed = true;
           break;
         }
-        // ' and " cannot hold a raw newline, so an unterminated one is not a
-        // string at all: it is an apostrophe in jsx text (<p>don't</p>), and
-        // letting it run to the next quote in the file is how a real export
-        // ends up inside a "string" and goes missing
+        // an unterminated ' or " is an apostrophe in jsx text (<p>don't</p>):
+        // run to the next quote, it would swallow a real export
         if (source[i] === "\n" && ch !== "`") break;
         i++;
       }
@@ -250,8 +200,7 @@ export function scanCode(source: string): Scan {
         push(ch);
         continue;
       }
-      // a template literal's ${...} does hold real code, but nothing inside an
-      // interpolation can be a top-level export: the whole literal is one span
+      // nothing inside a ${...} can be a top-level export: the whole literal is one span
       strings.push([start, i]);
       push(ch);
       continue;
@@ -280,8 +229,7 @@ export function scanCode(source: string): Scan {
   return { code: chars.join(""), strings };
 }
 
-// anchored to the start of a line: an `export` is a top-level statement, so
-// anything indented into an expression is not one
+// anchored to the start of a line: an `export` is a top-level statement
 const hydrateRe = /^[ \t]*export\s+const\s+hydrate\s*(?::[^=\n]+)?=\s*(false|true|["']visible["'])/gm;
 
 export function parseHydrate(source: string): "false" | "true" | '"visible"' {
@@ -294,41 +242,23 @@ export function parseHydrate(source: string): "false" | "true" | '"visible"' {
   return "true";
 }
 
-/**
- * A reference whose spelling only a case-insensitive filesystem forgives.
- *
- * `public/Logo.png` on disk and `/logo.png` in a page is served by windows and
- * by macos - in dev and in production alike, because both serving paths end at
- * the same fold - and answered 404 by linux. Nothing in the build, the export
- * or the doctor compared the two spellings, so the app works on the machine it
- * is written on and breaks on the machine it is deployed to, which for a chunk
- * or the stylesheet is a page that never hydrates.
- *
- * The rule is deliberately narrow, and that is the whole design: a reference
- * that matches nothing at all is ignored - it is a route, an api path, an
- * external url or a name assembled at runtime, and guessing about those is how
- * a warning earns the right to be ignored. Only a reference that misses on an
- * exact match and hits on a folded one is reported, which is provably a file
- * that exists under another spelling.
- */
+// `/logo.png` for `public/Logo.png` is served on windows and macos and 404 on
+// linux. Reported only when the exact spelling misses and a folded one hits:
+// a reference matching nothing is a route, an api path or a runtime name
 export type CaseMismatch = { ref: string; onDisk: string[]; source: string };
 
-// an absolute url path carrying an extension, and only where the leading slash
-// is not itself part of something longer: `https://cdn/x/Logo.png` and
-// `./logo.png` are both refused by the lookbehind
+// the lookbehind refuses `https://cdn/x/Logo.png` and `./logo.png`
 const ASSET_REF = /(?<![\p{L}\p{N}.:/_-])\/[\p{L}\p{N}._~%@+-]+(?:\/[\p{L}\p{N}._~%@+-]+)*\.[\p{L}\p{N}]{1,8}/gu;
 
 const CODE_EXT = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs"]);
 const TEXT_EXT = new Set([".html", ".css", ".scss", ".json", ".webmanifest"]);
-// at any depth, because a linked workspace puts a node_modules under a package
+// at any depth: a linked workspace puts a node_modules under a package
 const SKIP_DIRS = new Set(["node_modules", "dist"]);
-// public/assets is the build's own output: its references were written by the
-// bundler with the spelling it wrote the files under, so they cannot diverge
+// the bundler's own output cannot diverge from itself
 const SKIP_PATHS = new Set(["public/assets"]);
 const MAX_SOURCE_BYTES = 512 * 1024;
 
-// in code the candidates are taken from string literals only, so a path in a
-// comment or inside a regex is not a reference
+// in code only string literals count: a path in a comment or a regex is not a reference
 export function scanAssetRefs(source: string, code: boolean): string[] {
   const found: string[] = [];
   if (!code) {
@@ -378,7 +308,6 @@ export function collectAssetRefs(root = "."): Array<{ url: string; source: strin
   return refs;
 }
 
-// the served urls of everything in public/, spelled as the directory spells it
 export function publicAssetUrls(dir = "public"): string[] {
   let entries;
   try {
@@ -421,14 +350,8 @@ export function caseOnlyMismatches(
   return found.sort((a, b) => a.source.localeCompare(b.source) || a.ref.localeCompare(b.ref));
 }
 
-/**
- * The names borgo opens by name, checked the same way and for a worse failure.
- *
- * `Style.scss` compiles on windows and is invisible to linux, where cssSource
- * finds no source at all: the build drops the stylesheet it emitted, exits 0,
- * and the site ships unstyled. This costs a single readdir of the app root and
- * cannot report a name that is not there.
- */
+// `Style.scss` compiles on windows; on linux cssSource finds no source, the
+// build drops the stylesheet, exits 0 and the site ships unstyled
 export const CONVENTIONAL_PATHS = ["index.html", "style.scss", "style.css", "pages", "islands", "public"];
 
 export function miscasedConventions(
@@ -456,44 +379,14 @@ export function miscasedConventions(
   return found;
 }
 
-/**
- * The module specifier with the same disease, and not the loud one it was
- * registered as.
- *
- * `import "./helper"` against a `Helper.ts` on disk resolves on windows and on
- * macos. It was left uncovered on the grounds that linux answers it with a
- * failed build - loud, blocking, ahead of production. Half of that is measured
- * true and half of it is measured false, on a real case-sensitive filesystem:
- *
- *   - a static import, and a dynamic `import()` the bundler walks: the build
- *     fails, `File not found`, exit 1. Loud, and this check only moves it
- *     earlier, onto the machine the author is already watching.
- *   - a dynamic `import()` inside a loader, an action or a prerender export:
- *     the page transpiler eliminates those exports and `trimUnusedImports`
- *     takes the specifier with them, so the bundler never sees it. Measured:
- *     the client build is green, the bundle does not name the module, and the
- *     loader the front server runs from source throws ENOENT per request. The
- *     deploy goes out, the container is healthy, one route answers 500.
- *   - anything a `hydrate = false` page or `_500.tsx` imports: never in the
- *     client bundle either, so the build is green and the server's own import
- *     of the manifest is where it stops.
- *
- * `borgo export` builds on the author's machine and ships the output, so
- * nothing on linux ever resolves those specifiers again - there the defect is
- * invisible because it is inert. The scaffolded Dockerfile is the opposite: it
- * runs `bun run build` on linux and then serves pages from source on linux.
- *
- * Same narrowness as the asset rule above, for the same reason: a specifier
- * that matches nothing at all is left alone - it is a file that is generated
- * later, an extension this does not know, or a genuine mistake that is not a
- * spelling one - and only one that misses on the exact spelling and hits on a
- * folded one is named, which is provably a file that exists under another.
- */
+// a miscased import is NOT always a loud linux build failure (measured): an
+// `import()` inside a loader/action/prerender is stripped with the export by
+// `trimUnusedImports`, the build is green, and the loader run from source
+// throws ENOENT per request; a `hydrate = false` page or `_500.tsx` is never
+// bundled either. Same narrowness as the asset rule: only exact-miss, folded-hit
 const IMPORT_EXT = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".css", ".scss"];
 
-// `from "x"` covers import and `export ... from`; the bare form covers a
-// side-effect import; then the two call forms. Read off scanCode's output, so
-// a specifier in a comment is already blank by the time these run.
+// `from` covers import and `export ... from`; bare `import` the side-effect form
 const SPEC_PATTERNS = [
   /\bfrom\s*(["'])([^"'\n]+)\1/g,
   /\bimport\s*(["'])([^"'\n]+)\1/g,
@@ -501,18 +394,9 @@ const SPEC_PATTERNS = [
   /\brequire\s*\(\s*(["'])([^"'\n]+)\1\s*\)/g,
 ];
 
-/**
- * The relative specifiers a source names, and only those.
- *
- * A bare specifier (`react`, `borgo-framework/router`) goes through node_modules
- * resolution, which is a different mechanism with a different failure, and
- * guessing at it here is how a warning earns the right to be ignored.
- *
- * The match is rejected when the keyword that starts it is itself inside a
- * string or a template literal: generated code - borgo's own manifests are
- * written this way - holds `import ... from "./x"` as text, and that text is
- * not this file's import.
- */
+// relative specifiers only: bare ones resolve through node_modules, a
+// different mechanism. A keyword inside a string is generated code's text
+// (borgo's own manifests), not this file's import
 export function scanImportSpecifiers(source: string): string[] {
   const { code, strings } = scanCode(source);
   const found = new Set<string>();
@@ -529,23 +413,9 @@ export function scanImportSpecifiers(source: string): string[] {
 
 export type DirEntries = (path: string) => string[];
 
-/**
- * The on-disk spellings of the segment this specifier spells another way, or
- * null for every other answer.
- *
- * Compared segment by segment, never as a filename: a typescript import omits
- * the extension, so `./helper` has to be matched against `helper.ts`,
- * `helper.tsx` and a `helper/` directory alike. An intermediate segment must be
- * a directory that is really there under that exact name; the last one is
- * satisfied by the name itself or by the name plus any extension a bundler
- * would have tried. Anything that resolves exactly returns null, and so does
- * anything that resolves to nothing at all.
- *
- * Every folded hit is returned, sorted. On a case-sensitive checkout the two
- * spellings can sit in the same directory - measured, with `Helper.ts` and
- * `helper.ts` side by side - and naming whichever one readdir happened to
- * return first is a message that changes between machines and hides the other.
- */
+// segment by segment: `./helper` must match `helper.ts`, `helper.tsx` and a
+// `helper/` directory alike. Every folded hit, sorted: `Helper.ts` and
+// `helper.ts` can sit side by side on a case-sensitive checkout
 export function miscasedImport(
   root: string,
   fromDir: string,
@@ -559,7 +429,7 @@ export function miscasedImport(
     const part = parts[i];
     if (part === "" || part === ".") continue;
     if (part === "..") {
-      // above the app root, where this has read nothing and knows nothing
+      // above the app root: nothing read, nothing known
       if (!at) return null;
       at = at.includes("/") ? at.slice(0, at.lastIndexOf("/")) : "";
       continue;
@@ -619,51 +489,17 @@ export function miscasedImports(root = "."): CaseMismatch[] {
   return found.sort((a, b) => a.source.localeCompare(b.source) || a.ref.localeCompare(b.ref));
 }
 
-/**
- * A file next to a source, referenced through a channel borgo does not serve.
- *
- * The two rules above are about spelling and answer differently on two
- * filesystems. This one does not: it fails everywhere, always, silently.
- *
- *   `new URL("./x.png", import.meta.url)` is not an asset for borgo. Measured
- *   on bun 1.3.14 across six configurations - the default one borgo uses,
- *   `target` browser/bun/node, an explicit file loader, and `publicPath` - the
- *   string survives the bundle untouched and the file is neither emitted nor
- *   copied. It is not a misconfiguration: bun does not know the form.
- *
- * In the browser the bundle is a module script under /assets/, so
- * `import.meta.url` is the chunk's url and `./x.png` resolves to /assets/x.png,
- * where nothing was written: 404, on every filesystem, after a green build. In
- * the SSR pass the same expression runs from source under bun, where
- * `import.meta.url` is a file:// url - so the served document carries the
- * absolute path of the machine that rendered it, and hydration disagrees with
- * it. `import x from "./x.png"` is the other half: the bundler does emit and
- * copy the file, under a hashed name, and rewrites the reference to
- * `./x-hash.png` - a document-relative url that resolves against the page, not
- * against /assets/, so it is a 404 from every route, and the SSR pass renders
- * the on-disk path into the html. Emitted css is worse still: nothing links it.
- *
- * The proof is the emitted output, never the source, and that is the whole
- * design. The pattern is correct and common on the server - borgo's own
- * colors.ts reads its package.json this way, and so does any loader reading a
- * file beside itself - so a check that read sources would cry wolf at healthy
- * code. A specifier that survived into public/assets is code the browser will
- * run: no guess about which half of a page it came from. And the url it
- * resolves to is compared against what public/ actually holds, so
- * `new URL("../logo.svg", import.meta.url)` - which resolves to /logo.svg and
- * is served - is silent.
- *
- * Not covered here, and measured: a page that never enters the client bundle
- * (`hydrate = false`, `_500.tsx`) is in no emitted file - a probe app built in
- * production emitted index-*.js and boom-*.js and nothing at all for zero.tsx
- * or _500.tsx - so nothing read at build time can see its `new URL`, while ssr
- * renders it as a `file://` path into the served document. That half is closed
- * at render time instead, by `redactLocalPaths` in server.ts.
- */
+// Bun.build does not know `new URL("./x.png", import.meta.url)` in any
+// configuration - measured on bun 1.3.14 in six: the string survives untouched,
+// the file is neither emitted nor copied, so it is a 404 under /assets/ after a
+// green build, and under ssr a file:// path. Do not read the sources for this:
+// colors.ts uses the pattern correctly on the server. Only what survived into
+// public/assets is checked, against what public/ holds, so `../logo.svg` is
+// silent. Pages never bundled (`hydrate = false`, `_500.tsx`) are invisible
+// here; `redactLocalPaths` in server.ts closes that half at render time
 export type UnservedRef = { spec: string; url: string; from: string };
 
-// tolerant of the shape a minifier leaves behind - no spaces, either quote -
-// and anchored on `import.meta.url`, which nothing can rename
+// minifier-tolerant, anchored on `import.meta.url`, which nothing can rename
 const RUNTIME_URL_REF =
   /new\s+URL\s*\(\s*(["'])(\.{1,2}\/[^"'\n]*)\1\s*,\s*import\s*\.\s*meta\s*\.\s*url\s*\)/g;
 
@@ -673,22 +509,9 @@ export function runtimeUrlRefs(source: string): string[] {
   return found;
 }
 
-/**
- * The other spelling of the same mistake, and the one nothing read until now:
- * `import.meta.dir + "/x.png"`.
- *
- * Measured on the served document of a real production build: ssr renders
- * `src="C:\Users\...\pages/probe.png"` - the on-disk path with native
- * separators, next to the `file://` one `new URL` produces - and in the browser
- * `import.meta.dir` is not defined at all, so the same expression is the string
- * `"undefined/x.png"`. Broken on both halves, every time.
- *
- * ONLY WHEN CONCATENATED. `import.meta.dir` is also how a module asks "am I
- * running under bun or in a browser", and `typeof import.meta.dir` or
- * `if (import.meta.dir)` is a discriminator that works. A build that refuses is
- * only safe while it cannot refuse working code, so the rule is narrowed to the
- * one shape that is building a string: a `+` on either side of it.
- */
+// `import.meta.dir + "/x.png"`: ssr renders the native on-disk path, the
+// browser renders "undefined/x.png". Only when concatenated: `typeof
+// import.meta.dir` is a bun-or-browser discriminator that works
 const META_PATH_CONCAT =
   /(?:\+\s*import\s*\.\s*meta\s*\.\s*(?:dir|path)\b|import\s*\.\s*meta\s*\.\s*(?:dir|path)\s*\+)/g;
 
@@ -698,8 +521,7 @@ export function metaPathConcats(source: string): number {
   return n;
 }
 
-// where the emitted bundle is served from: `import.meta.url` in a chunk is that
-// chunk's url, so every relative specifier resolves against this
+// `import.meta.url` in a chunk is that chunk's url, so relative specifiers resolve against this
 const ASSET_BASE = "/assets/";
 
 export function unservedRuntimeUrls(
@@ -714,7 +536,7 @@ export function unservedRuntimeUrls(
     for (const spec of runtimeUrlRefs(source)) {
       let url: string;
       try {
-        // the host is arbitrary and never printed: only the path is compared
+        // the host is arbitrary: only the path is compared
         url = new URL(spec, `http://borgo${base}${name}`).pathname;
       } catch {
         continue;
@@ -729,9 +551,7 @@ export function unservedRuntimeUrls(
   return found.sort((a, b) => a.from.localeCompare(b.from) || a.spec.localeCompare(b.spec));
 }
 
-// the emitted javascript of the build that just ran. Read from disk rather than
-// from the build result so the check has one shape whether it is called after a
-// build or on a tree that already holds one.
+// from disk, not the build result: one shape after a build and on a tree that already holds one
 export function bundleSources(dir = outDir): Array<{ name: string; source: string }> {
   let entries;
   try {
@@ -749,16 +569,8 @@ export function bundleSources(dir = outDir): Array<{ name: string; source: strin
   return bundles.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/**
- * The files the bundler emitted for an asset import, which borgo does not serve
- * at the url the bundle names.
- *
- * `kind: "asset"` is an exact signal, not a guess: borgo bundles javascript
- * entrypoints and compiles its stylesheet outside the bundler, so an asset
- * output exists only because a source imported a file through the file loader.
- * A healthy tree emits none - measured on examples/tasks. Sourcemaps are
- * dropped in case a later build ever turns them on.
- */
+// `kind: "asset"` is exact: the stylesheet is compiled outside the bundler, so
+// an asset output exists only because a source imported a file
 export function bundledAssetNames(
   outputs: Iterable<{ kind: string; path: string }>,
 ): string[] {
@@ -772,44 +584,10 @@ export function bundledAssetNames(
   return names.sort();
 }
 
-/**
- * EVERY WAY THE CHANNEL SHOWS UP IN THE OUTPUT A BUILD JUST WROTE, IN ONE LIST.
- *
- * Three defects, one disease, and the evidence for all three is the emitted
- * output rather than the sources - which is what makes a refusal safe. The
- * pattern is correct on the server: borgo's own colors.ts does
- * `Bun.file(new URL("../package.json", import.meta.url))`, and a loader reading
- * a seed beside itself is right. Pages are rewritten for the client build with
- * `loader`, `action` and `prerender` eliminated and then tree-shaken, so none of
- * that server-side code is in any emitted file. What IS in one is code the
- * browser will run.
- *
- *   - `emitted`: the bundler wrote a file for `import x from "./x.png"` or
- *     `import "./x.css"`. Measured: the file lands at
- *     public/assets/x-<hash>.png and the reference in the bundle becomes
- *     `"./x-<hash>.png"`, which resolves against the DOCUMENT, not against
- *     /assets/ - a 404 from every route (measured: /logo-vfrp2mc1.png 404 while
- *     /assets/logo-vfrp2mc1.png is 200). Emitted css is worse: nothing links it,
- *     so the styles are simply absent and nothing says so.
- *   - `url`: an emitted bundle asks for a url public/ does not hold.
- *   - `dir`: an emitted bundle concatenates `import.meta.dir`, which the browser
- *     has not got.
- *
- * WHY THIS IS FATAL AND NOT A WARNING. A refusal is only admissible while it
- * cannot refuse an app that works, and that is the measured part: none of these
- * three forms works anywhere, on any filesystem, ever - the emitted url is
- * wrong from every route and the emitted stylesheet is linked by nothing. The
- * channel is also outside the documented contract and never denied by it: the
- * docs prescribe public/ plus an absolute path, and grep finds no mention of
- * `import.meta.url` or of importing an asset from a source anywhere in docs/.
- * The reference app builds with none of these (measured: 0 asset outputs, 0
- * unserved urls across 24 bundles and 413 kB).
- *
- * And the reason it stopped being enough to print it: the same expression, run
- * in the ssr pass from source, writes THE ABSOLUTE PATH OF THE MACHINE into the
- * document every visitor receives. A warning at the end of a green build does
- * not stop that from shipping. A refusal does.
- */
+// fatal, not a warning, because none of the three forms works anywhere: an
+// emitted `./x-<hash>.png` resolves against the document, not /assets/ (404
+// from every route, measured), emitted css is linked by nothing, and the ssr
+// pass writes the machine's absolute path into every served document
 export type ChannelFault =
   | { kind: "emitted"; name: string }
   | { kind: "url"; from: string; spec: string; url: string }
@@ -825,15 +603,13 @@ export function assetChannelFaults(
   for (const ref of unservedRuntimeUrls(bundles, served)) {
     faults.push({ kind: "url", from: ref.from, spec: ref.spec, url: ref.url });
   }
-  // re-read for the concatenation form: unservedRuntimeUrls owns the new URL one
   for (const { name, source } of bundles) {
     if (metaPathConcats(source)) faults.push({ kind: "dir", from: name });
   }
   return faults;
 }
 
-// one wording for both readers - the refusal that stops a build and the report
-// that a tree already built gets - so a message cannot drift between them
+// one wording for the refusal and for the report on a tree already built
 export function channelLines(faults: readonly ChannelFault[]): string[] {
   return faults.map((fault) => {
     if (fault.kind === "emitted") {
@@ -855,14 +631,8 @@ export function channelLines(faults: readonly ChannelFault[]): string[] {
   });
 }
 
-/**
- * A build that produced output borgo will not serve.
- *
- * Thrown BEFORE `clearBuildMark()`, which is the whole point of throwing here
- * rather than after: the tree keeps the mark that says the last build did not
- * finish, so the next `borgo start` rebuilds and refuses again instead of
- * finding a public/assets that looks complete and serving the leak.
- */
+// thrown before clearBuildMark(): the tree keeps its mark, so the next `borgo
+// start` rebuilds and refuses again instead of serving the leak
 export class AssetChannelRefused extends Error {
   readonly lines: string[];
   constructor(faults: readonly ChannelFault[]) {
@@ -878,18 +648,8 @@ export class AssetChannelRefused extends Error {
 
 const SHOWN = 10;
 
-/**
- * Printed, never thrown, and that is right for THESE findings: a file that
- * exists under another spelling works on the machine the author is looking at,
- * so refusing the build would stop a tree that builds and runs here from being
- * built at all. The channel checks went the other way and left this function
- * for the same reason in reverse - nothing they name has ever worked anywhere,
- * so assetChannelFaults refuses the build instead of printing at the end of a
- * green one.
- *
- * The last line states what was not read, because a check that names no limit
- * teaches whoever read it that there is none.
- */
+// printed, never thrown: these findings work on the author's machine, unlike
+// the channel faults. The last line states what was not read
 export function warnAssetCase(root = ".", pub = join(root, "public")): number {
   const served = publicAssetUrls(pub);
   const mismatches = caseOnlyMismatches(collectAssetRefs(root), served);
@@ -927,16 +687,14 @@ export function warnAssetCase(root = ".", pub = join(root, "public")): number {
   return total;
 }
 
-// islands are detected by the <Island marker in the page (or layout) source,
-// like hydrate: read statically, without executing the page
+// read statically, like hydrate
 const islandRe = /<Island[\s/>]/;
 
 export async function generateManifest(dev = false) {
   if (!existsSync("pages")) {
     throw new Error("no pages/ directory here - run borgo from the app root (the folder holding pages/)");
   }
-  // before the first generated file is written, because the first one written
-  // is what a later boot mistakes for a finished build
+  // before the first generated file: that is what a later boot mistakes for a finished build
   markBuildStarted();
   const files = [...new Glob("**/*.tsx").scanSync("pages")]
     .map((f) => f.replaceAll("\\", "/"))
@@ -947,15 +705,12 @@ export async function generateManifest(dev = false) {
   const sources = new Map<string, string>();
   for (const f of files) sources.set(f, await Bun.file(`pages/${f}`).text());
 
-  // a full basename, never a suffix: `endsWith` also matched page files, so
-  // pages/post_layout.tsx became a phantom layout for a pages/post/ directory
-  // that need not exist - emitting an import of "../pages/post/_layout" that
-  // resolves nowhere and takes dev, build and export down with it
+  // a full basename: `endsWith("_layout.tsx")` made pages/post_layout.tsx a
+  // phantom layout importing "../pages/post/_layout"
   const layoutDirs = files
     .filter((f) => f === "_layout.tsx" || f.endsWith("/_layout.tsx"))
     .map((f) => f.slice(0, -"_layout.tsx".length).replace(/\/$/, ""));
 
-  // layout chain for a page, outermost first
   const layoutsFor = (file: string) => {
     const parts = file.split("/").slice(0, -1);
     const chain: string[] = [];
@@ -966,7 +721,6 @@ export async function generateManifest(dev = false) {
     return chain;
   };
 
-  // static segments win over dynamic ones
   const pages = files
     .filter((f) => !special(f))
     .map((file) => ({ file, pattern: filePathToPattern(file) }))
@@ -1015,7 +769,7 @@ export async function generateManifest(dev = false) {
   ].join("\n");
   await writeIfChanged(`${genDir}/routes.gen.tsx`, manifest);
 
-  // client manifest: pages become lazy chunks; hydrate=false pages ship no js at all
+  // hydrate=false pages ship no js at all
   const hydrateOf = new Map<string, string>();
   for (const p of pages) hydrateOf.set(p.file, parseHydrate(sources.get(p.file)!));
   if (files.includes("_404.tsx")) hydrateOf.set("_404.tsx", parseHydrate(sources.get("_404.tsx")!));
@@ -1041,8 +795,7 @@ export async function generateManifest(dev = false) {
   ].join("\n");
   await writeIfChanged(`${genDir}/client-routes.gen.ts`, clientManifest);
 
-  // islands: components in islands/*.tsx, registered eagerly - island code
-  // rides with the entry, client="visible" defers the hydration work only
+  // registered eagerly: island code rides with the entry, client="visible" defers only the hydration
   const islandFiles = existsSync("islands")
     ? [...new Glob("*.tsx").scanSync("islands")].sort()
     : [];
@@ -1058,8 +811,7 @@ export async function generateManifest(dev = false) {
   ].join("\n");
   await writeIfChanged(`${genDir}/islands.gen.ts`, islandsManifest);
 
-  // dev only: the react-refresh runtime must install itself before react
-  // loads, so it lives in its own module imported first
+  // the refresh runtime must install itself before react loads: its own module, imported first
   if (dev) {
     const refresh = [
       "// @ts-nocheck",
@@ -1075,12 +827,8 @@ export async function generateManifest(dev = false) {
     await writeIfChanged(`${genDir}/refresh.ts`, refresh);
   }
 
-  // react is imported here, from inside the app, and handed to the runtime so
-  // the bundle never picks up a second copy through a linked borgo checkout.
-  // the registries come from borgo-framework/internal, not the root entry: the
-  // root entry is the application-facing api and generated code is not an
-  // application. these files are rewritten on every build, so moving the
-  // specifier here is the whole migration.
+  // react is imported from inside the app and handed to the runtime, so a
+  // linked borgo checkout never brings a second copy into the bundle
   const entry = [
     "// generated by borgo - do not edit",
     ...(dev ? ['import "./refresh";'] : []),
@@ -1098,8 +846,7 @@ export async function generateManifest(dev = false) {
   ].join("\n");
   await writeIfChanged(`${genDir}/client.tsx`, entry);
 
-  // a second, tiny entry for hydrate=false pages that use islands: it
-  // hydrates only the island markers, nothing else
+  // for hydrate=false pages that use islands: hydrates the island markers only
   const islandsEntry = [
     "// generated by borgo - do not edit",
     'import { createContext, createElement, useContext } from "react";',
@@ -1121,11 +868,8 @@ export async function generateManifest(dev = false) {
 export type Asset = { path: string; kind: "entry-point" | "chunk" | string; size: number };
 export type BuildResult = { assets: Asset[]; chunkMap: Record<string, string>; names: AssetNames };
 
-// the cache key a service worker hangs its precache on, so it must move
-// whenever any listed byte does. names alone are not enough: a dev build names
-// its entry points client.js and islands-client.js whatever they contain, and
-// a change confined to one of them - a layout edit lands in client.js - would
-// leave the stamp, and every cache keyed on it, pinned to yesterday's bundle
+// hashed over content, not names: a dev build names its entries client.js and
+// islands-client.js whatever they contain, and the precache is keyed on this
 export async function precacheStamp(dir: string, files: string[]): Promise<string> {
   let payload = "";
   for (const file of files) {
@@ -1136,13 +880,9 @@ export async function precacheStamp(dir: string, files: string[]): Promise<strin
   return String(Bun.hash(payload));
 }
 
-// tailwind runs as a postcss plugin, not the cli: @tailwindcss/cli pulls in
-// @parcel/watcher, whose postinstall compiles a native watcher from source -
-// a `Blocked 1 postinstall` warning on the very first install, for a watcher
-// borgo never uses (it does its own watching and asks for one-shot compiles).
-// the plugin api has no such dependency, and staying in-process takes a
-// rebuild from ~300ms to ~15ms. loaded from the app, not from borgo's own
-// tree, so the app's tailwind version is the one that runs.
+// the postcss plugin, not @tailwindcss/cli (which drags @parcel/watcher and its
+// blocked postinstall): in-process, a rebuild goes from ~300ms to ~15ms.
+// Loaded from the app, so the app's tailwind version runs
 type Processor = { process: (css: string, opts: { from: string; to: string }) => Promise<{ css: string }> };
 let tailwindPostcss: { dev: boolean; processor: Processor } | null = null;
 
@@ -1163,8 +903,7 @@ async function compileTailwind(dev: boolean) {
 
   const pluginPath = resolveFromApp("@tailwindcss/postcss");
   const postcssPath = resolveFromApp("postcss");
-  // apps scaffolded before 0.21 only have the cli: keep compiling those
-  // rather than breaking every existing tailwind app on upgrade
+  // apps scaffolded before 0.21 only have the cli
   if (!pluginPath || !postcssPath) {
     if (!existsSync("node_modules/@tailwindcss/cli")) {
       throw new Error(
@@ -1173,18 +912,15 @@ async function compileTailwind(dev: boolean) {
     }
     const args = ["x", "@tailwindcss/cli", "-i", "style.css", "-o", `${outDir}/style.css`];
     if (!dev) args.push("--minify");
-    // tailwind logs its banner to stderr even on success: only the exit
-    // code decides
+    // tailwind logs its banner to stderr even on success: only the exit code decides
     const proc = Bun.spawn(["bun", ...args], { stdout: "ignore", stderr: "pipe" });
     const stderr = await new Response(proc.stderr).text();
     if ((await proc.exited) !== 0) throw new Error(`tailwind failed:\n${stderr.trim()}`);
     return;
   }
 
-  // the plugin scans for class candidates from `base`, which defaults to cwd -
-  // the app root borgo already runs from. the processor is kept across
-  // rebuilds (that is where the speedup lives) but rebuilt if the mode flips,
-  // since `optimize` is fixed when the plugin is constructed
+  // the processor is where the speedup lives; `optimize` is fixed at
+  // construction, so a mode flip rebuilds it
   if (tailwindPostcss?.dev !== dev) {
     const plugin = (await import(pluginPath)).default as (opts: { optimize: boolean }) => unknown;
     const postcss = (await import(postcssPath)).default as (plugins: unknown[]) => Processor;
@@ -1198,44 +934,24 @@ async function compileTailwind(dev: boolean) {
   await Bun.write(`${outDir}/style.css`, result.css);
 }
 
-// which stylesheet the app root holds. style.scss is the sass pipeline's
-// entry, style.css is tailwind's; `null` - and only null - means the emitted
-// public/assets/style.css has no source left anywhere and is an orphan.
+// null, and only null, means the emitted stylesheet has no source left and is an orphan
 export function cssSource(dir = "."): "scss" | "css" | null {
   if (existsSync(join(dir, "style.scss"))) return "scss";
   if (existsSync(join(dir, "style.css"))) return "css";
   return null;
 }
 
-// which stylesheet is sitting in public/assets right now, under the name the
-// last build recorded or the plain one. null means there is none: nothing to
-// keep, and nothing a message may claim was kept.
 function stylesheetOnDisk(dir = outDir): string | null {
   const emitted = readAssetNames()["style.css"];
   if (emitted && existsSync(`${dir}/${emitted}`)) return emitted;
   return existsSync(`${dir}/style.css`) ? "style.css" : null;
 }
 
-/**
- * The previous build's stylesheet, dropped once its source is gone.
- *
- * Only names the build's own record claims. This used to delete
- * `public/assets/style.css` on sight, which is a file this build did not write
- * and cannot restore: public/assets is gitignored by every template, so a
- * stylesheet put there by anything other than borgo - a copy step, an older
- * borgo, a hand-placed file - was removed silently, exit 0, with no line
- * anywhere saying it had happened. The sweep two functions down settled the
- * same question the same way: with no record, the file is not provably borgo's
- * and stays.
- *
- * Returns the names it removed, which the caller prints. A build that deletes
- * something says so.
- */
+// only names the build's own inventory claims: without a record the file is
+// not provably borgo's and stays (public/assets is gitignored, so it cannot be restored)
 function dropStylesheet(inventory: string[] | null = readBuildInventory()): string[] {
   const owned = new Set(inventory ?? []);
-  // the name the last build emitted it under as well as the plain one: a
-  // production build renames the stylesheet after its content, so style.css
-  // alone would leave the orphan on disk under the name still being served
+  // the content-named one too, or the orphan stays under the name still being served
   const emitted = readAssetNames()["style.css"];
   const removed: string[] = [];
   for (const name of new Set([...(emitted ? [emitted] : []), "style.css"])) {
@@ -1246,8 +962,7 @@ function dropStylesheet(inventory: string[] | null = readBuildInventory()): stri
   return removed;
 }
 
-// whether this build compiled the stylesheet itself. What it did not write, it
-// does not get to rename or record as its own output.
+// true only if this build compiled the stylesheet: what it did not write it must not rename or record
 export async function compileCss(dev = false): Promise<boolean> {
   if (process.env.BORGO_TAILWIND === "1") {
     await compileTailwind(dev);
@@ -1259,9 +974,7 @@ export async function compileCss(dev = false): Promise<boolean> {
     await Bun.write(`${outDir}/style.css`, css.css);
     return true;
   }
-  // a deleted or renamed style.scss - and the scss -> tailwind switch, which
-  // leaves BORGO_TAILWIND unset on the build that removed the scss - must take
-  // the stylesheet it produced with it
+  // also the scss -> tailwind switch, whose first build runs without BORGO_TAILWIND
   if (cssSource() === null) {
     for (const name of dropStylesheet()) {
       console.warn(
@@ -1271,16 +984,10 @@ export async function compileCss(dev = false): Promise<boolean> {
     }
     return false;
   }
-  // tailwind is opt-in by flag, never by detection, so this build cannot
-  // compile it - but it must not delete it either, and silence here reads
-  // as "the stylesheet is stale" on the next page load
+  // tailwind is opt-in by flag, never by detection: not compiled, not deleted, and said
   const kept = stylesheetOnDisk();
   if (!kept) {
-    // "left as the last build wrote it" was printed on a clean clone, where
-    // there is no last build and public/assets is empty: the build then exited
-    // 0 having produced an app with no stylesheet at all, and said so in words
-    // that describe a tree that does not exist. Nothing here can be recovered
-    // by rebuilding without the flag, so this is where it stops.
+    // on a clean clone there is no last build to leave: nothing recovers without the flag
     throw new Error(
       "style.css is the app's stylesheet but this command ran without --tailwind, " +
         "and public/assets holds no stylesheet from an earlier build - re-run with --tailwind",
@@ -1293,23 +1000,15 @@ export async function compileCss(dev = false): Promise<boolean> {
   return false;
 }
 
-// the names borgo writes on every build, whatever the app looks like. the
-// hashed chunks are NOT guessable and are not guessed: they come from the
-// inventory below. client.js and islands-client.js are here for the tree a
-// dev build left, and for the upgrade from a borgo whose entries were never
-// content-named - a production build now emits neither name.
+// hashed chunks are not guessed: they come from the inventory. client.js and
+// islands-client.js are what a dev build, or a pre-content-naming borgo, left
 const FIXED_OUTPUT = ["client.js", "islands-client.js", "precache.json"];
 
-// the urls an app's index.html is written against, and which this build turned
-// each of them into. an app author never types a hash: the document keeps
-// naming /assets/client.js and the server resolves it at boot.
+// the names index.html is written against: an author never types a hash, the server resolves at boot
 export const LOGICAL_ASSETS = ["client.js", "islands-client.js", "style.css"] as const;
 
-// what the last build emitted, recorded rather than inferred. the sweep used
-// to match a *shape* - `[^/\\]+-[a-z0-9]{8}\.js` - which is also the shape of
-// `analytics-9f8e7d6c.js`, so the very file the narrowed sweep was written to
-// protect was deleted anyway, while `vendor.js` beside it survived. a name is
-// either on the list borgo wrote or it is the app's.
+// recorded, never inferred from a shape: `analytics-9f8e7d6c.js` is an app's
+// file that looks exactly like a chunk
 const inventoryPath = `${genDir}/build-output.json`;
 
 export function readBuildInventory(path = inventoryPath): string[] | null {
@@ -1322,41 +1021,21 @@ export function readBuildInventory(path = inventoryPath): string[] | null {
   }
 }
 
-/**
- * The emitted names whose url is a promise about their bytes.
- *
- * The same lesson as the sweep above, arrived at from the other side. Cache
- * policy used to read a *shape* - `-[a-z0-9]{8}\.(js|css)` under `assets/` -
- * and any eight-letter word satisfies it, so `stripe-checkout.js` and
- * `hero-carousel.js` were served `immutable` for a year while
- * `google-analytics.js` escaped only because "analytics" is nine characters.
- * The bundler is the only thing that knows which names it hashed, so it says
- * so here instead of leaving the server to guess.
- *
- * Absent, malformed, or written by a borgo that recorded no hashes: the empty
- * set, which spends a conditional request per asset and pins nothing. Nothing
- * may be pinned on the strength of a file we cannot prove the origin of.
- */
+// only the bundler knows which names it hashed: `stripe-checkout.js` matches
+// any eight-letter shape. Absent or malformed record: the empty set, which
+// pins nothing and spends a conditional request per asset
 export function readBuildOutputs(path = inventoryPath): BuildOutputs {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as { dir?: unknown; hashed?: unknown };
-    // the directory travels with the list: without it the server would be back
-    // to recognising an output by the shape of its path
+    // without the directory the server is back to recognising an output by its path's shape
     if (typeof parsed.dir !== "string" || !parsed.dir) return NO_BUILD_OUTPUTS;
     const entries = parsed.hashed;
     if (!entries || typeof entries !== "object" || Array.isArray(entries)) return NO_BUILD_OUTPUTS;
     const sizes = new Map<string, number>();
     for (const [name, size] of Object.entries(entries as Record<string, unknown>)) {
-      // keys are filenames inside dir. anything carrying a separator describes
-      // some other file, and is dropped rather than reasoned about
       if (!name || name.includes("/") || name.includes("\\")) continue;
-      // zero is dropped, not stored. A recorded length of 0 would pin *any*
-      // empty file at that name, because every empty file matches it - the
-      // length check would carry no information for exactly the case where a
-      // truncated or half-written file is what is on disk. The cost is a real
-      // output losing its year: a style.scss holding only a comment compiles
-      // to 0 bytes and its hashed url revalidates forever, spending a
-      // bodyless 304 on nothing rather than being cached.
+      // a recorded 0 would pin any truncated file at that name; the cost is a
+      // legitimately empty stylesheet revalidating forever
       if (typeof size !== "number" || !Number.isSafeInteger(size) || size <= 0) continue;
       sizes.set(name, size);
     }
@@ -1366,16 +1045,8 @@ export function readBuildOutputs(path = inventoryPath): BuildOutputs {
   }
 }
 
-/**
- * What this build called each of the names a document is written against.
- *
- * Read from the build's own record for the same reason the sizes above are:
- * the emitted name is `client-6j5pq722.js` and no rule over the directory
- * listing can tell that apart from an app's own `client-widget.js`. A name
- * that is absent, or that describes some other directory, falls back to the
- * literal the document already carries - the pre-hash behaviour, which
- * revalidates and works, rather than a guess that might 404.
- */
+// absent or foreign names fall back to the literal the document carries,
+// which revalidates and works, rather than a guess that might 404
 export function readAssetNames(path = inventoryPath): AssetNames {
   const names: AssetNames = {};
   try {
@@ -1392,42 +1063,14 @@ export function readAssetNames(path = inventoryPath): AssetNames {
   return names;
 }
 
-/**
- * The recorded names that are not on disk, which is what `borgo start` asks
- * before serving a tree it did not build.
- *
- * Every name the record hands the document, not just the entry: `.borgo/` from
- * one build beside a `public/assets/` from another - a partial deploy, or a
- * COPY that missed the css - leaves a record naming files that are not there,
- * and the server would boot healthy and serve a dead url until someone
- * rebuilt by hand. A missing entry is a blank page, a missing stylesheet an
- * unstyled one; both are permanent, and rebuilding only costs the build.
- *
- * With no record at all, the plain entry name stands in: an app upgrading from
- * a borgo that hashed nothing still has its build recognised.
- */
 export type AssetProblem = { name: string; why: string };
 
-/**
- * Every name the last build recorded, checked as a file rather than as a path.
- *
- * `existsSync` answers a question nobody asked. A directory exists. A file
- * truncated to nothing exists - and an empty entry point is the worst of the
- * three, because the server answers it 204 with a zero-length body, which is a
- * success: no 404, no error page, no line in any log, and a document that never
- * hydrates. Measured on a real tree before this checked lengths.
- *
- * The set is the record's own `files[]`, not the three logical names. The
- * document only ever names the entry and the stylesheet, but the entry imports
- * the chunks beside it, and a chunk that is missing takes hydration down just
- * as completely while `client.js` sits there looking healthy.
- *
- * Zero length condemns a `.js` outright - the bundler does not emit empty
- * javascript. Anything else is condemned for it only when the record vouches
- * for a length it no longer has: a style.scss holding nothing but variables
- * really does compile to zero bytes, and a build must not spend every boot
- * rebuilding a file that is exactly what it was written to be.
- */
+// not existsSync: a directory exists, a truncated file exists, and an empty
+// entry is served 204 - a success with a document that never hydrates
+// (measured). Every recorded file, not the logical three: a missing chunk
+// takes hydration down while client.js looks healthy. Zero bytes condemns a
+// .js outright; anything else only when the record vouches for another
+// length, since a scss of only variables really compiles to nothing
 export function unusableBuiltAssets(
   names: AssetNames = readAssetNames(),
   inventory: string[] | null = readBuildInventory(),
@@ -1456,7 +1099,6 @@ export function unusableBuiltAssets(
   return problems;
 }
 
-// the names alone, for callers that only need to know which files failed
 export function missingBuiltAssets(
   names: AssetNames = readAssetNames(),
   inventory: string[] | null = readBuildInventory(),
@@ -1465,18 +1107,13 @@ export function missingBuiltAssets(
   return unusableBuiltAssets(names, inventory, outputs).map((p) => p.name);
 }
 
-/**
- * Why a production boot has to build, in the operator's words, or nothing.
- *
- * The reasons and the decision come from here together: a boot that announces
- * one cause and rebuilds for another sends whoever reads it to the wrong file.
- */
+// reasons and decision from one place: a boot that announces one cause and
+// rebuilds for another sends the reader to the wrong file
 export function buildReasons(names: AssetNames = readAssetNames()): string[] {
   const why: string[] = [];
   const bad = unusableBuiltAssets(names);
   if (bad.length) {
-    // a partial deploy can leave every name broken at once, and a boot line
-    // naming seventeen files is a boot line nobody reads
+    // a partial deploy breaks every name at once; a line naming seventeen files is not read
     const shown = bad.slice(0, 3).map((p) => `${p.name} ${p.why}`);
     if (bad.length > shown.length) shown.push(`and ${bad.length - shown.length} more`);
     why.push(`in public/assets, ${shown.join(", ")}`);
@@ -1486,19 +1123,11 @@ export function buildReasons(names: AssetNames = readAssetNames()): string[] {
   return why;
 }
 
-// what `borgo start` asks before serving a tree it did not build. Doubt
-// resolves toward rebuilding: the cost is one build, and the alternative is a
-// document naming files that are not there, permanently and with no error.
+// doubt resolves toward rebuilding: the cost is one build
 export const needsBuild = (dev: boolean, names: AssetNames = readAssetNames()): boolean =>
   dev || buildReasons(names).length > 0;
 
-/**
- * Which emitted file each logical name became, read off the emitted names.
- *
- * The bundler reports artifacts, not which entrypoint produced them, so the
- * two entries are recognised by the only thing that is borgo's own: the stem
- * it asked bun to name them after.
- */
+// the bundler reports artifacts, not which entrypoint produced them: the stem is all that is borgo's own
 export function entryOutputNames(files: readonly string[]): AssetNames {
   const names: AssetNames = {};
   for (const file of files) {
@@ -1508,29 +1137,14 @@ export function entryOutputNames(files: readonly string[]): AssetNames {
   return names;
 }
 
-// 64-bit wyhash, base36, last eight characters - the same shape bun gives a
-// chunk, so a stylesheet's url reads like everything else in the directory
+// the same shape bun gives a chunk
 const contentHash = (bytes: ArrayBuffer): string =>
   Bun.hash(bytes).toString(36).padStart(8, "0").slice(-8);
 
-/**
- * The stylesheet's emitted name: content-hashed in production, plain in dev.
- *
- * The stylesheet is not a bundler artifact, so nothing else names it by
- * content - and the entry bundle's year would be a poor trade if the
- * stylesheet beside it still spent a round trip per navigation.
- *
- * A build that compiled no css at all (a tailwind app built without
- * `--tailwind`) keeps the name the last one emitted, which is the file still
- * sitting in the output directory. Renaming rather than copying: two files
- * with the same bytes under different names is the state where the sweep
- * deletes the one the document is using.
- *
- * `wrote` is whether this build compiled that plain style.css. A build that did
- * not must not rename it: the file would be one nobody produced, moved to a
- * name nobody asked for, and recorded as this build's own output - which is the
- * next build's licence to delete it.
- */
+// renamed, not copied: two files with the same bytes under different names is
+// the state where the sweep deletes the one the document uses. A build that
+// did not write style.css must not rename it: recording it as its own output
+// is the next build's licence to delete it
 export async function emittedStylesheet(
   dev: boolean,
   previous: string | undefined,
@@ -1547,20 +1161,13 @@ export async function emittedStylesheet(
   return previous && existsSync(`${dir}/${previous}`) ? previous : null;
 }
 
-/**
- * The byte length of each name, measured off the disk the build just wrote.
- *
- * Measured rather than taken from `BuildArtifact.size`, because
- * renameUnsafeChunks rewrites the import strings inside a chunk after the
- * bundler reported it - so the artifact's size is the size of a file that no
- * longer exists. A name that cannot be stat'd is simply left out and is
- * therefore never pinned.
- */
+// from disk, not `BuildArtifact.size`: renameUnsafeChunks rewrites import
+// strings inside a chunk after the bundler reported it
 export function recordedOutputSizes(dir: string, names: readonly string[]): Record<string, number> {
   const sizes: Record<string, number> = {};
   for (const name of names) {
     try {
-      // an empty output is not vouched for: see readBuildOutputs
+      // see readBuildOutputs
       const { size } = statSync(`${dir}/${name}`);
       if (size > 0) sizes[name] = size;
     } catch {}
@@ -1580,27 +1187,12 @@ export async function writeBuildInventory(
   await Bun.write(path, JSON.stringify(body) + "\n");
 }
 
-/**
- * Whether the bundler put this artifact's own content hash into its name.
- *
- * Not "does the name look hashed". `Bun.build` reports a content hash for
- * every artifact, and a dev build names its entry points `[name].[ext]` - so
- * `client.js` carries a hash that is nowhere in its filename and is
- * emphatically not cacheable forever. The name is a promise only when it
- * actually contains the hash of the bytes behind it, which is a thing a word
- * cannot accidentally be.
- */
+// Bun.build reports a hash for every artifact, dev `client.js` included: the
+// name is a promise only when it actually contains it
 export const nameCarriesHash = (file: string, hash: string | null): boolean =>
   hash !== null && hash !== "" && basename(file).includes(hash);
 
-/**
- * Which of a bundle's outputs may be cached forever, by name.
- *
- * `renamedTo` maps an artifact's path to where it actually landed:
- * renameUnsafeChunks moves the files bun could not name, and the name that
- * ends up in a url is the one a cache will ask about. The hash survives that
- * rename, so a renamed chunk stays cacheable.
- */
+// `renamedTo`: the name a cache asks about is where renameUnsafeChunks put the file
 export const hashedOutputNames = (
   outputs: readonly { path: string; hash: string | null }[],
   renamedTo: (path: string) => string = (p) => p,
@@ -1610,15 +1202,9 @@ export const hashedOutputNames = (
     .filter((o) => nameCarriesHash(o.file, o.hash))
     .map((o) => o.file);
 
-/**
- * Whether the sweep may delete `file`.
- *
- * `owned` is what a build wrote and is free to remove; `keep` is what the
- * build now running has just written and must not remove. Precompressed
- * siblings are always the build's own and always stale by the time it runs
- * again - dev writes none, and a production rebuild only rewrites a `.gz` that
- * came out smaller than the source - so they go with either.
- */
+// `owned` a build wrote, `keep` this build just wrote. Precompressed siblings
+// are always stale by the next run (dev writes none, production only rewrites
+// one that came out smaller), so they go with either
 export function isSweepable(file: string, owned: Set<string>, keep: Set<string> = new Set()): boolean {
   const sibling = file.match(/^(.*)\.(gz|br)$/);
   if (sibling) {
@@ -1628,16 +1214,9 @@ export function isSweepable(file: string, owned: Set<string>, keep: Set<string> 
   return owned.has(file) && !keep.has(file);
 }
 
-// hashed chunk names change between builds, so the stale ones and their
-// precompressed siblings go once the new build has written. Only the build's
-// own output: this directory is also where an app drops an analytics snippet
-// or a vendored widget, and those used to be deleted here with no warning.
-//
-// no inventory (an app upgrading from a borgo that never wrote one) means the
-// hashed chunks of that last build cannot be identified, so they are left
-// alone: a stale chunk nobody imports is dead weight, a deleted app file is
-// not recoverable. The build now finishing records its own, and the sweep
-// after it is exact.
+// only the build's own output: the directory also holds the app's vendored
+// files. With no inventory the last build's chunks are left alone - a stale
+// chunk is dead weight, a deleted app file is not recoverable
 export function sweepBuildOutput(
   dir: string,
   inventory: string[] | null = readBuildInventory(),
@@ -1655,10 +1234,8 @@ export function sweepBuildOutput(
   return removed;
 }
 
-// bun leaves the "[name]" token literal for a chunk it cannot name, which
-// puts brackets in a url path: legal, but s3, some cdns and some proxies
-// mangle them, and a chunk that 404s takes hydration down with it. rename
-// those files and rewrite the imports that point at them.
+// bun leaves the "[name]" token literal for a chunk it cannot name; brackets
+// in a url path are legal, but s3, some cdns and some proxies mangle them
 export async function renameUnsafeChunks(paths: string[]): Promise<Map<string, string>> {
   const renamed = new Map<string, string>();
   for (const path of paths) {
@@ -1672,7 +1249,6 @@ export async function renameUnsafeChunks(paths: string[]): Promise<Map<string, s
   }
   if (!renamed.size) return renamed;
 
-  // the old name is a literal string inside whatever imported it
   const swaps = [...renamed].map(([from, to]) => [basename(from), basename(to)] as const);
   for (const path of paths) {
     const current = renamed.get(path) ?? path;
@@ -1685,11 +1261,8 @@ export async function renameUnsafeChunks(paths: string[]): Promise<Map<string, s
   return renamed;
 }
 
-// what the bundler substitutes into the client bundle. BORGO_STATIC is how the
-// runtime learns it is being built for `borgo export`: a static host has no
-// ?__borgo=props endpoint, it answers the document for that url with a 200 the
-// runtime cannot parse, so the props path has to be compiled out rather than
-// tried and caught.
+// BORGO_STATIC compiles the props path out: a static host answers
+// ?__borgo=props with the document and a 200, so it cannot be tried and caught
 export function buildDefine(dev: boolean, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   return {
     "process.env.NODE_ENV": JSON.stringify(dev ? "development" : "production"),
@@ -1697,9 +1270,7 @@ export function buildDefine(dev: boolean, env: NodeJS.ProcessEnv = process.env):
   };
 }
 
-// one bundler log line, framed like the rest of the cli. bun reports the file
-// and the position separately (and sometimes not at all), which is why the
-// location is assembled rather than printed from the message.
+// bun reports file and position separately, and sometimes not at all
 export function formatBuildLog(log: unknown): string {
   const message = log instanceof Error ? log.message : String(log);
   const position = (log as { position?: { file?: string; line?: number; column?: number } }).position;
@@ -1709,15 +1280,6 @@ export function formatBuildLog(log: unknown): string {
   return `${file}${at} ${g.dot} ${message}`;
 }
 
-/**
- * A bundle that did not build.
- *
- * `Bun.build` reports failure two ways and borgo used to notice neither: with
- * `throw: true` (the default) an AggregateError escapes as a raw trace with no
- * borgo framing, and with the result checked by hand `result.success` was
- * simply never read - so a failed build fell through to writing
- * `.borgo/build-mode = production` over the tree it had just emptied.
- */
 export class BundleFailed extends Error {
   readonly details: string[];
   constructor(logs: readonly unknown[]) {
@@ -1728,16 +1290,13 @@ export class BundleFailed extends Error {
   }
 }
 
-// whether the operator asked for the stack. `--debug` is read off the whole
-// argv by cli.ts, like --tailwind; the variable is for everything that reaches
-// a build without a command line (the dev server's own rebuilds, a test).
+// off the whole argv, like --tailwind in cli.ts; the variable is for builds
+// without a command line (the dev server's own rebuilds, a test)
 export const debugEnabled = (
   argv: readonly string[] = process.argv,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean => argv.includes("--debug") || env.BORGO_DEBUG === "1";
 
-// the chain of `cause`s an error carries, which is where the real reason lives
-// once anything has wrapped it
 function causeChain(error: unknown): string[] {
   const chain: string[] = [];
   let current: unknown = (error as { cause?: unknown })?.cause;
@@ -1748,18 +1307,8 @@ function causeChain(error: unknown): string[] {
   return chain;
 }
 
-/**
- * Any failure a build can end in, printed as a borgo failure.
- *
- * `BundleFailed` had a handler and nothing else did, so every other way a build
- * dies - a sass parse error, an EACCES on public/assets, a tailwind plugin
- * throwing, an ENOSPC - escaped as a raw v8 trace with borgo's own source
- * comments quoted inside it. The trace is the one thing there that names no
- * file of the operator's, and it hides the one line that does.
- *
- * The stack is not lost, only moved behind `--debug`: the operator who needs it
- * is the one who already read the message and wants more.
- */
+// every failure, not just BundleFailed: a sass error or an EACCES escaped as
+// a raw v8 trace, the one thing that names no file of the operator's
 export function reportBuildFailure(error: unknown, debug = debugEnabled()): void {
   if (error instanceof AssetChannelRefused) {
     console.error(`\n  ${c.red(g.err)} ${error.message}`);
@@ -1778,7 +1327,7 @@ export function reportBuildFailure(error: unknown, debug = debugEnabled()): void
   const message = error instanceof Error ? error.message : String(error);
   console.error(`\n  ${c.red(g.err)} ${message}`);
   for (const cause of causeChain(error)) console.error(`    ${c.dim(`caused by ${g.dot}`)} ${cause}`);
-  // an fs error names the path it failed on and nothing else does
+  // an fs error carries the path it failed on
   const path = (error as { path?: unknown }).path;
   if (typeof path === "string") console.error(`    ${c.dim(`at ${g.dot}`)} ${path.replaceAll("\\", "/")}`);
   const stack = error instanceof Error ? error.stack : null;
@@ -1794,10 +1343,8 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   const wroteCss = await compileCss(dev);
   const stylesheet = await emittedStylesheet(dev, lastNames["style.css"], outDir, wroteCss);
 
-  // read before the bundle runs, swept after it succeeds: the sweep used to go
-  // first, so one parse error left public/assets holding nothing but style.css
-  // - client.js, every chunk, precache.json and all their precompressed
-  // siblings gone - and the last good build with them
+  // read before the bundle, swept after it succeeds: swept first, one parse
+  // error took the last good build with it
   const previous = readBuildInventory();
 
   const define = buildDefine(dev);
@@ -1809,15 +1356,11 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
     outdir: outDir,
     splitting: true,
     minify: !dev,
-    // dev keeps the entry name fixed: the shell is resolved once when the dev
-    // server boots, and a rebuild that moved the name would leave every open
-    // document asking for a bundle that is gone
+    // dev keeps the entry name fixed: the shell is resolved once at boot
     naming: { entry: dev ? "[name].[ext]" : "[name]-[hash].[ext]", chunk: "[name]-[hash].[ext]" },
     define,
     plugins: [appTranspile(define, dev)],
-    // borgo frames the failure itself: bun's own throw is an AggregateError
-    // whose message is a bare trace, printed where every other borgo failure
-    // has a mark, a file and a line
+    // bun's own throw is an AggregateError whose message is a bare trace
     throw: false,
   });
   if (!result.success) throw new BundleFailed(result.logs);
@@ -1825,22 +1368,12 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   const outPath = (p: string) => renamed.get(p) ?? p;
   const assets = result.outputs.map((o) => ({ path: outPath(o.path), kind: o.kind, size: o.size }));
 
-  // now that the new output is on disk, the previous build's is stale: sweep
-  // by inventory, never by shape, and never a name this build just wrote
   const named = (p: string) => p.replaceAll("\\", "/").split("/").pop()!;
   const emitted = assets.map((a) => named(a.path));
-  // the stylesheet comes from compileCss, not from the bundler, so it is named
-  // here and swept, recorded and vouched for alongside the bundler's own
+  // the stylesheet is not the bundler's: swept, recorded and vouched for alongside its output
   const written = stylesheet ? [...emitted, stylesheet] : emitted;
-  // recorded here because this is the only place that knows what the bundler
-  // hashed; every consumer downstream reads the list instead of guessing
   const hashed = hashedOutputNames(result.outputs, outPath);
   if (stylesheet && stylesheet !== "style.css") hashed.push(stylesheet);
-  // which name each url in the app's index.html became. Both directions cost:
-  // a document naming what the build no longer emits is a blank page, and a
-  // name that does not move when the bytes do hands a year of cache to stale
-  // ones.
-  //
   // entry-point artifacts only: splitting also emits a shared chunk named
   // client-<hash>.js, and a document sent to that one hydrates nothing
   const names = entryOutputNames(
@@ -1849,43 +1382,27 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   if (stylesheet) names["style.css"] = stylesheet;
   sweepBuildOutput(outDir, previous, written);
 
-  // prod only: the hashed asset list a service worker can precache; the
-  // stamp changes whenever any listed content does
   if (!dev) {
     const files = result.outputs
       .filter((o) => o.path.endsWith(".js"))
       .map((o) => "/assets/" + outPath(o.path).replaceAll("\\", "/").split("/").pop());
-    // the emitted name, not style.css: cache.addAll rejects as a whole on one
-    // missing url, and an install that never completes is a worker that can
-    // never replace the one already holding the previous deploy
+    // the emitted name: cache.addAll rejects as a whole on one missing url, and
+    // a worker that never installs never replaces the one holding the previous deploy
     if (stylesheet) files.push(`/assets/${stylesheet}`);
     files.sort();
     const stamp = await precacheStamp(outDir, files);
     await Bun.write(`${outDir}/precache.json`, JSON.stringify({ stamp, assets: files }));
-    // the stamp goes into the worker's own body too: a byte-identical sw.js is
-    // a worker the browser never reinstalls, so install (which fills the cache)
-    // and activate (which prunes the old ones) would never run again after the
-    // first deploy, and every later deploy's assets would be shadowed by the
-    // first one's for as long as the site data lives
+    // into the worker's body too: a byte-identical sw.js is never reinstalled,
+    // so install and activate would never run again after the first deploy
     stampWorkerFile(stamp);
   }
 
-  // prod only: emit .gz/.br siblings once here instead of compressing on
-  // every request; dev skips the cost and serves identity
   if (!dev) await precompressAssets(outDir);
 
-  // After precompression, because a sibling's length does not exist until it
-  // has been written and the server verifies whichever representation it is
-  // about to send - the .br and .gz go out under the same url and are pinned
-  // by the same directive, so they have to be vouched for the same way. Names
-  // that were not written (dev, or a file compression did not shrink) are not
-  // stat'able and are simply left out, which makes them unpinnable.
-  //
-  // A failure between the sweep above and this write leaves the previous
-  // build's inventory in place: it names files that are gone, which pins
-  // nothing and sweeps nothing that still exists, and the next successful
-  // build replaces it. The directory travels with the sizes so the server
-  // matches the whole path, never a folder that happens to be spelled "assets".
+  // after precompression: .br and .gz go out under the same url and the same
+  // directive, so they are vouched for the same way; unwritten siblings are not
+  // stat'able and stay unpinnable. A failure before this write leaves the old
+  // inventory, which names files that are gone: pins nothing, sweeps nothing
   const vouchable = hashed.flatMap((name) => [name, `${name}.gz`, `${name}.br`]);
   await writeBuildInventory(
     written,
@@ -1895,31 +1412,23 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   );
   await Bun.write(buildModePath, buildModeFor(dev));
 
-  // BEFORE THE MARK COMES OFF, so a refused build is a tree the next boot
-  // rebuilds rather than one it serves. Read off what this build just emitted,
-  // never off the sources - assetChannelFaults carries the argument for why
-  // that is what makes refusing safe.
+  // before the mark comes off, so a refused build is rebuilt by the next boot, not served
   const faults = assetChannelFaults(bundleSources(outDir), publicAssetUrls("public"), bundledAssetNames(assets));
   if (faults.length) throw new AssetChannelRefused(faults);
 
-  // every byte this build promises is on disk: the tree is a finished build
-  // again, and the next boot has nothing to inherit from this one
   clearBuildMark();
 
-  // after the build has committed, and inside a catch it can never escape: a
-  // reading of the source tree must not be able to fail a build that produced
-  // its output. dev runs it too - that is the machine the spelling looks right
-  // on, and the only one the author is watching
+  // after the build has committed and inside a catch: reading the source tree
+  // must not fail a build that produced its output. Dev too: that is the
+  // machine the spelling looks right on
   try {
     warnAssetCase(".", "public");
   } catch {}
 
-  // dev: page chunks carry an injected marker, so the fast-refresh channel
-  // can tell the browser which chunk file belongs to which page
+  // the injected marker tells the fast-refresh channel which chunk belongs to which page
   const chunkMap: Record<string, string> = {};
   if (dev) {
     for (const output of result.outputs) {
-      // the file may have been renamed out from under this path above
       const path = outPath(output.path);
       if (!path.endsWith(".js")) continue;
       const text = await Bun.file(path).text();
@@ -1931,10 +1440,8 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   return { assets, chunkMap, names };
 }
 
-// full react-refresh instrumentation: the babel plugin emits $RefreshReg$
-// registrations and $RefreshSig$ hook signatures, so a body edit keeps state
-// and a hook edit remounts just that component, like next. runs on the bun
-// transpiler's output (plain js), dev builds only.
+// the babel plugin's $RefreshSig$ signatures are what let a hook edit remount
+// only that component; runs on the bun transpiler's plain-js output
 let babelRefresh: {
   transformSync: typeof import("@babel/core").transformSync;
   plugin: unknown;
@@ -1972,10 +1479,6 @@ export async function refreshTransform(js: string, moduleId: string): Promise<st
   return refreshWrap(code, moduleId);
 }
 
-// pages are rewritten for the client build with their loader and action
-// eliminated, so server-only code and its imports never reach the browser.
-// in dev every app module additionally gets react-refresh registration, and
-// page modules a marker identifying their output chunk.
 function appTranspile(define: Record<string, string>, dev: boolean): import("bun").BunPlugin {
   const cwd = process.cwd() + sep;
   const pagesDir = join(process.cwd(), "pages") + sep;
@@ -1992,8 +1495,7 @@ function appTranspile(define: Record<string, string>, dev: boolean): import("bun
   return {
     name: "borgo-app-transpile",
     setup(build) {
-      // .ts modules matter in dev too: custom hooks must carry signatures, or
-      // react-refresh force-remounts every component that uses them
+      // .ts too: a custom hook without a signature force-remounts every component using it
       build.onLoad({ filter: /\.tsx?$/ }, async (args) => {
         if (!args.path.startsWith(cwd) || args.path.includes("node_modules")) return undefined;
         const rel = args.path.slice(cwd.length).replaceAll("\\", "/");

@@ -45,11 +45,8 @@ describe("asProps", () => {
   });
 });
 
-// The dev channel used to decide on one file - whichever survived the 100 ms
-// debounce - and bail with `if (file.startsWith("pages/") && file !== current)`.
-// So "Save All" over index.tsx and about.tsx, 20 ms apart, while you are on
-// `/`, applied nothing and logged nothing: one rebuild, one file announced, and
-// a one-in-two chance it was the wrong one. The whole set decides now.
+// decided on the whole set: two files 20 ms apart in one rebuild, while on `/`,
+// must apply even when the one that survived the debounce is the other
 describe("devUpdatePlan", () => {
   test("the page on screen refreshes", () => {
     expect(devUpdatePlan(["pages/index.tsx"], "index.tsx")).toBe("apply");

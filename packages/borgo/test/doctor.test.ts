@@ -167,10 +167,8 @@ describe("checkBun", () => {
       expect(bunMinimum(withEngines({ bun: "latest" })).source).toBe("borgo");
     });
 
-    // the floor used to be "the first version in the string", which reads a
-    // ceiling as a floor: `"<1.5.0"` is an app saying it cannot run on 1.5 yet,
-    // and doctor turned it into "you need at least 1.5.0" and exited 1 on a
-    // machine whose bun was exactly what the app asked for.
+    // a ceiling is not a floor: `"<1.5.0"` read for its first version exits 1
+    // on a machine whose bun is exactly what the app asked for
     test("a ceiling is not a floor", () => {
       for (const range of ["<1.5.0", "<=1.4.9", "<2"]) {
         const got = bunMinimum(withEngines({ bun: range }));
@@ -225,9 +223,8 @@ describe("checkBun", () => {
     });
 
     // an app may ask for a newer bun than borgo does; asking for an older one
-    // is not a relaxation it gets to grant itself. `"bun": "^1.2"` used to
-    // lower the floor below MIN_BUN outright, so doctor put a green tick next
-    // to a bun that `borgo build` then failed on
+    // is not a relaxation it gets to grant itself: `"bun": "^1.2"` would put a
+    // green tick next to a bun that `borgo build` fails on
     test("a floor below borgo's own is raised, not honoured", () => {
       expect(bunMinimum(withEngines({ bun: "^1.2" }))).toEqual({ min: "1.3.0", source: "borgo" });
       expect(bunMinimum(withEngines({ bun: ">=1.0.0" })).min).toBe("1.3.0");
@@ -571,16 +568,9 @@ describe("ports", () => {
     expect(r.fix).toContain("your own borgo");
   });
 
-  /**
-   * The measured case, on a real machine: `bun some-script.ts` holding :3000
-   * was reported "in use by borgo itself - bun.exe (pid 4284)" and doctor
-   * exited 0, while `borgo dev` could not bind. Every bun is called bun, so
-   * the image name never carried the identity the message claimed.
-   *
-   * A diagnostic must not assert more than it verified. It verified that the
-   * port is taken and by which image; both of those are said, and neither is
-   * turned into "that is us, carry on".
-   */
+  // every bun is called bun: `bun some-script.ts` holding :3000 read as "in use
+  // by borgo itself" and doctor exited 0 while `borgo dev` could not bind. the
+  // port is taken and by which image: both said, neither turned into "that is us"
   test("a bun that is not borgo is reported as a bun, and counts", async () => {
     const r = await checkPort(heldBy("bun.exe"), 3000, "front", "PORT");
     expect(isFailure(r)).toBe(true);
@@ -660,12 +650,8 @@ describe("ports", () => {
     }
   });
 
-  /**
-   * Measured by running it: `PORT=abc borgo doctor` threw
-   * ERR_INVALID_ARG_VALUE out of net.listen and printed a stack trace instead
-   * of a report; `PORT=70000` threw a RangeError; `PORT=0` printed
-   * "port 0 free", which names no port `borgo dev` can be found on.
-   */
+  // measured: `PORT=abc` threw ERR_INVALID_ARG_VALUE out of net.listen, `PORT=70000`
+  // a RangeError, and `PORT=0` printed "port 0 free", which names no port
   test("resolvePort refuses what is not a port instead of handing it to listen", () => {
     expect(resolvePort(undefined, 3000)).toBe(3000);
     expect(resolvePort("", 3000)).toBe(3000);
@@ -709,18 +695,10 @@ describe("checkApiBinary", () => {
     expect(checkApiBinary(fakeEnv()).ok).toBe(true);
   });
 
-  /**
-   * Measured by running it: with a healthy `borgo dev` up, this check printed
-   * red and doctor exited 1 - `.borgo/api.exe is locked by a running "api"
-   * process, dev cannot swap in a new build`. Both halves went past the
-   * evidence. `openForWrite` calls every error but ENOENT "busy", so the
-   * holder is not established; and dev kills its own api before the rename
-   * and retries twenty times, so "cannot swap" is false in precisely the
-   * state that produces the message.
-   *
-   * The check may say the file would not open. It may not say who has it or
-   * what that prevents.
-   */
+  // measured with a healthy `borgo dev` up: this check printed red and exited 1.
+  // `openForWrite` calls every error but ENOENT "busy", so the holder is not
+  // established; and dev kills its own api before the rename and retries
+  // twenty times. the check may say the file would not open, not who has it
   test("a binary that will not open reports that, and nothing beyond it", () => {
     const r = checkApiBinary(
       fakeEnv({
@@ -808,10 +786,8 @@ describe("checkApiTypes", () => {
     expect(r!.ok).toBe(true);
   });
 
-  // borgogen reads every .go file under api/, at any depth. a non-recursive
-  // listing reported "fresh" for an app whose handlers live one directory
-  // down no matter how far behind the generated types had fallen - and that
-  // is the layout every api past a handful of endpoints grows into
+  // borgogen reads every .go file under api/, at any depth: a non-recursive
+  // listing reports "fresh" for handlers one directory down
   test("a handler in a subdirectory is checked too", () => {
     const r = checkApiTypes(
       fakeEnv({
@@ -898,14 +874,10 @@ describe("project checks", () => {
   });
 });
 
-// A CHECK THAT WRITES TO FIND OUT WHETHER IT CAN WRITE, AND THEN LEAVES THE FILE.
-//
-// probeWrite was `write; remove; return "ok"` in one try. Measured on windows
-// with delete denied by ACL (icacls /deny <user>:(DC) plus (OI)(CI)(DE) on the
-// directory): it answered "denied" for a directory whose write had just
-// succeeded, and `.borgo-doctor-3048` was still on disk afterwards - the file
-// proving the write had worked was the same file the answer said was
-// impossible. Both halves come from the same missing finally.
+// a check that writes to find out whether it can write must clean up on every
+// branch: measured on windows with delete denied by ACL (icacls /deny <user>:(DC)
+// plus (OI)(CI)(DE)), `write; remove; return "ok"` in one try answered "denied"
+// for a directory whose write had just succeeded
 describe("probeWrite", () => {
   test("the answer is the write, not the removal", () => {
     const removed: string[] = [];
@@ -963,25 +935,12 @@ describe("probeWrite", () => {
   });
 });
 
-// A KILLED DOCTOR'S PROBE FILE, WHICH NOTHING EVER REMOVED.
-//
-// The window is two adjacent syscalls of a synchronous try/finally - 333 us
-// per write+unlink pair against a 679 ms `borgo doctor` on examples/tasks - so
-// a hard kill rarely lands in it, but the residue never heals: the name
-// carries the pid and the next run writes a different one. Measured with
-// taskkill /F held inside the window: the file is still there afterwards.
-//
-// It is not inert. Measured: a `.borgo-doctor-4242` in public/assets is
-// indexed by buildAssetIndex and answered by findAsset, so it is served at a
-// public url, and `borgo export` copies public/ wholesale into dist/site where
-// countAssets counts it. In a project that has not built yet none of the three
-// targets exist, so the probe lands in the project root or in public/ - which
-// no template gitignore covers.
-//
-// The sweep reads ownership off the disk instead of inferring it from a name.
-// Keeping the pid in that name is not decoration: two concurrent doctors
-// sharing one fixed name collide on the write with EPERM, the code a real
-// denial raises, 96 times in 3000 - bfaa0b4's false "denied" all over again.
+// a killed doctor's probe file never heals: the name carries the pid and the
+// next run writes a different one. not inert: in public/assets it is indexed by
+// buildAssetIndex and served at a public url, and `borgo export` copies it into
+// dist/site. the sweep reads ownership off the disk; the pid stays in the
+// name because two concurrent doctors on one fixed name collide on the write
+// with EPERM, the code a real denial raises (96 times in 3000)
 describe("residues of a doctor that was killed", () => {
   const reads = (contents: Record<string, string>) => (path: string) =>
     contents[path.replaceAll("\\", "/")] ?? null;
@@ -1042,8 +1001,7 @@ describe("residues of a doctor that was killed", () => {
     expect(removed).toEqual([]);
   });
 
-  // it runs after the answer exists, so a refusal cannot turn "ok" into
-  // "denied" the way the removal used to
+  // it runs after the answer exists, so a refusal cannot turn "ok" into "denied"
   test("a refusal to remove is not the diagnosis", () => {
     expect(() =>
       sweepProbes("/p", [".borgo-doctor-1"], () => PROBE_MARK, () => {
@@ -1111,11 +1069,10 @@ describe("residues of a doctor that was killed", () => {
     }
   });
 
-  // The structural guard, because neither property can be watched from
-  // outside: realEnv removes its own probe, so a probe that wrote anything but
-  // the mark would make the sweep a no-op that every test above still passes.
-  // And the answer has to exist before the sweep runs, or a refusal in there
-  // becomes the diagnosis - which is the defect bfaa0b4 closed.
+  // the structural guard, because neither property can be watched from outside:
+  // realEnv removes its own probe, so a probe that wrote anything but the mark
+  // would make the sweep a no-op every test above still passes; and the answer
+  // has to exist before the sweep runs, or a refusal in there becomes the diagnosis
   test("the probe writes the mark, and the sweep runs after the answer", () => {
     const source = readFileSync(join(import.meta.dir, "../src/doctor.ts"), "utf8");
     expect(source).toContain("writeFileSync(path, PROBE_MARK)");

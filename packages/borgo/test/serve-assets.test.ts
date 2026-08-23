@@ -226,11 +226,9 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
     expect(res.headers.get("Content-Range")).toBe(`bytes 0-3/${RAW_CSS.length}`);
   });
 
-  // the retirement, asserted rather than deleted: the validator is size+mtime,
-  // which two different files can share, and a range is the one place where a
-  // wrong match CORRUPTS - new bytes spliced onto an old prefix - instead of
-  // merely serving stale that no-cache would recheck. RFC 9110 §13.1.5 lets
-  // only a strong validator authorise one, so ours never does
+  // the validator is size+mtime, which two files can share, and a range is
+  // where a wrong match CORRUPTS instead of staling: rfc 9110 §13.1.5 lets only
+  // a strong validator authorise one, so ours never does
   test("a range is refused even when the client quotes back the validator we sent", async () => {
     const i = info("/style.css");
     const res = await fetch(`${base}/style.css`, {
@@ -253,10 +251,9 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
     expect(res.headers.get("Content-Type")).toContain("text/css");
   });
 
-  // An HTTP date resolves to one second, so it cannot name which representation
-  // it describes. Measured before this rule: a 206 handing brotli bytes to a
-  // client assembling plain css, and a 416 telling a client holding 6400 bytes
-  // the resource was 35 bytes long.
+  // an http date resolves to one second, so it cannot name which
+  // representation it describes (a 206 of brotli bytes to a client assembling
+  // css; a 416 telling a client holding 6400 bytes the resource was 35 long)
   test("if-range refuses a date validator, current or not", async () => {
     const i = info("/style.css");
     for (const ifRange of [i.lastModified, new Date(0).toUTCString()]) {
@@ -317,9 +314,8 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
   });
 
   test("a file rewritten after boot is framed from disk, head included", async () => {
-    // the index remembers boot-time sizes, and a HEAD used to be answered from
-    // it - so a client sizing a download from HEAD was told a number the GET
-    // then contradicted, by any factor. Both are framed from the file now.
+    // the index remembers boot-time sizes: a HEAD answered from it told a client
+    // a number the GET then contradicted. both are framed from the file
     const grown = RAW_PNG + " and then it grew past the indexed size";
     writeFileSync(join(dir, "public", "logo.png"), grown);
     try {
@@ -423,11 +419,8 @@ describe("serveAsset: the unindexed path", () => {
       ).headers.get("Cache-Control");
     expect(await cc(hashed)).toBe("public, max-age=31536000, immutable");
     expect(await cc(sw)).toBe("no-cache");
-    // an asset with no policy of its own still carries a Last-Modified, and a
-    // browser is free to heuristically cache anything dated for a tenth of its
-    // age: yesterday's bundle pinned against today's document. dev and prod
-    // state the same no-cache - the policy belongs to the url, not to the
-    // environment, and this used to be the one place they disagreed.
+    // no policy lets a browser heuristically cache anything dated for a tenth
+    // of its age; dev and prod state the same no-cache, the policy belongs to the url
     expect(await cc(plain)).toBe("no-cache");
     const prod = await serveAsset(new Request("http://app.test/x"), plain, Bun.file(plain), {
       dev: false,
@@ -436,11 +429,9 @@ describe("serveAsset: the unindexed path", () => {
     expect(prod.headers.get("Cache-Control")).toBe("no-cache");
   });
 
-  // This path used to emit no ETag, no Last-Modified and never consult
-  // If-Range, while negotiating br/gz per request off one url and handing back
-  // a rangeable Bun.file body. That is exactly the cross-encoding splice
-  // serveIndexed has nine lines of comment about - here with no mitigation and
-  // no validator a client could even have sent to be checked.
+  // this path negotiates br/gz per request off one url and hands back a
+  // rangeable Bun.file body: the cross-encoding splice serveIndexed refuses,
+  // and it emitted no validator a client could even have sent
   describe("validators", () => {
     const serve = (path: string, headers: Record<string, string> = {}, dev = false) =>
       serveAsset(new Request("http://app.test/style.css", { headers }), path, Bun.file(path), { dev });
@@ -589,21 +580,12 @@ test("a precompressed sibling deleted after boot degrades to identity, not a 500
   rmSync(dir, { recursive: true, force: true });
 });
 
-// Measured on the wire against a production build: /assets/client.js,
-// /assets/style.css and /logo.svg all came back 200 with an ETag, a
-// Last-Modified and no Cache-Control, while /assets/client-50dbnr0a.js beside
-// them carried the year. The document referencing those unhashed names is
-// private, no-store and therefore always fresh, so a returning browser fetched
-// today's html and ran a heuristically-cached yesterday's bundle against it.
-//
-// These go over a socket on purpose. The defect was two serving paths
-// disagreeing about one url - the indexed snapshot said nothing, the live path
-// said nothing in production and no-cache in dev - and a function's return
-// value cannot say which of them answered.
-// brotli at max quality on a real tree runs past bun's 5s default, and these
-// two blocks precompress one. A test that goes red because the machine was
-// busy is not measuring what it claims - it teaches everyone to re-run instead
-// of to read, which is how a real failure gets waved through.
+// measured on the wire: /assets/client.js, /assets/style.css and /logo.svg
+// came back with an ETag, a Last-Modified and no Cache-Control, so a
+// returning browser ran a heuristically-cached yesterday's bundle against
+// today's no-store document. over a socket because the defect was two serving
+// paths disagreeing about one url, which a return value cannot show. brotli at
+// max quality on a real tree runs past bun's 5s default
 const WIRE_TIMEOUT = 60_000;
 
 describe("cache-control on the wire: every serving path, every encoding", () => {
@@ -763,12 +745,9 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
     }
   }, WIRE_TIMEOUT);
 
-  // The dangerous direction, and the one that was actually shipping. An app
-  // file living in the build's output directory is not the build's, and no
-  // amount of it looking like a chunk makes its url a promise. Measured on the
-  // wire before this: stripe-checkout.js pinned for a year, so updating the
-  // vendored file in place left every browser that had seen it holding the old
-  // copy with no revalidation.
+  // the dangerous direction: an app file in the build's output directory is not
+  // the build's, however much it looks like a chunk (stripe-checkout.js pinned
+  // for a year, so updating the vendored file in place changed nothing for any browser)
   test("an app file in assets/ is never pinned, however hash-shaped its name", async () => {
     const traps = REVALIDATED.filter((u) => /^\/assets\/[^/]+-[^/]+$/.test(u));
     expect(traps.length).toBeGreaterThan(0);
@@ -801,11 +780,9 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
     }
   }, WIRE_TIMEOUT);
 
-  // The representation on the wire is the one that has to be vouched for.
-  // Measured before this: identity untouched at its recorded length, the .gz
-  // replaced 749 -> 75 bytes, and the 75 stale bytes went out `immutable`
-  // because the check was pointed at the identity file. Nearly every client
-  // sends Accept-Encoding, so that was the common case, not a corner of it.
+  // the representation on the wire is the one vouched for: identity untouched
+  // at its recorded length, the .gz replaced 749 -> 75, the 75 stale bytes
+  // went out `immutable`, and nearly every client sends Accept-Encoding
   test("a replaced sibling is not pinned, even though the identity file is", async () => {
     const url = "/assets/client-50dbnr0a.js";
     const name = "client-50dbnr0a.js";
@@ -863,9 +840,8 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
     }
   }, WIRE_TIMEOUT);
 
-  // The manifest vouches for bytes, not for a name. A recorded chunk deleted
-  // and recreated after boot keeps its name and its manifest entry, and used
-  // to inherit the year with them - on the live path measured directly.
+  // the manifest vouches for bytes, not for a name: a chunk recreated after
+  // boot keeps its name and its entry
   test("a recorded name whose bytes changed after boot loses its year", async () => {
     const url = "/assets/client-50dbnr0a.js";
     const path = join(root, "public", "assets", "client-50dbnr0a.js");
@@ -896,11 +872,9 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
     }
   }, WIRE_TIMEOUT);
 
-  // The other direction, and the cost of getting cautious wrong. Too strict and
-  // every content-addressed asset loses its year - a regression nobody notices
-  // until they measure. The old rule matched js and css alone, so bun's hashed
-  // images and fonts paid a conditional request per load forever; they are in
-  // this list on purpose.
+  // the cost of getting cautious wrong: every content-addressed asset loses its
+  // year, unnoticed until measured. bun hashes images and fonts too, and a
+  // js/css-only rule made them pay a conditional request per load forever
   test("a content-hashed asset keeps its year on every path and every encoding", async () => {
     for (const { name, base } of servers) {
       for (const url of HASHED) {
@@ -952,18 +926,11 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
   }, WIRE_TIMEOUT);
 });
 
-// A deploy that replaces files in place under a running `borgo start`. The
-// index is a boot snapshot, and serving its ETag and its Last-Modified meant
-// new bytes went out labelled with the old validator: measured on the wire,
-// ETag "gf-msf40zn3" - gf is 591 in base36 - on a response whose
-// Content-Length was 557, the etag contradicting the length beside it, and
-// every conditional request that quoted it came back 304 forever. The
-// no-cache the previous fix added is precisely what sends a browser down this
-// path, so it made the defect more reachable rather than less.
-//
-// Over a socket, on both serving paths, with the files replaced under the
-// running servers rather than only at boot: a snapshot defect is invisible to
-// a request made at boot, and a return value cannot say which path answered.
+// a deploy replacing files in place under a running `borgo start`: serving
+// the boot snapshot's validators sent new bytes under the old etag ("gf-msf40zn3",
+// gf = 591 in base36, on a 557-byte body), and no-cache is precisely what
+// sends a browser down this path. over a socket, on both serving paths, with
+// the files replaced under the running servers: a return value cannot say which path answered
 describe("validators on the wire: an in-place deploy under a running server", () => {
   let root: string;
   let servers: { name: string; base: string; stop: () => void }[];
@@ -1064,11 +1031,9 @@ describe("validators on the wire: an in-place deploy under a running server", ()
   // the tag is weak, so the W/ prefix comes off before the length is read
   const etagSize = (etag: string) => parseInt(etag.replace(/^W\//, "").slice(1).split("-")[0], 36);
 
-  // The strict direction, and it costs too: a validator that moves while the
-  // bytes did not turns every revalidation into a full re-download of an asset
-  // the client already holds. Asserted first, on an untouched tree, so the
-  // fresh-validator tests below cannot be satisfied by simply never repeating
-  // an etag.
+  // the strict direction costs too: a validator that moves while the bytes did
+  // not is a full re-download. asserted first, on an untouched tree, so the
+  // fresh-validator tests cannot be satisfied by never repeating an etag
   test("an unchanged file still answers 304, on both validators", async () => {
     for (const { name, base } of servers) {
       for (const url of URLS) {
@@ -1093,10 +1058,8 @@ describe("validators on the wire: an in-place deploy under a running server", ()
     }
   }, WIRE_TIMEOUT);
 
-  // Boot and the socket must compute one url's validator the same way, or an
-  // untouched file appears to change between the snapshot and the wire. When
-  // the two formulas drifted apart, the tests comparing them passed alone and
-  // failed only in a full run.
+  // boot and the socket must compute one url's validator the same way: when
+  // the formulas drifted, the tests comparing them passed alone and failed only in a full run
   test("the boot snapshot's etag is the one that goes on the wire", async () => {
     const { base } = servers.find((s) => s.name === "indexed")!;
     const fresh = buildAssetIndex(join(root, "public").replaceAll("\\", "/"), undefined, MANIFEST);
@@ -1114,8 +1077,7 @@ describe("validators on the wire: an in-place deploy under a running server", ()
     }
   }, WIRE_TIMEOUT);
 
-  // The bug. Every assertion here is a header off a real socket, taken after
-  // the bytes on disk moved under the running server.
+  // every assertion is a header off a real socket, after the bytes moved under the server
   test("a file replaced under the running server never 304s the old copy", async () => {
     const before: Record<string, { etag: string; date: string }> = {};
     for (const { name, base } of servers) {
@@ -1225,12 +1187,10 @@ describe("validators on the wire: an in-place deploy under a running server", ()
           `${name} identity: ${V1[HASHED].length}`,
         );
 
-        // The date is the sibling's own, not the url's. Sharing one meant a
-        // date-only revalidation 304'd a replaced .gz until somebody happened
-        // to touch the identity file - and a deploy that only refreshes
-        // precompressed siblings never does, so it was permanent, not a race.
-        // Measured: 304 returning ETag "2n-..." (95 bytes) to a client holding
-        // 323, repeated at +2s and +5s.
+        // the date is the sibling's own: sharing the url's meant a date-only
+        // revalidation 304'd a replaced .gz until somebody touched the identity,
+        // which a sibling-only deploy never does (304 with ETag "2n-..." (95
+        // bytes) to a client holding 323, at +2s and +5s)
         expect(`${name} own date: ${res.headers.get("Last-Modified") !== identity.headers.get("Last-Modified")}`).toBe(
           `${name} own date: true`,
         );
@@ -1245,9 +1205,8 @@ describe("validators on the wire: an in-place deploy under a running server", ()
     }
   }, WIRE_TIMEOUT);
 
-  // One url, one answer. The indexed path used to serve an orphaned sibling
-  // 200 while the live path 404'd it - so the same server answered the same
-  // url two ways depending on Accept-Encoding, and a restart flipped it again.
+  // one url, one answer: an orphaned sibling served 200 by the index and 404
+  // by the live path was a url answering by Accept-Encoding, flipped by a restart
   test("a representation whose identity file is gone is refused on both paths", async () => {
     const rel = HASHED;
     const identityPath = join(root, "public", rel);
@@ -1268,22 +1227,11 @@ describe("validators on the wire: an in-place deploy under a running server", ()
 
 });
 
-// WHAT PUBLIC/ COLLECTS BY ACCIDENT, AT A PUBLIC URL.
-//
-// Measured before the filter, over this same socket: .DS_Store, .gitkeep, a
-// stray .env and the .borgo-doctor-<pid> a killed doctor leaves in
-// public/assets all answered 200. .DS_Store is the one that matters - it
-// carries the listing of the directory it sits in, so it names files nothing
-// links to.
-//
-// The server here is server.ts's block, not half of it: index first, live
-// fallback second. That order is the point. A filter in buildAssetIndex alone
-// removes a dotfile from no url at all - the fallback opens the same file and
-// answers 200 - which is why the refusal is in both.
-//
-// And .well-known/ has to survive it. It is a directory, standard (rfc 8615),
-// and fetching it is its whole purpose: acme http-01 renews certificates
-// through it. It is served today and it still is.
+// what public/ collects by accident, at a public url: .DS_Store (the listing
+// of its directory, so it names files nothing links to), .gitkeep, a stray
+// .env, a killed doctor's probe all answered 200. server.ts's whole block,
+// index first and live fallback second: a filter in the index alone removes a
+// dotfile from no url. and .well-known/ (rfc 8615, acme http-01) has to survive it
 describe("dotfiles on the wire", () => {
   let root: string;
   let server: { base: string; stop: () => void };
