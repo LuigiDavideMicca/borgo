@@ -601,10 +601,9 @@ func pushSources(pkg *packages.Package, loader *helperLoader) []*packages.Packag
 		}
 		frontier = next
 	}
-	// the cap stopped the walk with same-module packages still ahead of it. A
-	// dropped push is worse than a plain omission: TopicEvents<T> closes a
-	// topic's union as soon as one of its events is declared, so a subscriber
-	// for the missing one fails tsc with nothing pointing back at here
+	// a dropped push is worse than an omission: TopicEvents<T> closes a topic's
+	// union as soon as one event is declared, so a subscriber for the missing
+	// one fails tsc with nothing pointing back at here
 	if dropped := nextPushHop(frontier, seen, loader); len(dropped) > 0 {
 		warn("%s is more than %d package hops from api/, so it was not scanned; a borgo.Push there stays out of WsEvents and its subscriber will not typecheck",
 			strings.Join(dropped, ", "), maxCrossPkgDepth)
@@ -667,12 +666,9 @@ func handlerTarget(info *types.Info, expr ast.Expr) (*types.Func, *ast.FuncDecl)
 }
 
 // handlerBody resolves the package, declarations and body a route's bridge
-// types are read from. A handler registered as borgo.Handle("GET /x",
-// users.List) is an ordinary layering choice, and api/ knows its *types.Func
-// while holding no declaration for it: the walk started at a nil body, the
-// route came out "response: unknown", and nothing said why. The package is
-// loaded like any other helper, and what cannot be loaded is said out loud
-// rather than typed as unknown in silence.
+// types are read from. A handler from another package (users.List) is loaded
+// like any other helper; what cannot be loaded is said out loud rather than
+// typed as unknown in silence.
 func handlerBody(pkg *packages.Package, decls map[*types.Func]*ast.FuncDecl, r route, loader *helperLoader) (*packages.Package, map[*types.Func]*ast.FuncDecl, *ast.FuncDecl) {
 	switch {
 	case r.decl != nil:
@@ -684,12 +680,9 @@ func handlerBody(pkg *packages.Package, decls map[*types.Func]*ast.FuncDecl, r r
 	}
 	hpkg := r.handler.Pkg()
 	if hpkg != nil && hpkg.Path() == borgoPath {
-		// borgo's own handlers - the built-in auth ones above all, which the
-		// full template registers exactly as they come - are untyped by
-		// construction and by the framework's choice, not by anything the app
-		// did. Warning here would fire on every run of every app that uses
-		// them, and a warning nobody can act on is how the ones that matter
-		// stop being read
+		// borgo's own handlers (the built-in auth ones) are untyped by the
+		// framework's choice: a warning here would fire on every run of every
+		// app that uses them, and nobody could act on it
 		return pkg, decls, nil
 	}
 	if hpkg == nil || hpkg == pkg.Types || !loader.sameModule(hpkg.Path()) {
@@ -732,12 +725,10 @@ type tsGen struct {
 	// distinct interfaces instead of collapsing on the generic origin
 	names map[string]string
 	taken map[string]bool
-	// named non-struct types currently being expanded. A struct is safe from
-	// recursion because interfaceFor names it before it walks its fields; a
-	// named map, slice or pointer had no such anchor, so `type Tree
-	// map[string]Tree` expanded forever. That is a stack overflow, which is
-	// fatal rather than a panic - run()'s recover never sees it, so the dev
-	// loop died on every save with no message at all.
+	// named non-struct types being expanded. A struct is anchored by its name
+	// before its fields are walked; `type Tree map[string]Tree` has no such
+	// anchor and would expand forever - a stack overflow is fatal, not a
+	// panic, so run()'s recover never sees it
 	expanding map[string]bool
 	defs      []string
 	apiPkg    *types.Package
@@ -757,18 +748,10 @@ type overrideSet struct {
 // resolves it to exactly one type. The Go type is "pkgpath.Name" for an
 // imported type, a bare name for an api or predeclared one, or - where a bare
 // name is ambiguous - "Name@file.go:line" for the declaration at that position.
-//
-// A bare name used to be the whole key, so a directive meant for a
-// package-level type also rewrote every function-local `type resp struct{...}`
-// of that name in the api, silently. It now names the package-level type if
-// there is one, the sole function-local one if there is not, and nothing at all
-// when several could answer to it: that is a question, and the run asks it.
-//
-// A directive that can never apply - one naming a Go type that does not exist,
-// or a second one for a type already claimed - fails the run. A malformed
-// directive already does; staying silent about a directive that is well formed
-// and still does nothing would read as "applied" and leave the user staring at
-// the type it was meant to replace.
+// A bare name means the package-level type if there is one, the sole
+// function-local one if not, and several candidates are a question the run
+// asks. A directive that can never apply fails the run: silence would read as
+// "applied".
 func collectTypeOverrides(pkg *packages.Package) *overrideSet {
 	out := &overrideSet{byObj: map[*types.TypeName]string{}, byName: map[string]string{}}
 	type claim struct {
@@ -814,26 +797,17 @@ func collectTypeOverrides(pkg *packages.Package) *overrideSet {
 	return out
 }
 
-// scanOverrideTS reads a //borgo:type replacement once and answers the only two
-// questions anything here ever asks about it: whether it can be a TypeScript
-// type at all, and whether it binds loosely enough to need parentheses when
-// something is composed around it.
+// scanOverrideTS answers the two questions asked of a //borgo:type
+// replacement: can it parse at all, and does it bind loosely enough to need
+// parentheses when composed. The text is spliced into the .d.ts whole, so an
+// unclosed bracket or a stray ";" costs every route in the project its types.
+// This is not a typechecker and cannot be one: the replacement usually names a
+// type declared in the app, unknowable from here, so only what cannot parse
+// is refused.
 //
-// reason is why the text cannot parse, or "" when nothing here can tell. The
-// text is hand written and spliced into the generated file whole - no site
-// downstream ever looks inside it - so what a bad one costs is not the type it
-// names: an unclosed bracket, a trailing comment or a stray ";" takes the parse
-// of the whole .d.ts with it, and every route in the project loses its types at
-// once. This is not a typechecker and cannot be one: the replacement usually
-// names a type declared somewhere in the app, which is not knowable from here,
-// and refusing what it cannot resolve would fail runs that are perfectly
-// correct. It refuses what cannot parse, and leaves the compiler the rest.
-//
-// loose is set by a "|", "&", "?" or "=>" outside every bracket - the operators
-// that bind looser than the union a nullable position wraps the text in. The
-// scan is what decides it, not a look at the finished string: it is the same
-// mistake as splitting a rendered type to count its alternatives, and it is
-// wrong the same way.
+// loose is a "|", "&", "?" or "=>" outside every bracket - the operators that
+// bind looser than the union a nullable position wraps the text in. Decided
+// by the scan, never by looking at the finished string (see tsRef).
 func scanOverrideTS(ts string) (loose bool, reason string) {
 	if ts == "" {
 		return false, "the TypeScript type is empty"
@@ -999,23 +973,14 @@ func shortPos(pkg *packages.Package, obj *types.TypeName) string {
 }
 
 // tsRef is one rendered TypeScript type with the null it admits carried beside
-// the text instead of inside it. The two are joined once, by String, and
-// nothing ever takes a joined type apart again.
+// the text, joined once by String. Nothing takes a joined type apart again: a
+// rendered string is not a parse tree, " | " occurs inside type-argument lists
+// too ("Record<string, Array<Item | null> | null>"), and counting brackets is
+// the same mistake spelled longer.
 //
-// Splitting a rendered type on " | " is what this replaces, and it cannot work:
-// " | " occurs inside type-argument lists too, so the pieces of
-// "Record<string, Array<Item | null> | null>" are fragments, not alternatives -
-// dropping the repeated "null>" as a duplicate took its ">" with it and emitted
-// a type that does not parse, which costs every route in the file its types. A
-// rendered string is not a parse tree and counting the angle brackets to make
-// the split smarter would only be the same mistake spelled longer.
-//
-// How this fails if it is wrong, in the direction opposite the old bug: the
-// null now travels apart from the text, so a site that renders ts and forgets
-// null emits a type that parses perfectly and silently promises non-null for a
-// field that arrives null - no compiler anywhere says so, unlike the unclosed
-// "<" that preceded it. Tests assert the exact rendering of each level, not
-// only that the emitted file parses.
+// Failure direction: a site that renders ts and forgets null emits a type that
+// parses and silently promises non-null for a field that arrives null. Tests
+// assert the exact rendering of each level, not only that the file parses.
 type tsRef struct {
 	ts   string // one whole alternative; "" when the type is null and nothing else
 	null bool
@@ -1276,11 +1241,8 @@ func (g *tsGen) bridgeTypes(pkg *packages.Package, decls map[*types.Func]*ast.Fu
 					return true
 				}
 				if depth >= maxCrossPkgDepth {
-					// the cap is a bound on how much of the module one route can
-					// pull in, not a statement that there is nothing out there.
-					// Dropped in silence it takes a whole alternative out of the
-					// union - or leaves the route "unknown" - and reads exactly
-					// like a handler that answers nothing
+					// dropped in silence the cap takes an alternative out of the
+					// union and reads like a handler that answers nothing
 					if !capped[fn] {
 						capped[fn] = true
 						warn("%s: %s.%s is more than %d package hops from the handler, so it was not followed; a borgo.JSON or borgo.Bind inside it is missing from this route's types",
@@ -1320,50 +1282,28 @@ func isErrorStatus(info *types.Info, expr ast.Expr) bool {
 }
 
 // wire is which crossing a type is being rendered for. The two are not mirror
-// images: encoding/json consults MarshalJSON and MarshalText on the way out and
-// UnmarshalJSON and UnmarshalText on the way in, and a type routinely carries
-// one side without the other. A hand written enum with a MarshalText and no
-// UnmarshalText is a string in a response and an ordinary object in a request
-// body; a type with an UnmarshalJSON - which is where practically all of them
-// are declared, on the pointer receiver - accepts whatever that method accepts
-// and nothing like its Go shape.
-//
-// Rendering a request body with the marshal rules was wrong in both directions
-// at once, and both are the dangerous one: it promised the caller a string the
-// server will not accept, and it typed a body the decoder rewrites as the Go
-// shape the decoder never sees.
+// images: encoding/json consults MarshalJSON/MarshalText going out and
+// UnmarshalJSON/UnmarshalText coming in, and a type routinely carries one side
+// without the other - an enum with MarshalText and no UnmarshalText is a
+// string in a response and an object in a request body.
 type wire int
 
 const (
 	out wire = iota
-	// in is the decoder's side, and what it does with one struct field was
-	// measured against encoding/json rather than read off its documentation.
-	// TestInboundFieldsMatchEncodingJSON runs the whole table; these are the two
-	// rows that decide the rendering, and both hold for every kind this file can
-	// emit - bool, number, string, pointer, slice, array, map, struct, []byte,
-	// time.Time, json.Number, an UnmarshalText type, an interface, a `,string`
-	// field, an omitempty one:
+	// in is the decoder's side, measured against encoding/json for every kind
+	// this file emits (TestInboundFieldsMatchEncodingJSON runs the table):
 	//
-	//   - a field that is absent is not an error. The decoder leaves the zero
-	//     value and says nothing, so nothing a request type declares is really
-	//     required and every property is "?".
-	//   - a field present as null is not an error either. On a *T it gives nil,
-	//     and on a plain T it gives the zero - encoding/json's literalStore
-	//     returns before it calls any UnmarshalText, and time.Time and
-	//     json.Number both check for null themselves - so every property admits
-	//     "| null" as well.
+	//   - an absent field is not an error: the zero value stays, so every
+	//     property is "?".
+	//   - a field present as null is not an error either: nil on a *T, the
+	//     zero on a plain T (literalStore never reaches an UnmarshalText for
+	//     null; time.Time and json.Number check for it themselves), so every
+	//     property admits "| null".
+	//   - a field present with the wrong type IS an error, for every kind
+	//     except the two already rendered "unknown" (an interface, a type with
+	//     its own UnmarshalJSON). So "x?: string | null" is exact, not wider.
 	//
-	// The third row is what keeps the type strong rather than a shrug: a field
-	// present with the wrong type IS an error, for every kind above except the
-	// two that accept any JSON at all and are already rendered "unknown" - an
-	// interface, and a type with its own UnmarshalJSON. So "x?: string | null"
-	// is the exact type of a Go string field, and not one alternative wider.
-	//
-	// omitempty and omitzero are marshal directives and change nothing here: a
-	// field carrying one decodes exactly like a field carrying neither, in all
-	// four cases. Anyone who read a `json:"x,omitempty"` as "this one is the
-	// optional one" was reading the wrong direction, and the ones without it are
-	// no less optional.
+	// omitempty and omitzero are marshal directives and change nothing here.
 	in
 )
 
@@ -1515,11 +1455,9 @@ func (g *tsGen) tsType(t types.Type, s site) tsRef {
 			return tsRef{ts: "number"}
 		}
 		if ts, ok := wireTS(t, s); ok {
-			// a marshaler reached through an interface is reached through
-			// something that can be nil, and encoding/json writes "null" for it
-			// without ever calling the method. Typing a domain interface that
-			// embeds encoding.TextMarshaler as "string" was a narrowing, and the
-			// dangerous direction of one: the browser reads .length off a null
+			// a marshaler reached through an interface can be nil, and
+			// encoding/json writes "null" for it without calling the method:
+			// "string" would be a narrowing in the dangerous direction
 			if _, iface := t.Underlying().(*types.Interface); iface {
 				return tsRef{ts: ts}.orNull()
 			}
@@ -1658,28 +1596,17 @@ func marshalsDiffer(t types.Type) (answered, differs bool) {
 }
 
 // dirDiffers reports whether t is rendered differently coming in than going
-// out, and so needs a declaration of its own for request bodies instead of
-// sharing the one the responses already have.
+// out, and so needs a $Request declaration of its own. Any struct with a field
+// on the wire differs: coming in every property is optional and nullable (see
+// in), going out only where omitempty/omitzero or a nil-able kind make it so.
+// `type Money int` renders "number" both ways, and so does a slice or map of
+// one.
 //
-// Any struct that puts a field on the wire differs, and that is not a shortcut:
-// coming in every property is optional and admits null (see in), and going out
-// a property is optional only where omitempty or omitzero can drop it and
-// nullable only where the Go kind can be nil. So `{ name: string }` on the way
-// out is `{ name?: string | null }` on the way in, and one declaration cannot
-// be both. What used to be the rare case - a type carrying one side of a
-// conversion without the other - is now the ordinary one, and a struct is the
-// only thing this ever turns on: `type Money int` renders "number" both ways,
-// and so does a slice or a map of one.
-//
-// It still over-approximates in the one place where the two renderings can
-// coincide - a struct whose every field is already both optional and nullable
-// going out, an all-`json:",omitempty"`-pointer struct - and the two errors are
-// not symmetric: answering "differs" where nothing does costs one duplicate
-// declaration under a $Request name, while answering "does not" where something
-// does hands a request body the response's shape, which is the whole bug this
-// direction exists to fix. Deciding that case exactly would mean a second walk
-// asking which renderings are nullable, able to disagree with the one that
-// renders them; the duplicate declaration is the cheaper mistake.
+// Over-approximates where the two renderings coincide (an
+// all-`json:",omitempty"`-pointer struct), on purpose: "differs" where nothing
+// does costs one duplicate declaration, "does not" where something does hands
+// a request body the response's shape. Deciding it exactly would take a second
+// walk able to disagree with the one that renders.
 func (g *tsGen) dirDiffers(t types.Type) bool {
 	return g.differs(t, map[types.Type]bool{})
 }
@@ -1812,15 +1739,11 @@ func (g *tsGen) override(obj *types.TypeName) (string, bool) {
 	return ts, ok
 }
 
-// overrideRef renders a //borgo:type replacement. The text replaces the shape
-// the Go type reaches the wire as - it does not replace the nil: a nil slice,
-// map, pointer or interface is "null" on the wire whatever the replacement
-// says, and the Go type is the only thing that knows which of them it is. A
-// directive mapping `type Tags []string` to Array<string> used to promise the
-// browser an array for a response that arrives null on the first empty result.
-//
-// The Go kind decides, so a text that already ends in "| null" is widened
-// again rather than merged with: see TestOverrideTextIsCarriedWholeIntoEveryNullablePosition.
+// overrideRef renders a //borgo:type replacement. The text replaces the shape,
+// not the nil: a nil slice, map, pointer or interface is "null" on the wire
+// whatever the replacement says. So a text that already ends in "| null" is
+// widened again rather than merged with
+// (TestOverrideTextIsCarriedWholeIntoEveryNullablePosition).
 func overrideRef(t types.Type, ts string) tsRef {
 	loose, _ := scanOverrideTS(ts) // the reason was answered when it was collected
 	r := tsRef{ts: ts, opaque: loose}
@@ -1867,14 +1790,10 @@ func (g *tsGen) typeArgSuffix(args *types.TypeList) string {
 // name can never be one a user type would claim.
 const addrSuffix = "$Addressable"
 
-// reqSuffix marks the declaration of a type as encoding/json reads it, for the
-// types that are read differently from how they are written - which, since
-// every property of a request body is optional and nullable (see in), is every
-// type with a field on it. It is unconditional where it applies, rather than a
-// fallback for a name already claimed: which of the two directions reached a
-// type first is an accident of route order, and a name that moves with it is a
-// diff nobody can read. So a type only ever bound carries the suffix too, and
-// carries it whether or not some route also answers with it.
+// reqSuffix marks the declaration of a type as encoding/json reads it. It is
+// unconditional where it applies, not a fallback for a name already claimed:
+// which direction reaches a type first is an accident of route order, and a
+// name that moves with it is a diff nobody can read.
 const reqSuffix = "$Request"
 
 // reserveName picks the TypeScript identifier for a Go type and claims it, so
@@ -1925,13 +1844,10 @@ func (g *tsGen) variantKey(t *types.Named, s site) (key string, addr, req bool) 
 }
 
 // typeKey identifies a named type across the names, expanding and taken maps.
-// types.TypeString spells one out as "pkgpath.Name", which is not unique: the
-// idiomatic one-off `type resp struct{...}` declared inside a handler body has
-// the same string in every handler, so every route sharing the name collapsed
-// onto one TypeScript type built from whichever route sorted first - promising
-// the caller of one route the properties of another. The declaration position
-// separates the function-local ones; a package-level type keeps the plain
-// string, so two instantiations of a generic still key on their type arguments.
+// types.TypeString is not unique: a function-local `type resp struct{...}` has
+// the same string in every handler, so the declaration position separates
+// those; a package-level type keeps the plain string, so two instantiations
+// of a generic still key on their type arguments.
 func typeKey(t *types.Named) string {
 	key := types.TypeString(t, nil)
 	obj := t.Obj()
@@ -2169,23 +2085,13 @@ func (g *tsGen) collectFields(u *types.Struct, depth int, viaPtr bool, s site, e
 }
 
 // quotesAsString reports whether a `,string` option really puts this field on
-// the wire quoted. encoding/json decides it on the Go kind, in typeFields,
-// before it knows anything about how the value will be written: a bool, an
-// integer, a float or a string is quoted, and an unnamed pointer to one is
-// quoted through - `type P *int` is a named type and is not. Everything else
-// keeps the option and ignores it.
-//
-// Reading the rendered TypeScript instead - rewriting a "number" or a "boolean"
-// to "string" - agreed with that by coincidence, because those two renderings
-// happen to come from the quotable kinds. It stopped agreeing the moment a
-// //borgo:type stood between the kind and the text: a `type Cents int64`
-// rendered as some hand written Money is still a quoted number on the wire,
-// and a struct rendered as "number" is not quoted at all.
-//
-// A converter outranks the option in the other direction: marshalerEncoder and
-// textMarshalerEncoder never look at opts.quoted, so a MarshalJSON writing a
-// bare number stays a bare number however the field is tagged, and the same
-// holds of the Unmarshal side coming back.
+// the wire quoted. encoding/json decides it on the Go kind, in typeFields: a
+// bool, an integer, a float or a string is quoted, and an unnamed pointer to
+// one is quoted through - `type P *int` is named and is not. Everything else
+// ignores the option. Decided on the kind, not on the rendered text: a
+// //borgo:type can stand between the two. A converter outranks the option:
+// marshalerEncoder and textMarshalerEncoder never look at opts.quoted, and
+// the same holds coming back.
 func quotesAsString(t types.Type, opts string, s site) bool {
 	if !hasOpt(opts, "string") {
 		return false
@@ -2211,21 +2117,12 @@ func tsPropName(name string) string {
 	return fmt.Sprintf("%q", name)
 }
 
-// tsReserved holds every name a generated declaration cannot carry.
-//
-// Array and Record are the two generics this file writes: an interface declared
-// under either name shadows them inside the module and every use turns into
-// "type is not generic", quietly, since apps typecheck with skipLibCheck. The
-// rest do not even parse, or are refused outright by name - "export interface
-// null" is a syntax error and "export interface string" is TS2427 - and one
-// such declaration costs every route in the project its types at once, not just
-// the type that produced it. A Go type is rarely called null or function, but a
-// function-local `type function struct{...}` is a name nobody thinks twice
-// about, and the .d.ts it breaks is the whole app's.
-//
-// The list is what this repo's own tsc rejects as an interface name or a type
-// alias name, one name per program - the two categories below are its two error
-// messages, TS1xxx at the parse and TS2427/TS2457 at the check.
+// tsReserved holds every name a generated declaration cannot carry: what this
+// repo's own tsc rejects as an interface or type alias name, in its two error
+// categories, TS1xxx at the parse and TS2427/TS2457 at the check. Array and
+// Record are the two generics this file writes: an interface under either
+// name shadows them in the module and every use becomes "type is not
+// generic", quietly, since apps typecheck with skipLibCheck.
 var tsReserved = []string{
 	"Array", "Record",
 	"as", "await", "break", "case", "catch", "class", "const", "continue",
