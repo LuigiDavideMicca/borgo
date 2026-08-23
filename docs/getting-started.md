@@ -8,7 +8,7 @@ Build something small and complete: a page that reads data from a Go API, a form
 bunx create-borgo@latest notes
 ```
 
-In a terminal it asks six questions: template (pick `minimal`, the one this guide builds on), Tailwind (say no; [styling](dev-experience.md#styling) covers it later), a linter (`none` is fine here), then `git init`, the Docker files and the VS Code settings — the last three default to yes, so pressing enter three times is the right answer. Every question has a flag, and `--yes` skips all of them: `bunx create-borgo@latest notes -t minimal --yes` produces exactly what this guide assumes. Then:
+In a terminal it asks seven questions: template (pick `minimal`, the one this guide builds on), Tailwind (say no; [styling](dev-experience.md#styling) covers it later), a linter (`none` is fine here), then `git init`, the Docker files and the VS Code settings — those three default to yes, so pressing enter is the right answer. The last question, "install dependencies and start the dev server", also defaults to yes in a terminal: say yes and the scaffolder runs the four commands below for you and hands over to the dev server. Say no and it prints them as next steps instead:
 
 ```bash
 cd notes
@@ -17,7 +17,9 @@ go mod tidy
 bun run dev
 ```
 
-Open http://localhost:3000. You should see the borgo logo and a line of text that came from Go.
+Every question has a flag, and `--yes` takes every default without asking: `bunx create-borgo@latest notes -t minimal --yes` produces exactly what this guide assumes — and, in a terminal, installs and starts too. Outside a terminal (CI, piped stdin) the install-and-start default flips to no, so a scaffold in a pipeline exits on its own.
+
+Either way, open http://localhost:3000. You should see the borgo logo and a line of text that came from Go.
 
 ## What you just got
 
@@ -41,7 +43,8 @@ And the rest, which the scaffolder's answers control rather than the template:
 
 ```
 README.md             the template's own readme, trimmed to the answers you gave
-public/logo.svg       served as-is from /logo.svg - public/ is static files
+public/logo.svg       served as-is from /logo.svg - public/ is static files, and the
+                      only place for a file the browser fetches (see "Ship it")
 Dockerfile            multi-stage build, small bun runtime      \  --no-docker
 docker-compose.yml    the one-container deployment              |  drops
 .dockerignore         what the image build does not need        /  these three
@@ -156,10 +159,10 @@ The `?? []` is not defensive padding. A nil Go slice marshals to `null`, not `[]
 Now try to break it on purpose. Change the route string to `"GET /api/note"`:
 
 ```
-error TS2345: Argument of type '"GET /api/note"' is not assignable to parameter of type '"GET /api/notes"'.
+error TS2345: Argument of type '"GET /api/note"' is not assignable to parameter of type 'Registered'.
 ```
 
-The typo is a compile error, not a 404 you find in production. Change it back, then try `notes.map((note) => note.tilte)` — same story. This is the point of the bridge: the Go handler and the React page cannot disagree without someone failing to build.
+`Registered` is the union of every route borgogen wrote into `ApiRoutes`; a second error on the same line, `Property 'notes' does not exist on type 'Greeting | NoteList'`, is the response type falling back to the union of all of them. The typo is a compile error, not a 404 you find in production. Change it back, then try `notes.map((note) => note.tilte)` — same story. This is the point of the bridge: the Go handler and the React page cannot disagree without someone failing to build.
 
 ## Write data back with a form
 
@@ -284,6 +287,8 @@ bun run start
 ```
 
 `build` compiles the client assets (one lazy chunk per route, precompressed), generates the types, and produces a single static Go binary in `dist/`. `start` runs both processes from that output. The scaffold also includes a `Dockerfile` and a `docker-compose.yml`, so `docker compose up -d` is a deployment.
+
+One thing the build refuses — `bun run dev` runs the same build at boot, so you would have met it there first: a file referenced beside its own source. `import pic from "./pic.svg"` next to a page, or `new URL("./pic.svg", import.meta.url)`, makes the bundler emit a url no route answers and makes the server render this machine's path into the HTML — so the build stops with `1 reference to a file beside its own source` and leaves the tree marked unfinished, to be rebuilt rather than served. Files the browser fetches go in `public/` and are named absolutely: `/pic.svg`.
 
 Read [security](security.md#before-you-go-live) before a real one — it ends with a checklist — and [deploy](deploy.md) for the layouts and the environment reference.
 

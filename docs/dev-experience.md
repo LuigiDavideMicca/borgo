@@ -17,11 +17,15 @@ Two details you would otherwise discover the hard way. Identical content does no
 
 ## Nothing outlives the session
 
-Every process borgo starts watches the one that started it and exits with it. Kill the terminal, kill the task runner, kill `borgo dev` itself with a signal that runs no handlers — the front server and the Go API still go away, releasing their ports and the API binary.
+Every process borgo starts watches the one that started it and exits with it. Kill the task runner (`bun run dev`, `bunx`), kill `borgo dev` itself with a signal that runs no handlers — the front server and the Go API still go away, releasing their ports and the API binary. Measured on Windows with `taskkill /F`, no `/T`: both ports free and `.borgo/api.exe` released within three seconds.
+
+How: the Go API opens a handle on its parent on Windows and waits on it in 250 ms ticks; on unix it polls `getppid` every 250 ms, and a parent that exited but was never reaped is read from `/proc` as the corpse it is. The front server probes its parent once *before* binding the port — a parent already gone gets no server at all — and polls it every 2 s after that; `borgo dev` watches its own parent on the same 2 s poll. Uncertainty answers alive: a parent that cannot be opened (another user, an EDR) is a live one out of reach, never a dead one, because the wrong answer there shuts down a healthy session.
+
+One launch shape is not covered, and it is the terminal itself — *force-killed as a process*, not closed. `bun run dev` and `bunx borgo dev` both put a wrapper between your shell and `borgo dev`, and that wrapper is the parent borgo watches. Windows does not take children down with a parent, so a `taskkill /F` on the shell leaves the wrapper alive, the wrapper leaves the session alive, and nothing notices: measured, every process and both ports stayed up. Closing the terminal *window* is different — Windows ends every process attached to that console — but that was not measured here. If you need the session gone, kill the wrapper or `borgo dev`, not the shell.
 
 This is not a nicety. Before it existed, a force-killed session left an API process holding `.borgo/api.exe`, and the next `borgo dev` could not swap the binary in; you had to find the orphan in the task manager. If you see that symptom now, `borgo doctor` names the process for you.
 
-One gap is known and left open on purpose. On Windows, `borgo dev` watches its own launcher — the shell you typed into, which borgo did not start — by pid alone, and Windows reuses pids. If that shell dies and the number is handed to another process within one poll, the watch keeps waiting on a stranger. Measured, a freed pid comes back after 740 spawns at the soonest while one poll window sees about 180, so it takes a machine spawning several hundred processes a second to reach. Closing it means reading the launcher's creation time through a native call, and a wrong answer there kills a healthy dev session — the opposite direction, and the more expensive one. Until the margin is shown to shrink in practice, the gap stays. Every process borgo itself starts is unaffected: those sit in a job object that takes them down with their parent.
+One gap is known and left open on purpose. On Windows, `borgo dev` watches its own launcher — the wrapper or shell above it, which borgo did not start — by pid alone, and Windows reuses pids. If that shell dies and the number is handed to another process within one poll, the watch keeps waiting on a stranger. Measured, a freed pid comes back after 740 spawns at the soonest while one poll window sees about 180, so it takes a machine spawning several hundred processes a second to reach. Closing it means reading the launcher's creation time through a native call, and a wrong answer there kills a healthy dev session — the opposite direction, and the more expensive one. Until the margin is shown to shrink in practice, the gap stays. Every process borgo itself starts is unaffected: those sit in a job object that takes them down with their parent.
 
 ## Styling
 
@@ -80,12 +84,13 @@ If the *build* is what broke, the fallback server keeps `/__borgo/dev` alive so 
 
 `bunx borgo doctor` diagnoses the environment — the class of problem that is never in your code:
 
-Fourteen checks, in three groups. A check that has nothing to say about your app — no `package.json`, no `api/`, no playwright dependency, a filesystem that will not report free space — is skipped rather than reported as passing.
+Fifteen checks, in three groups. A check that has nothing to say about your app — no `package.json`, no `api/`, no playwright dependency, a filesystem that will not report free space — is skipped rather than reported as passing.
 
 | Check | Group | What it catches |
 | --- | --- | --- |
-| bun | toolchain | not on `PATH`, older than the required minimum, or an npm-installed shim shadowing the real one |
+| bun | toolchain | not on `PATH`, older than the required minimum (borgo's own, or a higher floor your `package.json` declares in `engines.bun`), or an npm-installed shim shadowing the real one |
 | bun on PATH | toolchain | a `.cmd`/`.bat`/`.ps1` shim resolving ahead of a real `bun.exe` that is also installed — *informational* |
+| engines.bun | toolchain | an `engines.bun` range borgo cannot read as a minimum, so the bun check fell back to borgo's own floor — *informational*, and only shown when that happens |
 | go | toolchain | missing, or older than your `go.mod` requires |
 | node | toolchain | present or not, and its version — borgo needs none, so this is purely *informational* |
 | docker | toolchain | not installed, or installed with an unreachable daemon — *informational* |
