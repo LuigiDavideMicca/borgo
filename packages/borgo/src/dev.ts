@@ -7,16 +7,9 @@ import { encodeChanged, goBinName, runBorgogen, UNKNOWN_CHANGE } from "./util";
 
 const serverEntry = fileURLToPath(new URL("serve-entry.ts", import.meta.url));
 
-/**
- * Batches file changes per side behind one debounce window.
- *
- * The window used to key only on the side and carry only the last file that
- * landed in it, so two saves 20 ms apart - a "Save All" over index.tsx and
- * about.tsx - rebuilt once and told the browser about one of them. The client
- * ignores an update naming a page other than the one on screen, so if the
- * survivor was the other file the edit you were looking at applied nothing and
- * logged nothing. Every file in the window rides the rebuild it caused.
- */
+// every file in the window rides the rebuild: the client ignores an update
+// naming a page other than the one on screen, so the last file alone would
+// silently drop a "Save All"
 export function createChangeBatcher(
   delayMs: number,
   flush: (side: string, files: string[]) => void,
@@ -40,11 +33,9 @@ export function createChangeBatcher(
   };
 }
 
-// content dedup for the watcher: windows delivers a straggler event for a
-// write that was already rebuilt, and identical content must not trigger a
-// second restart and reload. `forget` exists because a failed rebuild makes
-// the dedup a trap - the file on disk is unchanged, so the save the user is
-// told to make would be swallowed.
+// windows delivers a straggler event for a write already rebuilt. `forget`:
+// after a failed rebuild the "save again" the user is told to make writes
+// identical bytes, and the dedup would swallow it
 export function createContentDedup(read: (file: string) => Uint8Array | Buffer) {
   const lastSeen = new Map<string, string>();
   return {
@@ -54,8 +45,8 @@ export function createContentDedup(read: (file: string) => Uint8Array | Buffer) 
         if (lastSeen.get(file) === hash) return true;
         lastSeen.set(file, hash);
       } catch {
-        // unreadable usually means deleted: forget the hash, or recreating the
-        // file with identical content (git stash pop) would never rebuild
+        // deleted: forget, or recreating it with identical content (git stash
+        // pop) would never rebuild
         lastSeen.delete(file);
       }
       return false;
@@ -65,38 +56,17 @@ export function createContentDedup(read: (file: string) => Uint8Array | Buffer) 
     },
   };
 }
-// node_modules and .git are ignored at any depth (workspaces nest them);
-// .borgo, public and dist are our own output dirs, ignored only at the root
-// so an app dir that happens to share a name stays watched
+// output dirs are ignored only at the root: an app dir sharing a name stays watched
 const ignored = /(^|[\\/])(node_modules|\.git)([\\/]|$)|^(\.borgo|public|dist)([\\/]|$)|borgo\.gen\.go$/;
 
 export async function dev() {
-  // die with the launcher: a force-killed parent (terminal, task runner, test
-  // harness) delivers no signal on windows, and an orphaned watcher would
-  // keep the front server and the api alive on their ports forever.
-  //
-  // Unlike the children this file spawns, nothing else saves this process: the
-  // job object bun puts a spawned child in only reaches processes bun started,
-  // and the launcher here is a shell. Measured on windows - taskkill /F on the
-  // cmd.exe that started a bun process left the bun process ALIVE, where the
-  // same kill on a bun parent took its bun child down with it. This poll is the
-  // only defence on that path, not defence in depth.
-  //
-  // The watched pid is process.ppid, so it is the direct parent by construction
-  // - which on posix means the reparent branch answers here, and no reused pid
-  // can forge it.
-  //
-  // Windows never reparents, so that branch never fires there and the bare probe
-  // is the whole answer. This is the ONE watch in borgo where a reused pid could
-  // read a stranger as the launcher still running: everywhere else the pid is
-  // either a posix direct parent or a process inside bun's job object. It stays
-  // open on purpose. The launcher is a shell borgo did not start, so there is no
-  // identity to hand down; reading one would mean opening the parent through
-  // bun:ffi, and a wrong comparison there answers "gone" and kills a healthy dev
-  // session. Measured, the window does not close by hand anyway: the probe would
-  // have to land in the 2 s gap between the launcher's death and the next poll,
-  // and a freed pid came back after 740 spawns at the soonest (median 1540, 8
-  // trials) while this machine creates at most ~180 processes in 2 s.
+  // the launcher is a shell bun did not start, so bun's job object does not
+  // reach this process: a force-killed terminal on windows delivers no signal
+  // and this poll is the only thing that frees both ports. Windows never
+  // reparents, so there a reused pid could read a stranger as the launcher:
+  // left open on purpose - a pid came back after 740 spawns at the soonest
+  // against ~180 processes created in the 2 s poll gap, and a wrong identity
+  // check would kill a healthy session instead
   watchParent(process.ppid, () => process.exit(0));
 
   const goBin = `.borgo/${goBinName()}`;
@@ -107,9 +77,7 @@ export async function dev() {
   let frontProc: Subprocess | null = null;
   let reload = false;
 
-  // the front server owns the dev websocket; these endpoints let this
-  // process trigger a css hot swap or a full reload in connected browsers.
-  // it may be mid-restart, so keep knocking for a while
+  // the front server may be mid-restart: keep knocking
   const notifyFront = async (path: string): Promise<Response | null> => {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
@@ -124,9 +92,7 @@ export async function dev() {
     return null;
   };
 
-  // wait until the api actually accepts requests: a freshly built binary can
-  // take a while to start listening (antivirus scans, slow disks), and
-  // reloading the browser before that lands it on a dead backend
+  // a reload before the api listens lands the browser on a dead backend
   const apiReady = async (proc: Subprocess) => {
     const deadline = Date.now() + 30_000;
     let exited = false;
@@ -141,12 +107,10 @@ export async function dev() {
     return false;
   };
 
-  // windows can deliver a straggler event for a write that was already
-  // rebuilt; identical content must not trigger a second restart and reload
   const dedup = createContentDedup(readFileSync);
 
-  // build to a scratch name while the old api keeps serving, swap only once
-  // the binary is ready; windows can hold the old file briefly after exit
+  // build to a scratch name while the old api keeps serving; windows can hold
+  // the old file briefly after exit
   let liveGoHash = "";
   const startGo = async () => {
     await runBorgogen();
@@ -158,14 +122,12 @@ export async function dev() {
       console.error(`  ${c.red(g.err)} go build failed, the previous api keeps serving...`);
       return;
     }
-    // dedup on the build output: a torn read at event time poisons the
-    // source-hash dedup and queues a second identical build - go builds are
-    // deterministic, so an unchanged binary means no swap and no reload
+    // a torn read at event time poisons the source-hash dedup; go builds are
+    // deterministic, so the binary is the reliable dedup
     const nextHash = String(Bun.hash(readFileSync(goNext)));
     if (nextHash === liveGoHash && goProc && goProc.exitCode === null) return;
     liveGoHash = nextHash;
-    // dropping the reference before killing marks this exit as ours, so the
-    // watchdog below stays quiet about a restart we asked for
+    // dropping the reference before the kill marks this exit as ours
     const previous = goProc;
     goProc = null;
     previous?.kill();
@@ -176,12 +138,8 @@ export async function dev() {
         break;
       } catch (error) {
         if (attempt >= 20) {
-          // our own api was already killed to release its lock, so if the
-          // rename still fails a stale process from a force-killed session
-          // holds the binary — and the api is down until the user acts.
-          // the advice is "save again", so the content dedup has to let that
-          // save through: a plain ctrl+s writes identical bytes, and the
-          // watcher would swallow it and leave the api down in silence
+          // our api is already dead: a stale process holds the binary. The
+          // dedup must let the "save again" through, it writes identical bytes
           dedup.forget();
           liveGoHash = "";
           console.error(
@@ -199,15 +157,12 @@ export async function dev() {
       env: {
         ...process.env,
         ...(reload ? { BORGO_RELOAD: "1" } : {}),
-        // the api watches this pid and exits when the watcher dies, so a
-        // force-killed session cannot leave a stale process on the binary
+        // the api watches this pid: a force-killed session leaves no stale process
         BORGO_PARENT_PID: String(process.pid),
       },
     });
     goProc = proc;
-    // an api that dies on its own - a panic, a failed bind, someone killing it
-    // - is nobody's rebuild: without this the session keeps serving 502s and
-    // says nothing until the next .go edit happens to restart it
+    // without this an api that dies on its own serves 502s in silence
     proc.exited.then((code) => {
       if (goProc !== proc) return;
       goProc = null;
@@ -220,24 +175,17 @@ export async function dev() {
     if (reload && ready) await notifyFront("reload");
   };
 
-  // a code change restarts the front server for a clean module graph; the
-  // browser keeps its state and hot-applies the change when it reconnects
+  // a restart for a clean module graph; the browser hot-applies on reconnect
   const startFront = async (changed?: string[]) => {
     frontProc?.kill();
     await frontProc?.exited;
-    // process.execPath, not "bun": a PATH lookup can resolve to a shim (npm
-    // installs one) whose kill leaves the real server orphaned on the port
+    // not "bun": killing a PATH shim leaves the real server on the port
     const proc = Bun.spawn([process.execPath, serverEntry], {
       stdout: "inherit",
       stderr: "inherit",
       env: {
-        // bun caps concurrent outbound fetches at 256, and every proxied /api
-        // request - an event stream included - holds one for its whole life.
-        // For a client that is a sensible default; for a proxy it is a ceiling
-        // on how many streams the app can serve at once, hit silently. It has
-        // to be in the environment at spawn: bun reads it when the process
-        // starts, so assigning process.env later changes nothing. Kept
-        // overridable, because the app may want a real limit.
+        // bun's fetch pool (default 256) is read at boot, and a proxied event
+        // stream holds a slot for its whole life; overridable on purpose
         BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
         ...process.env,
         BORGO_DEV: "1",
@@ -247,9 +195,7 @@ export async function dev() {
       },
     });
     frontProc = proc;
-    // hold the rebuild queue until the new server answers, so the fs noise
-    // of its own boot lands inside the busy window instead of triggering a
-    // second restart and a spurious reload
+    // the fs noise of the boot must land inside the busy window
     const deadline = Date.now() + 30_000;
     let exited = false;
     proc.exited.then(() => (exited = true));
@@ -262,8 +208,7 @@ export async function dev() {
     }
   };
 
-  // a css edit normally hot-swaps in place; if the front server is parked on
-  // a build error (fallback marks its responses), restart it instead
+  // a front server parked on a build error cannot hot-swap: restart it
   const swapCss = async (changed: string[]) => {
     const res = await notifyFront("css");
     if (res?.headers.get("x-borgo-fallback")) await startFront(changed);
@@ -276,9 +221,6 @@ export async function dev() {
   let queue = Promise.resolve();
   let busy = 0;
 
-  // every side's rebuild, given the whole set of files that landed in its
-  // window. the set is what the browser is told about: one file per rebuild
-  // was how a "Save All" silently dropped the edit to the page on screen.
   const rebuild: Record<string, (files: string[]) => Promise<void>> = {
     api: () => startGo(),
     css: (files) => swapCss(files),
@@ -304,8 +246,7 @@ export async function dev() {
   watch(".", { recursive: true }, (_, file) => {
     if (file && ignored.test(file)) return;
     if (!file) {
-      // the watch buffer overflowed and events were lost; unless it was our
-      // own rebuild writing, restart the front and force a full reload
+      // events lost: unless it was our own rebuild writing, force a full reload
       if (!busy) schedule(UNKNOWN_CHANGE, "app");
       return;
     }
@@ -322,8 +263,7 @@ export async function dev() {
 
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
-  // also fires on crashes (uncaught exceptions), not just ctrl-c: the api
-  // and front server must never outlive the watcher
+  // also fires on uncaught exceptions
   process.on("exit", () => {
     goProc?.kill();
     frontProc?.kill();

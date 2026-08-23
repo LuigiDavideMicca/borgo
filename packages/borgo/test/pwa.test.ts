@@ -33,14 +33,8 @@ describe("service worker", () => {
     expect(sw).toContain('const CACHE = "app-" + BUILD;');
   });
 
-  // THE bug this file exists for. A browser reinstalls a service worker only
-  // when the worker's own bytes change. A body that is byte-identical on every
-  // deploy means install - the only thing that ever writes to the cache - runs
-  // once in the app's life, activate never prunes, and every later deploy's
-  // /assets/client.js is shadowed by the first deploy's until the user clears
-  // site data. client.js carries the route table and the chunk hashes, and
-  // build.ts deletes yesterday's chunks from disk, so those lazy imports 404
-  // and hydration is broken permanently.
+  // a byte-identical worker is never reinstalled: install runs once in the
+  // app's life and every later deploy's client.js is shadowed by the first
   test("its bytes change with the build stamp", () => {
     expect(serviceWorker("aaa")).not.toBe(serviceWorker("bbb"));
     expect(serviceWorker("aaa")).toBe(serviceWorker("aaa"));
@@ -62,10 +56,7 @@ describe("service worker", () => {
     expect(sw).toContain('key.startsWith("app-") && key !== CACHE');
   });
 
-  // caches.match() with no cacheName searches every cache in CacheStorage, in
-  // creation order, oldest first: a cache activate has not pruned yet answers
-  // for the deploy that owns it, which is the same stale-asset failure again
-  // by a different route
+  // caches.match() with no cacheName searches all of CacheStorage oldest first
   test("reads only from this build's cache, never all of CacheStorage", () => {
     const code = sw.replace(/^\s*\/\/.*$/gm, "");
     expect(code).not.toMatch(/\bcaches\.match\(/);

@@ -1,26 +1,9 @@
-// THE TWO SUPERVISING PROCESSES, WHOSE PARENT WATCH WAS WRONG IN BOTH
-// DIRECTIONS AT ONCE.
-//
-// dev.ts (the watcher that owns the go api and the front server) and cli.ts
-// (the re-exec'd half of `borgo start`, which IS the production server) both
-// watched their parent with `try { process.kill(pid, 0) } catch { exit(0) }`.
-// 4bf68da took that line out of serve-entry.ts and left both of these live.
-//
-//   DIRECTION A - a corpse reads as ALIVE. A process that has exited but whose
-//   status nobody collected keeps its pid and keeps accepting signals. Measured
-//   on wsl2 with a real fork: /proc state Z, kill(pid, 0) = OK. The watcher then
-//   outlives the session that started it and holds both ports and the go binary.
-//
-//   DIRECTION B - a live parent out of reach reads as DEAD. Measured with bun
-//   1.3.14 on windows: process.kill(4, 0) - the System process, alive and
-//   unopenable - throws EPERM, and a bare `catch` cannot tell EPERM from ESRCH.
-//   On cli.ts that direction exits the PRODUCTION server with code 0, the
-//   supervisor exits 0 with it, and `Restart=on-failure` in the systemd unit
-//   borgo writes does not restart a clean exit.
-//
-// The /proc fixtures are transcribed from real processes on wsl2, including the
-// shape that defeats a naive parser: comm is field 2, in parentheses and
-// UNESCAPED, so a process literally named "my prog (x)" puts a ")" inside it.
+// dev.ts and cli.ts watch their parent. A bare `process.kill(pid, 0)` is wrong
+// both ways: an unreaped zombie reads as alive (wsl2: state Z, kill 0 = OK) and
+// a live parent out of reach reads as dead (windows, bun 1.3.14: pid 4 throws
+// EPERM) - on cli.ts the latter exits the production server with 0, which
+// `Restart=on-failure` does not restart. The /proc fixtures are real captures,
+// including the comm "my prog (x)" that defeats a naive parser.
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -62,12 +45,9 @@ async function withDeadline<T>(work: Promise<T>, ms: number, what: string): Prom
   }
 }
 
-// every child this file starts is registered here, killed at the end, and then
-// VERIFIED gone - a suite that leaves processes behind is the defect it tests
+// every child is killed at the end and VERIFIED gone
 const started: Array<{ pid: number; proc: Bun.Subprocess }> = [];
-// grandchildren: this process has no Subprocess for them, only a pid, so they
-// are killed by pid. Without this list a mutation that stops the watch leaves
-// them running forever - measured, it left two behind the first time.
+// grandchildren: only a pid, killed by pid
 const strayPids: number[] = [];
 const tempDirs: string[] = [];
 
@@ -105,15 +85,9 @@ afterAll(async () => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// THE PIN. The reading used to live twice, in dev.ts and serve-entry.ts, held
-// equal by a test because importing serve-entry from cli.ts drags in ./server,
-// which resolves react from the app at MODULE SCOPE and breaks a bare `borgo`
-// outside a project. It now has one home, parent-watch.ts, which imports
-// node:fs and nothing else - so it is safe from cli.ts and a second copy has no
-// reason to exist. Held by source: a copy that came back would pass every
-// behavioural test above while diverging in silence.
-// ---------------------------------------------------------------------------
+// held by source: a second copy of the reading would pass every behavioural
+// test above while diverging in silence. parent-watch.ts imports node:fs and
+// nothing else, so cli.ts can load it without dragging in ./server
 describe("the reading has one home", () => {
   const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const defines = /\bfunction (?:readParent|isCorpse|parentGone|watchParent)\(/g;
@@ -184,10 +158,8 @@ describe("parentGone: the two directions, decided one by one", () => {
     expect(parentGone(7551, reading({ killError: null, stat: null }))).toBe(false);
   });
 
-  // measured with a three-generation fork on wsl2: the grandchild's ppid had
-  // ALREADY moved off a parent still reading Z and still accepting kill 0, and
-  // it moved to a subreaper (13602), not to pid 1 - so the test is "changed",
-  // never "is 1"
+  // measured on wsl2: the grandchild moved to a subreaper (13602), not to pid
+  // 1 - so the test is "changed", never "is 1"
   test("a reparented child knows its parent left, with the probe still saying alive", () => {
     expect(parentGone(7683, reading({ direct: true, ppid: 1, killError: null, stat: LIVE }))).toBe(true);
     expect(parentGone(7683, reading({ direct: true, ppid: 13602, killError: null, stat: LIVE }))).toBe(true);
@@ -256,10 +228,8 @@ describe("readParent and watchParent, on real pids", () => {
     expect(parentGone(unreachable, r)).toBe(false);
   });
 
-  // measured on windows with bun 1.3.14: a child that has exited reads ESRCH
-  // even while this process still holds its Subprocess handle, so windows has
-  // no analogue of the /proc corpse for THIS probe (OpenProcess alone would
-  // have one - watchdog_windows.go carries that case on the go side)
+  // windows, bun 1.3.14: an exited child reads ESRCH even while its Subprocess
+  // handle is still held - no /proc-corpse analogue for THIS probe
   test("an exited child whose handle is still held is gone, not alive", async () => {
     const proc = track(Bun.spawn([process.execPath, "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" }));
     const pid = proc.pid;
@@ -321,13 +291,9 @@ function scratch(): string {
 }
 
 describe("site 1 - the dev watcher, in the shape dev() uses", () => {
-  // dev() calls watchParent(process.ppid, ...). The launcher of `borgo dev` is
-  // a shell or a task runner, NOT bun - and that distinction is the whole point
-  // on windows: measured, taskkill /F on a cmd.exe that started a bun process
-  // left the bun process ALIVE, where the same kill on a BUN parent took its
-  // bun child down through the job object. So the middle process here is a
-  // shell on windows: if it were bun, the job object would do the killing and
-  // this test would pass while proving nothing about the watch.
+  // the launcher of `borgo dev` is a shell, NOT bun: taskkill /F on a cmd.exe
+  // left its bun child alive, where a bun parent takes its child down through
+  // the job object. A bun middle process here would prove nothing.
   test("a watcher whose launcher is force-killed exits by itself", async () => {
     const dir = scratch();
     const watcher = join(dir, "watcher.ts");
@@ -374,10 +340,8 @@ describe("site 1 - the dev watcher, in the shape dev() uses", () => {
 });
 
 describe("site 2 - the re-exec'd borgo start, in the shape cli.ts uses", () => {
-  // handed an already-dead supervisor rather than one killed mid-test, on
-  // purpose: on windows bun puts a Bun.spawn'd child in a job object that takes
-  // it down with its parent (measured), so killing a live bun supervisor would
-  // pass through the job object and prove nothing about this poll.
+  // an already-dead supervisor, on purpose: killing a live bun supervisor on
+  // windows would pass through the job object and prove nothing about the poll
   test("a server handed a dead BORGO_SUPERVISOR_PID exits by itself, code 0", async () => {
     const dir = scratch();
     const server = join(dir, "server.ts");
@@ -432,12 +396,8 @@ describe("site 2 - the re-exec'd borgo start, in the shape cli.ts uses", () => {
   }, 20_000);
 });
 
-// ---------------------------------------------------------------------------
-// THE WIRING. Neither entry point can be imported and asserted: dev() spawns go
-// builds and binds ports, and cli.ts is a top-level switch that runs the whole
-// cli on import. The behaviour above is proven on real processes; that the two
-// sites still CALL it is held here, by source. Regression guards, not proof.
-// ---------------------------------------------------------------------------
+// neither entry point can be imported (dev() binds ports, cli.ts runs on
+// import): that the two sites still CALL the reading is held by source
 describe("the two sites are wired to the reading and not to a bare probe", () => {
   const dev = readFileSync(DEV_SRC, "utf8");
   const cli = readFileSync(CLI_SRC, "utf8");
@@ -451,9 +411,7 @@ describe("the two sites are wired to the reading and not to a bare probe", () =>
     expect(cli).toContain('Number(process.env.BORGO_SUPERVISOR_PID)');
   });
 
-  // the exact line 4bf68da named as still live in both files. comments are
-  // stripped first, or the paragraphs that quote the old probe in order to
-  // explain it would keep this green forever after somebody put it back.
+  // comments stripped first, or a paragraph quoting the old probe keeps this green
   const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
   test("neither file still reads a parent with a bare kill probe", () => {
@@ -475,21 +433,10 @@ describe("the two sites are wired to the reading and not to a bare probe", () =>
   });
 });
 
-// ---------------------------------------------------------------------------
-// WHY A REUSED PID CANNOT REACH ANY OF THIS - held, not assumed.
-//
-// A pid is not an identity: nothing in a bare `int` separates "the process that
-// spawned me" from "whatever the system later handed that number to". The one
-// answer no reused number can forge is reparenting, and it is available only
-// while `direct` is true - which holds because EVERY pid borgo hands out is the
-// spawner's OWN. Four sites do it: dev.ts spawns the go api and the front
-// server, cli.ts re-execs itself and spawns the go api.
-//
-// Break that - hand a supervisor's pid that is not the parent, or interpose a
-// shell between spawner and child - and `direct` is false, the bare probe is the
-// whole answer, and a reused pid reads as the parent still running on every
-// platform at once. Nothing else in the tree would fail; this does.
-// ---------------------------------------------------------------------------
+// a pid is not an identity: reparenting is the one answer a reused number
+// cannot forge, and it is available only while `direct` is true - which holds
+// because every pid borgo hands out is the spawner's own. Interpose a shell and
+// the bare probe becomes the whole answer on every platform.
 describe("every pid borgo hands a child is that child's direct parent", () => {
   const dev = readFileSync(DEV_SRC, "utf8");
   const cli = readFileSync(CLI_SRC, "utf8");
@@ -525,9 +472,7 @@ describe("every pid borgo hands a child is that child's direct parent", () => {
     }
   });
 
-  // the source pins above say what borgo intends; this says the operating
-  // system agrees, on real processes, in the shape dev.ts spawns the front
-  // server with
+  // the os agrees with the source pins, on a real process
   test("a child spawned the way dev.ts spawns one computes direct = true", async () => {
     const dir = scratch();
     const child = join(dir, "child.ts");
@@ -552,8 +497,7 @@ describe("every pid borgo hands a child is that child's direct parent", () => {
   }, 25_000);
 });
 
-// THE P3 ON THE REAL SITES: the mismatch line exists, comes after the probe,
-// and never prints on the parent.
+// the mismatch line exists, comes after the probe, and never prints on the parent
 describe("the parent mismatch line, where the watch starts", () => {
   const boot = async (parentPid: number, name?: string) => {
     const script = `

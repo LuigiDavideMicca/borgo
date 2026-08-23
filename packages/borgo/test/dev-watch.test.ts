@@ -7,12 +7,8 @@ import { propsPathEnabled } from "../src/runtime";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// The watcher debounces per side and used to carry only the last file that
-// landed in the window. Two saves 20 ms apart - a "Save All" over index.tsx and
-// about.tsx - rebuilt once and told the browser about one of them. The browser
-// ignores an update naming a page other than the one on screen, so if the
-// survivor was the other file the edit you were looking at applied nothing, and
-// logged nothing either. Same during a reconnect window.
+// the browser ignores an update naming a page other than the one on screen:
+// a window carrying only its last file drops a "Save All" in silence
 describe("createChangeBatcher", () => {
   test("every file in one window rides the rebuild it caused", async () => {
     const flushes: Array<[string, string[]]> = [];
@@ -74,10 +70,7 @@ describe("createChangeBatcher", () => {
   });
 });
 
-// Windows delivers a straggler event for a write that was already rebuilt, so
-// identical content is deduped. But when the binary swap loses to a stale
-// api.exe, dev prints "kill it ... and save again" - and a plain ctrl+s writes
-// identical bytes, which the dedup swallows. The advice has to be actionable.
+// "kill it and save again" must be actionable: that save writes identical bytes
 describe("createContentDedup", () => {
   const withFile = (fn: (file: string, write: (text: string) => void) => void) => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-dedup-"));
@@ -146,8 +139,6 @@ describe("createContentDedup", () => {
   });
 });
 
-// importing dev.ts must not have started a watcher or spawned anything: it is
-// imported here for two helpers, and the module top level has to stay inert
 test("importing dev.ts is inert", () => {
   expect(typeof createChangeBatcher).toBe("function");
   expect(propsPathEnabled()).toBe(true);

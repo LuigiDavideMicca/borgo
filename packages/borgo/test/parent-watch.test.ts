@@ -1,30 +1,9 @@
-// THE FRONT SERVER'S WATCH ON THE SESSION THAT STARTED IT, WRONG IN BOTH
-// DIRECTIONS AT ONCE.
-//
-// serve-entry watched its dev session with `try { process.kill(pid, 0) } catch
-// { exit(0) }`. That one line answers two opposite questions wrongly:
-//
-//   A corpse reads as ALIVE. A process that has exited but whose status nobody
-//   collected keeps its pid and keeps accepting signals - kill(pid, 0) succeeds
-//   on it. Measured on wsl2 with a real fork: state Z in /proc/<pid>/stat,
-//   kill 0 = OK, for as long as nobody reaps it. The front server then outlives
-//   the session that spawned it and holds the port forever, which is the orphan
-//   the watch exists to prevent.
-//
-//   A live parent out of reach reads as DEAD. Measured with bun 1.3.14 on
-//   windows: process.kill(4, 0) - the System process, alive and unopenable -
-//   throws EPERM, and that bare `catch` cannot tell EPERM from ESRCH. The watch
-//   then shuts the user's front server down in the middle of a session under a
-//   perfectly healthy supervisor. watchdog_windows.go names this exact case
-//   ("a supervisor running at a different elevation or as another user, or an
-//   EDR hooking the call") and answers ALIVE to it; watchdog_unix.go answers
-//   ALIVE to EPERM too. This file answered DEAD.
-//
-// The /proc fixtures below are transcribed from real processes on wsl2, not
-// invented: a live one and a corpse, each also in the shape that defeats a
-// naive parser - comm is field 2, in parentheses and UNESCAPED, so a process
-// whose name is literally "my prog (x)" (set with prctl(PR_SET_NAME)) puts a
-// ")" inside the field that the state character follows.
+// the front server's watch on its dev session. A bare `process.kill(pid, 0)`
+// is wrong both ways: an unreaped zombie reads as alive (wsl2: state Z, kill 0
+// = OK) and a live parent out of reach reads as dead (windows, bun 1.3.14: pid
+// 4 throws EPERM; both go watchdogs answer ALIVE to EPERM). The /proc fixtures
+// are real captures, including the comm "my prog (x)" (prctl(PR_SET_NAME))
+// that defeats a naive parser.
 import { afterAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { describeParentMismatch, isCorpse, parentGone, readParent } from "../src/parent-watch";
@@ -200,9 +179,8 @@ describe("readParent, against processes that really exist", () => {
     expect(parentGone(pid, r)).toBe(true);
     // and the reason is a probe that said so, not an empty reading
     expect(r.killError === null ? isCorpse(r.stat) : true).toBe(true);
-    // one bun spawn: 1 s under 16 burners, measured, past bun's 5 s default
-    // under a second set and other suites (red once in 12 at 5.25 s). The
-    // 10 s deadline above decides, so the budget sits above it.
+    // one bun spawn measured at 1 s under 16 burners, red once in 12 at bun's
+    // 5 s default: the budget sits above the 10 s deadline that decides
   }, 15_000);
 
   test("this process is alive about itself", () => {
@@ -211,12 +189,9 @@ describe("readParent, against processes that really exist", () => {
     expect(parentGone(process.pid, r)).toBe(false);
   });
 
-  // The second half of the name was never asserted, and it is the invariant the
-  // whole direct branch rests on: EVERY pid borgo hands a child is the spawner's
-  // own, so `direct` is true at every site and reparenting - which no reused pid
-  // can forge - is the answer. If Bun.spawn ever interposed a process (a shell,
-  // a shim), `direct` would be FALSE everywhere and the bare pid probe, which a
-  // reused number satisfies, would become borgo's only answer on every platform.
+  // the invariant the direct branch rests on: every pid borgo hands a child is
+  // the spawner's own. A process interposed by Bun.spawn would make `direct`
+  // false everywhere and the bare probe borgo's only answer
   test("a live child is alive, and its ppid is this process", async () => {
     const proc = track(
       Bun.spawn([process.execPath, "-e", "console.log(process.ppid); await Bun.sleep(30_000)"], {
@@ -285,16 +260,11 @@ describe("readParent, against processes that really exist", () => {
   });
 });
 
-// The watch only matters as the whole entry point behaves, spawned the way
-// dev.ts spawns it: `bun <serve-entry.ts>` with BORGO_PARENT_PID in the
-// environment. serve() fails here (no pages/ directory), which is the dev path
-// that BINDS THE FALLBACK PORT and keeps running - exactly the process that
-// must not be left holding it.
+// serve() fails here (no pages/), which is the dev path that BINDS THE
+// FALLBACK PORT and keeps running
 describe("serve-entry as a process, spawned the way dev.ts spawns it", () => {
-  // the probe runs before serve(): a parent already dead at boot must never
-  // see the port bound, not merely exit at the first 2 s tick. The port is
-  // knocked on for the whole life of the process; one accepted connection is
-  // the 2 s of port the probe exists to close.
+  // a parent already dead at boot must never see the port bound, not merely
+  // exit at the first 2 s tick: the port is knocked on for the whole life
   test("it exits by itself when the pid it was given is already dead, before ever binding the port", async () => {
     const corpse = track(Bun.spawn([process.execPath, "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" }));
     const deadPid = corpse.pid;

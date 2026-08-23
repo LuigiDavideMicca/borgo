@@ -150,16 +150,9 @@ describe("subscribe", () => {
     }
   });
 
-  // WHAT THE REDIAL DELIBERATELY DOES NOT TRY TO BE CLEVER ABOUT.
-  //
-  // A handshake the server refuses and a server that is not there arrive here
-  // as the same event: onclose, with nothing opened, and no status to read
-  // (measured on a live front server with a bun client - close code 1002 and an
-  // empty-handed reason; 1006 in a browser). The refusals a CALL can cause are settled
-  // before the dial instead, above; what is left is a close this code cannot
-  // classify, and the safe reading of an unclassifiable close is "the server
-  // will be back". A channel that guessed "permanent" and stopped would be a
-  // page that never reconnects after a deploy.
+  // a refused handshake and a server that is not there arrive as the same
+  // onclose (1002 with a bun client, 1006 in a browser, no status): the safe
+  // reading of an unclassifiable close is "the server will be back"
   test("a handshake that never opened keeps being retried, so a server that comes back is picked up", () => {
     const dial = withFakeTimers();
     try {
@@ -184,12 +177,9 @@ describe("subscribe", () => {
     }
   });
 
-  // THE ONE CLOSE THAT IS FINAL, AND ONLY THAT ONE. The relay answers an origin
-  // it does not accept by upgrading and closing with 4403 and a reason - the
-  // only refusal whose code reaches the client (a 400 or a 403 arrives as 1006
-  // with nothing). Direction, written before the test: a permanent refusal
-  // generates no further traffic; a non-permanent close never stops retrying.
-  // The test above is the guard for the second half and must stay as it is.
+  // 4403 is the only refusal whose code reaches the client (a 400 or a 403
+  // arrives as 1006 with nothing). A permanent refusal generates no further
+  // traffic; a non-permanent close never stops retrying.
   test("a 4403 close is final: no redial, the reason reaches the caller", () => {
     const dial = withFakeTimers();
     try {
@@ -272,16 +262,9 @@ describe("subscribe", () => {
     }
   });
 
-  // THE RELAY'S REFUSAL NEVER REACHES THE PERSON WHO CAUSED IT.
-  //
-  // /ws?topics=a,b packs topics into one query parameter, so the server splits
-  // on the comma and trims each part. A topic carrying a comma became two
-  // subscriptions; a padded one became a subscription under a name the
-  // onmessage filter (msg.topic === topic) never matches. Both open, both count,
-  // neither delivers. The server refuses the comma by name now - into its own
-  // log, where nobody developing a page is looking, while the browser is told
-  // only that the connection closed. The name is known at the call, so it is
-  // said at the call, before any socket is dialled.
+  // the relay's refusal reaches the browser as "connection closed": a comma
+  // became two subscriptions, a padded name one the onmessage filter never
+  // matches - both open, both count, neither delivers. Said at the call instead.
   describe("a topic the wire cannot carry is refused here, by name", () => {
     const refused: Array<[label: string, topic: string, says: string]> = [
       ["a single comma", "chat,news", '","'],
@@ -326,21 +309,9 @@ describe("subscribe", () => {
       lines.close();
     });
 
-    // AN OVER-LONG NAME USED TO BE DIALLED FOREVER.
-    //
-    // The relay answers 400 to it, and a refused handshake reaches the client
-    // as a closed connection with no status attached (measured against a live
-    // front server with a bun client: close code 1002 "Expected 101 status
-    // code", nothing else; a browser gets 1006 with an empty reason by spec -
-    // the same shape a server that is simply down produces). onclose cannot
-    // tell those apart, so it did
-    // what it does for a server that is down: redialled, backing off to thirty
-    // seconds, for as long as the tab stayed open. A refusal that will be
-    // identical every time, retried forever, for a cause nobody could read.
-    //
-    // It is settled before the first dial now, at the call, where the topic's
-    // length IS knowable. The cap is duplicated in index.ts to do it - and
-    // pinned to server.ts's by the coupling test below rather than trusted.
+    // an over-long name used to be dialled forever: the relay's 400 arrives as
+    // 1002/1006, the same shape as a server down. The cap is duplicated in
+    // index.ts and pinned to server.ts's by the coupling test below
     test("an over-long name never reaches the wire, and says why", () => {
       const long = "x".repeat(129);
       expect(() => subscribe(long, () => {})).toThrow("is 129 characters");

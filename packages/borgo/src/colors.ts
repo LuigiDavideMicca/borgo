@@ -13,9 +13,8 @@ export const c = {
   blue: wrap("38;5;109"),
 };
 
-// on windows, utf-8 marks survive only a real console in codepage 65001:
-// legacy consoles render mojibake, and piped output gets decoded with
-// powershell's legacy default. everywhere else utf-8 is safe
+// windows: utf-8 marks survive only a real console in codepage 65001; a pipe
+// is decoded by powershell 5.1 with the legacy oem codepage, so stay ascii there
 export const consoleUnicode: boolean = await (async () => {
   if (process.platform !== "win32") return true;
   if (process.stdout.isTTY !== true) return false;

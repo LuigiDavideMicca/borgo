@@ -235,11 +235,8 @@ describe("fillPattern", () => {
     expect(fillPattern("/posts/:slug", { slug: "a.b" })).toBe("/posts/a.b");
   });
 
-  // fillPattern percent-encodes and outputPath decodes each segment straight
-  // back to build the disk path, so every one of these is a url a static host
-  // serves happily and a directory windows refuses to create. Left unchecked,
-  // an app whose prerenderPaths return timestamps exported on linux and died
-  // with EINVAL on windows - and only on windows.
+  // every one of these is a url a static host serves and a directory windows
+  // refuses to create: timestamps in prerenderPaths died with EINVAL there only
   test("params windows cannot make a directory out of are rejected up front", () => {
     const rejected: Array<[string, string]> = [
       ["2024-01-01T00:00:00Z", "timestamps carry a colon"],
@@ -308,18 +305,8 @@ describe("outputPath", () => {
   });
 });
 
-// THE PROOF IS ON THE BYTES OF THE EXPORTED FILE, not on what a function
-// returned. requestResidue above is asked of strings a test wrote; this asks
-// the real command, against a real app, and then reads what is on disk - which
-// is the only artifact a visitor ever sees.
-//
-// What was on disk before this: every document carried `nonce="<32 hex>"` on
-// its props script, a different one per page and per run, referring to a
-// Content-Security-Policy header that a static host does not send and cannot
-// reproduce. And a page with <CsrfField /> carried a hidden __borgo_csrf value
-// that was the same for every visitor forever, checked against a borgo_csrf
-// cookie that nothing on a static site sets. Both are the same mistake: a value
-// that meant something to ONE request, published as a file.
+// asked of the bytes on disk, the only artifact a visitor ever sees: a nonce
+// for a header no static host sends, a csrf token checked against no cookie
 describe("an exported page carries nothing per-request", () => {
   const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
   const CLI = join(import.meta.dir, "../src/cli.ts");
@@ -404,23 +391,12 @@ describe("an exported page carries nothing per-request", () => {
   );
 });
 
-// a static host has no ?__borgo=props endpoint: it answers that url with the
-// page's own html document and a 200, so res.ok passes, res.json() throws, and
-// the navigation ends in the full reload the catch does anyway - having paid
-// for a second whole document per link, and one more for every link a pointer
-// crossed, since prefetch caches that doomed promise on hover. The flag is set
-// before the bundle is built and reaches the runtime through the define map.
-// A PARTIAL EXPORT IS NOT A SITE.
+// a static host answers ?__borgo=props with the html document and a 200, so
+// res.json() throws and every link pays a second document for a full reload.
 //
-// `borgo export` deleted dist/site and then rendered into it, counting the
-// pages that failed. So a run that died on page four published the three it had
-// managed - with a valid index.html at the top, the assets beside it, and a
-// hole where the rest of the site used to be. Exit was 1, which a CI step that
-// uploads dist/ after the build does not necessarily read, and nothing about
-// the published tree says it is incomplete.
-//
-// Run as a child process against a real app: the whole point is the order in
-// which the real command touches the real directory.
+// A PARTIAL EXPORT IS NOT A SITE: a run that dies on page four must not
+// publish three pages with a valid index.html on top. Run as a child process,
+// the point is the order in which the real command touches the real directory.
 describe("a partial export publishes nothing", () => {
   const APP_HOST = join(import.meta.dir, "../../../examples/tasks");
   const CLI = join(import.meta.dir, "../src/cli.ts");
@@ -534,18 +510,9 @@ describe("static export flag", () => {
   });
 });
 
-// EVERY EXPORT LEFT 21 MB BEHIND.
-//
-// The scratch api binary was built into .borgo/export-api.exe, spawned, killed
-// - and removed by nobody. Measured on examples/tasks: export-api.exe,
-// 21,217,280 bytes, dated two weeks before the run that found it. Reproduced in
-// a scratch copy of that app on both paths, which is the whole point: a failed
-// export (exit 1, one page refused) and a whole one (exit 0, 7 pages published)
-// each left 21,276,160 bytes in .borgo/.
-//
-// So the removal belongs in the finally beside the kill, not at the end of the
-// happy path - and the name has to exist before `go build` runs, because
-// `go build -o` writes that file whether or not it finishes.
+// the scratch api binary (21 MB) was built, spawned, killed and removed by
+// nobody, on the failed path and the whole one alike. The removal belongs in
+// the finally beside the kill, and the name must exist before `go build` runs
 describe("the scratch binary an export builds to work", () => {
   const scratch = () => mkdtempSync(join(tmpdir(), "borgo-scratchbin-"));
 
@@ -598,18 +565,10 @@ describe("the scratch binary an export builds to work", () => {
   });
 });
 
-// borgo start answers 404 to a dotfile in public/ on both of its paths since
-// the fix in compress.ts, and export.ts kept copying the same files into
-// dist/site with cpSync and counting them in the summary. Measured before
-// this, on a scratch app: .DS_Store, .gitkeep, .env, .borgo-doctor-1234,
-// assets/.hidden.js and .well-known/.DS_Store all landed in dist/site, and
-// "15 assets" counted every one of them. The 404 on one path masked the
-// exposure on the other: whoever probes with borgo start concludes it is
-// closed, then exports.
-//
-// The static host has its own idea about dotfiles - nginx serves them, some
-// hosts refuse them at deploy, some serve them - so the only place borgo can
-// keep them off the wire is here, by not copying.
+// borgo start answers 404 to a dotfile in public/ while export copied the same
+// files into dist/site: the 404 on one path masked the exposure on the other.
+// Static hosts disagree about dotfiles, so the only place to keep them off the
+// wire is here, by not copying
 describe("an export ships what serveAsset would serve, and nothing else", () => {
   const HIDDEN = [".DS_Store", ".gitkeep", ".env", ".borgo-doctor-1234", "assets/.hidden.js", ".well-known/.DS_Store"];
   const SHOWN = [

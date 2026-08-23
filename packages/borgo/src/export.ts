@@ -1,8 +1,3 @@
-// borgo export: prerenders every statically exportable route into a plain
-// dist/site/ of html files + assets, servable by any static file server.
-// exportable means: no loader, or `export const prerender = true` (the loader
-// runs once now, against a temporary api process); dynamic-param routes need
-// `export const prerenderPaths` returning the param sets.
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, relative } from "node:path";
@@ -24,8 +19,7 @@ export type ExportPlan = {
   export404: boolean;
 };
 
-// pure partition of the route table, unit-testable without a build. a _404
-// page exports as 404.html even when no regular page is exportable
+// a _404 page exports as 404.html even when no regular page is exportable
 export function planExport(routes: Route[], notFound: Route | null = null): ExportPlan {
   const plan: ExportPlan = { plans: [], skipped: [], needApi: false, export404: false };
   for (const route of routes) {
@@ -54,20 +48,16 @@ export function planExport(routes: Route[], notFound: Route | null = null): Expo
   return plan;
 }
 
-// characters windows refuses in a path component. every one of them is a legal
-// url character that encodeURIComponent happily escapes, and outputPath decodes
-// the segment straight back before mkdir - so an ISO timestamp param
-// ("2024-01-01T00:00:00Z") exports fine on linux and dies with EINVAL on
-// windows, which is the worst possible place to find out.
+// every one of these is a legal url character that outputPath decodes straight
+// back before mkdir: an ISO timestamp param exports on linux and dies with
+// EINVAL on windows
 const WINDOWS_ILLEGAL = /["*:<>?|\u0000-\u001f]/;
-// and the device names, which are reserved with or without an extension
+// reserved with or without an extension
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
-// null for a usable param, otherwise why it cannot become a directory
 export function unsafeParamReason(raw: string): string | null {
   if (/[\\/]/.test(raw)) return "contains a path separator";
-  // outputPath turns each segment into a directory, so a dot segment would
-  // climb out of dist/site and write an index.html somewhere else entirely
+  // a dot segment would climb out of dist/site
   if (raw === "." || raw === "..") return `is the dot segment "${raw}"`;
   const illegal = raw.match(WINDOWS_ILLEGAL);
   if (illegal) {
@@ -75,15 +65,13 @@ export function unsafeParamReason(raw: string): string | null {
     return `contains "${shown}", which windows does not allow in a path`;
   }
   if (WINDOWS_RESERVED.test(raw)) return `is "${raw}", a reserved windows device name`;
-  // windows silently strips both, so the directory would not be the one the
-  // url names and the page would 404 on the host that serves it
+  // windows strips both silently: the page would 404 on the host that serves it
   if (/[. ]$/.test(raw)) return "ends in a dot or a space, which windows strips from a path";
   return null;
 }
 
-// the result is a url path (fed to fetch), so params are encoded; a param that
-// cannot survive the round trip back to a directory name is rejected here,
-// where the message can name the route and the param
+// a param that cannot survive the round trip back to a directory name is
+// rejected here, where the message can name the route and the param
 export function fillPattern(pattern: string, params: Record<string, string | number>): string {
   return pattern.replace(/:(\w+)/g, (_, name) => {
     const value = params[name];
@@ -99,10 +87,8 @@ export function fillPattern(pattern: string, params: Record<string, string | num
   });
 }
 
-// "/" -> index.html, "/about" -> about/index.html: the directory style every
-// static server resolves without configuration. segments decode on disk
-// (posts/citt%C3%A0 -> posts/città): static servers decode the request path
-// before hitting the filesystem, an encoded dir name would 404
+// segments decode on disk (posts/citt%C3%A0 -> posts/città): static servers
+// decode the request path before the filesystem, an encoded dir name would 404
 export function outputPath(path: string): string {
   if (path === "/") return "index.html";
   const decode = (s: string) => {
@@ -116,44 +102,22 @@ export function outputPath(path: string): string {
   return `${dir}/index.html`;
 }
 
-// the client bundle an export ships must not ask for ?__borgo=props: a static
-// host answers that url with the page's own html document and a 200, so res.ok
-// passes, res.json() throws, and the runtime falls back to a full reload -
-// after having downloaded the document twice, once per link, and a third time
-// for every link a pointer merely crossed (prefetch caches the doomed promise).
-// buildDefine turns this into a literal in the bundle, so the whole path is
-// compiled out rather than tried and caught.
-//
-// AND THE CSP GOES OFF, because a csp is a response HEADER. A static host
-// serves the file, not the header borgo would have written, so no policy ever
-// governs an exported page - but the nonce minted for that policy was written
-// into every <script> in the file. Measured on a real dist/site: six documents,
-// six different `nonce="..."`, one per fetch, frozen. A nonce printed in the
-// document, the same for every visitor and permanent, is not a nonce: a
-// `script-src 'nonce-<that>'` allows exactly what an injected script can copy
-// off the page it was injected into. Rendering with no csp means no nonce is
-// minted at all - by react for its suspense scripts either - and the policy is
-// left where a static site can actually have one, in the host's header config.
+// BORGO_STATIC compiles the ?__borgo=props path out of the bundle: a static
+// host answers that url with the html document and a 200, so res.json() throws
+// and every link degrades to a full reload. BORGO_CSP off because a csp is a
+// header no static host ships, while its nonce would be frozen into every
+// <script>: a permanent public nonce allows exactly what an injected script can
+// copy off the page. No csp means no nonce minted at all, react's included.
 export function markStaticExport(env: NodeJS.ProcessEnv = process.env) {
   env.BORGO_STATIC = "1";
   env.BORGO_CSP = "0";
 }
 
-// A value minted for one request cannot be published as a file. `<CsrfField />`
-// renders the token that has to match a borgo_csrf cookie, and a static host
-// sets no cookies: what ships is one constant string, identical for every
-// visitor, checked against nothing. The form is not weakly protected, it is
-// dead - and a page that ships a dead form looks exactly like a page that works.
-//
-// ASKED OF THE BYTES ABOUT TO BE WRITTEN, NEVER OF THE ROUTE MODULE. A
-// `<CsrfField />` can come from a layout, an island, a conditional or a
-// component three packages deep; the module tells you nothing, and the file is
-// the thing that ships. `<` is escaped in text (react) and in props
-// (scriptJson's <), so a tag can only match a real tag - page content
-// about csrf cannot trip these.
-//
-// `what` names it on the page's own line, which stays short enough to read;
-// `why` is printed once at the end, for the residues actually found.
+// per-request values that cannot ship as a file: a <CsrfField /> token with
+// no cookie to match is a dead form that looks like a working one. Asked of
+// the bytes, never of the route module - the tag may come from a layout or a
+// component three packages deep. `<` is escaped in text (react) and in props
+// (scriptJson), so only a real tag can match.
 export type Residue = { what: string; why: string[] };
 
 const RESIDUE: Array<Residue & { test: RegExp }> = [
@@ -176,8 +140,6 @@ const RESIDUE: Array<Residue & { test: RegExp }> = [
   },
 ];
 
-// what this document carries that only meant something to the request that
-// produced it; empty when the file can be published as it is
 export function requestResidue(html: string): Residue[] {
   return RESIDUE.filter((r) => r.test.test(html)).map(({ what, why }) => ({ what, why }));
 }
@@ -192,8 +154,8 @@ const listenFree = () =>
     server.listen({ port: 0, host: "127.0.0.1" }, () => resolve(server));
   });
 
-// every listener stays open until all ports are picked: closing one before
-// asking for the next lets the os hand out the same port twice
+// closing one listener before asking for the next lets the os hand out the
+// same port twice
 export async function freePorts(count: number): Promise<number[]> {
   const servers: Array<import("node:net").Server> = [];
   for (let i = 0; i < count; i++) servers.push(await listenFree());
@@ -202,17 +164,15 @@ export async function freePorts(count: number): Promise<number[]> {
   return ports;
 }
 
-// what serveAsset would answer 200 to, through the same two predicates: a
-// dotfile or a dot-directory borgo start refuses must not reach dist/site
-// either, or the 404 masks the exposure. `rel` is the path under public/, as
-// the url names it.
+// the same two predicates as serveAsset: a dotfile borgo start refuses must
+// not reach dist/site either, or the 404 masks the exposure
 export const isExportedFile = (rel: string): boolean => {
   const url = `/${rel.replaceAll("\\", "/")}`;
   return !isHiddenAsset(url) && !inHiddenDirectory(url);
 };
 
-// a directory is judged as the prefix it will be: `.git` refused whole, so
-// nothing under it is even visited; `.well-known` at the root goes through
+// judged as the prefix it will be: `.git` refused whole, `.well-known` at the
+// root goes through
 const isExportedDirectory = (rel: string): boolean =>
   rel === "" || !inHiddenDirectory(`/${rel.replaceAll("\\", "/")}/`);
 
@@ -234,8 +194,7 @@ export function copyPublic(src: string, dest: string): void {
   });
 }
 
-// a file plus its .gz/.br siblings is one asset; an orphan .gz/.br with no
-// base file next to it counts as an asset in its own right
+// a file plus its .gz/.br siblings is one asset; an orphan .gz/.br is its own
 export function countAssets(dir: string): { assets: number; precompressed: number } {
   let assets = 0;
   let precompressed = 0;
@@ -259,13 +218,9 @@ export function exportSummary(pages: number, wrote404: boolean, assets: number, 
   return `exported ${parts.join(" + ")}${variants}`;
 }
 
-// Windows releases an image only once the process is gone, and that lags the
-// process's own exit, so a refusal is retried rather than thrown.
-//
-// It never throws. This runs from a finally, where an exception replaces
-// whatever the export was already reporting - a page that failed to render
-// would surface as an EPERM on a file the operator never asked about. A binary
-// that outlives its removal is said out loud instead.
+// windows releases an image only after the process is gone, which lags its
+// exit: retried. Never throws - it runs from a finally, where an exception
+// would replace the failure the export was already reporting
 export async function removeScratchBin(
   bin: string,
   attempts = 20,
@@ -294,9 +249,6 @@ export async function exportSite(): Promise<number> {
   try {
     await buildAssets(false);
   } catch (error) {
-    // every way the build can fail, not just the bundler's: an export that
-    // dies on a sass error or a missing --tailwind is still an export that
-    // must not print a v8 trace and must not go on to render pages
     reportBuildFailure(error);
     return 1;
   }
@@ -319,38 +271,30 @@ export async function exportSite(): Promise<number> {
   const [apiPort, frontPort] = await freePorts(2);
   process.env.API_PORT = String(apiPort);
   process.env.PORT = String(frontPort);
-  // a shell API_URL (split deployment) would send loaders to the real api
-  // mid-export; the export always talks to its own ephemeral one
+  // a shell API_URL would send loaders to the real api mid-export
   delete process.env.API_URL;
   process.env.BORGO_RELOAD = "1"; // quiet startup lines from the servers
 
-  // loaders and prerenderPaths run for real, so they get a real api: the
-  // binary is built and spawned on an ephemeral port, and killed at the end
   let apiProc: import("bun").Subprocess | null = null;
-  // named before the build, never after: `go build -o` writes the file it was
-  // told to write, and a build that dies partway still leaves one
+  // named before the build: a build that dies partway still leaves the file
   let apiBin: string | null = null;
 
   let failures = 0;
-  // rendered beside the published directory and moved onto it at the end,
-  // because dist/site is what CI uploads. Deleting it first meant a run that
-  // failed on page four published the three pages it had managed plus a valid
-  // index.html - a site that looks complete, with a hole in it, and no way to
-  // tell from the outside. The previous export stays up until this one has
-  // rendered every page it planned.
+  // staged beside dist/site and swapped in only once every page rendered: a
+  // run that fails on page four must not publish three pages and a valid
+  // index.html, a site with a hole nobody can see from outside
   const outDir = "dist/site";
   const stageDir = `dist/.site-staged-${process.pid}`;
   try {
     if (needApi) {
-      // a scratch binary: dist/ may be running under borgo start right now,
-      // and windows locks executing binaries against overwrite
+      // dist/ may be running under borgo start, and windows locks executing binaries
       apiBin = `.borgo/export-${goBinName()}`;
       const goBuild = Bun.spawn(["go", "build", "-o", apiBin, "."], { stdout: "inherit", stderr: "inherit" });
       if ((await goBuild.exited) !== 0) {
         console.error(`  ${c.red(g.err)} go build failed`);
         return 1;
       }
-      // explicit env: a mutated process.env does not reliably reach children
+      // a mutated process.env does not reliably reach children
       apiProc = Bun.spawn([apiBin], {
         stdout: "ignore",
         stderr: "inherit",
@@ -373,7 +317,6 @@ export async function exportSite(): Promise<number> {
     const apiUrl = `http://localhost:${apiPort}/api`;
     const api = makeApiClient(`http://localhost:${apiPort}`);
 
-    // expand dynamic routes now that the api answers
     const pages: Array<{ path: string; route: Route }> = [];
     for (const { route, dynamic } of plans) {
       if (!dynamic) {
@@ -384,7 +327,7 @@ export async function exportSite(): Promise<number> {
       for (const params of sets) pages.push({ path: fillPattern(route.pattern, params), route });
     }
 
-    // the real front server renders, so an export is byte-identical to ssr
+    // the real front server renders: an export is byte-identical to ssr
     const { serve } = await import("./server");
     await serve({ dev: false });
 
@@ -393,10 +336,9 @@ export async function exportSite(): Promise<number> {
 
     let written = 0;
     const failed: string[] = [];
-    // pages refused for what they carry, not for failing to render: they get
-    // their own closing note, since the fix is in the page and not in the run
+    // refused for what they carry, not for failing to render
     const refused: string[] = [];
-    // keyed by `what`, so two pages carrying the same residue explain it once
+    // two pages carrying the same residue explain it once
     const refusedWhy = new Map<string, string[]>();
     const noteRefusal = (path: string, residue: Residue[]) => {
       refused.push(path);
@@ -424,12 +366,9 @@ export async function exportSite(): Promise<number> {
         console.log(`  ${c.red(g.err)} ${path.padEnd(16)} ${error instanceof Error ? error.message : error}`);
       }
     }
-    // a _404 page exports as 404.html, the file static hosts serve for unknown
-    // paths (nginx error_page, most static hosting picks it up by name); it is
-    // its own line item, not one of the pages
+    // 404.html is what static hosts serve for unknown paths, by name
     let wrote404 = false;
     if (export404) {
-      // any unmatched path renders the _404 page with a 404 status
       try {
         const res = await fetch(`http://localhost:${frontPort}/__borgo-export-404-probe`);
         if (res.status !== 404) throw new Error(`responded ${res.status}`);
@@ -451,19 +390,14 @@ export async function exportSite(): Promise<number> {
       console.log(`  ${c.dim(g.dot)} ${s.pattern.padEnd(16)} ${c.dim(`skipped ${g.dot} ${s.reason}`)}`);
     }
 
-    // assets ride along, precompressed siblings included, so hydrated pages
-    // find their chunks next to the html
     let assets = 0;
     let precompressed = 0;
     if (existsSync("public")) {
       ({ assets, precompressed } = countAssets("public"));
-      // only onto a staging directory that is going to be published
       if (!failures) copyPublic("public", stageDir);
     }
 
-    // the swap, and only now: a partial render is not published under the name
-    // a deploy step reads. What is already in dist/site is the last export that
-    // rendered whole, which is a site that works.
+    // only now: what is in dist/site is the last export that rendered whole
     if (!failures) {
       rmSync(outDir, { recursive: true, force: true });
       mkdirSync(dirname(outDir), { recursive: true });
@@ -481,8 +415,7 @@ export async function exportSite(): Promise<number> {
         `  ${c.dim(`${g.dot} nothing was published ${g.dot} dist/site still holds the last export that rendered whole`)}`,
       );
     }
-    // said once, and only when a page was actually refused: the fix is in the
-    // page, not in the run, and repeating it per page buries it
+    // once, and only when a page was refused: per page it would bury itself
     if (refused.length) {
       console.log(
         `\n  ${c.red(g.err)} ${refused.join(", ")} ${refused.length > 1 ? "carry" : "carries"} a value that only meant something to the request that rendered it, and an exported page is one file served to everyone.`,
@@ -495,29 +428,22 @@ export async function exportSite(): Promise<number> {
     console.log(
       `  ${c.dim(`${g.dot} a static export serves pages only: actions, sse and websocket topics need borgo start`)}`,
     );
-    // BORGO_CSP is overridden by markStaticExport, so an operator who set one
-    // has to be told their policy is not in these files - it never could be
+    // an operator who set a csp has to be told it is not in these files
     console.log(
       `  ${c.dim(`${g.dot} the csp is a response header, so it is not in these files ${g.dot} set it on your static host${hadCsp ? ` (BORGO_CSP was set here and does not ship)` : ""}`)}`,
     );
-    // the export rebuilt public/assets with the props endpoint compiled out of
-    // the bundle. `.borgo/build-mode` now says so, and `borgo start` rebuilds
-    // rather than serving a bundle that reloads the document on every link.
+    // public/assets now holds a bundle with the props endpoint compiled out;
+    // `borgo start` reads .borgo/build-mode and rebuilds rather than serve it
     console.log(
       `  ${c.dim(`${g.dot} public/assets now holds the export build ${g.dot} borgo start rebuilds it for production`)}\n`,
     );
   } finally {
     apiProc?.kill();
     await apiProc?.exited;
-    // a successful run renamed it away; anything else leaves a half-rendered
-    // tree in dist/ that nothing will ever read again
+    // a successful run renamed it away; anything else left a half-rendered tree
     rmSync(stageDir, { recursive: true, force: true });
-    // and the 21 MB the api ran from, which nothing removed at all: the binary
-    // was built, spawned, killed, and left. Measured on examples/tasks,
-    // .borgo/export-api.exe, 21,217,280 bytes, two weeks stale; reproduced in a
-    // scratch copy on both paths, since a failed export left it exactly as a
-    // whole one did. What a command builds to work, it removes even when it
-    // fails - so this is here, beside the kill, and not on the happy path.
+    // beside the kill, not on the happy path: a failed export must not leave
+    // the 21 MB api binary behind either
     if (apiBin) await removeScratchBin(apiBin);
   }
   return failures ? 1 : 0;
