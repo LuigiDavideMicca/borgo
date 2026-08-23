@@ -6,11 +6,10 @@ import "unsafe"
 
 var bsdKinfo = freebsdKinfo
 
-// freebsdKinfoProc is the C layout as cgo -godefs reads it from sys/user.h,
-// amd64 and arm64 alike, with the fields this code never touches collapsed
-// into runs of the same width. golang.org/x/sys/unix carries no kinfo_proc for
-// freebsd, so this is the witness: the three numbers in watchdog_corpse.go
-// have to agree with it both ways, or the package does not build.
+// The C layout as cgo -godefs reads it from sys/user.h, amd64 and arm64 alike,
+// untouched fields collapsed into runs of the same width. golang.org/x/sys/unix
+// carries no kinfo_proc for freebsd, so this is the witness the numbers in
+// watchdog_corpse.go are held against: disagree and the package does not build.
 type freebsdKinfoProc struct {
 	Structsize int32
 	Layout     int32

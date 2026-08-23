@@ -8,21 +8,16 @@ import (
 	"sync/atomic"
 )
 
-// This file holds the part of the corpse question that is a decision rather
-// than a syscall, so it can be tested on any machine - including one with
-// neither /proc nor darwin. Every unsure answer here is false: refusing a boot
-// needs certainty the parent is gone, so the worst a wrong platform branch can
-// do is leave the behaviour that was there before it.
+// The decisions of the corpse question, with no build tag so they are testable
+// on any machine. Every unsure answer is false: refusing a boot needs certainty
+// the parent is gone, so a wrong platform branch can only leave the behaviour
+// that was there before it.
 
-// procStatCorpse decides from the contents of /proc/<pid>/stat.
-//
-// Field 1 is the pid the kernel is describing. If it is not the one asked
-// about, this /proc is not the one whose pids this process signals - a foreign
-// namespace mounted over it - and a stranger's state must not decide the boot.
-//
-// Field 2 is the comm, in parentheses and unescaped, so a process called
-// "my prog (x)" defeats any split on whitespace or on the first ")": only the
-// last one is certainly the closing paren.
+// A pid in field 1 that is not the one asked about is a foreign /proc (a
+// namespace mounted over it): a stranger's state must not decide the boot.
+// The comm in field 2 is unescaped, so "my prog (x)" defeats a split on
+// whitespace or on the first ")": only the last one is certainly the closing
+// paren.
 func procStatCorpse(pid int, stat []byte) bool {
 	if pid <= 0 {
 		return false
@@ -47,10 +42,9 @@ func procStatCorpse(pid int, stat []byte) bool {
 	return rest[0] == 'Z' || rest[0] == 'X' || rest[0] == 'x'
 }
 
-// darwin's struct kinfo_proc, LP64. Both darwin architectures are
-// little-endian and share this layout; the three numbers are cross-checked
-// against the struct golang.org/x/sys/unix generates from the system headers,
-// for darwin/arm64 and darwin/amd64 alike, and nothing reads them at runtime.
+// darwin's struct kinfo_proc, LP64, identical and little-endian on arm64 and
+// amd64. Taken from golang.org/x/sys/unix's generated struct for both; nothing
+// at runtime checks them, so watchdog_corpse_test.go pins them.
 const (
 	kinfoProcSize = 648 // sizeof(struct kinfo_proc)
 	kinfoStatOff  = 36  // offsetof(kp_proc.p_stat)
@@ -58,21 +52,11 @@ const (
 	sZomb         = 5   // SZOMB
 )
 
-// kinfoProcCorpse decides from one kern.proc.pid reading.
-//
-// buf must be exactly the struct the kernel reported: a short or long reading
-// is a layout this code does not know, and an unknown layout is "alive". A pid
-// nobody owns is reported as a reading of length zero, which the same check
-// catches.
-//
-// The pid the kernel put in the struct then has to be the one asked about.
-// That is the guard against the failure this file cannot be tested for from
-// here: if the offsets are wrong, the state byte belongs to some other field
-// and could read as SZOMB by accident, which would refuse every boot on macOS.
-// A mismatched pid turns that misparse into "alive" instead.
-//
-// A range check on the state would add nothing - garbage equal to SZOMB passes
-// it by construction - so the size and the pid are the whole guard.
+// The size and the pid are the whole guard against wrong offsets, which
+// cannot be tested from here: with them wrong the state byte belongs to some
+// other field and could read as SZOMB, refusing every boot on macOS. A range
+// check on the state adds nothing - garbage equal to SZOMB passes it. A pid
+// nobody owns is a reading of length zero.
 func kinfoProcCorpse(pid int, buf []byte) bool {
 	if pid <= 0 || len(buf) != kinfoProcSize {
 		return false
@@ -83,18 +67,14 @@ func kinfoProcCorpse(pid int, buf []byte) bool {
 	return buf[kinfoStatOff] == sZomb
 }
 
-// darwin's errno numbers, named here rather than imported, so this file keeps
-// no build tag and the classifier below is testable on any machine.
+// darwin's errno numbers, not imported, so this file keeps no build tag
 const (
 	darwinENOMEM = 12
 	darwinENOSYS = 78
 )
 
-// kinfoProcDecide is the whole darwin answer, given one raw reading: n is the
-// byte count the kernel claims, buf the buffer it was handed, errno 0 on
-// success. Splitting it from the syscall this way is what lets the darwin
-// branch - the anomaly report included - be exercised from a machine that has
-// no darwin kernel.
+// kinfoProcDecide is the whole darwin answer given one raw reading: n is the
+// byte count the kernel claims, errno 0 on success.
 func kinfoProcDecide(pid, n int, buf []byte, errno int) bool {
 	if a := kinfoReadAnomaly(pid, n, buf, errno); a != "" {
 		reportKinfoAnomaly(pid, a)
@@ -105,26 +85,17 @@ func kinfoProcDecide(pid, n int, buf []byte, errno int) bool {
 	return kinfoProcCorpse(pid, buf[:n])
 }
 
-// kinfoReadAnomaly names the way a kern.proc.pid reading is structurally
-// wrong, and answers "" when it is not.
+// kinfoReadAnomaly names a structurally wrong reading, "" otherwise. It
+// changes no answer: every failure is still "alive", this only makes a darwin
+// branch that never worked distinguishable from one that does.
 //
-// Every failure of this branch answers "alive", by design, so a darwin branch
-// that never worked at all is indistinguishable from one that does. This
-// changes none of those answers - refusing a boot still takes certainty - it
-// only makes the mute failure legible.
-//
-// Which is why the line drawn here is the whole work. A parent that has been
-// reaped, or was never there, is the frequent and legitimate case and has to
-// stay silent: darwin reports it as a success that wrote nothing, and there is
-// no reading of the errno list from here that says which number some kernel
-// spells it with. So only errnos that cannot describe a missing process count.
-// ENOSYS is one - it says no syscall ran at all, whoever owned the pid - and
-// so is ENOMEM, which says the kernel wants to write more than this code
-// believes a kinfo_proc is.
-//
-// A pid of 0 inside a full struct is not counted against the offsets: a zeroed
-// buffer reads that way, and pid 0 is a real process on darwin, so it is not
-// evidence that the layout is wrong.
+// A reaped or never-there parent is the frequent, legitimate case and stays
+// silent: darwin reports it as a success that wrote nothing, and no errno can
+// be read from here as "missing process". Only errnos that cannot describe one
+// count: ENOSYS (no syscall ran) and ENOMEM (the kernel wants more bytes than
+// this code believes a kinfo_proc is). Pid 0 in a full struct is not evidence
+// against the offsets: a zeroed buffer reads that way, and pid 0 is a real
+// process on darwin.
 func kinfoReadAnomaly(pid, n int, buf []byte, errno int) string {
 	if pid <= 0 {
 		return ""
@@ -155,10 +126,8 @@ var (
 	kinfoAnomalyLogf   = log.Printf
 )
 
-// reportKinfoAnomaly says once, for the life of the process, that the darwin
-// reading is broken in a way that cannot mean "the parent is gone". Once:
-// waitParentExit re-probes every two seconds and a line per probe would be the
-// reason nobody reads any of them.
+// Once for the life of the process: waitParentExit re-probes four times a
+// second, and a line per probe would be the reason nobody reads any of them.
 func reportKinfoAnomaly(pid int, what string) {
 	if kinfoAnomalyLogged.Swap(true) {
 		return
@@ -166,8 +135,6 @@ func reportKinfoAnomaly(pid int, what string) {
 	kinfoAnomalyLogf("borgo: reading kern.proc.pid.%d: %s; from here on every parent reads as alive on macOS, which is what this platform did before the check existed - an api can outlive the supervisor that started it", pid, what)
 }
 
-// bsdKinfoLayout is where one BSD kernel puts the pid and the state inside the
-// bytes kern.proc.pid returns, and how many of them one reading must be.
 type bsdKinfoLayout struct {
 	size    int  // bytes one reading must be, exactly
 	pidOff  int  // int32 pid, little-endian on every arch covered
@@ -177,11 +144,10 @@ type bsdKinfoLayout struct {
 	sized   bool // the reading opens with its own byte count as an int32
 }
 
-// freebsd's struct kinfo_proc on LP64 (amd64, arm64): KINFO_PROC_SIZE, which
-// the kernel also writes into ki_structsize as the first int32, so a reading
-// is checked against its own header before anything else is read from it.
-// SZOMB is 5; 6 is SWAIT, a living state, so only 5 counts. The numbers are
-// held against the C layout at compile time in watchdog_bsd_freebsd.go.
+// freebsd LP64 (amd64, arm64), held against the C layout at compile time in
+// watchdog_bsd_freebsd.go. The kernel writes KINFO_PROC_SIZE into
+// ki_structsize as the first int32, so a reading is checked against its own
+// header. 6 is SWAIT, a living state: only 5 counts.
 const (
 	freebsdKinfoSize    = 1088 // sizeof(struct kinfo_proc)
 	freebsdKinfoPidOff  = 72   // offsetof(ki_pid)
@@ -198,12 +164,12 @@ var freebsdKinfo = bsdKinfoLayout{
 	sized:   true,
 }
 
-// openbsd's struct kinfo_proc is fixed-width by design, the same bytes on
-// every arch, and grows only at the tail; the caller passes the element size
-// it knows and gets that many bytes. So this asks for a prefix that ends at
-// p_comm, past p_stat, and never depends on the whole struct's size for the
-// release it runs on. SZOMB is 5; SDEAD 6 is the moment before it, both dead.
-// The numbers are held against the C layout in watchdog_bsd_openbsd.go.
+// openbsd, held against the C layout at compile time in
+// watchdog_bsd_openbsd.go. Its kinfo_proc is the same bytes on every arch and
+// grows only at the tail, and the caller names the element size it wants: so
+// this asks for a prefix ending at p_comm, past p_stat, and never depends on
+// the whole struct's size for the release it runs on. SDEAD 6 is the moment
+// before SZOMB, both dead.
 const (
 	openbsdKinfoPrefix  = 312 // offsetof(p_comm): the bytes asked for
 	openbsdKinfoPidOff  = 108 // offsetof(p_pid)
@@ -220,11 +186,9 @@ var openbsdKinfo = bsdKinfoLayout{
 	dead:    openbsdSDead,
 }
 
-// bsdKinfoCorpse decides from one kern.proc.pid reading on freebsd or openbsd:
-// n is what the kernel says it wrote, errno 0 on success. Every unsure answer
-// is alive - failed call, wrong length, pid that does not match - so a wrong
-// layout leaves the platform where kill(pid, 0) alone left it, and nothing
-// here can refuse a boot without a full reading naming the pid asked about.
+// bsdKinfoCorpse decides from one kern.proc.pid reading: n is what the kernel
+// says it wrote, errno 0 on success. Every unsure answer is alive, so a wrong
+// layout leaves the platform where kill(pid, 0) alone left it.
 func bsdKinfoCorpse(l bsdKinfoLayout, pid, n int, buf []byte, errno int) bool {
 	if pid <= 0 || errno != 0 || n != l.size || len(buf) < n {
 		return false

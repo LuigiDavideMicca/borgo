@@ -7,16 +7,11 @@ import (
 	"unsafe"
 )
 
-// bsdKinfoSysctl asks the kernel for pid's kinfo_proc through the mib each
-// platform spells kern.proc.pid with, and reports the reading raw: bytes the
-// kernel claims, the buffer, the errno. bsdKinfoCorpse decides, in a file with
-// no build tag, which is what makes the answer testable off these kernels.
-//
-// syscall.Sysctl is name-based and cannot address a per-pid node, and the
-// package's mib-taking sysctl is unexported, so the call is made directly. On
-// openbsd, where 7.5 removed indirect syscalls, syscall.Syscall6 reroutes
-// SYS___SYSCTL through the libc stub itself; on freebsd it is the trap the
-// standard library uses.
+// bsdKinfoSysctl reports the reading raw; bsdKinfoCorpse decides, with no
+// build tag. syscall.Sysctl is name-based and cannot address a per-pid node,
+// so the call is made directly: on openbsd, where 7.5 removed indirect
+// syscalls, syscall.Syscall6 reroutes SYS___SYSCTL through the libc stub
+// itself; on freebsd it is the trap the standard library uses.
 func bsdKinfoSysctl(pid int) (int, []byte, int) {
 	mib := bsdKinfoMib(pid)
 	buf := make([]byte, bsdKinfo.size)
@@ -33,10 +28,8 @@ func bsdKinfoSysctl(pid int) (int, []byte, int) {
 	return int(n), buf, int(errno)
 }
 
-// processIsCorpse asks the kernel for the process's state: neither freebsd nor
-// openbsd mounts a /proc, and kill(pid, 0) succeeds on a zombie. Every failure
-// answers no, so this branch can only ever add a corpse it is certain of to
-// what the signal probe alone saw.
+// Neither freebsd nor openbsd mounts a /proc, and kill(pid, 0) succeeds on a
+// zombie. Every failure answers no.
 func processIsCorpse(pid int) bool {
 	if pid <= 0 {
 		return false

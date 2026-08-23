@@ -20,23 +20,19 @@ func Cache(w http.ResponseWriter, maxAge time.Duration, staleWhileRevalidate ...
 		value += fmt.Sprintf(", stale-while-revalidate=%d", clampSeconds(staleWhileRevalidate[0]))
 	}
 	w.Header().Set("Cache-Control", value)
-	// the cookie-first order, settled here; the cookie-second order is settled
-	// on the way out of the handler, by privateIfCookies again
+	// the cookie-first order; the cookie-second order is settled on the way out
+	// of the handler, by privateIfCookies again
 	privateIfCookies(w.Header())
 }
 
 // unbalancedQuoteAt returns the index of the double quote that opens a string
 // the line never closes, or len(line) when every string is closed.
 //
-// An unterminated quote is the one place the two plausible readings of a
-// Cache-Control line disagree about something that matters. A strict RFC 9110
-// reader treats everything after it as one quoted string running to the end of
-// the line; a lenient comma-splitter, which is what several CDNs actually do,
-// sees ordinary directives. Trusting the strict reading hid `s-maxage=600` from
-// the guard in `x=", s-maxage=600` while a lenient cache read it and obeyed it.
-// So the quote does not open a string at all: from here on the line is split as
-// though it were an ordinary character. Over-matching costs a redundant
-// `private`; under-matching costs a session.
+// From that quote on the line is split as if the quote were an ordinary
+// character: a strict RFC 9110 reader sees one quoted string to the end of
+// the line, a lenient comma-splitter (several CDNs) sees directives, and
+// trusting the strict reading hid `s-maxage=600` in `x=", s-maxage=600` from
+// the guard. Over-matching costs a redundant `private`; under-matching a session.
 func unbalancedQuoteAt(line string) int {
 	open, quoted, escaped := -1, false, false
 	for i := 0; i < len(line); i++ {
@@ -58,17 +54,10 @@ func unbalancedQuoteAt(line string) int {
 	return len(line)
 }
 
-// splitDirectives splits a Cache-Control line on the commas that separate
-// directives, leaving the commas inside a balanced quoted argument alone.
-//
-// The argument of no-cache and private is itself a comma-separated list of
-// header field names (RFC 9111 5.2.2.4), so `no-cache="a, public, b"` is one
-// directive naming three fields, not three directives. Splitting it blindly
-// rewrote the handler's stored `public` header field into a `private` field
-// that does not exist, and left the response no longer revalidating the one it
-// meant - all of it paid for coverage that was not even achieved, since
-// `no-cache="a, public"` came back untouched: the trailing quote stayed glued
-// to the token and the whole-directive match failed.
+// splitDirectives splits a Cache-Control line on the commas between
+// directives, not on those inside a balanced quoted argument: the argument of
+// no-cache and private is itself a comma-separated list of field names (RFC
+// 9111 5.2.2.4), so `no-cache="a, public, b"` is one directive.
 func splitDirectives(line string) []string {
 	stop := unbalancedQuoteAt(line)
 	var fields []string
@@ -89,34 +78,27 @@ func splitDirectives(line string) []string {
 	return append(fields, line[start:])
 }
 
-// directiveName is a directive's name, without its argument or surrounding
-// whitespace. Names are case-insensitive (RFC 9111 5.2), and matching the name
-// rather than the whole field is what keeps `publicish` and `x-public`
-// somebody else's directive.
+// case-insensitive (RFC 9111 5.2); matched by name so `publicish` and
+// `x-public` stay somebody else's directive
 func directiveName(field string) string {
 	name, _, _ := strings.Cut(field, "=")
 	return strings.TrimSpace(name)
 }
 
-// bareDirective reports whether a field is a directive name on its own, with no
-// ="argument" after it. The distinction is load-bearing for `private`: the
-// qualified form private="X" makes only the named header fields private and
-// leaves the response as a whole storable by a shared cache (RFC 9111 5.2.2.7),
-// so it does not satisfy this guard and a bare `private` is added beside it.
+// load-bearing for `private`: the qualified private="X" leaves the response
+// storable by a shared cache (RFC 9111 5.2.2.7), so it does not satisfy the
+// guard and a bare `private` is added beside it
 func bareDirective(field string) bool {
 	return !strings.Contains(field, "=")
 }
 
-// leadingSpace is the whitespace a field is indented by, kept so a rewritten
-// directive lands in the same shape as the one it replaced.
 func leadingSpace(field string) string {
 	return field[:len(field)-len(strings.TrimLeft(field, " \t"))]
 }
 
-// quotedSpanCrossesALine reports whether a quoted argument in the joined value
-// runs across one of the boundaries the header lines were joined at - the one
-// shape where two readers partition the same response differently. stop is the
-// unbalanced-quote cutoff the rest of the guard reads by, so this agrees with
+// reports whether a quoted argument runs across a boundary the header lines
+// were joined at: the one shape where two readers partition the same response
+// differently. stop is the unbalanced-quote cutoff, so this agrees with
 // splitDirectives about which quotes open anything at all.
 func quotedSpanCrossesALine(lines []string, value string, stop int) bool {
 	if len(lines) < 2 {
@@ -146,29 +128,16 @@ func quotedSpanCrossesALine(lines []string, value string, stop int) bool {
 	return false
 }
 
-// sameField reports whether a map key names the given canonical field.
-//
-// Canonicalisation maps case and nothing else, so a differing length is proof
-// of a different field at one comparison - which is what keeps the scans below
-// off the critical path of a response that has neither header. For a key that
-// is not a valid field name textproto returns it unchanged, so such an entry
-// matches nothing and is left alone: net/http will not write it either.
+// canonicalisation maps case and nothing else, so a differing length is proof
+// of a different field at one comparison. An invalid field name comes back from
+// textproto unchanged and matches nothing; net/http will not write it either
 func sameField(key, canonical string) bool {
 	return len(key) == len(canonical) && textproto.CanonicalMIMEHeaderKey(key) == canonical
 }
 
-// hasField reports whether a response carries the named field under any
-// spelling of its key.
-//
-// A GUARD THAT CANNOT READ A HEADER DOES NOT CONCLUDE THE HEADER IS ABSENT.
-// h.Values canonicalises the key it looks up and reads that one key;
-// net/http's writer canonicalises nothing and emits the map as it finds it. A
-// handler that assigns through the map - w.Header()["set-cookie"] = - therefore
-// puts a field on the wire that every reader sees, because RFC 9110 5.1 makes
-// field names case-insensitive, and that the guard's lookup did not. The old
-// answer to that was to declare it out of reach, and out of reach is exactly
-// what it was not: the guard is handed the map itself, and the only thing that
-// could not see the entry was the convenience method it happened to call.
+// under any spelling of the key: h.Values canonicalises the key it looks up,
+// net/http's writer emits the map as it finds it, so a w.Header()["set-cookie"]
+// = assignment reaches the wire and must reach the guard
 func hasField(h http.Header, canonical string) bool {
 	for k := range h {
 		if sameField(k, canonical) {
@@ -178,13 +147,9 @@ func hasField(h http.Header, canonical string) bool {
 	return false
 }
 
-// fieldKeys returns every key under which a response carries the named field,
-// in the order net/http writes them.
-//
-// The order is load-bearing and it is not the map's: writeSubset sorts the keys
-// it emits, so plain byte order is the order the lines reach the wire and
-// therefore the order a cache joins them in (RFC 9110 5.3). Reading them in map
-// order would decide a response by a hash seed.
+// in the order net/http writes them: writeSubset sorts keys, so byte order is
+// the order a cache joins the lines in (RFC 9110 5.3). Map order would decide
+// a response by a hash seed.
 func fieldKeys(h http.Header, canonical string) []string {
 	var keys []string
 	for k := range h {
@@ -197,146 +162,50 @@ func fieldKeys(h http.Header, canonical string) []string {
 }
 
 // privateIfCookies makes a response that carries a Set-Cookie say `private`,
-// and takes away every directive that would let a shared cache store it.
+// and takes away every directive that would let a shared cache store it:
+// `public` becomes `private`, `s-maxage` is dropped, and if nothing then says
+// `private` a bare one is added at the front. `max-age` is left alone: it is
+// legitimate for a private cache, and `private` already bars the shared one.
+// A bare `private` forbids shared storage on its own (RFC 9111 5.2.2.7), so
+// `must-revalidate` needs no case; the qualified private="X" does not count.
+// The redundant `private` next to a `no-store` is noise, and noise is the side
+// to be wrong on: too narrow costs a cache miss, too wide hands one user's
+// session to the next requester through a CDN, silently. The direction to
+// test is a Set-Cookie response still advertising itself to a shared cache.
 //
-// This used to be a one-shot test inside Cache, which made the guard depend on
-// the order the handler happened to call things in: `Cache` before
-// `SetSession` saw no cookie yet and emitted `public`, and the session cookie
-// was then added to a response that had just told every shared cache it was
-// free to store and re-serve it. RFC 9111 3.5 is explicit that `public` is one
-// of the directives that authorises a shared cache to store a Set-Cookie
-// response, so this is not a theoretical grade of wrong: it is the exact
-// combination that hands one user's session to the next requester through a
-// CDN. A comment saying "set cookies first" is not a guard - it is a guard's
-// absence, written down.
+// Not called once in Cache but from every call site and on the way out of
+// the handler, up to four times on one response: the order the handler calls
+// Cache and SetSession in must not matter, and every pass must see the
+// `private` the pass before it added.
 //
-// THE RULE. On a response carrying a Set-Cookie and saying anything at all
-// about caching: `public` becomes `private`, `s-maxage` is dropped, and if
-// nothing then says `private`, `private` is added. `max-age` is left alone
-// deliberately, and that is not an oversight - it is legitimate and useful for
-// a private cache, and `private` beside it already bars the shared one.
+// The added `private` goes at the front because it is the only position
+// guaranteed not to sit inside a quoted string an earlier field left open.
 //
-// `s-maxage` had to join `public` because 3.5 lists it too: it is by definition
-// the directive addressed to shared caches, so `s-maxage=600, max-age=60` on a
-// response with a session cookie shipped exactly the authorisation the guard
-// exists to remove, and the guard could not see it. Dropping it also settles a
-// contradiction the guard used to manufacture out of `public, s-maxage=600`:
-// `private, s-maxage=600` tells shared caches both that they may not store the
-// response and how long to keep it.
+// The fold over every spelling of the key costs one range over the header
+// map on the cookieless response, and the matcher is free: measured 26ns to
+// 57ns on a four-header response and 25ns to 253ns on a thirty-two-header
+// one, no allocation. A gzip-eligible response already clones the same map
+// at WriteHeader and re-copies it at commit.
 //
-// Adding `private` when nothing else says it is what makes the rule one
-// sentence with no exceptions to remember. It is also why `must-revalidate` -
-// the third directive 3.5 lists - needs no case of its own: a bare `private` is
-// itself a prohibition on shared storage (5.2.2.7), so once one is present
-// nothing else in the list can authorise one. Bare is the whole of it: the
-// qualified private="X" that the same section defines makes only the named
-// header fields private and leaves the response storable by a shared cache, so
-// it satisfies nothing here and a bare `private` is added beside it. The cost
-// is a redundant `private` next to a `no-store` that already forbade
-// everything; that is noise, and noise is the side to be wrong on.
+// Not reached, each a decision:
 //
-// The added `private` goes at the front of the whole value, and that position
-// is not cosmetic: it is the only place guaranteed not to sit inside a quoted
-// string some earlier field left open. An unterminated quote swallows
-// everything after it under a strict reader, and it swallowed both the
-// `private` this adds and the one a downgraded `public` becomes.
-//
-// ONE VALUE, NOT ONE PER LINE. Everything here is decided against the
-// comma-join of every Cache-Control line, because RFC 9110 5.3 makes that join
-// the value and it is what a cache parses. Reading line by line was wrong twice
-// over and in the same shape both times: first h.Get, which saw only the first
-// line, and then a per-line reachability test, which let a `private` on a later
-// line satisfy the guard while an earlier line's unterminated quote hid it from
-// every strict reader. The result is emitted as the one value it was read as -
-// the handler's line partition cannot be restored once a quoted argument is
-// found to span it, and re-deriving one would be the same reasoning again.
-//
-// EVERY SPELLING OF THE KEY, NOT THE CANONICAL ONE. This used to be a declared
-// limit rather than a defect, on the grounds that h.Values canonicalises the
-// key it looks up while net/http's writer does not, so an entry assigned as
-// w.Header()["cache-control"] = was "unreachable from the Header API this guard
-// is written against". It was reachable: the guard holds the map. What could
-// not see the entry was the convenience method, and a limit written around the
-// method rather than the field is a limit that names the wrong thing.
-//
-// It also understated itself, which is how it came back. Enumerated on the
-// wire, the response ships `public, s-maxage=600` beside a cookie under every
-// spelling except both-canonical - so the all-lowercase case is not the
-// harmless symmetric blindness it reads as, it is the same leak. And one shape
-// is worse than any blind spot: with the cookie canonical and a Cache-Control
-// under both spellings, the guard ran, rewrote the half it could see, and put
-// `Cache-Control: private, max-age=60` on the wire next to a surviving
-// `cache-control: public, s-maxage=600`. RFC 9110 5.1 makes those one field, so
-// the cache joins them and reads the authorisation - the guard manufacturing
-// the exact contradiction it exists to remove, and reporting success.
-//
-// So the field is read by folding the key, and that costs a scan of the header
-// map. It is paid once on a response with no cookie, which is the common one:
-// the Set-Cookie scan fails and the function returns before looking for a
-// Cache-Control at all. Measured, it is 26ns to 57ns on a four-header response
-// and 25ns to 253ns on a thirty-two-header one, and no allocation either way.
-//
-// Where that time goes is worth writing down, because it is not where it looks:
-// the matcher is free. A matcher that returns false without reading its
-// arguments benchmarks the same as this one, so the whole cost is the map range
-// itself and there is nothing in sameField to tune. Which also means the price
-// is set by how many headers a response has, and a response with enough headers
-// to make this scan expensive is already paying more than it on the same path -
-// every gzip-eligible one clones the whole map at WriteHeader and clears and
-// re-copies it at commit, both larger than one range over it.
-//
-// Nothing is deleted that the guard is not there to remove. It used to read
-// h.Get - the first line only - and write h.Set, which replaces all of them:
-// `["public, max-age=60", "no-store"]` came out as `["private, max-age=60"]`,
-// dropping a no-store the handler asked for so a private cache could now store
-// what the handler forbade storing.
-//
-// Idempotent, and that has to be checked against the same value the guard reads
-// rather than assumed: this runs up to four times on one response, and while
-// the added `private` was placed per line but judged per line too, each pass
-// declined to see the one the pass before it had added and prepended another.
-//
-// HOW THIS FAILS IF IT IS WRONG. The two directions are not the same size. Too
-// narrow costs a cache miss; too wide hands one user's session cookie to the
-// next requester through a CDN, unrecoverable and silent. Every choice here is
-// resolved towards `private` for that reason, including the redundant one
-// above. The direction to test is a response that carries Set-Cookie and still
-// advertises itself to a shared cache - not one that got `private` when it
-// wanted `public`.
-//
-// WHAT IT DOES NOT REACH, each a decision and not an accident:
-//
-//   - A response with no Cache-Control at all is left with none. A guard that
-//     invents a caching policy for a handler that stated none is no longer
-//     narrowing, and a Set-Cookie response with no directives is already
-//     unstorable by a shared cache under 3.5.
-//   - Anything the handler does after the last call-site guard, on a mux borgo
-//     does not own. See borgo.Middleware: on such a mux there is no last
-//     moment, so this is a boundary and not a bug to chase.
-//   - 1xx. net/http writes an informational response immediately and both
-//     borgo wrappers hand it straight through, precisely so Early Hints arrive
-//     before the body; the staged headers go with it, cookie included. 1xx are
-//     not stored by caches (RFC 9111 3 stores final responses), so this is a
-//     gap with nothing behind it.
-//   - Trailers. A Cache-Control staged under http.TrailerPrefix lives at a
-//     different map key and is invisible here. Stock net/http gives the same
-//     answer; a trailer is not where a cache reads freshness from.
-//   - An empty list element - the `,,` in "public,,max-age=1" - is dropped
-//     rather than re-emitted. RFC 9110 5.6.1 says senders must not generate one
-//     and recipients ignore it, so nothing is lost; it happens only on a
-//     response the guard was already rewriting, because tidying is not a reason
-//     to touch a response. Only a genuinely blank element goes. A malformed but
-//     non-empty one such as `=weird` is kept and passed through: it briefly was
-//     not, because its directive name parses as empty and it fell into the same
-//     arm, and a guard that deletes what it cannot parse is not a guard that
-//     only narrows.
+//   - A response with no Cache-Control is left with none: a guard that invents
+//     a policy for a handler that stated none is no longer narrowing. This is
+//     not guaranteed safe - a shared cache may store such a response
+//     heuristically; nothing in RFC 9111 bars storing Set-Cookie by itself.
+//   - Anything the handler does after the last call-site guard on a mux borgo
+//     does not own (see borgo.Middleware): no last moment exists there.
+//   - 1xx: written immediately with the staged headers, cookie included, and
+//     not stored by caches.
+//   - Trailers: a Cache-Control under http.TrailerPrefix lives at another key.
+//   - An empty list element (`public,,max-age=1`) is dropped, and only on a
+//     response already being rewritten (RFC 9110 5.6.1.2: recipients ignore
+//     it). A malformed non-empty one such as `=weird` is kept: a guard that
+//     deletes what it cannot parse no longer only narrows.
 func privateIfCookies(h http.Header) {
 	if !hasField(h, "Set-Cookie") {
 		return
 	}
-	// every spelling of the key, not the canonical one alone: a `cache-control`
-	// the handler assigned through the map is a directive to every cache that
-	// reads the response and was invisible to the lookup that decided here
 	keys := fieldKeys(h, "Cache-Control")
 	var lines []string
 	for _, k := range keys {
@@ -346,22 +215,17 @@ func privateIfCookies(h http.Header) {
 		return
 	}
 
-	// one value, not one per line. RFC 9110 5.3 makes repeated field lines
-	// equivalent to their comma-join, and the join is what a cache parses, so
-	// it is what gets read and what the answer is placed against. Deciding
-	// per line put a `private` on the third line of a response whose second
-	// line left a quote open, where no strict reader could reach it
+	// one value, not one per line: RFC 9110 5.3 makes the comma-join the value a
+	// cache parses. Judged per line, a `private` on line three sat behind a quote
+	// line two left open
 	value := strings.Join(lines, ",")
-	// from an unterminated quote onward nothing is reachable, wherever the line
-	// boundaries happened to fall
 	stop := unbalancedQuoteAt(value)
 
 	var kept []string
 	hasPrivate, changed := false, false
 	offset := 0
 	for _, f := range splitDirectives(value) {
-		// conservative: a directive counts only if the whole of it lies before
-		// any unterminated quote
+		// a directive counts only if the whole of it lies before any unterminated quote
 		readable := offset+len(f) <= stop
 		offset += len(f) + 1 // the comma the split consumed
 		switch name := directiveName(f); {
@@ -371,8 +235,7 @@ func privateIfCookies(h http.Header) {
 		case strings.EqualFold(name, "s-maxage"):
 			changed = true
 		case strings.TrimSpace(f) == "":
-			// an empty list element carries no directive; dropped only because
-			// this response is being rewritten anyway
+			// dropped only because this response is being rewritten anyway
 		default:
 			hasPrivate = hasPrivate || (readable && strings.EqualFold(name, "private") && bareDirective(f))
 			kept = append(kept, f)
@@ -382,32 +245,17 @@ func privateIfCookies(h http.Header) {
 		kept = append([]string{"private"}, kept...)
 		changed = true
 	}
-	// "unchanged means untouched" has exactly one exception, and it is not an
-	// inconsistency with the rule beside it - do not delete this condition.
-	//
-	// The guard already refuses to trust the strict reading of an unterminated
-	// quote, on the grounds that a lenient comma-splitter sees ordinary
-	// directives there and under-matching costs a session. A balanced quote
-	// that spans a line boundary is the same disagreement wearing the other
-	// hat: only a reader that joins every line first can tell that the `public`
-	// alone on line two is inside the argument opened on line one, and a reader
-	// that takes the lines one at a time sees a bare `public` on a response
-	// carrying a session cookie. Emitting the join is the guard saying, in the
-	// one shape where it matters, what it read - so a reader cannot arrive at a
-	// different answer by partitioning the value differently from us.
-	//
-	// It is deliberately this narrow. A multi-line value with no quoted span
-	// crossing a boundary is one every reader partitions the same way, so it
-	// comes back exactly as it arrived, and cookieless responses never reach
-	// here at all.
+	// the one exception to "unchanged means untouched", do not delete it: a
+	// balanced quote spanning a line boundary is read as one argument by a reader
+	// that joins the lines first and as a bare `public` by one that takes them one
+	// at a time. Emitting the join says what the guard read. A multi-line value
+	// with no span crossing a boundary comes back exactly as it arrived.
 	if !changed && !quotedSpanCrossesALine(lines, value, stop) {
 		return
 	}
 
-	// emitted as the single value it was read as: the line partition the
-	// handler happened to use cannot be restored once a quoted argument is
-	// found to span it, and re-deriving one would be the per-line reasoning
-	// this function no longer does
+	// as the single value it was read as: the handler's line partition cannot be
+	// restored once a quoted argument spans it
 	var b strings.Builder
 	for i, f := range kept {
 		if i > 0 {
@@ -418,10 +266,8 @@ func privateIfCookies(h http.Header) {
 		}
 		b.WriteString(f)
 	}
-	// the keys the value was read out of, not the canonical one h.Del would
-	// reach: leaving a `cache-control` entry behind next to the rewritten one
-	// is the guard emitting its own `private` beside the `public` it was there
-	// to remove, on a response a cache reads as one field
+	// the keys the value was read out of, not the canonical one h.Del reaches: a
+	// `cache-control` left behind is one field with the rewritten one to a cache
 	for _, k := range keys {
 		delete(h, k)
 	}
@@ -430,10 +276,8 @@ func privateIfCookies(h http.Header) {
 	}
 }
 
-// clampSeconds converts a duration to whole seconds without going through a
-// platform-sized int: on 32-bit, int(d.Seconds()) of a >68-year duration
-// overflows into an implementation-defined value (typically negative), turning
-// the header into garbage. int64 holds any duration's seconds exactly.
+// not int(d.Seconds()): on 32-bit a >68-year duration overflows into an
+// implementation-defined value. int64 holds any duration's seconds exactly.
 func clampSeconds(d time.Duration) int64 {
 	if d < 0 {
 		return 0

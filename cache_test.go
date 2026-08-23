@@ -46,10 +46,8 @@ func TestCacheHeaders(t *testing.T) {
 	}
 }
 
-// stripQuoted blanks out the quoted arguments of a Cache-Control line, so a
-// header field name inside a no-cache list is not read as a directive. It is
-// deliberately a different implementation from cache.go's splitter: a test that
-// reuses the code under test cannot disagree with it.
+// deliberately a different implementation from cache.go's splitter: a test
+// that reuses the code under test cannot disagree with it
 func stripQuoted(line string) string {
 	var b strings.Builder
 	quoted := false
@@ -67,12 +65,8 @@ func stripQuoted(line string) string {
 	return b.String()
 }
 
-// hasDirective reports whether a directive of that name is present anywhere
-// across every Cache-Control line, under the strict reading: a quoted argument
-// is an argument, and an unterminated quote runs to the end of the line. A
-// response's Cache-Control is one directive list that may arrive split over
-// repeated lines, so a check that reads only the first line reads only part of
-// the answer - which is the shape of the bug this file exists to hold shut.
+// across every Cache-Control line, under the strict reading: a quoted
+// argument is an argument, and an unterminated quote runs to the end of the line
 func hasDirective(values []string, name string) bool {
 	for _, v := range values {
 		for _, field := range strings.Split(stripQuoted(v), ",") {
@@ -85,16 +79,11 @@ func hasDirective(values []string, name string) bool {
 	return false
 }
 
-// stripBalancedQuoted blanks out only the quoted arguments that are actually
-// closed. An unterminated quote is left as an ordinary character, so the tokens
-// after it stay visible.
-//
-// This is the reading a forbidden directive is hunted under, and the asymmetry
-// with stripQuoted is the point. A balanced argument belongs to the handler and
-// is preserved verbatim, so a `public` inside one is not the guard's to remove
-// and not the guard's to be failed for. An unterminated quote is where a strict
-// parser and a comma-splitting CDN disagree, and a directive that only one of
-// them can see is still a directive some cache will obey.
+// only the quoted arguments that are actually closed; an unterminated quote
+// is left as an ordinary character. This is the reading a forbidden directive
+// is hunted under: a balanced argument belongs to the handler, an unterminated
+// quote is where a strict parser and a comma-splitting CDN disagree, and a
+// directive only one of them sees is still one some cache will obey
 func stripBalancedQuoted(line string) string {
 	b := []byte(line)
 	for i := 0; i < len(b); i++ {
@@ -123,8 +112,6 @@ func stripBalancedQuoted(line string) string {
 	return string(b)
 }
 
-// hasForbiddenDirective looks for a directive that must never reach the wire
-// beside a Set-Cookie, under the reading described on stripBalancedQuoted.
 func hasForbiddenDirective(values []string, name string) bool {
 	for _, v := range values {
 		for _, field := range strings.Split(stripBalancedQuoted(v), ",") {
@@ -137,11 +124,8 @@ func hasForbiddenDirective(values []string, name string) bool {
 	return false
 }
 
-// hasBareDirective is hasDirective restricted to the bare token, with no
-// ="argument" after it. RFC 9111 5.2.2.7 makes private="X" a statement about
-// the named header fields that leaves the response as a whole storable by a
-// shared cache, so only the bare form counts as this response saying it is
-// private.
+// bare token only: private="X" leaves the response storable by a shared
+// cache (RFC 9111 5.2.2.7)
 func hasBareDirective(values []string, name string) bool {
 	for _, v := range values {
 		for _, field := range strings.Split(stripQuoted(v), ",") {
@@ -153,8 +137,6 @@ func hasBareDirective(values []string, name string) bool {
 	return false
 }
 
-// rawContains looks at the bytes of the header lines themselves, for the
-// assertions about what survived verbatim.
 func rawContains(values []string, s string) bool {
 	for _, v := range values {
 		if strings.Contains(v, s) {
@@ -164,23 +146,15 @@ func rawContains(values []string, s string) bool {
 	return false
 }
 
-// A RESPONSE CARRYING A SET-COOKIE MUST NEVER SHIP `public`, HOWEVER THE
-// HANDLER ENDS AND HOWEVER THE HEADER WAS SPELLED.
+// A response carrying a Set-Cookie must never ship `public`, however the
+// handler ends and however the header was spelled: `public` is the directive
+// that tells a shared cache it may store the response (RFC 9111 5.2.2.9), and
+// that hands one user's session to the next requester through a CDN.
 //
-// RFC 9111 3.5 lists `public` as one of the directives that authorises a shared
-// cache to store a Set-Cookie response, so this is the exact combination that
-// hands one user's session to the next requester through a CDN.
-//
-// This test replaces TestCacheIsPrivateWhateverOrderTheCookieWasSetIn, which
-// asserted the same property on one axis only - the order Cache and SetSession
-// were called in - and could not see two live defects because of what it held
-// fixed. Every one of its cases ended in w.Write, so the guard was always
-// reached through a commit hook and a handler that writes nothing was never
-// tried; and it read the header through a ResponseRecorder, which shows the
-// staged map rather than what net/http emits for a handler that never writes.
-// Both axes are now variables: how the handler ends, and whether the client
-// takes gzip. The assertions are made on the bytes a real server put on the
-// wire.
+// Both axes vary on purpose: a handler that writes nothing never reaches a
+// commit hook, and a ResponseRecorder shows the staged map rather than what
+// net/http emits for it. The assertions are on the bytes a real server put on
+// the wire.
 func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 	t.Setenv("SESSION_SECRET", strings.Repeat("k", 32))
 
@@ -200,7 +174,7 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 				t.Errorf("Cache-Control = %q, want it narrowed to private with the max-age kept", v)
 			}
 		}},
-		// the order that used to ship `public` on a response carrying a session
+		// the order that once shipped `public` on a response carrying a session
 		{"Cache first, then cookie", func(w http.ResponseWriter) error {
 			Cache(w, 5*time.Minute)
 			return SetSession(w, map[string]string{"user": "luigi"}, time.Hour)
@@ -238,10 +212,8 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 				t.Errorf("Cache-Control = %q, want the stale-while-revalidate window kept", v)
 			}
 		}},
-		// the guard narrows, so it must not delete a stricter directive the
-		// handler added on a line of its own: dropping no-store lets a private
-		// cache store a response the handler forbade storing, which is the
-		// guard widening what it was asked for
+		// the guard narrows: dropping a no-store the handler added on its own line
+		// would let a private cache store what the handler forbade
 		{"the handler's own no-store on a second header line survives", func(w http.ResponseWriter) error {
 			Cache(w, time.Minute)
 			w.Header().Add("Cache-Control", "no-store")
@@ -261,10 +233,8 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 				t.Errorf("Cache-Control = %q, want the no-store kept", v)
 			}
 		}},
-		// s-maxage is the directive addressed to shared caches by definition,
-		// and RFC 9111 3.5 lists it beside public as authorising the storage of
-		// a Set-Cookie response. The guard replaced the literal token `public`
-		// and nothing else, so this shipped as written
+		// s-maxage is the directive addressed to shared caches by definition (RFC
+		// 9111 5.2.2.10); replacing the literal token `public` alone shipped it
 		{"s-maxage is dropped and the max-age kept", func(w http.ResponseWriter) error {
 			w.Header().Set("Cache-Control", "s-maxage=600, max-age=60")
 			return SetSession(w, map[string]string{"user": "luigi"}, time.Hour)
@@ -276,9 +246,8 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 				t.Errorf("Cache-Control = %q, want max-age kept: it is legitimate for a private cache", v)
 			}
 		}},
-		// the contradiction the guard used to manufacture out of this one:
-		// `private, s-maxage=600` tells a shared cache both that it may not
-		// store the response and how long to keep it
+		// `private, s-maxage=600` tells a shared cache both that it may not store
+		// the response and how long to keep it
 		{"public beside s-maxage leaves no contradiction", func(w http.ResponseWriter) error {
 			w.Header().Set("Cache-Control", "public, s-maxage=600")
 			return SetSession(w, map[string]string{"user": "luigi"}, time.Hour)
@@ -287,9 +256,8 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 				t.Errorf("Cache-Control = %q, want private", v)
 			}
 		}},
-		// the argument of no-cache is a comma-separated list of header field
-		// names, not a list of directives: rewriting a `public` inside it named
-		// a field that does not exist and stopped revalidating the one that did
+		// the argument of no-cache is a list of header field names, not of
+		// directives
 		{"a public inside a quoted argument is left alone", func(w http.ResponseWriter) error {
 			w.Header().Set("Cache-Control", `no-cache="a, public, b", max-age=60`)
 			return SetSession(w, map[string]string{"user": "luigi"}, time.Hour)
@@ -298,10 +266,9 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 				t.Errorf("Cache-Control = %q, want the handler's no-cache field list untouched", v)
 			}
 		}},
-		// an unterminated quote is where the strict and lenient readings of a
-		// Cache-Control line disagree, and it is reachable the moment any part
-		// of the value is interpolated. Treating it as opening a string hid
-		// these directives from the guard while a lenient cache obeyed them
+		// an unterminated quote is reachable the moment any part of the value is
+		// interpolated; treating it as opening a string hid these directives from
+		// the guard while a lenient cache obeyed them
 		{"an unterminated quote does not hide s-maxage", func(w http.ResponseWriter) error {
 			w.Header().Set("Cache-Control", `x=", s-maxage=600`)
 			return SetSession(w, map[string]string{"user": "luigi"}, time.Hour)
@@ -316,9 +283,8 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 			w.Header().Set("Cache-Control", `max-age=600, x="`)
 			return SetSession(w, map[string]string{"user": "luigi"}, time.Hour)
 		}, nil},
-		// the value is the comma-join of every line: a private on a later line
-		// is behind an earlier line's open quote and reaches no strict reader,
-		// however plausible it looks in the header map
+		// a private on a later line is behind an earlier line's open quote and
+		// reaches no strict reader
 		{"a private on a later line does not count behind an earlier open quote", func(w http.ResponseWriter) error {
 			w.Header().Add("Cache-Control", "max-age=31536000, immutable")
 			w.Header().Add("Cache-Control", `no-cache="a`)
@@ -329,11 +295,9 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 				t.Errorf("Cache-Control = %q, want the handler's immutable kept", v)
 			}
 		}},
-		// the shape the guard used to leave alone because nothing needed
-		// changing: a bare `public` and a bare `s-maxage` each alone on a line,
-		// inside a quoted argument opened on an earlier line and closed on a
-		// later one. Safe under the join, and a bare token on its own line to
-		// any reader that does not join first
+		// a bare `public` and a bare `s-maxage` each alone on a line, inside a
+		// quoted argument opened earlier and closed later: safe under the join, a
+		// bare token to any reader that does not join first
 		{"a quoted span crossing lines is emitted joined", func(w http.ResponseWriter) error {
 			w.Header().Add("Cache-Control", `private, no-cache="a`)
 			w.Header().Add("Cache-Control", "public")
@@ -348,8 +312,8 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 				t.Errorf("Cache-Control = %q, want the handler's argument intact", v)
 			}
 		}},
-		// the sibling that must stay as it arrived: same multi-line value, no
-		// quoted span crossing a boundary, so every reader partitions it alike
+		// same multi-line value, no quoted span crossing a boundary: must come back
+		// as it arrived
 		{"a multi-line value with no crossing span is left as it arrived", func(w http.ResponseWriter) error {
 			w.Header().Add("Cache-Control", `private, no-cache="a, public"`)
 			w.Header().Add("Cache-Control", "max-age=60")
@@ -372,9 +336,8 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 				t.Errorf("Cache-Control = %q carries %d privates, want exactly one", v, n)
 			}
 		}},
-		// private="X" makes only the named fields private and leaves the
-		// response storable by a shared cache (RFC 9111 5.2.2.7), so it does
-		// not satisfy the guard
+		// private="X" leaves the response storable by a shared cache (RFC 9111
+		// 5.2.2.7), so it does not satisfy the guard
 		{"a qualified private does not count as private", func(w http.ResponseWriter) error {
 			w.Header().Set("Cache-Control", `private="X-Thing", max-age=600`)
 			return SetSession(w, map[string]string{"user": "luigi"}, time.Hour)
@@ -385,8 +348,7 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 		}},
 	}
 
-	// how the handler ends: the guard used to hang off the commit hooks, so
-	// only the rows that write anything at all reached it
+	// how the handler ends: only the rows that write anything reach a commit hook
 	finishes := []struct {
 		name string
 		run  func(w http.ResponseWriter)
@@ -434,10 +396,9 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 						t.Fatal("no Set-Cookie on the wire; the case proves nothing")
 					}
 					cc := res.Header.Values("Cache-Control")
-					// RFC 9111 3.5 authorises a shared cache to store a
-					// Set-Cookie response on either of these, so neither may
-					// reach the wire beside one - under either reading of the
-					// line, because either is a cache someone runs
+					// the two directives addressed to shared caches (RFC 9111 5.2.2.9,
+					// 5.2.2.10): neither may reach the wire beside a cookie under either
+					// reading of the line, because either is a cache someone runs
 					for _, bad := range []string{"public", "s-maxage"} {
 						if hasForbiddenDirective(cc, bad) {
 							t.Fatalf("Cache-Control = %q ships %s on a response carrying Set-Cookie: a shared cache may store it and hand this session to the next requester", cc, bad)
@@ -455,15 +416,11 @@ func TestNoResponseWithASetCookieShipsPublicOnTheWire(t *testing.T) {
 	}
 }
 
-// The guard runs up to four times on one response - Cache, SetSession or
-// ClearSession, the gzip commit, and recoverMiddleware's exit - so a pass that
-// cannot see what the pass before it did does not merely waste work, it keeps
-// changing a response that was already settled. `private` accumulated without
-// bound on any value with an unterminated quote, because judging the added
-// token per line meant no pass recognised its own predecessor.
-//
-// A fixed point after the first pass is the property, not a smaller number of
-// duplicates, so this asserts stability from pass two rather than counting.
+// The guard runs up to four times on one response (Cache, SetSession or
+// ClearSession, the gzip commit, recoverMiddleware's exit). A fixed point
+// after the first pass is the property: `private` once accumulated without
+// bound on any value with an unterminated quote, because the added token was
+// judged per line
 func TestPrivateIfCookiesReachesAFixedPoint(t *testing.T) {
 	values := []string{
 		"public, max-age=60",
@@ -495,19 +452,9 @@ func TestPrivateIfCookiesReachesAFixedPoint(t *testing.T) {
 	}
 }
 
-// BORGO'S OWN SESSION COOKIE IS GUARDED WITHOUT BORGO'S PIPELINE.
-//
-// recoverMiddleware's exit only exists inside the chain borgo.Serve builds, and
-// session.go treats mounting these handlers on your own server as supported. On
-// such a mux the guard fell all the way back to the one-shot inside Cache, so
-// the order dependence was live again: session-then-cache came out private and
-// cache-then-session shipped `public` on a response carrying a session, which
-// is the quiet half of the pair. SetSession and ClearSession now enforce it
-// themselves, at the one moment borgo knows a Set-Cookie is going out whatever
-// server it is running under.
-//
-// No middleware here on purpose. Wrapping it would test the thing that already
-// worked.
+// borgo's own session cookie is guarded without borgo's pipeline: on an
+// embedder mux there is no commit-time guard, so SetSession and ClearSession
+// enforce it themselves. No middleware here on purpose.
 func TestSessionCookiesAreGuardedOnAnEmbedderMux(t *testing.T) {
 	t.Setenv("SESSION_SECRET", strings.Repeat("k", 32))
 
@@ -571,19 +518,12 @@ func TestSessionCookiesAreGuardedOnAnEmbedderMux(t *testing.T) {
 	}
 }
 
-// borgo.Middleware's doc tells an embedder that Serve is defined in terms of it
-// and that the two cannot drift apart. That is a claim about a single line in
-// serveContext, and nothing held it: routing Serve around the chain left every
-// other test in this file green, because they all build the chain themselves.
-// This one goes through borgo's own listener instead.
-//
-// The handler sets its Cache-Control after the cookie and then writes nothing,
-// which is deliberate on both counts: the order is one no call-site guard can
-// close, and the ending is the response net/http finishes on the handler's
-// behalf. Only the commit-time guard answers it, so this fails if borgo's own
-// server ever stops installing the chain. A handler using borgo.Cache would
-// have passed either way - SetSession's best-effort call covers that order -
-// and would have made the test green for the wrong reason.
+// borgo.Middleware's doc says Serve is defined in terms of it; that is one
+// line in serveContext and every other test builds the chain itself, so this
+// one goes through borgo's own listener. The handler sets Cache-Control after
+// the cookie and writes nothing: the order no call-site guard can close, and
+// the ending net/http finishes on the handler's behalf. borgo.Cache would
+// have passed either way, through SetSession's own call.
 func TestBorgosOwnServerInstallsTheGuard(t *testing.T) {
 	restoreRegistry(t)
 	t.Setenv("SESSION_SECRET", strings.Repeat("k", 32))
@@ -634,18 +574,11 @@ func TestBorgosOwnServerInstallsTheGuard(t *testing.T) {
 	}
 }
 
-// THE ORDERS A CALL-SITE GUARD CANNOT CLOSE, AND THE ONE-LINER THAT DOES.
-//
-// Guarding at SetSession closed cache-then-session on an embedder mux and
-// mirrored the order dependence rather than removing it: anything that sets
-// Cache-Control after the cookie escapes. borgo ships two such setters itself,
-// SSE and NoCache, so this needs no unusual handler at all - an authenticated
-// event stream is enough.
-//
-// The answer is not a third call-site guard. It is borgo.Middleware, which
-// gives an embedder the commit-time guard borgo's own server has. Each case
-// runs the same handler twice: bare, where it is documented to be the app's
-// problem, and wrapped, where the property must hold.
+// The orders a call-site guard cannot close: anything that sets
+// Cache-Control after the cookie, and borgo ships two such setters itself,
+// SSE and NoCache. borgo.Middleware is what closes them for an embedder.
+// Each case runs the same handler bare, where it is documented to be the
+// app's problem, and wrapped, where the property must hold.
 func TestMiddlewareClosesTheOrdersACallSiteGuardCannot(t *testing.T) {
 	t.Setenv("SESSION_SECRET", strings.Repeat("k", 32))
 
@@ -714,9 +647,8 @@ func TestMiddlewareClosesTheOrdersACallSiteGuardCannot(t *testing.T) {
 			}
 		})
 
-		// the other side of the boundary, pinned so the next reader finds a
-		// decision and not a gap. These are the responses cache.go documents as
-		// the app's own; the test to change if that boundary moves
+		// the other side of the boundary, pinned: the responses cache.go documents
+		// as the app's own. The test to change if that boundary moves
 		t.Run(c.name+"/bare mux, documented as the app's", func(t *testing.T) {
 			mux := http.NewServeMux()
 			mux.HandleFunc("/", c.run)
@@ -725,18 +657,10 @@ func TestMiddlewareClosesTheOrdersACallSiteGuardCannot(t *testing.T) {
 	}
 }
 
-// The guard adds `private`, removes the two directives that authorise a shared
-// cache to store a Set-Cookie response, and changes nothing else: it must not
-// invent a header, touch a response with no cookie, or drop a directive it was
-// not there to change.
-//
-// The `no-store is untouched` and `publicish` rows changed with the rule: they
-// now come back with a `private` appended. That is not a test relaxed to stay
-// green - the assertion is stricter than it was, and the output it now demands
-// is narrower. The reason for adding `private` even where nothing authorised
-// sharing is in cache.go: it makes the rule one sentence, and it covers
-// must-revalidate - the third directive RFC 9111 3.5 lists - without a case of
-// its own.
+// The guard adds `private`, removes `public` and `s-maxage`, and changes
+// nothing else: it must not invent a header, touch a cookieless response, or
+// drop a directive it was not there to change. The `no-store is untouched`
+// and `publicish` rows demand a `private` appended: stricter, not relaxed.
 func TestPrivateIfCookiesOnlyNarrows(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -752,22 +676,19 @@ func TestPrivateIfCookiesOnlyNarrows(t *testing.T) {
 		{"public is downgraded, the rest of the value kept", true, []string{"public, max-age=60, stale-while-revalidate=600"}, []string{"private, max-age=60, stale-while-revalidate=600"}},
 		// "public-something" is not the public directive
 		{"a directive merely starting with public is not public", true, []string{"publicish, max-age=60"}, []string{"private, publicish, max-age=60"}},
-		// the directive name is case-insensitive, and need not come first
+		// case-insensitive, and need not come first
 		{"uppercase PUBLIC is still the public directive", true, []string{"PUBLIC, max-age=60"}, []string{"private, max-age=60"}},
 		{"public last in the list is found too", true, []string{"max-age=60, public"}, []string{"max-age=60, private"}},
-		// repeated header lines are one directive list. Every line is read, and
-		// a response the guard rewrites comes back as the single value it was
-		// read as - which is the same value, since RFC 9110 5.3 makes the join
-		// the meaning. Nothing is dropped and the order is the order
+		// repeated lines are one directive list, and come back as the single value
+		// they were read as: the same value, since RFC 9110 5.3 makes the join the
+		// meaning
 		{"a second line is not deleted by the downgrade", true, []string{"public, max-age=60", "no-store"}, []string{"private, max-age=60, no-store"}},
 		{"public on the second line is found", true, []string{"no-store", "public"}, []string{"no-store, private"}},
 		{"public on every line is downgraded on every line", true, []string{"public", "max-age=60, PUBLIC"}, []string{"private, max-age=60, private"}},
 		{"no cookie leaves a multi-line value alone", false, []string{"public, max-age=60", "no-store"}, []string{"public, max-age=60", "no-store"}},
 		{"a multi-line value with nothing to change is not collapsed", true, []string{"private", "max-age=60"}, []string{"private", "max-age=60"}},
 		{"nor is one whose quoted argument stays on its own line", true, []string{`private, no-cache="a, public"`, "max-age=60"}, []string{`private, no-cache="a, public"`, "max-age=60"}},
-		// the one exception to "unchanged means untouched": a quoted span
-		// crossing a line boundary is read one way by a reader that joins the
-		// lines and another by a reader that does not, and only the join shows
+		// the one exception to "unchanged means untouched": only the join shows
 		// that the bare `public` on its own line is inside an argument
 		{"a quoted span crossing a line is emitted joined even when nothing changed", true,
 			[]string{`private, no-cache="a`, "public", "s-maxage=600", `b"`},
@@ -775,15 +696,13 @@ func TestPrivateIfCookiesOnlyNarrows(t *testing.T) {
 		{"a crossing span with no bare private still gets one, joined", true,
 			[]string{`no-cache="a`, "public", `b"`},
 			[]string{`private, no-cache="a,public,b"`}},
-		// an unterminated quote opens nothing, so it crosses nothing: the
-		// crossing scan has to agree with splitDirectives about which quotes
-		// open anything at all, or the exception fires on a value the guard
-		// itself reads as unquoted
+		// an unterminated quote opens nothing, so it crosses nothing: the crossing
+		// scan must agree with splitDirectives, or the exception fires on a value
+		// the guard itself reads as unquoted
 		{"an unterminated quote is not a crossing span", true, []string{"private", `x="`}, []string{"private", `x="`}},
 		{"nor does an unterminated quote cross a later boundary", true, []string{"private", `x="`, "max-age=60"}, []string{"private", `x="`, "max-age=60"}},
-		// the reachability of a private is a property of the joined value, not
-		// of the line it sits on: an earlier line's unterminated quote hides a
-		// later line's private from every strict reader
+		// an earlier line's unterminated quote hides a later line's private from
+		// every strict reader
 		{"a private on a later line does not count behind an earlier open quote", true,
 			[]string{"max-age=31536000, immutable", `no-cache="a`, "private"},
 			[]string{`private, max-age=31536000, immutable, no-cache="a, private`}},
@@ -793,12 +712,12 @@ func TestPrivateIfCookiesOnlyNarrows(t *testing.T) {
 		{"an open quote on line one does not hide an s-maxage on line two", true,
 			[]string{`x="`, "s-maxage=600"},
 			[]string{`private, x="`}},
-		// s-maxage is the other directive RFC 9111 3.5 authorises sharing on
+		// s-maxage is the other directive addressed to shared caches
 		{"s-maxage goes and a private replaces it", true, []string{"s-maxage=600, max-age=60"}, []string{"private, max-age=60"}},
 		{"s-maxage last goes too", true, []string{"max-age=60, s-maxage=600"}, []string{"private, max-age=60"}},
 		{"s-maxage alone becomes private", true, []string{"s-maxage=600"}, []string{"private"}},
 		{"uppercase S-MAXAGE goes too", true, []string{"S-MaxAge=600, max-age=60"}, []string{"private, max-age=60"}},
-		// the contradiction the guard used to manufacture
+		// the contradiction `private, s-maxage` would be
 		{"public beside s-maxage leaves one private and no s-maxage", true, []string{"public, s-maxage=600"}, []string{"private"}},
 		{"a line emptied by the drop is not emitted blank", true, []string{"public", "s-maxage=600"}, []string{"private"}},
 		{"an existing private is not duplicated when s-maxage goes", true, []string{"private, s-maxage=600"}, []string{"private"}},
@@ -809,23 +728,20 @@ func TestPrivateIfCookiesOnlyNarrows(t *testing.T) {
 		{"a public inside a quoted argument is not a directive", true, []string{`no-cache="a, public, b", max-age=60`}, []string{`private, no-cache="a, public, b", max-age=60`}},
 		{"a quoted argument ending in public is not a directive either", true, []string{`no-cache="a, public"`}, []string{`private, no-cache="a, public"`}},
 		{"a real public beside a quoted one is still downgraded", true, []string{`no-cache="a, public", public`}, []string{`no-cache="a, public", private`}},
-		// an unterminated quote does not open a string: the tokens after it are
-		// directives to any cache that splits on commas, so they are directives
-		// here too
+		// the tokens after an unterminated quote are directives to any cache that
+		// splits on commas, so they are directives here too
 		{"an unterminated quote does not hide s-maxage", true, []string{`x=", s-maxage=600`}, []string{`private, x="`}},
 		{"an unterminated quote does not hide public", true, []string{`s-maxage=600, x=", public`}, []string{`private, x=", private`}},
 		{"the added private is not swallowed by an open string", true, []string{`max-age=600, x="`}, []string{`private, max-age=600, x="`}},
 		{"an escaped quote inside a balanced argument is not an opener", true, []string{`no-cache="a\", public", max-age=60`}, []string{`private, no-cache="a\", public", max-age=60`}},
-		// RFC 9111 5.2.2.7: private="X" is about the named fields only and
-		// leaves the response storable by a shared cache
+		// RFC 9111 5.2.2.7: private="X" leaves the response storable by a shared cache
 		{"a qualified private does not satisfy the guard", true, []string{`private="X", max-age=600`}, []string{`private, private="X", max-age=600`}},
 		{"a qualified private beside public still gets a bare one", true, []string{`private="X", public`}, []string{`private="X", private`}},
-		// an empty list element carries no directive (RFC 9110 5.6.1)
+		// an empty list element carries no directive (RFC 9110 5.6.1.2)
 		{"an empty element is dropped when the guard rewrites", true, []string{"public,,max-age=1"}, []string{"private, max-age=1"}},
 		{"a lone empty value does not grow an empty field", true, []string{""}, []string{"private"}},
 		{"an empty element is left alone when nothing else changes", true, []string{"private,,max-age=1"}, []string{"private,,max-age=1"}},
-		// a malformed element still carries characters, and a guard that
-		// deletes what it cannot parse is not one that only narrows
+		// a guard that deletes what it cannot parse is not one that only narrows
 		{"a malformed element is kept, not deleted", true, []string{"max-age=60, =weird"}, []string{"private, max-age=60, =weird"}},
 		{"a second run changes nothing", true, []string{"private, max-age=60"}, []string{"private, max-age=60"}},
 	}
@@ -848,14 +764,10 @@ func TestPrivateIfCookiesOnlyNarrows(t *testing.T) {
 	}
 }
 
-// wireHeaderLines returns the header block a real server put on the wire, read
-// off a raw connection.
-//
-// Not http.Client: its parser canonicalises every key it reads, which is
-// precisely the distinction under test here - a `cache-control` entry and a
-// `Cache-Control` entry are the same key by the time res.Header holds them, so
-// a client-side assertion cannot tell a guarded response from a leaking one.
-// The bytes can.
+// read off a raw connection, not through http.Client: its parser
+// canonicalises every key, so a `cache-control` and a `Cache-Control` entry
+// are one key in res.Header and a client-side assertion cannot tell a guarded
+// response from a leaking one
 func wireHeaderLines(t *testing.T, h http.Handler) []string {
 	t.Helper()
 	srv := httptest.NewServer(h)
@@ -877,31 +789,14 @@ func wireHeaderLines(t *testing.T, h http.Handler) []string {
 	return strings.Split(head, "\r\n")[1:]
 }
 
-// THE KEY A HEADER WAS SPELLED WITH DOES NOT DECIDE WHETHER THE GUARD SEES IT.
-//
-// h.Values canonicalises the key it looks up; net/http's writer canonicalises
-// nothing and emits the map as it finds it. So a handler that assigns through
-// the map - w.Header()["cache-control"] = - puts a line on the wire that every
-// cache obeys, because RFC 9110 5.1 makes field names case-insensitive, and
-// that the guard's lookup did not see. This was a declared limit rather than a
-// defect, and the declaration understated it twice over.
-//
-// First, it read as symmetric blindness with a symmetric consequence: if the
-// guard sees neither header it does nothing, which sounds coherent. On the wire
-// it is not. Every row here except both-canonical shipped `public,
-// s-maxage=600` beside a Set-Cookie - the all-lowercase response leaks exactly
-// as hard as the mixed one, because the leak is what the handler wrote and the
-// guard's silence is not a mitigation.
-//
-// Second, and worse than any blind spot: with a cookie the guard can see and a
-// Cache-Control present under both spellings, the guard ran, narrowed the half
-// it could read, and emitted `Cache-Control: private, max-age=60` next to a
-// surviving `cache-control: public, s-maxage=600`. Those are one field to the
-// cache that joins them, so the response the guard produced carried the
-// authorisation the guard exists to remove.
-//
-// The axes are both keys' spelling, one value per key against several, and a
-// field present under two spellings at once. The assertion is on the bytes.
+// The key a header was spelled with does not decide whether the guard sees
+// it: net/http's writer emits the map as it finds it, h.Values canonicalises
+// the key it looks up. Every row here except both-canonical once shipped
+// `public, s-maxage=600` beside a Set-Cookie, and with a Cache-Control under
+// both spellings the guard rewrote the half it could read and emitted
+// `private, max-age=60` next to a surviving `cache-control: public,
+// s-maxage=600`, one field to the cache that joins them. The assertion is on
+// the bytes.
 func TestTheGuardReadsAHeaderUnderEverySpellingOfItsKey(t *testing.T) {
 	type staging struct {
 		name string
@@ -924,7 +819,7 @@ func TestTheGuardReadsAHeaderUnderEverySpellingOfItsKey(t *testing.T) {
 		{"uppercase", func(h http.Header) { h["CACHE-CONTROL"] = []string{"public, s-maxage=600"} }},
 		{"two canonical", func(h http.Header) { h["Cache-Control"] = []string{"public", "s-maxage=600"} }},
 		{"two lowercase", func(h http.Header) { h["cache-control"] = []string{"public", "s-maxage=600"} }},
-		// the row the guard used to get wrong rather than miss
+		// the row the guard once got wrong rather than missed
 		{"both spellings", func(h http.Header) {
 			h["Cache-Control"] = []string{"max-age=60"}
 			h["cache-control"] = []string{"public, s-maxage=600"}
@@ -956,8 +851,8 @@ func TestTheGuardReadsAHeaderUnderEverySpellingOfItsKey(t *testing.T) {
 				if len(control) == 0 {
 					t.Fatal("no Cache-Control reached the wire under any spelling; the case proves nothing")
 				}
-				// every line, whatever key it arrived under: a cache reads
-				// them case-insensitively and joins them into one value
+				// every line, whatever key it arrived under: a cache reads them
+				// case-insensitively and joins them into one value
 				for _, bad := range []string{"public", "s-maxage"} {
 					if hasForbiddenDirective(control, bad) {
 						t.Fatalf("Cache-Control = %q ships %s on a response carrying Set-Cookie: a shared cache may store it and hand this session to the next requester", control, bad)
@@ -971,13 +866,10 @@ func TestTheGuardReadsAHeaderUnderEverySpellingOfItsKey(t *testing.T) {
 	}
 }
 
-// The scan the fold costs is paid on every response, so it is measured rather
-// than asserted to be small. It is proportional to the number of header keys
-// and independent of the matcher: a matcher that returns false without looking
-// at anything benchmarks the same, because the whole of it is the map range.
-//
-// For scale, the gzip path this runs on clones the same map at WriteHeader and
-// clears and re-copies it at commit, both of which are the same order of work.
+// measured rather than asserted small: proportional to the number of header
+// keys and independent of the matcher (one that returns false without looking
+// benchmarks the same). For scale, the gzip path clones the same map at
+// WriteHeader and re-copies it at commit.
 func benchmarkGuard(b *testing.B, keys int) {
 	h := http.Header{}
 	filler := []string{"Content-Type", "Content-Length", "Date", "Vary", "Etag", "Last-Modified", "Server", "X-Request-Id", "X-Frame-Options", "Content-Security-Policy", "Referrer-Policy", "X-Content-Type-Options", "Strict-Transport-Security", "Accept-Ranges", "Age", "Link", "X-A", "X-B", "X-C", "X-D", "X-E", "X-F", "X-G", "X-H", "X-I", "X-J", "X-K", "X-L", "X-M", "X-N"}
@@ -986,7 +878,6 @@ func benchmarkGuard(b *testing.B, keys int) {
 	}
 	h.Set("Cache-Control", "public, max-age=60")
 	// no cookie: the common path, and the one that leaves the map untouched
-	// so the benchmark measures the guard rather than a reset beside it
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

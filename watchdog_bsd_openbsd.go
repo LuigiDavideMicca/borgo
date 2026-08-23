@@ -6,12 +6,11 @@ import "unsafe"
 
 var bsdKinfo = openbsdKinfo
 
-// openbsdKinfoProc is the C layout as cgo -godefs reads it from sys/sysctl.h,
-// amd64 and 386 alike, with the fields this code never touches collapsed into
-// runs of the same width. golang.org/x/sys/unix carries no kinfo_proc for
-// openbsd, so this is the witness: the offsets in watchdog_corpse.go have to
-// agree with it both ways, and the prefix asked for has to end at p_comm,
-// inside it, or the package does not build.
+// The C layout as cgo -godefs reads it from sys/sysctl.h, amd64 and 386 alike,
+// untouched fields collapsed into runs of the same width. golang.org/x/sys/unix
+// carries no kinfo_proc for openbsd, so this is the witness the offsets in
+// watchdog_corpse.go are held against, and the prefix asked for has to end at
+// p_comm inside it: disagree and the package does not build.
 type openbsdKinfoProc struct {
 	_    [12]uint64 // p_forw .. p_ru
 	_    [3]int32   // p_eflag p_exitsig p_flag

@@ -48,12 +48,10 @@ type pushPayload struct {
 	Title string `json:"title"`
 }
 
-// Push carries its payload type in its signature - this only compiles if Push
-// has exactly one type parameter, which is what borgogen reads to type the
-// browser's subscribe callback. The whole typed-events feature rests on it.
+// compiles only if Push has exactly one type parameter, which is what borgogen
+// reads to type the browser's subscribe callback
 var _ func(string, string, pushPayload) error = Push[pushPayload]
 
-// the typed path end to end: T inferred from the argument, payload on the wire
 func TestPushIsTypedAndInferred(t *testing.T) {
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +61,6 @@ func TestPushIsTypedAndInferred(t *testing.T) {
 	defer server.Close()
 	t.Setenv("FRONT_URL", server.URL)
 
-	// no type argument written anywhere: Go infers T = pushPayload
 	if err := Push("live", "created", pushPayload{Title: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +69,6 @@ func TestPushIsTypedAndInferred(t *testing.T) {
 		t.Fatalf("payload wrong: %+v", got)
 	}
 
-	// an explicit type argument is accepted too
 	got = nil
 	if err := Push[pushPayload]("live", "created", pushPayload{Title: "explicit"}); err != nil {
 		t.Fatal(err)
@@ -82,7 +78,7 @@ func TestPushIsTypedAndInferred(t *testing.T) {
 	}
 }
 
-// every pre-0.21 call shape that Go can still infer must compile and behave
+// every pre-0.21 call shape must still compile and behave
 func TestPushAcceptsUntypedCallSites(t *testing.T) {
 	var seen int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -120,8 +116,7 @@ func TestPushClientHasTimeout(t *testing.T) {
 	}
 }
 
-// pushes go to one host: without a raised idle-connection cap, concurrent
-// pushes open a socket per call and eat the ephemeral port range
+// without a raised idle-connection cap, concurrent pushes open a socket per call
 func TestPushReusesConnections(t *testing.T) {
 	const workers, each = 16, 50
 	var requests, opened atomic.Int64
@@ -156,17 +151,14 @@ func TestPushReusesConnections(t *testing.T) {
 	if got := requests.Load(); got != workers*each {
 		t.Fatalf("front server saw %d pushes, want %d", got, workers*each)
 	}
-	// generous: reuse should keep this near the worker count, a fresh
-	// connection per push would be workers*each
+	// generous: reuse keeps this near the worker count, no reuse is workers*each
 	if got := opened.Load(); got > workers*each/4 {
 		t.Fatalf("%d connections opened for %d pushes: they are not being reused", got, workers*each)
 	}
 }
 
-// a front server that accepts the connection and then never answers: the
-// caller gets out on its own deadline, it does not wait for the destination.
-// The settings carry no client timeout at all, so what is proven is the
-// deadline on the request and not the client's.
+// a front server that accepts and never answers. The settings carry no client
+// timeout, so what is proven is the deadline on the request
 func TestPushDoesNotBlockOnHungFrontServer(t *testing.T) {
 	addr := hungFrontServer(t)
 	t.Setenv("FRONT_URL", "http://"+addr)
@@ -192,10 +184,8 @@ func TestPushDoesNotBlockOnHungFrontServer(t *testing.T) {
 	}
 }
 
-// a deadline shortened for one test is that test's own: it does not reach the
-// settings every other caller reads. These subtests run at the same time on
-// purpose - shortening a shared deadline instead would be both a data race and,
-// while the window is open, a wrong answer to "does the client have a timeout".
+// the subtests run in parallel on purpose: a shared deadline shortened by one
+// of them would be a data race and a wrong answer about the client's timeout
 func TestPushSettingsAreNotShared(t *testing.T) {
 	t.Setenv("FRONT_URL", "http://"+hungFrontServer(t))
 
@@ -217,15 +207,12 @@ func TestPushSettingsAreNotShared(t *testing.T) {
 	})
 }
 
-// the settings a test pushes with: its own client, so the shared one is neither
-// read nor written here. No client timeout, so a deadline that fires is the
-// request's.
+// no client timeout, so a deadline that fires is the request's
 func shortPush(d time.Duration) pushSettings {
 	client := pushHTTPClient(0)
 	return pushSettings{timeout: d, client: client}
 }
 
-// a listener that accepts and holds every connection open without answering
 func hungFrontServer(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -256,10 +243,9 @@ func hungFrontServer(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// FRONT_URL is the whole evidence about the channel the key would travel on:
-// the scheme first, the host second. A spelling counts as this machine only
-// when nothing that reads it could disagree - case and the root dot cannot be
-// read two ways, the inet_aton short forms can.
+// a spelling counts as this machine only when nothing that reads it could
+// disagree: case and the root dot cannot be read two ways, the inet_aton short
+// forms can
 func TestPushKeyDoesNotTravelInClear(t *testing.T) {
 	cases := []struct {
 		front, want string
@@ -272,28 +258,20 @@ func TestPushKeyDoesNotTravelInClear(t *testing.T) {
 		{"http://0.0.0.0:1", "cross the network in clear"},
 		{"http://localhost.attacker.tld", "cross the network in clear"},
 
-		// the same machine, spelled the other ways that mean the same thing
-		// to everything that reads them
 		{"HTTP://LOCALHOST:1", ""},
 		{"http://LocalHost:1", ""},
 		{"HTTP://127.0.0.1:1", ""},
 		{"http://localhost.:1", ""}, // the root dot: an absolute name for it
-		// NOT on the address form: the dialer looks "127.0.0.1." up as a name,
-		// so reading it as this machine here is a verdict something else does
-		// not share - measured, it dials and gets "lookup 127.0.0.1.: no such
-		// host". The root dot belongs to the name branch only
+		// the dialer looks "127.0.0.1." up as a name ("lookup 127.0.0.1.: no
+		// such host"): the root dot belongs to the name branch only
 		{"http://127.0.0.1.:1", "cross the network in clear"},
 		{"http://127.0.0.2.:1", "cross the network in clear"},
 		{"http://[::ffff:127.0.0.1]:1", ""},
 		{"http://[::FFFF:127.0.0.1]:1", ""},
 
-		// The inet_aton short forms are refused ON PURPOSE, and this is not a
-		// gap to close. They are not illegitimate - they are the spellings we
-		// and the resolver may not agree on: glibc and Windows connect to
-		// 127.0.0.1, Go's own resolver (netgo, the common build on Linux)
-		// looks them up as names and can land anywhere. Teaching the guard to
-		// parse them would put a promise here that no parser can keep on every
-		// platform. Anyone who can write these can write 127.0.0.1.
+		// refused on purpose, not a gap to close: glibc and Windows connect
+		// these to 127.0.0.1, Go's own resolver looks them up as names and can
+		// land anywhere
 		{"http://127.1:1", "cross the network in clear"},
 		{"http://127.0.1:1", "cross the network in clear"},
 		{"http://2130706433:1", "cross the network in clear"},
@@ -301,7 +279,6 @@ func TestPushKeyDoesNotTravelInClear(t *testing.T) {
 		{"http://0177.0.0.1:1", "cross the network in clear"},
 		{"http://134744072:1", "cross the network in clear"}, // 8.8.8.8, likewise
 
-		// not this machine at all
 		{"http://127.0.0.1.attacker.tld", "cross the network in clear"},
 		{"http://999.0.0.1:1", "cross the network in clear"},
 
@@ -325,16 +302,14 @@ func TestPushKeyDoesNotTravelInClear(t *testing.T) {
 				}
 				return
 			}
-			// unreachable on purpose: any error must come from the wire,
-			// not from the guard
+			// unreachable on purpose: the error must come from the wire
 			if err != nil && (strings.Contains(err.Error(), "cross the network in clear") || strings.Contains(err.Error(), "FRONT_URL")) {
 				t.Fatalf("FRONT_URL=%q: this channel may carry the key, but Push refused: %v", c.front, err)
 			}
 		})
 	}
 
-	// the exported entry point asks the same question - the cases above run
-	// through its body, but the one line that delegates to it could go missing
+	// the one line in Push that delegates to the guard could go missing
 	t.Run("through Push itself", func(t *testing.T) {
 		t.Setenv("FRONT_URL", "http://front.invalid")
 		if err := Push("live", "x", "y"); err == nil || !strings.Contains(err.Error(), "cross the network in clear") {
@@ -343,8 +318,6 @@ func TestPushKeyDoesNotTravelInClear(t *testing.T) {
 	})
 }
 
-// the same address, the same reachable server: what changes is whether there
-// is a key to protect. Nothing may reach the wire when there is.
 func TestPushHoldsKeyBackWithoutSendingIt(t *testing.T) {
 	var seen atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -353,8 +326,7 @@ func TestPushHoldsKeyBackWithoutSendingIt(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// 0.0.0.0 connects to this machine but is not a loopback address: a
-	// reachable destination the guard must still refuse
+	// 0.0.0.0 connects to this machine but is not loopback: still refused
 	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
 	if err != nil {
 		t.Fatal(err)
@@ -376,7 +348,6 @@ func TestPushHoldsKeyBackWithoutSendingIt(t *testing.T) {
 		t.Fatalf("front server saw %d requests: the refused push went out anyway", got)
 	}
 
-	// and an operator who says so out loud gets the old behaviour back
 	t.Setenv("BORGO_PUSH_INSECURE", "1")
 	if err := Push("live", "x", "y"); err != nil {
 		t.Fatalf("BORGO_PUSH_INSECURE=1: %v", err)
@@ -386,8 +357,6 @@ func TestPushHoldsKeyBackWithoutSendingIt(t *testing.T) {
 	}
 }
 
-// a switch that decides whether a secret goes on the wire cannot guess at a
-// value nobody can read
 func TestPushInsecureRefusesUnreadableValue(t *testing.T) {
 	t.Setenv("FRONT_URL", "http://front.invalid")
 	t.Setenv("BORGO_PUSH_KEY", "s3cret")
@@ -398,10 +367,8 @@ func TestPushInsecureRefusesUnreadableValue(t *testing.T) {
 	}
 }
 
-// the two halves of BORGO_PUSH_KEY, from this side: with no key here nothing
-// is presented at all - which is what makes the front server's own rule
-// ("a key arrived but I have none" is refused, not waved through) reachable.
-// A header sent from nowhere would turn every keyless push into that case.
+// with no key nothing is presented at all: an empty header would turn every
+// keyless push into the front server's "a key arrived but I have none" refusal
 func TestPushPresentsNoKeyWhenUnset(t *testing.T) {
 	var present bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -420,10 +387,8 @@ func TestPushPresentsNoKeyWhenUnset(t *testing.T) {
 	}
 }
 
-// the guard vets the host FRONT_URL names, and that is the only host it can
-// vet: a hop chosen by the first server was never looked at. The return value
-// cannot show whether the key left - only the bytes arriving at the second hop
-// can, so this reads them off a raw listener.
+// the return value cannot show whether the key left: only the bytes arriving
+// at the second hop can, so this reads them off a raw listener
 func TestPushKeyDoesNotFollowRedirect(t *testing.T) {
 	tap := newWireTap(t)
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -431,8 +396,6 @@ func TestPushKeyDoesNotFollowRedirect(t *testing.T) {
 	}))
 	defer front.Close()
 
-	// the default shape of a borgo deployment: the front server is on this
-	// machine, so the guard lets the key through to it
 	t.Setenv("FRONT_URL", front.URL)
 	t.Setenv("BORGO_PUSH_KEY", "s3cret")
 
@@ -446,7 +409,7 @@ func TestPushKeyDoesNotFollowRedirect(t *testing.T) {
 	}
 }
 
-// the escape hatch opens the first hop, never the ones after it
+// BORGO_PUSH_INSECURE opens the first hop, never the ones after it
 func TestPushInsecureStillDoesNotFollowRedirect(t *testing.T) {
 	tap := newWireTap(t)
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -464,8 +427,7 @@ func TestPushInsecureStillDoesNotFollowRedirect(t *testing.T) {
 	tap.mustStaySilent(t)
 }
 
-// a listener that speaks no http: it records whatever is written at it, so a
-// header that should never have been sent is visible as bytes
+// speaks no http: records whatever is written at it
 type wireTap struct {
 	addr string
 	hit  chan struct{}
@@ -525,16 +487,14 @@ func TestPushRejected(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("FRONT_URL", server.URL)
-	// an untyped nil is the one payload Go cannot infer T from: spell it out
+	// Go cannot infer T from an untyped nil
 	if err := Push[any]("live", "x", nil); err == nil {
 		t.Fatal("want error on non-204 response")
 	}
 }
 
-// The key crossing the network in clear is the one event that leaves no other
-// trace: no request fails, nothing is logged, and the operator learns it from
-// somebody else. Every input is environment, so the boot can say it - and the
-// boot is where whoever deployed is still watching.
+// the key crossing the network in clear leaves no other trace: no request
+// fails, nothing is logged. Every input is environment, so the boot can say it
 func TestCheckPushEnvSaysAtBootWhatPushWouldSayHoursLater(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -546,8 +506,8 @@ func TestCheckPushEnvSaysAtBootWhatPushWouldSayHoursLater(t *testing.T) {
 		quiet    bool
 	}{
 		{name: "no key, nothing to leak", frontURL: "http://front.invalid", quiet: true},
-		// a destination no push could reach is broken with or without a secret,
-		// and reading the key first is what left it for the first publish
+		// the endpoint is judged before the key: a broken destination is
+		// broken with or without a secret
 		{
 			name:     "no key, but a FRONT_URL nobody could push to still stops the boot",
 			frontURL: "ftp://front.invalid",
@@ -578,9 +538,8 @@ func TestCheckPushEnvSaysAtBootWhatPushWouldSayHoursLater(t *testing.T) {
 		},
 	}
 
-	// PORT is the front server's, read separately and possibly fine there, so a
-	// default it cannot build is said rather than fatal - and it names PORT,
-	// because FRONT_URL is a variable this operator never set
+	// said, not fatal: PORT may be fine for the front server that reads it.
+	// It names PORT, because FRONT_URL is a variable this operator never set
 	t.Run("a broken default names PORT, and does not stop a boot that may not need it", func(t *testing.T) {
 		var logs strings.Builder
 		log.SetOutput(&logs)
@@ -636,11 +595,9 @@ func TestCheckPushEnvSaysAtBootWhatPushWouldSayHoursLater(t *testing.T) {
 	}
 }
 
-// PORT is interpolated into a url, and an "@" in it turns "localhost:" into
-// credentials while the rest becomes the authority. Measured before the fix:
-// every push arrived at a listener of somebody else's choosing, the front
-// server got nothing, and the boot said not one word - and with no key set
-// there is no guard anywhere on that path.
+// an "@" in PORT turns "localhost:" into credentials and the rest into the
+// authority: every push would go to a listener of somebody else's choosing,
+// and with no key set there is no guard anywhere on that path
 func TestPortCannotMoveThePushToAnotherHost(t *testing.T) {
 	var frontHits, otherHits atomic.Int64
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -681,8 +638,7 @@ func TestPortCannotMoveThePushToAnotherHost(t *testing.T) {
 		})
 	}
 
-	// and the honest control: a real port still works, or the guard above is
-	// only proving that nothing ever pushes
+	// control: a real port still works, or the guard only proves nothing pushes
 	t.Setenv("FRONT_URL", front.URL)
 	t.Setenv("PORT", "")
 	if err := Push("live", "x", "y"); err != nil {
@@ -693,9 +649,8 @@ func TestPortCannotMoveThePushToAnotherHost(t *testing.T) {
 	}
 }
 
-// a query or fragment on the base swallows the publish path: measured, the
-// request arrived at "/" instead of "/__borgo/publish", so every push was a 404
-// against a real front server while the boot stayed silent
+// JoinPath keeps a query or fragment on the base, so it would ride on every
+// publish with the boot silent
 func TestABaseThatSwallowsThePublishPathIsRefused(t *testing.T) {
 	for _, base := range []string{
 		"http://localhost:3000/?x=1",
@@ -712,11 +667,9 @@ func TestABaseThatSwallowsThePublishPathIsRefused(t *testing.T) {
 	}
 }
 
-// go 1.25 lets url.Parse read a second colon in the authority, so
-// "127.0.0.1:3000:9000" parses with Hostname()="127.0.0.1:3000". The boot said
-// nothing, the push died at the dial, and with a key set the guard judged a
-// host the dialer would never use. Being told about that by a GODEBUG default
-// is not a check.
+// with go.mod below 1.26 url.Parse reads a second colon in the authority
+// (urlstrictcolons off): "127.0.0.1:3000:9000" parses with Hostname()
+// "127.0.0.1:3000", and the guard would judge a host the dialer never uses
 func TestADestinationTheDialerWouldReadDifferentlyIsRefused(t *testing.T) {
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -738,14 +691,13 @@ func TestADestinationTheDialerWouldReadDifferentlyIsRefused(t *testing.T) {
 		if err := Push("live", "x", "y"); err == nil {
 			t.Errorf("Push() = nil with FRONT_URL=%q: refusing before the request is the point", base)
 		}
-		// and the boot must never be quieter than the push
 		t.Setenv("BORGO_PUSH_KEY", "k")
 		if err := checkPushEnv(); err == nil {
 			t.Errorf("checkPushEnv() = nil with FRONT_URL=%q: the boot stayed quieter than the push", base)
 		}
 	}
 
-	// honest control: the same server, addressed properly, still works
+	// control: the same server, addressed properly, still works
 	t.Setenv("FRONT_URL", front.URL)
 	t.Setenv("BORGO_PUSH_KEY", "")
 	if err := Push("live", "x", "y"); err != nil {
@@ -753,7 +705,7 @@ func TestADestinationTheDialerWouldReadDifferentlyIsRefused(t *testing.T) {
 	}
 }
 
-// the rule says digits, and Atoi accepts a leading sign
+// Atoi accepts a leading sign
 func TestASignedPortIsNotAPort(t *testing.T) {
 	for _, p := range []string{"+80", "-80", " 80", "80 ", "0x50", "8e1", ""} {
 		if validPort(p) {
