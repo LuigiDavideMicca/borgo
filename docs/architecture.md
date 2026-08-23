@@ -39,6 +39,16 @@ In production the two servers are supervised as one command. `borgo start` spawn
 
 In dev there are three processes: the `borgo dev` watcher, the Go binary it builds, and a separate Bun process running the front server — separate so a code change can be applied by restarting it without losing the watcher. More on that below.
 
+### The watchdog
+
+Each half watches the other, because a pair supervised as one command must die as one. The Bun side is simple: `borgo start` spawns `dist/api` with `BORGO_PARENT_PID` set to its own pid, and if the API exits on its own the front exits with its code; the re-exec'd child polls `BORGO_SUPERVISOR_PID` every 2 seconds. The Go side lives in `watchdog_*.go` and is the part with platform branches:
+
+- **A probe at boot.** Before binding, `borgo.Serve` checks whether the pid in `BORGO_PARENT_PID` is already gone and refuses to start if it is, with an error — otherwise an API launched under a dead supervisor would mount, serve nobody, and report a clean exit. `kill(pid, 0)` alone is not the probe: it succeeds on a zombie, so the check also asks the kernel whether the pid is a corpse.
+- **A 250 ms poll after that.** For the direct parent the evidence is reparenting — `getppid()` changing — which survives the freed pid being reused. For a pid that is not the parent (a hand-set variable; borgo prints one line at boot when that is the case) the poll falls back to the probe.
+- **Where the corpse check reads.** Linux and WSL read `/proc/<pid>/stat` and look at the state field. macOS and the BSDs have no `/proc`: they read the `kern.proc.pid.<pid>` sysctl and the process-state offset inside the `kinfo_proc` struct, which is why that code is covered by a separate macOS CI job. Windows holds a handle and waits on it with `WaitForSingleObject`, on the same 250 ms tick. Every platform answers "alive" when it cannot tell, because refusing a boot needs certainty.
+
+When the parent is gone the server runs the same graceful shutdown a `SIGTERM` would, bounded by `BORGO_SHUTDOWN_TIMEOUT`.
+
 ## What happens at boot
 
 `serve()` in `packages/borgo/src/server.ts` runs a fixed sequence before it binds a port. Everything here is work that would otherwise happen on every request.
@@ -91,7 +101,8 @@ Four of those are worth following in full.
 3. A nonce is minted, before the render, because React's own streaming scripts need the same one as the props script.
 4. The props are serialized to JSON *before* the render starts. A loader returning something JSON cannot carry fails here, cheaply, instead of abandoning a render already in flight.
 5. `renderToReadableStream` produces the React stream. `documentStream` wraps it: shell head, React's chunks, shell tail with the props script.
-6. In production the whole thing goes through a gzip stream with a sync flush per chunk, so streamed Suspense boundaries still arrive progressively.
+6. The stream is scanned for the path of the machine it runs on and every occurrence is replaced with `[redacted]`. A loader that renders `import.meta.url` or `new URL("./x.png", import.meta.url)` into markup writes the server's own directory into the document; on Windows the root's native, forward-slash and JSON-escaped spellings are all needles, and the `file://` form is one everywhere. A bare POSIX root such as `/app` is *not* redacted — it is textually a valid root-relative URL — which is why the build refuses the expressions that produce it (see below). The same scan runs on the props JSON, on the head a page computes from it, and on every JSON answer.
+7. In production the whole thing goes through a gzip stream with a sync flush per chunk, so streamed Suspense boundaries still arrive progressively.
 
 The response carries `Content-Type: text/html; charset=utf-8`, `Cache-Control: private, no-store`, `Vary: Accept-Encoding`, the CSP with this render's nonce, and any cookies the loader's API calls produced. Documents are never cached, because a document embeds the session-shaped props of whoever asked for it.
 
@@ -110,9 +121,16 @@ The proxy is the thinnest layer in the framework. It rewrites nothing about the 
 
 Failures answer as an API would: `502` when Go is unreachable, `504` on the deadline. Never the rendered 500 page — an API path must not answer HTML. The `/api/*` response is also the one response borgo does not add its own security headers to; Go's headers pass through as they are.
 
+On the Go side two middlewares sit between `ServeMux` and your handler, and both are deliberately pedantic about header spelling, because a cache or a client is allowed to be:
+
+- **gzip.** Responses of at least 1024 bytes are compressed when the client accepts it; smaller ones, event streams, pre-encoded responses and `HEAD` bodies pass through. `Accept-Encoding` is read as one folded list across repeated field lines and coding names compare case-insensitively, so `GZIP` compresses and `gzip, gzip;q=0` is a refusal. `Vary: Accept-Encoding` is set whether or not the response ends up compressed, and the writer is wrapped for every request so a panic means the same thing to a gzip client and an identity one.
+- **cache.** `borgo.Cache` writes `public, max-age=…`, but a response that carries `Set-Cookie` is rewritten to `private` on the way out, in whichever order the handler called the two. The guard finds the cookie under any spelling of the key — `w.Header()["set-cookie"]` reaches the wire in `net/http` without canonicalisation — and rewrites `Cache-Control` across every field line a handler left, in the order the writer emits them, so a shared cache can never store a personalised body.
+
 ### A static asset
 
 `GET /assets/client-a1b2c3d4.js` is decoded, checked for traversal and separator tricks (on Windows also for the NTFS alternate-stream and reserved characters that alias a file under a name the path checks never saw), and looked up in the boot-time index. A hit answers with the ETag, `Last-Modified`, `Content-Length` and — when the client accepts it — the `.br` or `.gz` sibling written at build time, with `Cache-Control: public, max-age=31536000, immutable` for content-hashed files. `If-None-Match` gets a `304` with no file read at all.
+
+Two classes of file under `public/` are never served, on either the indexed road or the live fallback: a file whose own name starts with a dot (`.DS_Store`, `.gitkeep`, an `.env` somebody dropped, an editor's `.swp`), and anything under a directory whose name starts with a dot (`public/.git/config`, `public/.svn/entries`). The one exception is `.well-known` as the *first* segment, exact and lower-case, because RFC 8615 puts ACME renewals and `security.txt` there and nowhere else. `borgo export` applies the same rule before copying `public/`.
 
 Assets are checked *before* page routes, so a file in `public/` shadows a page of the same path for `GET` and `HEAD`. It does not shadow a `POST`: a page action must not be hijacked by a static file.
 
@@ -141,17 +159,19 @@ The same endpoint is what hover prefetching warms. See [client navigation](clien
   api/
     borgo.gen.go              init() { borgo.Handle(...) } for every //borgo:route (borgogen)
   public/assets/
-    client.js                 entry: runtime + react + layouts
-    islands-client.js         entry: island hydration only (when islands/ exists)
+    client-<hash>.js          entry: runtime + react + layouts
+    islands-client-<hash>.js  entry: island hydration only (when islands/ exists)
     <page>-<hash>.js          one chunk per hydrated page, content-hashed
-    style.css                 compiled from style.scss, or from tailwind
+    style-<hash>.css          compiled from style.scss, or from tailwind
     *.gz  *.br                precompressed siblings of everything compressible
     precache.json             the hashed asset list a service worker precaches, plus a stamp
   dist/
     api                       the go binary (api.exe on windows)
 ```
 
-The asset build is one `Bun.build` call with `splitting: true` and two entry points. A plugin transpiles your own `pages/*.tsx` with the `loader`, `action`, `prerender` and `prerenderPaths` exports eliminated and unused imports trimmed, which is why a page can `import { db } from "../db"` at the top of its loader and ship none of it to the browser. Chunks are named `[name]-[hash]`; entry points keep stable names, which is why `precache.json` carries a content stamp rather than trusting the names.
+The asset build is one `Bun.build` call with `splitting: true` and two entry points. A plugin transpiles your own `pages/*.tsx` with the `loader`, `action`, `prerender` and `prerenderPaths` exports eliminated and unused imports trimmed, which is why a page can `import { db } from "../db"` at the top of its loader and ship none of it to the browser. In production every output is named `[name]-[hash]`, entry points included; `index.html` keeps naming `/assets/client.js` and `/assets/style.css`, and the build records which hashed file each logical name became so the server resolves them at boot. A dev build names its entries `client.js` and `islands-client.js` whatever they contain, which is why `precache.json` carries a content stamp rather than trusting the names.
+
+The build also refuses output it would not serve. Importing a file from beside a source — `import logo from "./logo.png"`, `import "./x.css"`, `new URL("./x.png", import.meta.url)` aimed at a path `public/` does not hold, or `import.meta.dir + "/x.png"` — emits a URL no route answers and, in the SSR pass, writes the machine's absolute path into the document. The check reads the *emitted* bundles, never the sources, because the same pattern is correct in a loader; any hit throws `AssetChannelRefused` before the build mark is cleared, so the next `borgo start` rebuilds and refuses again rather than serving the leak.
 
 `borgo export` is a fourth output path — it drives the same render machinery to write plain HTML into `dist/site/`. See [static export](deploy.md#static-export).
 
@@ -221,6 +241,8 @@ declare module "borgo-framework" {
   }
 }
 ```
+
+A type is not rendered the same way in both directions. Going out, `encoding/json` writes every field unless `omitempty`/`omitzero` or a nil-able kind says otherwise; coming in, every property is optional and nullable. When the two renderings differ, the request side gets its own declaration with a `$Request` suffix — unconditionally, not as a fallback for a taken name, so the generated file does not change shape depending on which route reached the type first. A struct every field of which renders identically (`type Money int`, or a slice of one) gets a single declaration.
 
 Because `ApiRoutes` is an interface the framework declares empty and `borgogen` augments, the `api` client in every loader is typed by that map — the route string is a key, the return type follows from it, and a body is required exactly when the handler binds one:
 

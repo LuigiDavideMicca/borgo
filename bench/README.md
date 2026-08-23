@@ -372,43 +372,47 @@ Do not carry a number from a Windows run into a Linux claim, or the reverse.
 
 ## Findings from building the harness
 
-Two things fell out of building this that are worth recording, because both are
-the sort of thing a benchmark exists to surface.
+Three things fell out of building this that are worth recording, because all
+three are the sort of thing a benchmark exists to surface. The first two have
+since been fixed in borgo itself; they stay here because the harness is what
+found them.
 
-### 1. Concurrent SSE streams are capped at ~255 by default
+### 1. Concurrent SSE streams were capped at ~255 by default
 
 borgo's front server proxies `/api/*` to the Go binary using Bun's `fetch`, and
 Bun caps simultaneous outbound HTTP requests at **256** by default. Every held
-SSE stream is one in-flight request, so a stock borgo app ceilings at roughly
-255 concurrent event-stream clients — the 256th connects and then waits.
+SSE stream is one in-flight request, so a stock borgo app ceilinged at roughly
+255 concurrent event-stream clients — the 256th connected and then waited.
 
 Measured directly: 400 requested → 255 established. With
 `BUN_CONFIG_MAX_HTTP_REQUESTS=16384`, 800 requested → 800 established.
 
-The borgo bench app sets that variable, and its manifest says so in `notes`
-rather than applying it quietly. **This deserves attention outside the
-benchmark**: it is a default-configuration ceiling on exactly the feature borgo
-advertises, and the harness only found it because the memory scenario tries to
-open a thousand connections.
+**Fixed since.** `borgo start` now re-runs itself once with the variable set to
+`16384` when nothing set it, and every deployment borgo writes sets it
+explicitly — see [realtime](../docs/realtime.md#honest-limits). The borgo bench
+app still sets it in its manifest `env` so that no re-exec'd supervisor
+process appears in the tree the memory probe charges, and its `notes` say so.
 
-### 2. The front server withholds end-of-headers until the first body byte
+### 2. Bun withholds end-of-headers until the first body byte
 
-A borgo SSE endpoint that blocks without sending anything writes its header
-*lines* but not the terminating blank line, so a client that waits for
-`\r\n\r\n` — as the HTTP spec requires, and as Bun's own `fetch` does — hangs
-indefinitely against a server that is behaving otherwise correctly. `curl`
-streams and shows the headers, which is why this is easy to miss.
+A response whose body is a stream that has not yet produced a byte is written
+by `Bun.serve` as its header *lines* without the terminating blank line, so a
+client that waits for `\r\n\r\n` — as the HTTP spec requires, and as Bun's own
+`fetch` does — hangs indefinitely against a server that is behaving otherwise
+correctly. `curl` streams and shows the headers, which is why this is easy to
+miss. Reproduced on Bun 1.3.14 with a bare `Bun.serve` and an empty
+`ReadableStream`, so it is the runtime, not the proxy: the Go API terminates
+its header block correctly when hit directly on `API_PORT`.
 
-Isolated: the Go API terminates its header block correctly when hit directly on
-`API_PORT`; the behaviour appears at the Bun front server's proxy.
-
-The contract works around it by requiring every implementation to flush a
-`: ping` comment immediately, which is good SSE practice anyway and removes the
-variable from the comparison. The underlying behaviour is still worth a look.
+**Fixed since, for borgo apps.** `borgo.SSE` writes an `:ok` comment frame and
+flushes before returning the stream, so a quiet stream crosses the proxy with
+its headers complete. The contract still requires every implementation to flush
+a `: ping` comment immediately, which is good SSE practice anyway and removes
+the variable from the comparison.
 
 ### 3. An SSE connection is charged to both processes
 
-The proof run measures **65.7 kiB of RSS per held SSE connection** across the
+The committed proof run measures **65.8 kiB of RSS per held SSE connection** across the
 tree. That is not obviously a Go-runtime win, and the per-process breakdown says
 why: a browser's event stream traverses the Bun front server *and* the Go API,
 so each connection costs a Bun-side proxied fetch plus a Go-side goroutine and

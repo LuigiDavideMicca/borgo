@@ -2,7 +2,7 @@
 
 A [borgo](https://github.com/LuigiDavideMicca/borgo) app: file-based React pages server-rendered by Bun, API routes written in Go.
 
-This is the `base` template — a small tour of the framework: a loader-backed page (`/hello/world`), a form action, a zero-JS page with an island (`/about`), and live server-sent events from a goroutine (`/live`). Scaffold with `--template minimal` for a bare skeleton or `--template full` for auth + CRUD.
+This is the `base` template — a small tour of the framework: a loader-backed page with a form action on it (`/hello/world`), a zero-JS page with an island (`/about`), and live server-sent events from a goroutine (`/live`). Scaffold with `--template minimal` for a bare skeleton or `--template full` for auth + CRUD.
 
 ## Prerequisites
 
@@ -39,7 +39,7 @@ The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the 
 
 ## Layout
 
-- `pages/` — React pages; the file name is the route. This template ships four: `index.tsx` → `/`, `about.tsx` → `/about`, `live.tsx` → `/live`, and `hello/[name].tsx` → `/hello/:name`, where `[name]` matches one path segment and arrives as `params.name`. A page may export a `loader` (props fetched on the server before rendering — `hello/[name].tsx` calls the Go route from one), `head` (title and metas), `action` (form posts), and `hydrate` (`false` or `"visible"`) to ship less JavaScript. A file whose name starts with `_` is never routed: `_layout.tsx` wraps its directory, `_404.tsx` and `_500.tsx` are the error pages, and anything else with that prefix is simply not served.
+- `pages/` — React pages; the file name is the route. This template ships four: `index.tsx` → `/`, `about.tsx` → `/about`, `live.tsx` → `/live`, and `hello/[name].tsx` → `/hello/:name`, where `[name]` matches one path segment and arrives as `params.name`. A page may export a `loader` (props fetched on the server before rendering — `hello/[name].tsx` calls the Go route from one), `head` (title and metas), `action` (form posts — `hello/[name].tsx` handles its own form's post beside its loader), and `hydrate` (`false` or `"visible"`) to ship less JavaScript. `index.tsx` exports neither a loader nor an action, so `bun run export` writes `/`, `/about` and `/live` and skips `/hello/:name`, which needs `borgo start`. A file whose name starts with `_` is never routed: `_layout.tsx` wraps its directory, `_404.tsx` and `_500.tsx` are the error pages, and anything else with that prefix is simply not served.
 - `islands/Counter.tsx` — an island: a component that hydrates on its own inside a page that ships no bundle of its own. `pages/about.tsx` sets `hydrate = false` and drops `<Island name="Counter" />` into the markup, so that page loads only the counter's JavaScript and nothing else. Any default-exported component in `islands/` can be used the same way, by its file name.
 - `api/` — Go API routes; annotate a handler with `//borgo:route GET /api/path` (or register manually in `init()` with `borgo.Handle`). `hello.go` responds with `borgo.JSON`, and that call is what types the route: `borgogen` reads the Go type and writes `.borgo/api-types.d.ts`, so the `api` client in a loader knows the response shape. `events.go` opens a `borgo.NewSSEHub()` and a goroutine publishes into it, which is what `/live` subscribes to — server-sent events, proxied to the browser without buffering.
 - `main.go` — imports `api` and calls `borgo.Serve()`.

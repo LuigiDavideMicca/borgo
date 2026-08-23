@@ -1,6 +1,6 @@
 # borgo docs
 
-Start with [getting started](getting-started.md) if you have not built anything yet; everything else is a deep dive on one convention the [README](../README.md) summarizes. Each page opens with what it covers and ends with the honest limits of what it describes — skim the index, read what you need.
+Start with [getting started](getting-started.md) if you have not built anything yet; everything else is a deep dive on one convention the [README](../README.md) summarizes. Each page opens with what it covers, and the ones that describe a mechanism close with its honest limits — skim the index, read what you need.
 
 CI compiles the examples on these pages against the real framework types — every `ts`/`tsx` block as a module inside the example app, every `go` block that is a whole declaration as a file in the example's module. Blocks that are deliberately partial carry `no-check` on the fence and are skipped, as are `go` fragments that are statements rather than declarations; a handful on these pages are. So: a snippet you can paste is a snippet CI compiled, and a snippet CI cannot compile is marked as such in the source.
 
@@ -8,7 +8,7 @@ CI compiles the examples on these pages against the real framework types — eve
 | --- | --- |
 | [Getting started](getting-started.md) | build a small app end to end: a page, a Go route, a loader, a form action, an island |
 | [Why borgo works this way](why.md) | six design questions — Go, Bun, codegen, file routing, typed APIs, self-hosting — and what each choice costs |
-| [Architecture](architecture.md) | the two processes, what happens at boot, a request through both servers, what the build produces, code generation, the dev loop |
+| [Architecture](architecture.md) | the two processes and the watchdog between them, what happens at boot, a request through both servers, what the build produces and refuses, code generation, the dev loop |
 | [Pages and routing](pages-and-routing.md) | pages and loaders, layouts, `<head>` management, streaming SSR, form actions, error pages |
 | [The typed bridge](typed-bridge.md) | Go API routes, borgogen, typed request bodies, type overrides, honest limits |
 | [Client navigation and hydration](client-navigation.md) | client-side transitions, prefetching, scroll restoration, code splitting, hydration modes, islands |
