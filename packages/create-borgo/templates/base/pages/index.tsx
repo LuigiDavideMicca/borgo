@@ -1,20 +1,13 @@
 import { useState } from "react";
-import { CsrfField, type ActionContext } from "borgo-framework";
 
 export const head = {
   title: "{{name}}",
   meta: [{ name: "description", content: "react pages server-rendered by bun, api routes in go" }],
 };
 
-// classic form post handled on the server; the body of the api call is typed
-export async function action({ request, api }: ActionContext) {
-  const form = await request.formData();
-  const name = String(form.get("name") ?? "").trim() || "stranger";
-  const { message } = await api("POST /api/hello", { body: { name } });
-  return { greeting: message };
-}
-
-export default function Home({ actionData }: { actionData?: { greeting?: string } }) {
+// no loader and no action: this page is the same for every visitor, so
+// `bun run export` writes it to dist/site as it is
+export default function Home() {
   const [message, setMessage] = useState("");
 
   const greet = async () => {
@@ -35,6 +28,10 @@ export default function Home({ actionData }: { actionData?: { greeting?: string 
         <a className="card" href="/hello/world">
           <h2>SSR with a loader →</h2>
           <p>This page's props are fetched from the Go API on the server, before rendering.</p>
+        </a>
+        <a className="card" href="/hello/world#greet">
+          <h2>Form action →</h2>
+          <p>A classic form post handled by a server action, typed body end to end.</p>
         </a>
         <a className="card" href="/about">
           <h2>Zero-JS page →</h2>
@@ -57,13 +54,6 @@ export default function Home({ actionData }: { actionData?: { greeting?: string 
             )}
           </p>
         </button>
-        <form className="card" method="post">
-          <CsrfField />
-          <h2>Form action →</h2>
-          <p>{actionData?.greeting ?? "Posts to a server action, typed body end to end."}</p>
-          <input name="name" placeholder="Your name" />
-          <button type="submit">Greet</button>
-        </form>
         <a className="card" href="https://github.com/LuigiDavideMicca/borgo">
           <h2>Docs →</h2>
           <p>Conventions, the roadmap and the whole framework source, small enough to read.</p>

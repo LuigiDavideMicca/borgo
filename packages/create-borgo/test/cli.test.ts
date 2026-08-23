@@ -1370,8 +1370,17 @@ describe("the scaffolded tree", () => {
 // cannot tell `export const prerender = true` from the same characters inside a
 // comment or a string, and a test in this repository once asserted a string
 // that matched only a commented-out line.
+//
+// AND THE COMMAND IS RUN. An exportable page is necessary, not sufficient: the
+// base template had three exportable pages and still exited 1, because its home
+// carried a <CsrfField /> and export refuses a page that ships a request-bound
+// token - refusing the whole site, since a partial export is never published.
+// The partition below cannot see that (the token is in the rendered bytes, not
+// in the module), so each template is exported for real and asked for exit 0.
 describe("the export script every template advertises", () => {
   const framework = fileURLToPath(new URL("../../borgo", import.meta.url));
+  const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+  const hasGo = Bun.which("go") !== null;
   // wherever the install layout put them, rather than a guessed node_modules path
   const packageDir = (name: string) => dirname(Bun.resolveSync(name, framework));
 
@@ -1421,6 +1430,75 @@ describe("the export script every template advertises", () => {
       expect(`${template}: ${(await exportablePages(template)).length > 0}`).toBe(`${template}: true`);
     }, 60_000);
   }
+
+  // `bun run export` is `borgo export`, and `borgo` is whatever the framework's
+  // package.json names as its bin - the file a bun install would shim. Run
+  // through that field rather than a shim, since the shim's shape is the
+  // installer's and differs per platform.
+  const borgoBin = () => {
+    const { bin } = JSON.parse(readFileSync(join(framework, "package.json"), "utf8")) as {
+      bin: { borgo: string };
+    };
+    return join(framework, bin.borgo);
+  };
+
+  // export runs borgogen through `go tool`, which needs the borgo module: the
+  // scaffold's go.mod is pointed at this checkout and tidied exactly the way
+  // ci.yml does it. The checkout's sums are copied first, so a module cache
+  // that already built this repository satisfies the tidy without a fetch
+  const pointGoAtCheckout = (app: string) => {
+    const gomod = join(cwd, app, "go.mod");
+    writeFileSync(
+      gomod,
+      `${readFileSync(gomod, "utf8")}\nreplace github.com/LuigiDavideMicca/borgo => ${repoRoot.replaceAll("\\", "/")}\n`,
+    );
+    writeFileSync(join(cwd, app, "go.sum"), readFileSync(join(repoRoot, "go.sum")));
+    const tidy = Bun.spawnSync(["go", "mod", "tidy"], { cwd: join(cwd, app), stdout: "pipe", stderr: "pipe" });
+    if (tidy.exitCode !== 0) throw new Error(`go mod tidy failed:\n${tidy.stderr.toString()}`);
+  };
+
+  const exportSite = (app: string) => {
+    const proc = Bun.spawnSync(["bun", borgoBin(), "export"], {
+      cwd: join(cwd, app),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, NO_COLOR: "1" } as Record<string, string>,
+    });
+    return { code: proc.exitCode, out: proc.stdout.toString() + proc.stderr.toString() };
+  };
+
+  // the command itself, exit code read: a page export refuses (a csrf token, a
+  // nonce) is invisible to the partition above and still exits 1. Skipped
+  // where there is no go, the way the golden borgogen test is; ci has one.
+  for (const template of ["minimal", "base", "full"] as const) {
+    test.skipIf(!hasGo)(`${template}'s \`bun run export\` exits 0 and publishes a site`, () => {
+      expect(run([template, "--template", template, NG]).code).toBe(0);
+      linkDeps(template);
+      pointGoAtCheckout(template);
+      const { code, out } = exportSite(template);
+      expect(`${template}: exit ${code}\n${out}`).toStartWith(`${template}: exit 0`);
+      expect(out).not.toContain("cannot be exported");
+      // published, not only rendered: dist/site holds at least one page
+      const site = join(cwd, template, "dist", "site");
+      const pages = [...new Bun.Glob("**/*.html").scanSync({ cwd: site })];
+      expect(`${template}: ${pages.length > 0}`).toBe(`${template}: true`);
+    }, 180_000);
+  }
+
+  // base's home is the page a static host serves first, so it is the one page
+  // that has to export: the form action lives on /hello/:name, whose loader
+  // keeps it out of the export, and the published home carries no token
+  test.skipIf(!hasGo)("base exports its home; the form action sits on a page export skips", () => {
+    expect(run(["app", "--template", "base", NG]).code).toBe(0);
+    linkDeps("app");
+    pointGoAtCheckout("app");
+    const { code, out } = exportSite("app");
+    expect(`exit ${code}\n${out}`).toStartWith("exit 0");
+    const home = join(cwd, "app", "dist", "site", "index.html");
+    expect(existsSync(home)).toBe(true);
+    expect(readFileSync(home, "utf8")).not.toContain("__borgo_csrf");
+    expect(out).toMatch(/\/hello\/:name\s+skipped/);
+  }, 180_000);
 
   // minimal has one page and that page has a loader, so it can only be
   // exportable by opting in - there is no second page to carry the export
