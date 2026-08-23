@@ -39,10 +39,8 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-// Version is hand-written in the source and bumped by the release, so the one
-// failure mode is drifting from what was actually released. The release
-// manifest is the source of truth for both halves; if they ever disagree the
-// build says so rather than shipping a constant that lies.
+// Version is bumped by hand, so its one failure mode is drifting from the
+// release manifest, which is the source of truth for both halves.
 func TestVersionMatchesManifest(t *testing.T) {
 	raw, err := os.ReadFile(".release-please-manifest.json")
 	if err != nil {
@@ -178,13 +176,9 @@ func TestHandleRecoversAndStaysUsable(t *testing.T) {
 	}
 }
 
-// THE P3: a hand-set BORGO_PARENT_PID that is not the parent is accepted, and
-// said. Measured before this existed: an api booted under a live pid that was
-// not its parent printed nothing and ran on the probe alone, the getppid
-// branch of waitParentExit off on every platform at once, nobody told. The
-// pid stays the env's, never the parent's; one line at boot, only on mismatch,
-// so the normal boot stays silent and the line gets read. serve-entry.ts says
-// the same line under the same condition.
+// A hand-set BORGO_PARENT_PID that is not the parent is accepted and said,
+// once, only on mismatch, so the normal boot stays silent and the line gets
+// read. serve-entry.ts says the same line under the same condition.
 func TestWarnParentMismatch(t *testing.T) {
 	capture := func(pid, ppid int) string {
 		var logs strings.Builder
@@ -207,9 +201,8 @@ func TestWarnParentMismatch(t *testing.T) {
 	}
 }
 
-// The line comes out of a real boot, after the probe: a pid already gone is
-// the refusal it always was, with no mismatch line beside it, and the parent
-// itself boots silent.
+// From a real boot, after the probe: a pid already gone is a refusal with no
+// mismatch line beside it, and the parent itself boots silent.
 func TestServeContextSaysParentMismatchAfterTheProbe(t *testing.T) {
 	boot := func(t *testing.T, pid int) (logs string, err error) {
 		t.Helper()
