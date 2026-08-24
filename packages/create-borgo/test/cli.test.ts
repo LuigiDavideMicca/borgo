@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -130,6 +131,15 @@ const gitConfig = (label: string, body: string) => {
   return { GIT_CONFIG_GLOBAL: path, GIT_CONFIG_SYSTEM: join(cwd, "no-system-gitconfig") };
 };
 
+// git runs a hook, a filter or an fsmonitor only if it is executable, and says
+// nothing at all when it is not. Windows has no such bit and runs the script
+// either way, so without this the arrangement is void on linux alone: the
+// command succeeds and the test reads a refusal that never happened
+const writeScript = (path: string, body: string) => {
+  writeFileSync(path, body);
+  chmodSync(path, 0o755);
+};
+
 // git's own answer, so a test that claims "the identity is set" has proof of
 // it rather than an assumption about the environment
 const gitConfigValue = (env: Record<string, string | undefined>, key: string) => {
@@ -148,7 +158,7 @@ const IDENTITY_CONFIG = "[user]\n\tname = A Real Person\n\temail = real@example.
 const blockingHook = (label: string, which: string, body = "sleep 15\n") => {
   const hooks = join(cwd, `hooks-${label}`);
   mkdirSync(hooks, { recursive: true });
-  writeFileSync(join(hooks, which), `#!/bin/sh\n${body}`);
+  writeScript(join(hooks, which), `#!/bin/sh\n${body}`);
   return `[core]\n\thooksPath = ${hooks.replaceAll("\\", "/")}\n`;
 };
 
@@ -486,7 +496,7 @@ describe("git", () => {
   const failingHook = (label: string, body: string) => {
     const hooks = join(cwd, `hooks-${label}`);
     mkdirSync(hooks, { recursive: true });
-    writeFileSync(join(hooks, "pre-commit"), ["#!/bin/sh", body, "exit 1", ""].join("\n"));
+    writeScript(join(hooks, "pre-commit"), ["#!/bin/sh", body, "exit 1", ""].join("\n"));
     return gitConfig(
       label,
       `[core]\n\thooksPath = ${hooks.replaceAll("\\", "/")}\n${IDENTITY_CONFIG}`,
@@ -930,7 +940,7 @@ describe("git", () => {
   // long and still prints the same words.
   test("a follow-up probe that hangs is bounded far shorter than the first", () => {
     const fsmonitor = join(cwd, "slow-fsmonitor.sh");
-    writeFileSync(fsmonitor, "#!/bin/sh\nsleep 15\n");
+    writeScript(fsmonitor, "#!/bin/sh\nsleep 15\n");
     const env = gitConfig(
       "fsmonitor",
       `[core]\n\tfsmonitor = ${fsmonitor.replaceAll("\\", "/")}\n${IDENTITY_CONFIG}`,
@@ -951,13 +961,18 @@ describe("git", () => {
     expect(out).toContain("luigimicca.com");
   }, 60_000);
 
-  // the other half of the same fault: a stall during `add` leaves no index and
-  // a lock that will block the user's own next `git add` until it is removed.
-  test("a timeout during the staging names the lock it left", () => {
+  // the other half of the same fault: a stall during `add` leaves no index, and
+  // on windows a lock that will block the user's own next `git add` until it is
+  // removed. Whether the lock survives is git's business and not the same on
+  // every platform - killed on linux it unlinks its own lock, killed on windows
+  // it cannot - so the assertion is that the sentence agrees with the disk,
+  // never that the disk holds a lock. Naming a lock that is not there sends the
+  // user after a file they will not find, and it reads exactly like the truth.
+  test("a timeout during the staging names the lock it left, if it left one", () => {
     const attrs = join(cwd, "attributes");
     writeFileSync(attrs, "* filter=slow\n");
     const filter = join(cwd, "slow-filter.sh");
-    writeFileSync(filter, "#!/bin/sh\nsleep 15\n");
+    writeScript(filter, "#!/bin/sh\nsleep 15\n");
     const env = gitConfig(
       "slowfilter",
       `[core]\n\tattributesFile = ${attrs.replaceAll("\\", "/")}\n` +
@@ -968,10 +983,10 @@ describe("git", () => {
     onlyGitLine(out, "unresponsive");
     expect(existsSync(join(cwd, "app", ".git"))).toBe(true);
     expect(existsSync(join(cwd, "app", ".git", "index"))).toBe(false);
-    expect(existsSync(join(cwd, "app", ".git", "index.lock"))).toBe(true);
     expect(onDisk("app").commits).toBe(0);
     expect(out).toContain("nothing staged");
-    expect(out).toContain("remove .git/index.lock");
+    const locked = existsSync(join(cwd, "app", ".git", "index.lock"));
+    expect(out.includes("remove .git/index.lock")).toBe(locked);
     expect(out).not.toContain("the commit was made");
   }, 60_000);
 
@@ -1029,7 +1044,7 @@ describe("git", () => {
     mkdirSync(hooks, { recursive: true });
     // octal escapes, so this test file contains no forgeable byte of its own:
     // \342\200\250 is U+2028, \342\200\256 is U+202E, \342\200\213 is U+200B
-    writeFileSync(
+    writeScript(
       join(hooks, "pre-commit"),
       [
         "#!/bin/sh",

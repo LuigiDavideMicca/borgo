@@ -91,6 +91,21 @@ function composeElement(route: Route, props: Record<string, unknown>) {
 // disclosure the native needle cannot see: the escaped form is a needle of its own
 const REDACTED = "[redacted]";
 
+// pathToFileURL reads the platform this process is running on, never the one it
+// is asked about: on linux a windows root comes back resolved against the cwd,
+// `file:///home/you/app/C:%5Csrv%5Capp`, which matches nothing. For this
+// machine's own root - the only one that ever reaches a response - it is still
+// the platform's own converter that answers. bun 1.3 ignores its `windows`
+// option, so the other platform's shape is built here rather than asked for
+function platformFileUrl(root: string, platform: string): string {
+  if (platform === process.platform) return pathToFileURL(root).href;
+  const slashed = platform === "win32" ? root.replaceAll("\\", "/") : root;
+  // % first, or the escapes below would be re-read as escapes; # and ? would
+  // otherwise open a fragment or a query. the URL parser encodes the rest
+  const escaped = slashed.replaceAll("%", "%25").replaceAll("#", "%23").replaceAll("?", "%3F");
+  return new URL(`file:///${escaped.replace(/^\/+/, "")}`).href;
+}
+
 export function localPathNeedles(root: string, platform: string = process.platform): string[] {
   if (!root) return [];
   const needles: string[] = [];
@@ -103,7 +118,7 @@ export function localPathNeedles(root: string, platform: string = process.platfo
   // the file:// url only when one of those is not already inside it:
   // `file:///C:/x/y` carries `C:/x/y`, and scanning twice is a third of the
   // per-response cost. a root that percent-encodes (a space) is its own needle
-  const fileUrl = pathToFileURL(root).href;
+  const fileUrl = platformFileUrl(root, platform);
   if (!needles.some((n) => fileUrl.includes(n))) needles.push(fileUrl);
   return [...new Set(needles)].filter((n) => n.length > 0);
 }
