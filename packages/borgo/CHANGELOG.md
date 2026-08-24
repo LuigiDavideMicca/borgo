@@ -1,5 +1,87 @@
 # Changelog
 
+## [0.21.0](https://github.com/LuigiDavideMicca/borgo/compare/v0.20.1...v0.21.0) (2026-08-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* a build whose emitted bundles reference a file beside their own source now fails instead of warning. No app in examples/, e2e/ or create-borgo uses the channel, and examples/tasks reports 0 faults over 24 bundles.
+* **borgogen:** request types are renamed to <Name>$Request and their fields are optional and nullable. A caller that constructed a request object with every field set still compiles; one that declared a variable of the old type name does not.
+* the body limit counted a header, so not declaring one removed it
+* borgo's own errors on /api went out without borgo's headers
+* BORGO_DEV=0 turned dev mode on, and four switches beside it
+* BORGO_CSRF=true turned off the check it names
+* an unsigned cookie could authenticate, and the two halves disagreed
+* prefix the two unprefixed env vars
+* **ts:** freeze the typescript api for 1.0
+* **go:** freeze the go api for 1.0 and flush sse headers on open
+
+### Features
+
+* **build:** name a reference only a case-insensitive filesystem forgives ([72a2f4c](https://github.com/LuigiDavideMicca/borgo/commit/72a2f4c5f916a0e1089d116ab9d7706170e07656))
+* **build:** name a relative import only a case-insensitive filesystem resolves ([143a06e](https://github.com/LuigiDavideMicca/borgo/commit/143a06e7a09d950fa533d7c1359364f9a9e94ed8))
+* **build:** name the url an emitted bundle asks for and the server does not have ([e40be2e](https://github.com/LuigiDavideMicca/borgo/commit/e40be2eb2cd8f6e246c625e445a242ffc96b2ad3))
+* doctor checks versions, docker, permissions, disk and the bun shim ([70ca753](https://github.com/LuigiDavideMicca/borgo/commit/70ca753c6fde3b3542c1637c9ce949da8c982761))
+* **go:** freeze the go api for 1.0 and flush sse headers on open ([8272431](https://github.com/LuigiDavideMicca/borgo/commit/82724318cacaa6b17b0172f0acbb31daa7f65ef1))
+* **ts:** freeze the typescript api for 1.0 ([7376032](https://github.com/LuigiDavideMicca/borgo/commit/73760328220d1dbba6f38d15c3101973bdfecd10))
+
+
+### Bug Fixes
+
+* a 304 could tell a browser to keep bytes that were gone ([326c40c](https://github.com/LuigiDavideMicca/borgo/commit/326c40caaa77444d8736941e7210b98261ff44f7))
+* a BORGO_PARENT_PID that is not the parent is said at boot, not discovered from an orphan ([5d87a93](https://github.com/LuigiDavideMicca/borgo/commit/5d87a93e660597ea067318831d2094aea147ef22))
+* a fatal generator crash, a wedged upstream, and a spliced download ([2ed6631](https://github.com/LuigiDavideMicca/borgo/commit/2ed6631052cf66650d37a1096c9f8002cffc6de7))
+* a file referenced beside its own source is refused, and no document carries this machine's path ([e77bb34](https://github.com/LuigiDavideMicca/borgo/commit/e77bb34a8fa3db92466b7c14a2717b0f08bb0ee3))
+* a killed doctor left a probe file, and it was not inert ([d070fb2](https://github.com/LuigiDavideMicca/borgo/commit/d070fb255fd216add5260c9aff50bf95b5498b45))
+* a refused websocket handshake named the wrong cause, to nobody ([fb4e107](https://github.com/LuigiDavideMicca/borgo/commit/fb4e107c50550162d9788a320c23ace0d8bd2cc2))
+* a stream held warm below bun's timer floor was cut before its first sweep ([a64b712](https://github.com/LuigiDavideMicca/borgo/commit/a64b7125e5c99ee89a95121cc9133ed0b80f0cb9))
+* a topic the relay cannot carry now fails at the call site ([36a7d37](https://github.com/LuigiDavideMicca/borgo/commit/36a7d372b0d7fa3911e3bbc19484d3a0bebe83b5))
+* a websocket refused for its origin now says so, once, instead of being redialled forever ([7f99684](https://github.com/LuigiDavideMicca/borgo/commit/7f99684c020d7ec5cbaa134c9870cd7a9f2e9e36))
+* an exported page carried a token minted for one request ([d8e5d40](https://github.com/LuigiDavideMicca/borgo/commit/d8e5d4031997ee14c055bcaf958d24124504a7dc))
+* an unsafe /api request was proxied without any csrf check ([517a8fb](https://github.com/LuigiDavideMicca/borgo/commit/517a8fb55b7cfda1b23f77cfaced29511b99739b))
+* an unsigned cookie could authenticate, and the two halves disagreed ([0fff5de](https://github.com/LuigiDavideMicca/borgo/commit/0fff5dec00261df04eff3859ff3b1e991c2763be))
+* borgo start raises its own in-flight request cap ([c0700b2](https://github.com/LuigiDavideMicca/borgo/commit/c0700b2882dc28df665e2ccc64b661a4a29acffb))
+* borgo start rebuilt in silence, and said the wrong thing when it spoke ([ff13b0c](https://github.com/LuigiDavideMicca/borgo/commit/ff13b0c74620eea4058f09be4ffbe07b92a29d60))
+* BORGO_CSRF=true turned off the check it names ([5da4a19](https://github.com/LuigiDavideMicca/borgo/commit/5da4a1915e09bdfa1166f909caf7c635ef08b6b2))
+* BORGO_DEV=0 turned dev mode on, and four switches beside it ([4b9d3e6](https://github.com/LuigiDavideMicca/borgo/commit/4b9d3e600573417ab00ccc54cf2eab31074fd6e0))
+* borgo's own errors on /api went out without borgo's headers ([50ab128](https://github.com/LuigiDavideMicca/borgo/commit/50ab128dffa4ecff0508b1dc1113beaeee3660c1))
+* **borgogen:** a request type promised fields the decoder never requires ([47d0761](https://github.com/LuigiDavideMicca/borgo/commit/47d07613bdfbf2209b1c815dd34bd5c3cfd5f23d))
+* **compress:** measure whether the filesystem folds case instead of guessing the platform ([3741b03](https://github.com/LuigiDavideMicca/borgo/commit/3741b03703f9d93077197dbe9fd1698fd11146ee))
+* **compress:** stop precompressing what serveAsset will never serve ([0784e74](https://github.com/LuigiDavideMicca/borgo/commit/0784e7447b51295e01145351b51f41009e4ff8c7))
+* deploy init wrote a live signing key into a file nothing ignored ([68b6db5](https://github.com/LuigiDavideMicca/borgo/commit/68b6db5746a503e2815f36f25da2cce7b79db1b5))
+* doctor claimed more than it had checked, and died on the thing it diagnoses ([b82ede4](https://github.com/LuigiDavideMicca/borgo/commit/b82ede4d37addeed3145faa958404c977a5d14e8))
+* drive tailwind through the postcss plugin so no postinstall is blocked ([43f59b1](https://github.com/LuigiDavideMicca/borgo/commit/43f59b1c7eeffc66ff9dfc9ee906d8fc7c6f1479))
+* **export:** dist/site adopts the dot-directory rule borgo start now enforces ([522789e](https://github.com/LuigiDavideMicca/borgo/commit/522789eeed22bdcaf3e713df13bcc0fec490d819))
+* **export:** dist/site no longer ships what borgo start refuses to serve ([37f5d4e](https://github.com/LuigiDavideMicca/borgo/commit/37f5d4ea458357c47e8df0a8b869f8d3aee4c60f))
+* one 40-byte GET held a connection until the process restarted ([4cdbfaf](https://github.com/LuigiDavideMicca/borgo/commit/4cdbfaf7e9ba75af199570924feea8038e050396))
+* production assets shipped with no cache-control at all ([2faf652](https://github.com/LuigiDavideMicca/borgo/commit/2faf6522d3ddc43dd73ef7b1d1b01dfcdfa2658f))
+* raise the front server's in-flight request cap ([9d2ad80](https://github.com/LuigiDavideMicca/borgo/commit/9d2ad80148c5f4d59b1bf769bc6f9d781f0cdc33))
+* serve the compressed sibling an asset actually has ([8e4dd6f](https://github.com/LuigiDavideMicca/borgo/commit/8e4dd6f25593450037b7bcc91b9b169ef1820aee))
+* the asset validator promised a strength it never had ([502a015](https://github.com/LuigiDavideMicca/borgo/commit/502a015fd1cba84b749002db3e31e1a99290f301))
+* the body limit counted a header, so not declaring one removed it ([2978ee1](https://github.com/LuigiDavideMicca/borgo/commit/2978ee1b5ce0d6128de7e8efeb45b1448ab24b86))
+* the build called things finished that it had not verified ([930379c](https://github.com/LuigiDavideMicca/borgo/commit/930379cdd0478838387f42a4acf27222edf61527))
+* the Caddyfile we print opened a real ACME order in the operator's name ([6fd65fc](https://github.com/LuigiDavideMicca/borgo/commit/6fd65fceb62570dce45ee0be0a5a1c38bad1686c))
+* the front server probes its parent before opening the port ([94b8e7e](https://github.com/LuigiDavideMicca/borgo/commit/94b8e7eaaf0af8ef3d49e6c5ed1edeac82a0732f))
+* the front server, the build, and every doc claim the code denied ([a1932e8](https://github.com/LuigiDavideMicca/borgo/commit/a1932e8b65783b8b86d08a20b0a48e3825cf18f1))
+* the front server's parent watch was wrong in both directions at once ([4bf68da](https://github.com/LuigiDavideMicca/borgo/commit/4bf68da01a85f0e9fc8e80705700771310c235f6))
+* the last two parent watches read a corpse as alive and a live parent as dead ([3144995](https://github.com/LuigiDavideMicca/borgo/commit/3144995ef8acca8c12d3b990e44dc3709fff6e4a))
+* the props carried this machine's path past the redaction, and dot-directories were still served ([d819038](https://github.com/LuigiDavideMicca/borgo/commit/d819038e5ec4583118b201ee9bfbd885f6ad9dfd))
+* the second audit wave, and the regressions the first one caused ([c8dac83](https://github.com/LuigiDavideMicca/borgo/commit/c8dac8350cfed629c6803550a4f851abe6a2d5a2))
+* the third pass, and the guards that failed open ([7880f3c](https://github.com/LuigiDavideMicca/borgo/commit/7880f3c2b2e7a0355c61fc931bff2d5979e25dc2))
+* the three residues the build round left behind ([8431765](https://github.com/LuigiDavideMicca/borgo/commit/8431765f6aaa931973a15e85a8f74ffd490f1fd2))
+* three ways the suite passed on windows and could not pass on linux ([ffe075b](https://github.com/LuigiDavideMicca/borgo/commit/ffe075ba151ca6d2f3bee6b9996e76fd8cff2aec))
+* two commands left behind what they had made to work with ([bfaa0b4](https://github.com/LuigiDavideMicca/borgo/commit/bfaa0b4b63523b23f49ed3699b2939619ae39234))
+
+
+### Performance Improvements
+
+* the entry bundle could not be cached, so every navigation paid for it ([b2af5aa](https://github.com/LuigiDavideMicca/borgo/commit/b2af5aa0f454c1675424e14c34028edca806e73f))
+
+
+### Code Refactoring
+
+* prefix the two unprefixed env vars ([0f6931e](https://github.com/LuigiDavideMicca/borgo/commit/0f6931e1c5af8d5c6d78a2fafa86113aac3b1319))
+
 ## [0.20.1](https://github.com/LuigiDavideMicca/borgo/compare/v0.20.0...v0.20.1) (2026-07-31)
 
 
