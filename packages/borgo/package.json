@@ -1,6 +1,6 @@
 {
   "name": "borgo-framework",
-  "version": "0.20.1",
+  "version": "0.21.0",
   "description": "The self-hosted React framework: file-based React SSR on Bun, API routes in Go, typed end to end. Vercel DX, Go performance, no platform lock-in.",
   "type": "module",
   "bin": {
