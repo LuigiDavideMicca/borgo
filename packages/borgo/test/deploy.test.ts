@@ -693,9 +693,22 @@ describe("the forwarding headers are the proxy's, not the client's", () => {
     if ("skip" in nginx) return void console.log(`skipped: ${nginx.skip}`);
 
     const dir = mkdtempSync(join(tmpdir(), "borgo-deploy-"));
-    // the file's own documented alternative to a certificate: `listen 80`
-    // behind another terminator. nginx -t hard-fails on 443 with no cert.
-    writeFileSync(join(dir, "site.conf"), nginxConf(ctx).replace("listen 443 ssl;", "listen 80;"));
+    // -t is not a dry run: it binds every listening socket the config declares.
+    // 443 hard-fails without a certificate, and the file's own documented
+    // alternative - `listen 80` behind another terminator - is a privileged
+    // port, so under any account that is not root the test dies on bind()
+    // before judging a line of site.conf. A container hides this twice over:
+    // docker keeps CAP_NET_BIND_SERVICE and sets ip_unprivileged_port_start=0,
+    // so the same command passes there as an ordinary user and fails on a CI
+    // runner. What is under test is the directive, never the number, so the
+    // port is one the kernel has just confirmed is free and unprivileged.
+    const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+    const port = probe.port;
+    probe.stop(true);
+    writeFileSync(
+      join(dir, "site.conf"),
+      nginxConf(ctx).replace("listen 443 ssl;", `listen 127.0.0.1:${port};`),
+    );
     // -t is not a dry run: nginx opens its pid file, its logs and its temp
     // directories, and those paths are compiled in as absolute ones the package
     // built for root. Under any account that is not root - every CI runner -
