@@ -696,10 +696,36 @@ describe("the forwarding headers are the proxy's, not the client's", () => {
     // the file's own documented alternative to a certificate: `listen 80`
     // behind another terminator. nginx -t hard-fails on 443 with no cert.
     writeFileSync(join(dir, "site.conf"), nginxConf(ctx).replace("listen 443 ssl;", "listen 80;"));
-    writeFileSync(join(dir, "nginx.conf"), "events {}\nhttp {\n    include site.conf;\n}\n");
+    // -t is not a dry run: nginx opens its pid file, its logs and its temp
+    // directories, and those paths are compiled in as absolute ones the package
+    // built for root. Under any account that is not root - every CI runner -
+    // the test dies on /run/nginx.pid before it has read a line of site.conf,
+    // and reports it as this file failing. Every path it touches is moved
+    // inside the prefix, so what is under test is the config and nothing else.
+    const prefix = dir.replaceAll("\\", "/");
+    writeFileSync(
+      join(dir, "nginx.conf"),
+      "events {}\nhttp {\n" +
+        `    client_body_temp_path ${prefix}/temp/body;\n` +
+        `    proxy_temp_path ${prefix}/temp/proxy;\n` +
+        `    fastcgi_temp_path ${prefix}/temp/fastcgi;\n` +
+        `    uwsgi_temp_path ${prefix}/temp/uwsgi;\n` +
+        `    scgi_temp_path ${prefix}/temp/scgi;\n` +
+        `    access_log ${prefix}/logs/access.log;\n` +
+        "    include site.conf;\n}\n",
+    );
     // the prefix nginx wants around any config it is asked to test
     for (const sub of ["logs", "temp"]) mkdirSync(join(dir, sub), { recursive: true });
-    const { code, text } = await run([nginx.path, "-p", dir, "-c", join(dir, "nginx.conf"), "-t"]);
+    const { code, text } = await run([
+      nginx.path,
+      "-p",
+      dir,
+      "-c",
+      join(dir, "nginx.conf"),
+      "-g",
+      `pid ${prefix}/nginx.pid; error_log ${prefix}/logs/error.log;`,
+      "-t",
+    ]);
     expect(text).toContain("syntax is ok");
     expect(text).toContain("test is successful");
     expect(code).toBe(0);
