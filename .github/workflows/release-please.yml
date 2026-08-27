@@ -12,11 +12,8 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    outputs:
-      prs_created: ${{ steps.rp.outputs.prs_created }}
     steps:
       - uses: googleapis/release-please-action@v4
-        id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
@@ -33,15 +30,20 @@ jobs:
   # main going red after the merge.
   sync-go-version:
     needs: release-please
-    if: needs.release-please.outputs.prs_created == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: release-please--branches--main
 
+      # not gated on the action's outputs: prs_created stays false on a run
+      # that leaves an already-open pr untouched, and a skip on the wrong
+      # guess costs a red release pr. the branch itself is the truth - when
+      # it is not there, this is a no-op that says so
       - name: align borgo.go with the branch manifest
         run: |
+          if ! git fetch origin release-please--branches--main 2>/dev/null; then
+            echo "no release branch open - nothing to sync"; exit 0
+          fi
+          git checkout -B release-please--branches--main FETCH_HEAD
           want="$(node -p 'require("./.release-please-manifest.json")["packages/borgo"]')"
           if [ -z "$want" ] || [ "$want" = "undefined" ]; then
             echo "::error::no packages/borgo entry in the manifest"; exit 1
