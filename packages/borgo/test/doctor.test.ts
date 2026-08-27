@@ -172,7 +172,7 @@ describe("checkBun", () => {
     test("a ceiling is not a floor", () => {
       for (const range of ["<1.5.0", "<=1.4.9", "<2"]) {
         const got = bunMinimum(withEngines({ bun: range }));
-        expect(`${range}: ${got.min} from ${got.source}`).toBe(`${range}: 1.3.0 from borgo`);
+        expect(`${range}: ${got.min} from ${got.source}`).toBe(`${range}: 1.3.14 from borgo`);
         expect(got.unreadable).toContain(range);
       }
     });
@@ -210,8 +210,8 @@ describe("checkBun", () => {
       expect(note.info).toBe(true);
       expect(isFailure(note)).toBe(false);
       expect(note.detail).toContain('"<1.5.0"');
-      expect(note.detail).toContain("1.3.0");
-      expect(note.fix).toContain(">=1.3.0");
+      expect(note.detail).toContain("1.3.14");
+      expect(note.fix).toContain(">=1.3.14");
       // nothing to say about a range it reads, or about an app that declares none
       expect(checkEnginesBun(withEngines({ bun: ">=1.4.2" }))).toBeNull();
       expect(checkEnginesBun(fakeEnv())).toBeNull();
@@ -226,17 +226,17 @@ describe("checkBun", () => {
     // is not a relaxation it gets to grant itself: `"bun": "^1.2"` would put a
     // green tick next to a bun that `borgo build` fails on
     test("a floor below borgo's own is raised, not honoured", () => {
-      expect(bunMinimum(withEngines({ bun: "^1.2" }))).toEqual({ min: "1.3.0", source: "borgo" });
-      expect(bunMinimum(withEngines({ bun: ">=1.0.0" })).min).toBe("1.3.0");
+      expect(bunMinimum(withEngines({ bun: "^1.2" }))).toEqual({ min: "1.3.14", source: "borgo" });
+      expect(bunMinimum(withEngines({ bun: ">=1.0.0" })).min).toBe("1.3.14");
       // borgo's own floor exactly: either source is honest, the number is what matters
-      expect(bunMinimum(withEngines({ bun: "1.3.0" })).min).toBe("1.3.0");
+      expect(bunMinimum(withEngines({ bun: "1.3.14" })).min).toBe("1.3.14");
     });
 
     test("a bun below borgo's floor fails even when the app declares less", () => {
       const d = withEngines({ bun: "^1.2" });
       const r = checkBun({ ...d, exec: () => ({ code: 0, out: "1.2.9\n" }) });
       expect(r.ok).toBe(false);
-      expect(r.detail).toContain("1.3.0");
+      expect(r.detail).toContain("1.3.14");
     });
 
     test("a bun that satisfies borgo but not the app is flagged as too old", () => {
