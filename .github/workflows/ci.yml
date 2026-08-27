@@ -18,19 +18,34 @@ jobs:
   ci:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # the floor go.mod declares. a floor nobody executes is a promise
+          # nobody keeps: 0.21 shipped after weeks of green on a stable that
+          # was two minors past what the module admits
+          - column: go-floor
+            go: "1.25"
+          # what users actually install today; go1.27 moving encoding/json
+          # under a green tree is why this column and the floor are both here
+          - column: go-latest
+            go: stable
+    name: ci (${{ matrix.column }})
     steps:
       - uses: actions/checkout@v4
 
-      # the version the lockfiles were produced with. --frozen-lockfile is
-      # resolver-sensitive, so pinning nine manifests and floating the tool
-      # that reads them pins nothing
+      # the one bun everywhere: the version the lockfiles were produced with,
+      # and since 0.22 also the floor doctor declares - 1.3.0 was measured
+      # unable to install this workspace from its own lockfile. the tip is
+      # covered by the scheduled bun-latest job below
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
 
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: ${{ matrix.go }}
 
       - name: install workspace
         run: bun install --frozen-lockfile
