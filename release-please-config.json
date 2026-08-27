@@ -5,13 +5,7 @@
     "packages/borgo": {
       "release-type": "node",
       "component": "borgo-framework",
-      "include-component-in-tag": false,
-      "extra-files": [
-        {
-          "type": "generic",
-          "path": "../../borgo.go"
-        }
-      ]
+      "include-component-in-tag": false
     },
     "packages/create-borgo": {
       "release-type": "node",

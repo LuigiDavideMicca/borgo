@@ -1,0 +1,47 @@
+name: sync-go-version
+
+# release-please owns the two package.json files and the manifest; the go
+# constant lives at the repository root, and its generic updater refuses to
+# climb out of packages/borgo ("illegal pathing characters"). So the sync
+# happens here instead: on every push to the release branch, borgo.go is
+# aligned to the manifest and the correction is committed back to that
+# branch. Deterministic - one file, one line, read from the same manifest
+# the release is made from - and TestVersionMatchesReleaseManifest stays as
+# the net: if this workflow silently stops running, the release pr's own ci
+# goes red on that test instead of main going red after the merge.
+#
+# A push made with GITHUB_TOKEN does not retrigger workflows, so the sync
+# commit shows no checks of its own on the pr. That is the known trade: the
+# version test already passed against the synced value here, and it runs
+# again on main the moment the pr merges.
+on:
+  push:
+    branches: ["release-please--branches--main"]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: align borgo.go with the release manifest
+        run: |
+          want="$(node -p 'require("./.release-please-manifest.json")["packages/borgo"]')"
+          if [ -z "$want" ] || [ "$want" = "undefined" ]; then
+            echo "::error::no packages/borgo entry in the manifest"; exit 1
+          fi
+          sed -i "s/^const Version = \"[0-9][^\"]*\"/const Version = \"$want\"/" borgo.go
+          if ! grep -q "^const Version = \"$want\"" borgo.go; then
+            echo "::error::borgo.go does not carry const Version = \"$want\" after the edit"; exit 1
+          fi
+          if git diff --quiet -- borgo.go; then
+            echo "borgo.go already at $want"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add borgo.go
+          git commit -m "chore: borgo.Version = $want"
+          git push
