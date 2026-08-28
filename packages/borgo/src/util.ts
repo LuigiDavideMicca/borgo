@@ -861,7 +861,16 @@ export function resolveAssetUrls(shell: string, names: AssetNames): string {
 
 // scanned once at boot so a render only concatenates strings
 export function prepareShell(source: string, dev: boolean, names: AssetNames = {}): ShellParts {
-  const shell = resolveAssetUrls(source, names);
+  let shell = resolveAssetUrls(source, names);
+  // the refresh prelude must finish before any app chunk evaluates, and
+  // module scripts in document order are the one sequencing the chunk graph
+  // cannot reshuffle: injected ahead of the client tag, dev only
+  if (dev) {
+    shell = shell.replace(
+      /(<script\b[^>]*src="\/assets\/(?:client|islands-client)[^"]*"[^>]*><\/script>)/,
+      '<script type="module" src="/assets/refresh.js"></script>$1',
+    );
+  }
   const [start, end = ""] = shell.split("<!--app-->");
   // decoded once: downstream sees the title as data
   const title = decodeHtmlText(shell.match(/<title>(.*?)<\/title>/s)?.[1] ?? "");

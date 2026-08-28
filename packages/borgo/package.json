@@ -21,7 +21,6 @@
     "bun": ">=1.4.0"
   },
   "dependencies": {
-    "@babel/core": "^7.26.0",
     "sass-embedded": "^1.93.0",
     "react-refresh": "^0.18.0"
   },
@@ -30,7 +29,6 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@types/babel__core": "^7.20.0",
     "@types/bun": "^1.4.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",

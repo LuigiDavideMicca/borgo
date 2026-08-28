@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { buildAssetIndex, findAsset, serveAsset, serveIndexed } from "../src/compress";
 import { serviceWorker } from "../src/pwa";
 import { prepareShell } from "../src/util";
@@ -51,7 +51,8 @@ import {
   readBuildOutputs,
   rebuildBeforeServing,
   recordedOutputSizes,
-  refreshTransform,
+  fixRefreshRedeclare,
+  hocRegistrations,
   renameUnsafeChunks,
   reservedRoutes,
   reportBuildFailure,
@@ -200,69 +201,155 @@ describe("a commented-out hydrate export reaches the client manifest", () => {
   }, 30_000);
 });
 
-describe("refreshTransform", () => {
-  test("registers components and scopes ids to the module", async () => {
-    const js = [
-      'import { useState } from "react";',
-      "export default function Home() { const [n] = useState(0); return n; }",
-      "function helper() { return 1; }",
-    ].join("\n");
-    const out = await refreshTransform(js, "pages/index.tsx");
+// the dev refresh pipeline as it ships: flatten with the transpiler, hand the
+// js back under the jsx loader, let bun's fast-refresh pass emit the
+// registrations, and append borgo's memo/forwardRef complement. these tests
+// double as the sentinel for the undocumented reactFastRefresh option: if a
+// bun upgrade renames or drops it, they go red by name instead of hmr dying mute
+describe("the bun refresh pipeline", () => {
+  async function refreshBundle(source: string, file: string): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-refresh-"));
+    const path = join(dir, file);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, source);
+    const flat = new Bun.Transpiler({
+      loader: file.endsWith(".tsx") ? "tsx" : "ts",
+      autoImportJSX: true,
+    }).transformSync(source);
+    const result = await Bun.build({
+      entrypoints: [path],
+      external: ["*"],
+      ...({ reactFastRefresh: true } as {}),
+      plugins: [
+        {
+          name: "like-dev",
+          setup(b) {
+            b.onLoad({ filter: /\.tsx?$/ }, () => ({
+              contents: flat + hocRegistrations(flat, file),
+              loader: "jsx",
+            }));
+          },
+        },
+      ],
+      throw: false,
+    });
+    if (!result.success) throw new Error(String(result.logs[0]));
+    return result.outputs[0].text();
+  }
+
+  test("bun's pass registers components with the module baked into the id", async () => {
+    const out = await refreshBundle(
+      'import { useState } from "react";\nexport default function Home() { const [n] = useState(0); return <p>{n}</p>; }\nfunction helper() { return 1; }',
+      "index.tsx",
+    );
     expect(out).toContain("$RefreshReg$");
-    // the key the wrapper composes, not the "Home" babel emits on its own: with
-    // the name half dropped every component in a module registers under one key
-    expect(out.match(/register\(type, ([^)]+)\)/)?.[1]).toBe('"pages/index.tsx" + "#" + name');
-    // and babel did register the component, so there is a name to scope
-    expect(out).toContain('$RefreshReg$(_c, "Home")');
-    // save and restore, asserted apart: the declaration alone satisfies a
-    // "$borgoPrevReg" substring, and it is the restore that stops the next
-    // module registering under this module's id
-    expect(out).toContain("var $borgoPrevReg = globalThis.$RefreshReg$");
-    expect(out).toContain("globalThis.$RefreshReg$ = $borgoPrevReg;");
-    // first call in the file, so it pays the lazy @babel/core and
-    // react-refresh/babel imports: ~210ms warm
+    // the id carries the module, so one pair of global Reg/Sig serves every file
+    expect(out).toMatch(/\$RefreshReg\$\(Home, "[^"]*index\.tsx:default"\)/);
+    // a plain function is not a component and is not registered
+    expect(out).not.toMatch(/\$RefreshReg\$\(helper/);
   }, 30_000);
 
-  test("emits hook signatures so hook edits remount instead of corrupting state", async () => {
-    const withState = await refreshTransform(
-      'import { useState } from "react";\nexport default function P() { const [a] = useState(1); return a; }',
-      "pages/p.tsx",
+  test("hook signatures change when the hooks change, which is what remounts", async () => {
+    const one = await refreshBundle(
+      'import { useState } from "react";\nexport default function P() { const [a] = useState(1); return <i>{a}</i>; }',
+      "p.tsx",
     );
-    const withTwo = await refreshTransform(
-      'import { useState } from "react";\nexport default function P() { const [a] = useState(1); const [b] = useState(2); return a + b; }',
-      "pages/p.tsx",
+    const two = await refreshBundle(
+      'import { useState } from "react";\nexport default function P() { const [a] = useState(1); const [b] = useState(2); return <i>{a + b}</i>; }',
+      "p.tsx",
     );
-    expect(withState).toContain("$RefreshSig$");
-    expect(withTwo).toContain("$RefreshSig$");
-    const sigOf = (code: string) => code.match(/_s\d*\(P, "([^"]+)"/)?.[1];
-    expect(sigOf(withState)).toBeTruthy();
-    expect(sigOf(withTwo)).toBeTruthy();
-    expect(sigOf(withState)).not.toBe(sigOf(withTwo));
-    // 7ms warm, but no test here is guaranteed to be warm: the sibling above
-    // pays the lazy @babel/core and react-refresh/babel imports only when it
-    // runs first, and any run filtered by name makes whichever one it selects
-    // the first call. That first call measured 8.2-11.6s at 2x
-    // oversubscription, against a 5s default - so all four carry the same
-    // budget the first one does.
+    const sigOf = (code: string) => code.match(/_s\d*\(\s*(?:function\s+)?P[\s\S]*?"([^"]+)"\)/)?.[1];
+    expect(sigOf(one)).toBeTruthy();
+    expect(sigOf(two)).toBeTruthy();
+    expect(sigOf(one)).not.toBe(sigOf(two));
   }, 30_000);
 
-  test("instruments custom hooks with signatures", async () => {
-    const out = await refreshTransform(
+  test("custom hooks in .ts files carry signatures too", async () => {
+    const out = await refreshBundle(
       'import { useState } from "react";\nexport function useCounter() { const [n, setN] = useState(0); return [n, setN]; }',
-      "lib/use-counter.ts",
+      "use-counter.ts",
     );
     expect(out).toContain("$RefreshSig$");
     expect(out).toContain("useCounter");
-    // 5ms warm, 8.2-11.6s if it is the call that pays the babel import
   }, 30_000);
 
-  test("passes plain modules through untouched", async () => {
-    const js = "export const x = 1;\n";
-    expect(await refreshTransform(js, "lib/util.ts")).toBe(js);
-    // 2ms warm: the transform runs and its output is thrown away. It still
-    // awaits loadBabelRefresh first, so passing through costs the same import
-    // as transforming when this is the call that pays it
+  test("a module with no components gets no refresh machinery", async () => {
+    const out = await refreshBundle("export const x = 1;\n", "util.ts");
+    expect(out).not.toContain("$RefreshReg$(");
+    expect(out).not.toContain("$RefreshSig$()");
   }, 30_000);
+});
+
+// the two emit defects of bun 1.4.0's fast-refresh pass, patched after the
+// bundle with invariants that cannot break working code: the redeclare pair
+// is illegal js (the file could not have parsed), and the renamed global is
+// rewritten only when nothing declares it (the reference was about to throw).
+// when a bun upgrade stops emitting either shape, the pipeline tests above
+// keep passing with removed=0 - that is the signal this pass can be deleted
+describe("fixRefreshRedeclare", () => {
+  test("drops the var rebinding that follows a const _s wrap", () => {
+    const js = 'const Home = _s(function Home() {});\nvar Home = Home;\n$RefreshReg$(Home, "x:default");\n';
+    const { code, removed } = fixRefreshRedeclare(js);
+    expect(removed).toBe(1);
+    expect(code).not.toContain("var Home = Home;");
+    expect(code).toContain("const Home = _s(function Home() {});");
+    expect(code).toContain("$RefreshReg$(Home");
+  });
+
+  test("a legal rebinding after a function declaration is left alone", () => {
+    const js = "function Home() {}\nvar Home = Home;\n";
+    const { code, removed } = fixRefreshRedeclare(js);
+    expect(removed).toBe(0);
+    expect(code).toBe(js);
+  });
+
+  test("a renamed refresh global is pointed back at the real one", () => {
+    const js = "var _s = $RefreshSig$();\nvar _s2 = $RefreshSig$2();\n$RefreshReg$2(P, \"x:P\");\n";
+    const { code, removed } = fixRefreshRedeclare(js);
+    expect(removed).toBe(2);
+    expect(code).toContain("var _s2 = $RefreshSig$();");
+    expect(code).toContain('$RefreshReg$(P, "x:P");');
+  });
+
+  test("a name that is genuinely declared in the chunk is not rewritten", () => {
+    const js = "var $RefreshSig$2 = () => (t) => t;\nvar _s2 = $RefreshSig$2();\n";
+    const { code, removed } = fixRefreshRedeclare(js);
+    expect(removed).toBe(0);
+    expect(code).toBe(js);
+  });
+
+  test("clean output passes through byte for byte with removed=0", () => {
+    const js = 'var _s = $RefreshSig$();\nconst P = _s(function P() {}, "h");\n$RefreshReg$(P, "x:default");\n';
+    const { code, removed } = fixRefreshRedeclare(js);
+    expect(removed).toBe(0);
+    expect(code).toBe(js);
+  });
+});
+
+describe("hocRegistrations", () => {
+  test("memo and forwardRef results are registered through the indirection", () => {
+    const js = [
+      'import { memo, forwardRef } from "react";',
+      "const Base = (p) => p;",
+      "export const M = memo(Base);",
+      "export const F = forwardRef((p, r) => null);",
+      "const Themed = React.memo(Base);",
+    ].join("\n");
+    const out = hocRegistrations(js, "pages/x.tsx");
+    expect(out).toContain('reg(M, "pages/x.tsx:M")');
+    expect(out).toContain('reg(F, "pages/x.tsx:F")');
+    expect(out).toContain('reg(Themed, "pages/x.tsx:Themed")');
+    // the literal would silence bun's own pass over the module - measured:
+    // with it in the source, Base and Wrap stopped being registered
+    expect(out).not.toContain("$RefreshReg$");
+    expect(out).toContain('"$Refresh" + "Reg$"');
+  });
+
+  test("a module without wrappers gets nothing appended", () => {
+    expect(hocRegistrations("export default function A() { return 1; }", "a.tsx")).toBe("");
+    // memo used as a value, not a wrapper assignment, is not a registration
+    expect(hocRegistrations("fn(memo);", "b.tsx")).toBe("");
+  });
 });
 
 describe("precacheStamp", () => {

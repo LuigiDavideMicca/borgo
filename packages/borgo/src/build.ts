@@ -811,7 +811,11 @@ export async function generateManifest(dev = false) {
   ].join("\n");
   await writeIfChanged(`${genDir}/islands.gen.ts`, islandsManifest);
 
-  // the refresh runtime must install itself before react loads: its own module, imported first
+  // the refresh runtime must install itself before react loads: its own module,
+  // imported first. the globals are the real implementations, not stubs: bun's
+  // fast-refresh transform emits bare $RefreshReg$/$RefreshSig$ calls at module
+  // scope with the module path baked into the name ("pages/index.tsx:default"),
+  // so one pair of globals serves every module and nothing wraps per file
   if (dev) {
     const refresh = [
       "// @ts-nocheck",
@@ -820,8 +824,8 @@ export async function generateManifest(dev = false) {
       "",
       "RefreshRuntime.injectIntoGlobalHook(window);",
       "globalThis.$RefreshRuntime$ = RefreshRuntime;",
-      "globalThis.$RefreshReg$ = () => {};",
-      "globalThis.$RefreshSig$ = () => (type) => type;",
+      "globalThis.$RefreshReg$ = (type, id) => RefreshRuntime.register(type, id);",
+      "globalThis.$RefreshSig$ = () => RefreshRuntime.createSignatureFunctionForTransform();",
       "",
     ].join("\n");
     await writeIfChanged(`${genDir}/refresh.ts`, refresh);
@@ -1337,7 +1341,6 @@ export function reportBuildFailure(error: unknown, debug = debugEnabled()): void
 }
 
 export async function buildAssets(dev = false): Promise<BuildResult> {
-  if (dev) void loadBabelRefresh();
   const { hasIslands } = await generateManifest(dev);
   const lastNames = readAssetNames();
   const wroteCss = await compileCss(dev);
@@ -1352,6 +1355,13 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
     entrypoints: [
       `${genDir}/client.tsx`,
       ...(hasIslands ? [`${genDir}/islands-client.tsx`] : []),
+      // its own entry, loaded by the shell as a module script BEFORE the
+      // client: shared chunks holding refresh-transformed modules evaluate
+      // before the client entry's own body, so a prelude inside that body is
+      // too late - measured as "$RefreshSig$ is not defined" thrown by the
+      // islands chunk. module scripts run in document order, which is the one
+      // ordering the chunk graph cannot reshuffle
+      ...(dev ? [`${genDir}/refresh.ts`] : []),
     ],
     outdir: outDir,
     splitting: true,
@@ -1360,10 +1370,24 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
     naming: { entry: dev ? "[name].[ext]" : "[name]-[hash].[ext]", chunk: "[name]-[hash].[ext]" },
     define,
     plugins: [appTranspile(define, dev)],
+    // bun's own fast-refresh transform, in place of the babel plugin this
+    // codebase carried for it. the option is real but absent from bun's
+    // types, so it rides through a cast and a test pins its existence -
+    // renamed upstream, that test goes red by name instead of hmr dying mute
+    ...(dev ? ({ reactFastRefresh: true } as {}) : {}),
     // bun's own throw is an AggregateError whose message is a bare trace
     throw: false,
   });
   if (!result.success) throw new BundleFailed(result.logs);
+  // dev only, where the fast-refresh transform ran: see fixRefreshRedeclare
+  if (dev) {
+    for (const output of result.outputs) {
+      if (!output.path.endsWith(".js")) continue;
+      const js = await Bun.file(output.path).text();
+      const { code, removed } = fixRefreshRedeclare(js);
+      if (removed > 0) await Bun.write(output.path, code);
+    }
+  }
   const renamed = await renameUnsafeChunks(result.outputs.map((o) => o.path));
   const outPath = (p: string) => renamed.get(p) ?? p;
   const assets = result.outputs.map((o) => ({ path: outPath(o.path), kind: o.kind, size: o.size }));
@@ -1440,43 +1464,63 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   return { assets, chunkMap, names };
 }
 
-// the babel plugin's $RefreshSig$ signatures are what let a hook edit remount
-// only that component; runs on the bun transpiler's plain-js output
-let babelRefresh: {
-  transformSync: typeof import("@babel/core").transformSync;
-  plugin: unknown;
-} | null = null;
-
-async function loadBabelRefresh() {
-  if (babelRefresh) return babelRefresh;
-  const babel = await import("@babel/core");
-  const mod = (await import("react-refresh/babel")) as { default?: unknown };
-  babelRefresh = { transformSync: babel.transformSync, plugin: mod.default ?? mod };
-  return babelRefresh;
+// bun's fast-refresh transform registers plain function components and skips
+// the results of memo() and forwardRef() - measured against the babel plugin
+// on a hostile corpus, the one divergence in 31 files. unregistered, those
+// exports are a new identity on every rebuild and their subtrees remount on
+// each edit instead of preserving state. the flattened js in the dev onLoad
+// is borgo's own, so the missing registrations are appended there - through
+// an indirection, deliberately: bun skips its whole pass over a module whose
+// source already spells $RefreshReg$, so the literal must not appear (also
+// measured - the appended calls silenced Base and Wrap). the shapes are the
+// transpiler's output, top-level `const X = memo(...)` with or without
+// export, React.-prefixed or bare; registering the same type twice is
+// harmless, the runtime keys by (type, id)
+export function hocRegistrations(js: string, moduleId: string): string {
+  const found: string[] = [];
+  for (const m of js.matchAll(
+    /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Z][\w$]*)\s*=\s*(?:React\s*\.\s*)?(?:memo|forwardRef)\s*\(/g,
+  )) {
+    found.push(m[1]);
+  }
+  if (!found.length) return "";
+  const calls = found.map((name) => `reg(${name}, ${JSON.stringify(`${moduleId}:${name}`)});`);
+  return `\n{ const reg = globalThis["$Refresh" + "Reg$"]; if (reg) { ${calls.join(" ")} } }\n`;
 }
 
-export function refreshWrap(js: string, moduleId: string) {
-  const id = JSON.stringify(moduleId);
-  return (
-    `var $borgoPrevReg = globalThis.$RefreshReg$, $borgoPrevSig = globalThis.$RefreshSig$;\n` +
-    `globalThis.$RefreshReg$ = (type, name) => globalThis.$RefreshRuntime$ && globalThis.$RefreshRuntime$.register(type, ${id} + "#" + name);\n` +
-    `globalThis.$RefreshSig$ = () => globalThis.$RefreshRuntime$ ? globalThis.$RefreshRuntime$.createSignatureFunctionForTransform() : (type) => type;\n` +
-    js +
-    `\nglobalThis.$RefreshReg$ = $borgoPrevReg; globalThis.$RefreshSig$ = $borgoPrevSig;\n`
-  );
-}
-
-export async function refreshTransform(js: string, moduleId: string): Promise<string> {
-  const { transformSync, plugin } = await loadBabelRefresh();
-  const out = transformSync(js, {
-    configFile: false,
-    babelrc: false,
-    compact: false,
-    plugins: [[plugin, { skipEnvCheck: true }]],
+// bun 1.4.0's fast-refresh emit follows every hook-wrapped component with a
+// rebinding line, `var X = X;` - legal after `function X() {}`, a SyntaxError
+// after the `const X = _s(function X() {...})` the same transform wrote two
+// lines up. every page with a hook shipped a chunk the browser refuses to
+// parse, measured as "Identifier 'RootLayout' has already been declared" and
+// a page that never hydrates. the invariant that makes this pass safe: the
+// pair is illegal js, so a file carrying it could not have executed at all -
+// removing the line cannot change the behaviour of any code that had one.
+// the day bun stops emitting the pair, the test pinning this goes green with
+// zero lines removed and the pass is deletable
+export function fixRefreshRedeclare(js: string): { code: string; removed: number } {
+  let removed = 0;
+  let code = js.replace(/^var ([A-Za-z_$][\w$]*) = \1;\r?\n/gm, (line, name: string) => {
+    if (!new RegExp(`^const ${name} = _s\\d*\\(`, "m").test(js)) return line;
+    removed++;
+    return "";
   });
-  const code = out?.code;
-  if (!code || !/\$Refresh(Reg|Sig)\$/.test(code)) return js;
-  return refreshWrap(code, moduleId);
+  // the second defect of the same family: merging two transformed modules
+  // into one chunk, the bundler renames the second module's reference to the
+  // GLOBAL $RefreshSig$/$RefreshReg$ as if it were a chunk-local binding -
+  // "$RefreshSig$2 is not defined", thrown the moment the chunk evaluates.
+  // rewritten back only when the chunk declares no binding by that name, so
+  // the reference was an undefined global about to throw: the rewrite cannot
+  // change the behaviour of any code that worked
+  code = code.replace(/\$Refresh(Sig|Reg)\$(\d+)\b/g, (whole, kind: string, n: string) => {
+    const declared = new RegExp(
+      `(?:\\b(?:var|let|const|function)\\s+|,\\s*)\\$Refresh${kind}\\$${n}\\b\\s*[=(]`,
+    ).test(js);
+    if (declared) return whole;
+    removed++;
+    return `$Refresh${kind}$`;
+  });
+  return { code, removed };
 }
 
 function appTranspile(define: Record<string, string>, dev: boolean): import("bun").BunPlugin {
@@ -1495,6 +1539,16 @@ function appTranspile(define: Record<string, string>, dev: boolean): import("bun
   return {
     name: "borgo-app-transpile",
     setup(build) {
+      // the fast-refresh transform injects a bare `import "react-refresh/runtime"`
+      // into every module it touches, resolved from the app's files - where
+      // react-refresh is borgo's dependency, not the app's, and the store
+      // layout decides whether that name is reachable. pinned to the copy
+      // borgo itself resolves, the same reason refresh-runtime.ts exists
+      if (dev) {
+        build.onResolve({ filter: /^react-refresh\/runtime$/ }, () => ({
+          path: Bun.resolveSync("react-refresh/runtime", import.meta.dir),
+        }));
+      }
       // .ts too: a custom hook without a signature force-remounts every component using it
       build.onLoad({ filter: /\.tsx?$/ }, async (args) => {
         if (!args.path.startsWith(cwd) || args.path.includes("node_modules")) return undefined;
@@ -1506,10 +1560,13 @@ function appTranspile(define: Record<string, string>, dev: boolean): import("bun
         const transpiler = isPage ? pageTranspiler : rel.endsWith(".tsx") ? plainTranspiler : tsTranspiler;
         let js = transpiler.transformSync(source);
         if (dev) {
-          js = await refreshTransform(js, rel);
+          js += hocRegistrations(js, rel);
           if (isPage) js += `\nglobalThis[${JSON.stringify("borgo-page:" + rel.slice("pages/".length))}] = 1;\n`;
         }
-        return { contents: js, loader: "js" };
+        // dev hands the flattened js back under the jsx loader: bun's
+        // fast-refresh transform runs on jsx modules and skips plain js, and
+        // it is that pass - not this plugin - that emits the registrations
+        return { contents: js, loader: dev ? "jsx" : "js" };
       });
     },
   };
