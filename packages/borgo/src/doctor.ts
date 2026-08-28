@@ -222,12 +222,12 @@ export function versionAtLeast(version: string, min: string): boolean {
   return true;
 }
 
-// the floor is the version the suite actually runs on, not a hope. 1.3.0 was
-// measured broken on three fronts: the workspace install fails its own
-// symlinks from a clean tree, bun:test has no two-argument beforeAll, and a
-// range request over a real socket comes back wrong. a floor nobody executes
-// is a promise nobody keeps
-const MIN_BUN = "1.3.14";
+// the floor is the version the suite actually runs on, not a hope - 1.3.0
+// was measured unable to even install this workspace. it sits at 1.4 by
+// decision, not drift: one requirements change in 0.22 instead of two
+// releases apart, and 1.4 honours pathToFileURL's `windows` option that 1.3
+// ignored, which is a hand-rolled branch this codebase no longer carries
+const MIN_BUN = "1.4.0";
 const MIN_GO = "1.25";
 // enough for node_modules, a go build cache and the emitted bundle
 const MIN_FREE_BYTES = 512 * 1024 * 1024;
@@ -250,7 +250,7 @@ const packageJson = (d: DoctorEnv): Record<string, unknown> | null => {
 
 // the comparators that put a floor under a range; a ceiling or a form with no
 // single floor is refused by name rather than read for the first number in it
-export const SUPPORTED_RANGES = ">=1.3.14, >1.3.14, ^1.3.14, ~1.3.14 or 1.3.14, optionally followed by an upper bound";
+export const SUPPORTED_RANGES = ">=1.4.0, >1.4.0, ^1.4.0, ~1.4.0 or 1.4.0, optionally followed by an upper bound";
 
 // the lowest version a range admits, or null when it declares no floor we read:
 // a ceiling like "<1.5.0" must not become a requirement nobody wrote. hyphen
