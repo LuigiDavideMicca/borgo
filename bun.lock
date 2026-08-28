@@ -4,9 +4,6 @@
   "workspaces": {
     "": {
       "name": "borgo-monorepo",
-      "dependencies": {
-        "sass-embedded": "^1.103.1",
-      },
       "devDependencies": {
         "@happy-dom/global-registrator": "^20.11.12",
         "@playwright/test": "^1.62.1",
