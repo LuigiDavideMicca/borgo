@@ -1,4 +1,4 @@
-import { readdirSync, statSync, type Dirent } from "node:fs";
+import { readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
 import { join } from "node:path";
 import { brotliCompressSync, constants, createGzip, gzipSync } from "node:zlib";
 
@@ -465,17 +465,18 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
   // a HEAD is answered from the headers alone, and dropping the body drops the
   // length bun computes from the file: without this every HEAD says Content-Length: 0
   headers.set("Content-Length", String(live.size));
-  // bun turns a Range into a 206 off a Bun.file body and never consults
-  // If-Range: a stream body is how the refusal is spelled, bun ranges files,
-  // not streams, so the whole representation goes out as a 200, still off the disk
+  // bun slices a Range into a 206 itself and never consults If-Range: a bare
+  // Range rides that on the file body below, deliberately. a stale If-Range
+  // must not - and since bun 1.4 a stream is sliced like a file (measured: a
+  // gzip body cut at byte 3, the exact splice this refusal exists to
+  // prevent), so bytes in memory are the one shape that still spells the
+  // whole 200. paid only on the stale If-Range, the rare case, never the
+  // serving path
   if (isRangeStale(req, etag)) {
-    // a stream body loses the type bun derives from a file, and under nosniff a
-    // typeless stylesheet is a refused stylesheet. it loses the Content-Length
-    // too (bun 1.3.14 drops an explicit one on a stream and goes chunked): a
-    // legal framing difference, accepted over a Content-Range on a 200 (rfc
-    // 9110 §14.4 gives it meaning on 206 and 416 alone) or reading the asset through memory
+    // an in-memory body loses the type bun derives from a file, and under
+    // nosniff a typeless stylesheet is a refused stylesheet
     headers.set("Content-Type", info.type);
-    return new Response(Bun.file(variant.path).stream(), { headers });
+    return new Response(readFileSync(variant.path), { headers });
   }
   return new Response(Bun.file(variant.path), { headers });
 }
@@ -545,10 +546,12 @@ export function serveAsset(
   // a HEAD keeps the headers and loses the body bun would have measured
   headers.set("Content-Length", String(size));
   if (isRangeStale(req, etag)) {
-    // a stream body is how a range is refused (bun ranges files, not streams,
-    // and never consults If-Range); the type goes back on, a stream loses it
+    // bytes in memory are how a stale If-Range is refused - since bun 1.4 the
+    // one body shape it does not slice (files and streams alike get the 206,
+    // and If-Range is never consulted). a bare Range keeps riding the file
+    // body below. the type goes back on, an in-memory body loses it
     headers.set("Content-Type", asset.type);
-    return new Response(file.stream(), { headers });
+    return new Response(readFileSync(file.name!), { headers });
   }
   return new Response(file, { headers });
 }
