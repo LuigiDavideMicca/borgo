@@ -605,6 +605,12 @@ describe("the container artefacts have a healthcheck", () => {
     const argv = health(composeYml({ ...ctx, port: String(server.port) }))!.test!.slice(1);
     // the container talks to itself, on the port the app is told to listen on
     expect(argv.join(" ")).toContain(`127.0.0.1:${server.port}/healthz`);
+    // in the container "bun" is the binary; on a dev machine PATH can hand
+    // back a .cmd shim (the very shape checkBunShim exists for), and since
+    // bun 1.4 spawn refuses cmd.exe special characters on a .bat/.cmd
+    // target. the probe's own text is untouched - only who runs it is pinned
+    expect(argv[0]).toBe("bun");
+    argv[0] = process.execPath;
 
     const probe = async () => (await run(argv)).code;
     expect(await probe()).toBe(0);
