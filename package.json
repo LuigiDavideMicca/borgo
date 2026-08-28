@@ -18,7 +18,7 @@
     "@happy-dom/global-registrator": "^20.11.12",
     "@playwright/test": "^1.62.1",
     "@types/bun": "^1.4.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "sass-embedded": "^1.103.1"

@@ -15,18 +15,27 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import ts from "typescript";
 
 const CONFIG = join(import.meta.dir, "..", "tsconfig.json");
 
+// the question is still put to the real config parser, but through the cli:
+// typescript 7's native compiler no longer ships the readConfigFile /
+// parseJsonConfigFileContent surface this file used to call, and
+// `tsc --showConfig` answers with the resolved program - "files" included -
+// on 5 and 7 alike. spawned via the running bun, never a .cmd shim
 function programFiles(): string[] {
-  const { config, error } = ts.readConfigFile(CONFIG, ts.sys.readFile);
-  if (error) throw new Error(ts.flattenDiagnosticMessageText(error.messageText, "\n"));
-  const parsed = ts.parseJsonConfigFileContent(config, ts.sys, dirname(CONFIG));
-  if (parsed.errors.length) {
-    throw new Error(parsed.errors.map((e) => ts.flattenDiagnosticMessageText(e.messageText, "\n")).join("\n"));
+  const proc = Bun.spawnSync({
+    cmd: [process.execPath, "x", "tsc", "--showConfig", "-p", CONFIG],
+    cwd: dirname(CONFIG),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    throw new Error(`tsc --showConfig exited ${proc.exitCode}: ${proc.stderr.toString()}`);
   }
-  return parsed.fileNames.map((f) => resolve(f));
+  const shown = JSON.parse(proc.stdout.toString()) as { files?: string[] };
+  if (!Array.isArray(shown.files)) throw new Error("tsc --showConfig answered without a files list");
+  return shown.files.map((f) => resolve(dirname(CONFIG), f));
 }
 
 const PROBE_DTS = join(import.meta.dir, "__ambient-probe.d.ts");

@@ -112,7 +112,11 @@ export function redirectUrl(raw: string): URL | null {
 
 // `borgo export` sets BORGO_STATIC and the bundler substitutes it, so a static
 // build compiles the props path out: a static host answers ?__borgo=props
-// with the page's own html and a 200, res.ok passes, res.json() throws
+// with the page's own html and a 200, res.ok passes, res.json() throws.
+// declared here because the name never survives to the browser and the dts
+// project compiles with no ambient types at all - tsc 7 stopped leaking a
+// global `process` into it, which is the stricter reading, not a regression
+declare const process: { env: { BORGO_STATIC?: string } };
 export const propsPathEnabled = (): boolean => process.env.BORGO_STATIC !== "1";
 
 // "reload" for what fast refresh cannot express, "apply" for a refreshable
