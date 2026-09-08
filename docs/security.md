@@ -30,6 +30,10 @@ The interesting part is `script-src`. Server-rendered pages carry their loader p
 
 In development the policy uses `'unsafe-inline'` instead of a nonce, because the dev client and the error overlay inject scripts outside the render.
 
+### CSP on cached pages
+
+A [cached page](pages-and-routing.md#cached-pages) is one render served many times, and a nonce shared across responses is no nonce at all — anyone can read it off the page and inject a script that names it, which is exactly what the header exists to block. `borgo export` refuses a nonce for that reason: a file cannot change. A live server can, so it re-mints instead: the cached copy keeps the nonce its render produced as a substitution key — a value that never ships, not even on the first response — and every replay swaps a fresh one into the body and the `Content-Security-Policy` header together. Each response a cached page produces therefore carries a nonce as unpredictable as a fresh render's, and a page nonced by anything other than borgo's own render is refused from the cache rather than guessed at.
+
 `style-src` keeps `'unsafe-inline'` in both modes: React writes inline styles, and so does almost every component library.
 
 ### Changing the policy

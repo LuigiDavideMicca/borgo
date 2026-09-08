@@ -9,7 +9,7 @@ CI compiles the examples on these pages against the real framework types — eve
 | [Getting started](getting-started.md) | build a small app end to end: a page, a Go route, a loader, a form action, an island |
 | [Why borgo works this way](why.md) | six design questions — Go, Bun, codegen, file routing, typed APIs, self-hosting — and what each choice costs |
 | [Architecture](architecture.md) | the two processes and the watchdog between them, what happens at boot, a request through both servers, what the build produces and refuses, code generation, the dev loop |
-| [Pages and routing](pages-and-routing.md) | pages and loaders, layouts, `<head>` management, streaming SSR, form actions, error pages |
+| [Pages and routing](pages-and-routing.md) | pages and loaders, layouts, `<head>` management, streaming SSR, form actions, cached pages, error pages |
 | [The typed bridge](typed-bridge.md) | Go API routes, borgogen, typed request bodies, type overrides, honest limits |
 | [Client navigation and hydration](client-navigation.md) | client-side transitions, prefetching, scroll restoration, code splitting, hydration modes, islands |
 | [Realtime](realtime.md) | server-sent events, WebSocket topics, typed event payloads, `borgo.SSEHub` and `borgo.Push` |

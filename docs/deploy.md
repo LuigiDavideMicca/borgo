@@ -185,6 +185,8 @@ An exported site is pages only: [form actions](pages-and-routing.md#form-actions
 
 `borgo.Cache(w, 5*time.Minute)` sets `Cache-Control: public, max-age=300` (optional second argument adds `stale-while-revalidate`); `borgo.NoCache(w)` sets `no-store` for anything personalized. A reverse proxy in front turns these headers into actual caching — enable `proxy_cache` in nginx or `cache` in Caddy plugins if you want the proxy to serve them.
 
+Rendered HTML has its own cache: pages that export `revalidate` are rendered once and shared — see [cached pages](pages-and-routing.md#cached-pages). Two deployment notes belong here. The copies persist under `.borgo/cache/html` (`BORGO_CACHE_DIR` moves it), keyed to the build that rendered them, so a restart on the same build boots warm and a redeploy sweeps them — mount the directory as a volume if you want the warmth to survive a container replacement, and nothing breaks if you do not. And the cache is per instance: `borgo.Revalidate`/`RevalidateTag` reach the front server `FRONT_URL` names, so with several instances behind a load balancer each holds its own copies and the invalidation reaches one of them — keep `revalidate` windows short in that layout, or invalidate against each instance.
+
 ## systemd, no Docker
 
 Build on the server (`bun install && bun run build`), then drop in a unit — `borgo deploy init systemd` writes this file as `borgo.service`, with your app's name and ports filled in:
@@ -324,6 +326,7 @@ The refusal is deliberate and it is new in 0.21: before, the key went out over w
 | `SESSION_SECURE` | unset | `1`/`true` adds `Secure` to the session and csrf cookies; `0`/`false` and unset do not. A value that is neither is refused at startup by both halves, rather than read as "not secure" |
 | `BORGO_CSRF` | unset | `0` disables both csrf checks (form actions, and unsafe requests to proxied `/api/*` routes), `1` forces them in dev |
 | `BORGO_METRICS` | unset | `1` exposes `/metrics` (Prometheus text) on the front server |
+| `BORGO_CACHE_DIR` | `.borgo/cache/html` | front server: where [cached pages](pages-and-routing.md#cached-pages) persist across restarts. Swept at boot when the build changed |
 | `BORGO_SECURITY_HEADERS` | unset | `0` drops the security headers *and* the CSP — see [security](security.md#changing-the-policy) |
 | `BORGO_CSP` | unset | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request |
 | `BORGO_MAX_BODY` | `33554432` (32 MB) | front server: most it will read of a request body, in bytes, counted as it arrives; `0` means no limit |

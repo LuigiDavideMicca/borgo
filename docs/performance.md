@@ -127,11 +127,27 @@ func ListTasks(w http.ResponseWriter, r *http.Request) {
 
 It downgrades itself to `private` when the response carries a `Set-Cookie`, which keeps a shared cache from storing a personalized response — and since 0.21 the order no longer matters. The check used to run once, inside `Cache`, so `Cache` then `SetSession` emitted `public` on a response that ended up carrying a session cookie, and RFC 9111 §3.5 lists `public` as exactly the directive that lets a shared cache store a `Set-Cookie` response. Now the guard runs again where every header is staged at once, on the way out of the handler: on a response carrying any `Set-Cookie` — read under every spelling of the key — `public` becomes `private`, `s-maxage` is dropped, and a bare `private` is added if nothing else says it. `max-age` is left alone, because it is legitimate for a private cache and `private` beside it already bars the shared one. [Caching](auth-and-sessions.md#caching) covers the rule.
 
+## Cached pages: incremental regeneration
+
+A page that exports `revalidate` opts its rendered HTML into a shared cache — [pages and routing](pages-and-routing.md#cached-pages) covers the authoring side; this is what the mechanism does and refuses to do.
+
+**Shared by construction.** The copy is rendered from an anonymised request — cookies, `Authorization` and `Accept-Encoding` removed, method forced to GET — so whatever a loader would personalise from is simply not there. The finished response is then still refused, loudly and per page, if it was not a 200, set a cookie under any spelling, or carries per-request bytes (the same `requestResidue` check `borgo export` runs). The failure direction is always *no caching*, never *shared what was personal*: a refused page serves fresh on every request with `X-Borgo-Cache: bypass` and one log line naming the reason.
+
+**One render per key, whatever the burst.** Concurrent misses on one key await a single in-flight render. A stale copy — past its `revalidate` seconds — is served immediately with `X-Borgo-Cache: stale` while one background render replaces it, so the window expiring never turns into a thundering herd, and a regeneration that *fails* leaves the last good copy serving, said once in the log.
+
+**Invalidation is the data's, not the clock's, when you want it.** `borgo.Revalidate(path)` and `borgo.RevalidateTag(tag)` ride the same channel as `borgo.Push` — an internal topic the front server intercepts and never fans out — so the Go handler that writes the data drops the pages depending on it in the same breath. `revalidate = "manual"` makes that the *only* way a copy leaves.
+
+**The replay is cheap, and the csp survives it.** The stored copy is one identity representation; gzip is negotiated per replay like any render, compressed once at store time for pages that allow it. Pages whose scripts carry a CSP nonce are the exception twice over: a frozen nonce would be [no CSP at all](security.md#csp-on-cached-pages), so the stored copy keeps its render's nonce as a substitution key and every replay swaps in a fresh one — body and header together, re-compressing that response. Still far cheaper than a render.
+
+**Warm restarts.** Copies persist under `.borgo/cache/html` (`BORGO_CACHE_DIR` moves it), each with the id of the build that rendered it. A restart on the same build boots with its cache warm and serves without rendering; a new build sweeps every old copy at boot, the same story hashed asset names tell. The write is fire-and-forget behind the response — a disk that stops taking writes costs the persistence, never the request.
+
+**The honest limits.** The cache is per instance: two front servers behind a load balancer each hold their own copies, and an invalidation reaches the one `FRONT_URL` points at — for multiple instances you need to call it against each, or accept the clock as the bound. The cache is bounded at 512 entries (the key includes the query string, so an attacker varying queries meets LRU eviction, not unbounded growth). And it is still your server doing the serving — a CDN edge in front of a cacheable page is faster than any of this; what ISR buys is dynamic data with render-once economics, no edge required.
+
 ## What borgo does not optimize
 
 The list below is where borgo will lose, and to whom.
 
-**Rendered documents are never cached.** Every document goes out `private, no-store`, because it embeds the props of whoever asked for it. There is no full-page cache, no ISR, no stale-while-revalidate for HTML. A framework that can serve a prerendered page from a CDN edge will beat borgo on a cacheable marketing page, badly and correctly. borgo's answers are `borgo export` for pages that are genuinely static and `borgo.Cache` on the API routes underneath the dynamic ones — not the same thing, and no substitute at scale.
+**Rendered documents are not cached unless the page opts in.** A document without a `revalidate` export goes out `private, no-store`, because it embeds the props of whoever asked for it — the [page cache](#cached-pages-incremental-regeneration) exists only for pages that declared themselves shareable, and it lives in your server's memory, not at an edge. A framework that serves a prerendered page from a CDN edge still beats borgo on a cacheable marketing page; `borgo export` for the genuinely static, `revalidate` for the shared-but-live, and `borgo.Cache` on API routes are the answers, and none of them is a CDN.
 
 **No image or font pipeline.** No resizing, no format negotiation, no font subsetting. The build is one `Bun.build` call and stays that way. Put a CDN, an image proxy or `vips` in front if you need it.
 

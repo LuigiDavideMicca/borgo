@@ -199,6 +199,34 @@ export const hydrate = "visible";  // hydrate when the marked section scrolls in
 
 `hydrate = false` pages are pure server-rendered HTML; individual interactive pieces can still be `<Island>` components. See [client navigation and hydration](client-navigation.md#partial-hydration).
 
+## Cached pages
+
+A page that is the same for every visitor can say so, and stop rendering per request:
+
+```tsx
+import type { LoaderContext } from "borgo-framework";
+
+export const revalidate = 60;      // seconds a copy stays fresh
+export const tags = ["tasks"];     // the data this page depends on
+
+export async function loader({ api }: LoaderContext) {
+  const { tasks } = await api("GET /api/tasks");
+  return { count: (tasks ?? []).length };
+}
+
+export default function Summary({ count }: { count: number }) {
+  return <p>{count} tasks right now</p>;
+}
+```
+
+In production the first request renders the page **as nobody** — no cookies, no `Authorization`, a plain GET — and the copy is cached and shared. Within the window every request is served from memory; past it the stale copy is served immediately while one background render replaces it, however many requests arrive at once. `revalidate = "manual"` never goes stale by clock: the copy lives until the data drops it.
+
+Dropping it is the api's side of the contract. The moment a Go handler writes the data a page depends on, it names the tag — `borgo.RevalidateTag("tasks")` — and every page that declared it re-renders on its next request. `borgo.Revalidate("/path")` drops one page instead (its query variants with it; a trailing `*` drops a prefix). Both ride the same channel as [`borgo.Push`](realtime.md), so a split deployment needs nothing new — if push works, invalidation works.
+
+The shared property holds by construction, not by trust in your loader: a copy is refused — and the page served fresh per request, with one log line saying why — if the response was not a 200, set a cookie under any spelling, or carries per-request bytes such as a `<CsrfField />` token. That last check is the same one `borgo export` runs; the one residue a live server handles rather than refuses is the CSP nonce, which every replay [re-mints](security.md#csp-on-cached-pages). Responses carry `X-Borgo-Cache: miss | hit | stale | bypass` so you can watch all of this from `curl`.
+
+In development every request renders fresh — the cache would fight the reload the dev channel just asked for. `borgo export` skips a `revalidate` page by name: a frozen file would honour neither the clock nor an invalidation, so the page asked for a server. Cached copies also survive a restart: they persist under `.borgo/cache/html`, keyed to the build that rendered them. [Performance](performance.md#cached-pages-incremental-regeneration) has the mechanism end to end; the `tasks` example's `/news` page and its `api/tasks.go` handlers are the working pair.
+
 ## Error pages
 
 - `pages/_404.tsx` renders unmatched routes with status 404.

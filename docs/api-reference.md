@@ -101,7 +101,16 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | --- | --- | --- |
 | `Push[T any](topic, event string, data T) error` | Publishes to a WebSocket topic on the front server. `borgogen` records `T` in the generated event map, typing the browser's `subscribe` callback. | stable |
 
-`push.go` declares exactly one exported function. `PushT` was folded into it in 0.21 — see [finding 2](#duplicated-apis).
+`push.go` declares exactly one exported function for app topics. `PushT` was folded into it in 0.21 — see [finding 2](#duplicated-apis).
+
+### Cache invalidation
+
+| Symbol | What it is for | Stability |
+| --- | --- | --- |
+| `Revalidate(path string) error` | Drops the cached copy of one page (query variants included; a trailing `*` drops a prefix). Rides the push channel on an internal topic, never fanned out to clients. | provisional |
+| `RevalidateTag(tag string) error` | Drops every cached page whose `tags` export named the tag. | provisional |
+
+Both refuse an empty name, and both reach the front server the way `Push` does — same `FRONT_URL`, same `BORGO_PUSH_KEY` rules across hosts. See [cached pages](pages-and-routing.md#cached-pages).
 
 ### Not exported, but worth knowing
 
@@ -238,6 +247,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `BORGO_SECURITY_HEADERS` | `0` drops the security headers and the CSP. | stable |
 | `BORGO_CSP` | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request. | stable |
 | `BORGO_METRICS` | `1` exposes `/metrics` in Prometheus text format. | stable |
+| `BORGO_CACHE_DIR` (`.borgo/cache/html`) | Where cached pages persist across restarts, keyed to the build that rendered them. | provisional |
 | `BUN_CONFIG_MAX_HTTP_REQUESTS` (`16384` under `borgo dev` and `borgo start`; `256`, bun's default, otherwise) | How many proxied requests may be in flight at once. Each event stream holds one for its whole life, so bun's default ceilings concurrent SSE subscribers at ~255. Read by bun at process start. | stable |
 
 `BORGO_METRICS` was `METRICS` before 0.21. The old name is not honoured, and not honouring it is the point: a bare `METRICS` is the most collidable variable borgo ever read, and an alias kept for compatibility would keep the collision alive.
@@ -364,6 +374,8 @@ These are as much a public API as any function: an app depends on them, and chan
 | `hydrate` | `true`, `false` or `"visible"`. **Must be a literal** — it is read from the source text without executing the module. | stable |
 | `prerender` | `true` opts a loader page into static export. | stable |
 | `prerenderPaths(ctx)` | Lists param sets for a dynamic route during export. | stable |
+| `revalidate` | Seconds a shared cached copy stays fresh, or `"manual"` for invalidation-only. Production only; a malformed value is named in the log and the page served fresh. | provisional |
+| `tags` | Array of tag names `borgo.RevalidateTag` drops the page by. Read only beside `revalidate`. | provisional |
 
 ### Go directives
 
@@ -401,6 +413,7 @@ Failing is the point: a directive that is well formed and still does nothing rea
 | `?__borgo=props` | URL | Asks a page for its loader props as JSON. | internal |
 | `X-Borgo-Action`, `X-Borgo` | HTTP | Action request marker, and the response discriminator (`action` / `raw`). | internal |
 | `X-Borgo-Key` | HTTP | `BORGO_PUSH_KEY` on a cross-host push. | internal |
+| `X-Borgo-Cache` | HTTP | How a [cached page](pages-and-routing.md#cached-pages) answered: `miss`, `hit`, `stale` or `bypass`. Diagnostic — read it, do not build on it. | provisional |
 | `X-CSRF-Token` | HTTP | The double-submit token on an unsafe `/api/*` request. `apiFetch` attaches it. | stable |
 | `borgo_session`, `borgo_csrf` | Cookies | The two cookies borgo owns. | stable |
 | `/healthz`, `/metrics`, `/ws`, `/api/*`, `/assets/*`, `/__borgo/*` | URL | Reserved paths. An app route must not claim them (except `/healthz`, which an app may override on the Go side). | stable |
