@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  anonymised,
+  CACHE_STATE_HEADER,
+  Isr,
   MAX_CACHED_PAGES,
   PageCache,
   readIsrPolicy,
@@ -155,4 +158,214 @@ describe("PageCache", () => {
     // /p0 was evicted; the tag drop must count only the survivors
     expect(cache.invalidateTag("t")).toBe(MAX_CACHED_PAGES);
   });
+});
+
+describe("the orchestrator", () => {
+  const routeOf = (module: Record<string, unknown>, pattern = "/p") => ({ pattern, module });
+  const reqFor = (url: string, headers: Record<string, string> = {}) =>
+    new Request(`http://x${url}`, { headers });
+
+  function harness(over: { now?: () => number; body?: () => string; log?: string[] } = {}) {
+    const log = over.log ?? [];
+    const renders: Request[] = [];
+    let body = over.body ?? (() => "<html>v1</html>");
+    const isr = new Isr((line) => log.push(line), over.now ?? (() => 1_000_000));
+    const render = async (req: Request) => {
+      renders.push(req);
+      return new Response(body(), {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    };
+    return { isr, render, renders, log, setBody: (fn: () => string) => (body = fn) };
+  }
+
+  test("no opt-in is none of isr's business", async () => {
+    const { isr, render, renders } = harness();
+    expect(await isr.handle(reqFor("/p"), routeOf({}), render)).toBeNull();
+    expect(renders.length).toBe(0);
+  });
+
+  test("an invalid opt-in is warned once by name and served fresh", async () => {
+    const { isr, render, log } = harness();
+    const route = routeOf({ revalidate: "soon" });
+    expect(await isr.handle(reqFor("/p"), route, render)).toBeNull();
+    expect(await isr.handle(reqFor("/p"), route, render)).toBeNull();
+    expect(log.filter((l) => l.includes("revalidate")).length).toBe(1);
+    expect(log[0]).toContain("/p");
+  });
+
+  test("a miss renders once as nobody, then hits without rendering", async () => {
+    const { isr, render, renders } = harness();
+    const route = routeOf({ revalidate: 60 });
+    const first = await isr.handle(reqFor("/p", { cookie: "session=abc" }), route, render);
+    expect(first!.headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    expect(await first!.text()).toBe("<html>v1</html>");
+    // the render never saw the visitor's cookie: shared by construction
+    expect(renders[0].headers.get("cookie")).toBeNull();
+
+    const second = await isr.handle(reqFor("/p", { cookie: "session=other" }), route, render);
+    expect(second!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    expect(await second!.text()).toBe("<html>v1</html>");
+    expect(renders.length).toBe(1);
+  });
+
+  test("a burst of misses is one render", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const renders: Request[] = [];
+    const isr = new Isr(() => {});
+    const render = async (req: Request) => {
+      renders.push(req);
+      await gate;
+      return new Response("<html>once</html>", {
+        headers: { "Content-Type": "text/html" },
+      });
+    };
+    const route = routeOf({ revalidate: 60 });
+    const burst = Promise.all(
+      Array.from({ length: 8 }, () => isr.handle(reqFor("/p"), route, render)),
+    );
+    release();
+    const responses = await burst;
+    expect(renders.length).toBe(1);
+    for (const res of responses) expect(await res!.text()).toBe("<html>once</html>");
+  });
+
+  test("stale serves the old copy now and swaps in the new one behind", async () => {
+    let t = 1_000_000;
+    const { isr, render, renders, setBody } = harness({ now: () => t });
+    const route = routeOf({ revalidate: 60 });
+    await isr.handle(reqFor("/p"), route, render);
+    setBody(() => "<html>v2</html>");
+    t += 61_000;
+    const stale = await isr.handle(reqFor("/p"), route, render);
+    expect(stale!.headers.get(CACHE_STATE_HEADER)).toBe("stale");
+    expect(await stale!.text()).toBe("<html>v1</html>");
+    // the background regeneration ran exactly once
+    await Bun.sleep(0);
+    expect(renders.length).toBe(2);
+    const after = await isr.handle(reqFor("/p"), route, render);
+    expect(after!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    expect(await after!.text()).toBe("<html>v2</html>");
+  });
+
+  test("a failed regeneration keeps serving the last good copy, said once", async () => {
+    let t = 1_000_000;
+    let fail = false;
+    const log: string[] = [];
+    const isr = new Isr((line) => log.push(line), () => t);
+    const render = async () => {
+      if (fail) throw new Error("api down");
+      return new Response("<html>good</html>", { headers: { "Content-Type": "text/html" } });
+    };
+    const route = routeOf({ revalidate: 60 });
+    await isr.handle(reqFor("/p"), route, render);
+    fail = true;
+    t += 61_000;
+    for (let i = 0; i < 3; i++) {
+      const res = await isr.handle(reqFor("/p"), route, render);
+      expect(await res!.text()).toBe("<html>good</html>");
+      await Bun.sleep(0);
+    }
+    expect(log.filter((l) => l.includes("last good copy")).length).toBe(1);
+    // recovery clears the note, so a later failure is news again
+    fail = false;
+    t += 61_000;
+    await isr.handle(reqFor("/p"), route, render);
+    await Bun.sleep(0);
+  });
+
+  test("a response that sets a cookie is bypassed, warned once, and never shared", async () => {
+    const log: string[] = [];
+    const renders: Request[] = [];
+    const isr = new Isr((line) => log.push(line));
+    const render = async (req: Request) => {
+      renders.push(req);
+      const headers = new Headers({ "Content-Type": "text/html" });
+      headers.append("Set-Cookie", "session=abc");
+      return new Response("<html>personal</html>", { headers });
+    };
+    const route = routeOf({ revalidate: 60 });
+    const first = await isr.handle(reqFor("/p"), route, render);
+    expect(first!.headers.get(CACHE_STATE_HEADER)).toBe("bypass");
+    const second = await isr.handle(reqFor("/p"), route, render);
+    expect(second!.headers.get(CACHE_STATE_HEADER)).toBe("bypass");
+    // fresh every time - a bypass must never become a shared copy
+    expect(renders.length).toBe(2);
+    expect(log.filter((l) => l.includes("cookie")).length).toBe(1);
+  });
+
+  test("a csrf field in the copy is bypassed like the exporter refuses it", async () => {
+    const { isr, render, log, setBody } = harness();
+    setBody(() => `<html><input name="${CSRF_FIELD}"></html>`);
+    const route = routeOf({ revalidate: 60 });
+    const res = await isr.handle(reqFor("/p"), route, render);
+    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("bypass");
+    expect(log.some((l) => l.includes("CsrfField"))).toBe(true);
+  });
+
+  test("path and tag invalidation force the next request to render again", async () => {
+    const { isr, render, renders, setBody } = harness();
+    const posts = routeOf({ revalidate: "manual", tags: ["posts"] }, "/blog");
+    await isr.handle(reqFor("/blog"), posts, render);
+    setBody(() => "<html>v2</html>");
+    expect(isr.invalidatePath("/blog")).toBe(1);
+    const after = await isr.handle(reqFor("/blog"), posts, render);
+    expect(await after!.text()).toBe("<html>v2</html>");
+    expect(renders.length).toBe(2);
+
+    expect(isr.invalidateTag("posts")).toBe(1);
+    await isr.handle(reqFor("/blog"), posts, render);
+    expect(renders.length).toBe(3);
+  });
+
+  test("anonymised strips what personalises, and the coding too", () => {
+    const req = new Request("http://x/p?q=1", {
+      method: "GET",
+      headers: {
+        cookie: "s=1",
+        authorization: "Bearer t",
+        "accept-language": "it",
+        "accept-encoding": "gzip, br",
+      },
+    });
+    const anon = anonymised(req);
+    expect(anon.headers.get("cookie")).toBeNull();
+    expect(anon.headers.get("authorization")).toBeNull();
+    // identity on purpose: renderPage gzips for whoever accepts it, and a
+    // coded copy would be bytes the residue check cannot read
+    expect(anon.headers.get("accept-encoding")).toBeNull();
+    expect(anon.headers.get("accept-language")).toBe("it");
+    expect(anon.url).toBe("http://x/p?q=1");
+  });
+
+  // defence in depth: if the render path ever hands the cache a coded body,
+  // the guard refuses it rather than inspecting bytes it cannot read
+  test("a coded body is refused before any inspection", () => {
+    const h = new Headers({ "Content-Encoding": "gzip" });
+    expect(unstorable(200, h, "garbage-that-hides-anything")?.reason).toContain("gzip");
+  });
+
+  test("the replay negotiates its own coding: gzip to who accepts it, identity to who does not", async () => {
+    const { isr, render } = harnessNegotiation();
+    const route = { pattern: "/p", module: { revalidate: 60 } };
+    await isr.handle(reqFor("/p"), route, render);
+
+    const gz = await isr.handle(reqFor("/p", { "accept-encoding": "gzip" }), route, render);
+    expect(gz!.headers.get("Content-Encoding")).toBe("gzip");
+    const raw = new Uint8Array(await gz!.arrayBuffer());
+    expect(new TextDecoder().decode(Bun.gunzipSync(raw))).toBe("<html>v1</html>");
+
+    const id = await isr.handle(reqFor("/p"), route, render);
+    expect(id!.headers.get("Content-Encoding")).toBeNull();
+    expect(await id!.text()).toBe("<html>v1</html>");
+  });
+
+  function harnessNegotiation() {
+    const isr = new Isr(() => {});
+    const render = async () =>
+      new Response("<html>v1</html>", { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    return { isr, render };
+  }
 });

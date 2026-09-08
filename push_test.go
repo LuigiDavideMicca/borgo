@@ -718,3 +718,38 @@ func TestASignedPortIsNotAPort(t *testing.T) {
 		}
 	}
 }
+
+func TestRevalidateRidesTheInternalTopic(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	t.Setenv("FRONT_URL", server.URL)
+
+	if err := Revalidate("/blog/x"); err != nil {
+		t.Fatal(err)
+	}
+	if got["topic"] != "$borgo/revalidate" || got["event"] != "path" || got["data"] != "/blog/x" {
+		t.Fatalf("Revalidate sent %v", got)
+	}
+
+	if err := RevalidateTag("posts"); err != nil {
+		t.Fatal(err)
+	}
+	if got["topic"] != "$borgo/revalidate" || got["event"] != "tag" || got["data"] != "posts" {
+		t.Fatalf("RevalidateTag sent %v", got)
+	}
+}
+
+// an empty name would drop nothing while looking like it dropped something:
+// refused at the call site, before any request exists
+func TestRevalidateRefusesEmptyNames(t *testing.T) {
+	if err := Revalidate(""); err == nil || !strings.Contains(err.Error(), "empty path") {
+		t.Fatalf("Revalidate(\"\") = %v, want a named refusal", err)
+	}
+	if err := RevalidateTag(""); err == nil || !strings.Contains(err.Error(), "empty tag") {
+		t.Fatalf("RevalidateTag(\"\") = %v, want a named refusal", err)
+	}
+}

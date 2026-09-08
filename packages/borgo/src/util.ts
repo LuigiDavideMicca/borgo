@@ -916,6 +916,11 @@ export type RenderPageOptions = {
   security: Security | null;
   // attributes minted onto a fresh csrf cookie (path, samesite, secure)
   csrfCookieAttrs: string;
+  // a render whose output may be served to more than one visitor (isr): no
+  // csrf cookie is minted and no token reaches the bytes - a page that uses
+  // <CsrfField /> still renders the field, which is exactly how the cache's
+  // residue check catches it and refuses to share the copy
+  sharedRender?: boolean;
   // the page's loader wired to the api client; collects set-cookie headers
   runLoader: (
     req: Request,
@@ -965,10 +970,15 @@ export async function renderPage(
   if (loaded instanceof Response) return withCookies(loaded, apiCookies);
   const props = extraProps ? { ...loaded, ...extraProps } : loaded;
 
-  // one token for the cookie and every <CsrfField />
-  const cookieToken = csrfCookieValue(req.headers.get("cookie"));
-  const csrfToken = cookieToken || randomToken();
-  if (!cookieToken) apiCookies.push(`${CSRF_COOKIE}=${csrfToken}; ${csrfCookieAttrs}`);
+  // one token for the cookie and every <CsrfField />. a shared render mints
+  // nothing: a token frozen into a copy served to everyone matches nobody's
+  // cookie, so the field renders empty and the cache's residue check refuses
+  // the page rather than sharing a broken form that looks like a working one
+  const cookieToken = options.sharedRender ? "" : csrfCookieValue(req.headers.get("cookie"));
+  const csrfToken = options.sharedRender ? "" : cookieToken || randomToken();
+  if (!cookieToken && !options.sharedRender) {
+    apiCookies.push(`${CSRF_COOKIE}=${csrfToken}; ${csrfCookieAttrs}`);
+  }
 
   // minted before the render: react's own suspense scripts need the nonce
   const nonce = security?.needsNonce ? randomToken() : "";

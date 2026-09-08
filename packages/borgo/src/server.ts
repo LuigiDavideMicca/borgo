@@ -23,6 +23,7 @@ import {
   type AssetInfo,
 } from "./compress";
 import { registerCsrf, registerIslands } from "./internal";
+import { Isr, REVALIDATE_TOPIC } from "./isr";
 import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
 import { matchRoute, safeDecode, type Route } from "./router";
@@ -451,6 +452,7 @@ export async function serve({
     status: number,
     extraProps?: Record<string, unknown>,
     extraCookies: string[] = [],
+    shared = false,
   ) =>
     renderDocument(
       req,
@@ -459,6 +461,7 @@ export async function serve({
       status,
       {
         ...renderOptions,
+        sharedRender: shared,
         renderToStream: async (element, init) =>
           redactLocalPaths(
             (await renderToReadableStream(element, init)) as unknown as AsyncIterable<Uint8Array>,
@@ -470,6 +473,12 @@ export async function serve({
       extraProps,
       extraCookies,
     );
+
+  // production only, like the asset index: dev rebuilds under stable names
+  // and a cached page would fight the reload the dev channel just asked for.
+  // pages opt in with `export const revalidate`; everything else cannot tell
+  // this exists
+  const isr = dev ? null : new Isr();
 
   // hashed build outputs cache forever, compressible types are served from the
   // .gz/.br siblings `borgo build` emitted; dev has no siblings and serves
@@ -579,6 +588,12 @@ export async function serve({
       return runPropsRequest(req, matched.route, matched.params, propsOptions);
     }
 
+    if (isr) {
+      const cached = await isr.handle(req, matched.route, (anon) =>
+        renderPage(anon, matched.route, matched.params, 200, undefined, [], true),
+      );
+      if (cached) return cached;
+    }
     return renderPage(req, matched.route, matched.params, 200);
   }
 
@@ -845,6 +860,26 @@ export async function serve({
         if (!msg || typeof msg.topic !== "string" || typeof msg.event !== "string") {
           return secure(new Response("bad request", { status: 400 }));
         }
+        // the revalidate channel rides the same authorized endpoint and stops
+        // here: an invalidation is the server's business, never fanned out to
+        // websocket clients - a browser must not be able to watch which pages
+        // the operator drops, nor subscribe to a topic that was never a topic
+        if (msg.topic === REVALIDATE_TOPIC) {
+          if (msg.event !== "path" && msg.event !== "tag") {
+            return secure(badRequest(`revalidate event must be "path" or "tag", got ${JSON.stringify(msg.event)}`));
+          }
+          if (typeof msg.data !== "string" || msg.data === "") {
+            return secure(badRequest("revalidate needs a non-empty path or tag"));
+          }
+          if (isr) {
+            if (msg.event === "path") isr.invalidatePath(msg.data);
+            else isr.invalidateTag(msg.data);
+          }
+          // dev has no cache to drop; 204 either way, so app code behaves the
+          // same in both modes
+          return secure(new Response(null, { status: 204 }));
+        }
+
         // a topic no subscriber can ever name is a message dropped with a 204 on it
         const rejected = topicRejection(msg.topic);
         if (rejected) {

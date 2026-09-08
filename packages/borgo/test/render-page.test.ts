@@ -188,6 +188,14 @@ describe("renderPage: loader short-circuits", () => {
 });
 
 describe("renderPage: csrf token and cookies", () => {
+  // the isr contract: a copy that may be served to everyone mints nothing.
+  // the field a page renders anyway stays detectable, which is exactly how
+  // the cache's residue check refuses to share it
+  test("a shared render mints no csrf cookie", async () => {
+    const res = await render(opts({ sharedRender: true }));
+    expect(res.headers.getSetCookie()).toEqual([]);
+  });
+
   test("a browser without a token gets one minted, with the given attributes", async () => {
     const res = await render(opts());
     const cookies = res.headers.getSetCookie();

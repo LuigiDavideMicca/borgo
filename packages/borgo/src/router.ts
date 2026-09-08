@@ -41,6 +41,12 @@ export type PageModule = {
   prerenderPaths?: (
     ctx: PrerenderContext,
   ) => Array<Record<string, string | number>> | Promise<Array<Record<string, string | number>>>;
+  // isr: seconds a shared copy stays fresh, or "manual" for a page dropped
+  // only by borgo.Revalidate / borgo.RevalidateTag; tags name the data the
+  // page depends on. same grammar family as prerender: a flag on the module,
+  // read at serve time
+  revalidate?: number | "manual";
+  tags?: string[];
 };
 
 export type LayoutModule = {

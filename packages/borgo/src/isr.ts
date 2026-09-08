@@ -11,6 +11,7 @@
 //
 // production only, like the asset index: dev rebuilds under stable names and
 // a cached page would fight the reload the dev channel just asked for.
+import { pickEncoding } from "./compress";
 import { requestResidue, type Residue } from "./export";
 
 // the grammar mirrors prerender's: a flag on the page module, read at serve
@@ -45,6 +46,9 @@ export function readIsrPolicy(module: {
 
 export type CachedPage = {
   body: Uint8Array;
+  // compressed once at store time, served to whoever negotiates it: the cpu
+  // cost sits on the regeneration, never on the hit
+  gzip?: Uint8Array;
   status: number;
   // replayed on every hit; Set-Cookie can never be here, the guard refused it
   headers: Array<[string, string]>;
@@ -65,6 +69,13 @@ export function unstorable(
   html: string,
 ): Unstorable | null {
   if (status !== 200) return { reason: `status ${status}` };
+  // defence in depth: the shared render asks for identity, so a coded body
+  // here means the render path changed under this cache - and coded bytes
+  // are bytes the residue check below cannot honestly read. refused, loudly,
+  // rather than inspected wrongly and shared
+  if (headers.get("content-encoding")) {
+    return { reason: `the body is ${headers.get("content-encoding")}-coded and cannot be inspected` };
+  }
   const cookies = headers.getSetCookie();
   if (cookies.length > 0) {
     return { reason: "the response sets a cookie, and a shared copy would hand it to everyone" };
@@ -171,3 +182,160 @@ export class PageCache {
     return this.pages.size;
   }
 }
+
+// the copy is rendered as nobody: no cookies, no authorization, plain GET -
+// whatever the loader personalises from is simply not there, so the shared
+// property holds by construction instead of by trust in every loader. and
+// as an identity client: renderPage gzips for whoever accepts it, and a
+// coded copy would be bytes the residue check cannot read and a body served
+// to clients that never asked for that coding. one canonical representation
+// is stored; the coding is negotiated again at every replay
+export function anonymised(req: Request): Request {
+  const headers = new Headers(req.headers);
+  headers.delete("cookie");
+  headers.delete("authorization");
+  headers.delete("accept-encoding");
+  return new Request(req.url, { method: "GET", headers });
+}
+
+// what the server hands the orchestrator: a shared-mode render of one route
+export type SharedRender = (req: Request) => Promise<Response>;
+
+type RouteLike = { pattern: string; module: { revalidate?: unknown; tags?: unknown } };
+
+export const CACHE_STATE_HEADER = "X-Borgo-Cache";
+
+// one orchestrator per server, production only. handle() answers null for
+// "not mine" - wrong method, no opt-in, invalid opt-in (warned once by
+// name) - and the caller renders exactly as before, so a tree with no
+// revalidate export cannot tell isr exists.
+export class Isr {
+  private cache = new PageCache();
+  private inflight = new Map<string, Promise<CachedPage | Response>>();
+  private policies = new Map<string, IsrPolicy | null>();
+  private noted = new Set<string>();
+  constructor(
+    private log: (line: string) => void = (line) => console.error(line),
+    private now: () => number = Date.now,
+  ) {}
+
+  private note(key: string, line: string): void {
+    if (this.noted.has(key)) return;
+    this.noted.add(key);
+    this.log(line);
+  }
+
+  private policyFor(route: RouteLike): IsrPolicy | null {
+    const known = this.policies.get(route.pattern);
+    if (known !== undefined) return known;
+    const read = readIsrPolicy(route.module);
+    if (typeof read === "string") {
+      this.note(`policy:${route.pattern}`, `${route.pattern}: ${read} - served fresh, never cached`);
+      this.policies.set(route.pattern, null);
+      return null;
+    }
+    this.policies.set(route.pattern, read);
+    return read;
+  }
+
+  async handle(req: Request, route: RouteLike, render: SharedRender): Promise<Response | null> {
+    if (req.method !== "GET" && req.method !== "HEAD") return null;
+    const policy = this.policyFor(route);
+    if (!policy) return null;
+
+    const url = new URL(req.url);
+    const key = url.pathname + url.search;
+    const entry = this.cache.get(key);
+    if (entry && this.cache.fresh(entry, policy, this.now())) {
+      return this.respond(req, entry, "hit");
+    }
+    if (entry) {
+      // stale is still a page: served now, replaced in the background, one
+      // regeneration however wide the burst - and a regeneration that fails
+      // leaves the last good copy serving, said once
+      void this.regenerate(key, req, route, policy, render).catch((error) => {
+        this.note(
+          `regen:${key}`,
+          `${key}: regeneration failed, serving the last good copy (${error instanceof Error ? error.message : error})`,
+        );
+      });
+      return this.respond(req, entry, "stale");
+    }
+    const made = await this.regenerate(key, req, route, policy, render);
+    if (made instanceof Response) return made;
+    return this.respond(req, made, "miss");
+  }
+
+  // single-flight: every concurrent miss on one key awaits the same render.
+  // the entry is keyed before the await so a burst arriving mid-render joins
+  // instead of rendering again
+  private regenerate(
+    key: string,
+    req: Request,
+    route: RouteLike,
+    policy: IsrPolicy,
+    render: SharedRender,
+  ): Promise<CachedPage | Response> {
+    const running = this.inflight.get(key);
+    if (running) return running;
+    const flight = (async (): Promise<CachedPage | Response> => {
+      const rendered = await render(anonymised(req));
+      const html = await rendered.text();
+      const refusal = unstorable(rendered.status, rendered.headers, html);
+      if (refusal) {
+        this.note(
+          `store:${key}`,
+          `${key}: declares revalidate but ${refusal.reason} - served fresh, never cached`,
+        );
+        // the body was consumed to ask the question: rebuilt, with the state named
+        const headers = new Headers(rendered.headers);
+        headers.set(CACHE_STATE_HEADER, "bypass");
+        return new Response(html, { status: rendered.status, headers });
+      }
+      const body = new TextEncoder().encode(html);
+      const entry: CachedPage = {
+        body,
+        gzip: Bun.gzipSync(body),
+        status: rendered.status,
+        headers: [...rendered.headers.entries()],
+        storedAt: this.now(),
+        tags: policy.tags,
+      };
+      this.cache.store(key, entry);
+      this.noted.delete(`regen:${key}`);
+      return entry;
+    })().finally(() => this.inflight.delete(key));
+    this.inflight.set(key, flight);
+    return flight;
+  }
+
+  // the stored copy is identity; the coding is negotiated per replay, like
+  // renderPage negotiates per render. Vary: Accept-Encoding is already in
+  // the stored headers, renderPage put it there
+  private respond(req: Request, entry: CachedPage, state: "hit" | "stale" | "miss"): Response {
+    const headers = new Headers(entry.headers);
+    headers.set(CACHE_STATE_HEADER, state);
+    const gzip = entry.gzip && pickEncoding(req.headers.get("accept-encoding"), ["gzip"]);
+    const body = gzip ? entry.gzip! : entry.body;
+    if (gzip) headers.set("Content-Encoding", "gzip");
+    headers.set("Content-Length", String(body.byteLength));
+    return new Response(body.slice(), { status: entry.status, headers });
+  }
+
+  invalidatePath(path: string): number {
+    const dropped = this.cache.invalidatePath(path);
+    this.log(`revalidate ${path}: ${dropped} cached ${dropped === 1 ? "copy" : "copies"} dropped`);
+    return dropped;
+  }
+
+  invalidateTag(tag: string): number {
+    const dropped = this.cache.invalidateTag(tag);
+    this.log(`revalidate tag ${tag}: ${dropped} cached ${dropped === 1 ? "copy" : "copies"} dropped`);
+    return dropped;
+  }
+}
+
+// the internal topic borgo.Revalidate rides on __borgo/publish: intercepted
+// server-side before topic validation and never fanned out. the "$" prefix
+// keeps it out of the namespace client topics are allowed to use
+export const REVALIDATE_TOPIC = "$borgo/revalidate";

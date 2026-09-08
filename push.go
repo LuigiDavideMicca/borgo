@@ -54,6 +54,35 @@ func Push[T any](topic, event string, data T) error {
 	return pushWith(defaultPush, topic, event, data)
 }
 
+// revalidateTopic is intercepted by the front server before topic validation
+// and never fanned out to websocket clients: an invalidation is the server's
+// business, and the "$" prefix keeps it out of the namespace client topics
+// may use.
+const revalidateTopic = "$borgo/revalidate"
+
+// Revalidate drops the front server's cached copy of a page that declared
+// `export const revalidate`. The natural call site is the handler that just
+// wrote the data the page renders. An exact path drops the page and its
+// query variants; a trailing star drops the prefix: Revalidate("/blog/*").
+// In dev there is no cache and the call is a no-op that still answers 204,
+// so application code behaves the same in both modes.
+func Revalidate(path string) error {
+	if path == "" {
+		return fmt.Errorf("borgo.Revalidate: an empty path names no page")
+	}
+	return pushWith(defaultPush, revalidateTopic, "path", path)
+}
+
+// RevalidateTag drops every cached page that listed the tag in its `tags`
+// export - one call from the handler that wrote the posts, and every page
+// depending on them re-renders on its next request.
+func RevalidateTag(tag string) error {
+	if tag == "" {
+		return fmt.Errorf("borgo.RevalidateTag: an empty tag names no pages")
+	}
+	return pushWith(defaultPush, revalidateTopic, "tag", tag)
+}
+
 func pushWith[T any](s pushSettings, topic, event string, data T) error {
 	payload, err := json.Marshal(map[string]any{"topic": topic, "event": event, "data": data})
 	if err != nil {
