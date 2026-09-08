@@ -23,6 +23,7 @@ import {
   type AssetInfo,
 } from "./compress";
 import { registerCsrf, registerIslands } from "./internal";
+import { appEnvMetas, envRefusal } from "./env-app";
 import { Isr, REVALIDATE_TOPIC } from "./isr";
 import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
@@ -323,6 +324,11 @@ export async function serve({
   switches = resolveSwitches(process.env, dev),
 }: { dev?: boolean; switches?: Switches } = {}) {
   const started = performance.now();
+  // the app's declared environment is checked before anything binds: a
+  // missing or malformed variable refuses the boot naming every failure at
+  // once, instead of surfacing at whichever request reads it first
+  const refusal = envRefusal(await appEnvMetas());
+  if (refusal) throw new Error(`borgo: ${refusal}`);
   let chunkMap: Record<string, string> = {};
   // every name the last build recorded: a production build names its outputs
   // after their content, and a tree missing any of them is rebuilt rather

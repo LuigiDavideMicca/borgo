@@ -12,6 +12,7 @@ import {
 import { basename, dirname, extname, join, sep } from "node:path";
 import { c, g } from "./colors";
 import { NO_BUILD_OUTPUTS, precompressAssets, type BuildOutputs } from "./compress";
+import { appEnvMetas, clientEnvDefine, clientEnvRefusal } from "./env-app";
 import { stampWorkerFile } from "./pwa";
 import { filePathToPattern } from "./router";
 import { metricsEnabled, type AssetNames } from "./util";
@@ -1361,7 +1362,13 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   // error took the last good build with it
   const previous = readBuildInventory();
 
-  const define = buildDefine(dev);
+  // the app's client env rides into the bundle as one explicit define; a
+  // broken client variable fails the build here, because its value is about
+  // to be frozen into every asset. server variables are the boot check's
+  const envMetas = await appEnvMetas();
+  const envBroken = clientEnvRefusal(envMetas);
+  if (envBroken) throw new Error(envBroken);
+  const define = { ...buildDefine(dev), ...clientEnvDefine(envMetas) };
   const result = await Bun.build({
     entrypoints: [
       `${genDir}/client.tsx`,

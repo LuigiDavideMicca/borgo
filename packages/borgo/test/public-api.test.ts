@@ -30,6 +30,8 @@ const ROOT_VALUES = [
   "Island",
   "apiFetch",
   "csrfCookieValue",
+  // 0.22: the typed app environment - a deliberate stability promise
+  "defineEnv",
   "redirect",
   "registerServiceWorker",
   "subscribe",

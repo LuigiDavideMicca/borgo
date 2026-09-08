@@ -13,6 +13,8 @@ export type {
 } from "./router";
 export { ApiError } from "./api";
 export type { ApiClient, ApiOptions, ApiRequest, ApiResponse, ApiRouteKey } from "./api";
+export { defineEnv } from "./env";
+export type { Env, EnvSchema, EnvSpec, EnvType } from "./env";
 
 // filled in by the generated .borgo/api-types.d.ts through declaration merging
 export interface ApiRoutes {}
