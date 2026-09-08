@@ -565,7 +565,13 @@ test("a precompressed sibling deleted after boot degrades to identity, not a 500
   writeFileSync(file, "console.log('hello')");
   writeFileSync(file + ".gz", gzipSync(Buffer.from("console.log('hello')")));
   const index = buildAssetIndex(dir);
-  const info = [...index.values()][0];
+  // by name, never by position: the index holds the .gz sibling as an entry
+  // of its own, and which of the two iterates first is readdir order - the
+  // filesystem's, not ours. on the ci runner the sibling came first, its
+  // variants were rightly empty, and this test failed deterministically
+  // while every container and both dev machines happened to iterate app.js
+  // first
+  const info = index.get("/app.js")!;
   expect(info.variants.some((v) => v.encoding === "gzip")).toBe(true);
 
   // the sibling vanishes the way a parallel `borgo dev` build removes it
