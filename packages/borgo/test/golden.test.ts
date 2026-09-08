@@ -252,7 +252,7 @@ describe("golden: generated api types", () => {
     );
     writeFileSync(
       join(work, "go.mod"),
-      `module borgogolden\n\ngo 1.25.0\n\nrequire github.com/LuigiDavideMicca/borgo v0.0.0\n\n` +
+      `module borgogolden\n\ngo 1.27.0\n\nrequire github.com/LuigiDavideMicca/borgo v0.0.0\n\n` +
         `replace github.com/LuigiDavideMicca/borgo => ${REPO_ROOT.replaceAll("\\", "/")}\n`,
     );
     // the checkout's own sums cover borgogen's dependencies

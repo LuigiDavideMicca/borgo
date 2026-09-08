@@ -26,7 +26,7 @@ jobs:
           # nobody keeps: 0.21 shipped after weeks of green on a stable that
           # was two minors past what the module admits
           - column: go-floor
-            go: "1.25"
+            go: "1.27"
           # what users actually install today; go1.27 moving encoding/json
           # under a green tree is why this column and the floor are both here
           - column: go-latest

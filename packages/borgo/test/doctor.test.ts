@@ -473,7 +473,7 @@ describe("the exit code contract", () => {
     const results = await runChecks(
       fakeEnv({
         which: (cmd) => (cmd === "node" || cmd === "docker" ? null : "/usr/bin/tool"),
-        exec: (cmd) => ({ code: 0, out: cmd[0] === "go" ? "go version go1.26.4 linux/amd64" : "1.4.0" }),
+        exec: (cmd) => ({ code: 0, out: cmd[0] === "go" ? "go version go1.27.1 linux/amd64" : "1.4.0" }),
       }),
     );
     const notes = results.filter((r) => !r.ok && r.info);
@@ -485,7 +485,7 @@ describe("the exit code contract", () => {
     const results = await runChecks(
       fakeEnv({
         which: (cmd) => (cmd === "docker" ? null : cmd === "bun" ? null : "/usr/bin/tool"),
-        exec: () => ({ code: 0, out: "go version go1.26.4 linux/amd64" }),
+        exec: () => ({ code: 0, out: "go version go1.27.1 linux/amd64" }),
       }),
     );
     expect(results.filter(isFailure).map((r) => r.name)).toEqual(["bun"]);
@@ -512,9 +512,9 @@ describe("checkGo", () => {
   });
 
   test("recent enough", () => {
-    const r = checkGo(fakeEnv({ exec: () => ({ code: 0, out: "go version go1.26.4 windows/amd64" }) }));
+    const r = checkGo(fakeEnv({ exec: () => ({ code: 0, out: "go version go1.27.1 windows/amd64" }) }));
     expect(r.ok).toBe(true);
-    expect(r.detail).toContain("go1.26.4");
+    expect(r.detail).toContain("go1.27.1");
   });
 });
 

@@ -7,7 +7,7 @@ Read [VISION.md](VISION.md) first if you are proposing a feature — it says wha
 | Tool | Version | Why |
 | --- | --- | --- |
 | [Bun](https://bun.sh) | `>= 1.3.0` | Declared in `engines.bun` for both packages. The CLI, the front server, the build and the TypeScript tests all run on it. |
-| [Go](https://go.dev) | `>= 1.25.0` | The floor declared in `go.mod`. Two things below it are already hard requirements: `crypto/pbkdf2`, which the default password hasher uses, and the `go.mod` `tool` directive that apps invoke `borgogen` through — both arrived in 1.24. |
+| [Go](https://go.dev) | `>= 1.27.0` | The floor declared in `go.mod`, raised with the toolchains the suite proves — one requirements change per release, same policy as bun. The `encoding/json` this release is verified against is 1.27's. |
 | Git | any recent | — |
 
 CI pins Bun to `1.3.14` — the version the lockfiles were produced with, because `--frozen-lockfile` is resolver-sensitive — and Go to `stable`. So a change that needs a newer Go than the table says will pass CI and fail for contributors, and a change that needs a newer Bun than `1.3.14` fails CI. If you raise a floor, raise it in `go.mod` / `engines` and in this table too. A separate weekly job, `bun-latest`, runs `check:docs` and `bun run test` on Bun `latest` as an early warning for the pin; it runs on a schedule only, never on a pull request.

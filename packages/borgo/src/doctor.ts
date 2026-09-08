@@ -228,7 +228,7 @@ export function versionAtLeast(version: string, min: string): boolean {
 // releases apart, and 1.4 honours pathToFileURL's `windows` option that 1.3
 // ignored, which is a hand-rolled branch this codebase no longer carries
 const MIN_BUN = "1.4.0";
-const MIN_GO = "1.25";
+const MIN_GO = "1.27";
 // enough for node_modules, a go build cache and the emitted bundle
 const MIN_FREE_BYTES = 512 * 1024 * 1024;
 
