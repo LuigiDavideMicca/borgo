@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    
     "paths": { "@/*": ["./*"] },
 
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
