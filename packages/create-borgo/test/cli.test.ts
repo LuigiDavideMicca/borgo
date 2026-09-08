@@ -1306,14 +1306,16 @@ describe("the scaffolded tree", () => {
 
   // "everywhere" is the scan below; this one names the files worth reading in a
   // failure
-  test("the app name reaches package.json, go.mod, main.go and a nested layout", () => {
+  test("the app name reaches package.json, go.mod, main.go and the env schema", () => {
     run(["my-notes", "--template", "full", NG]);
     expect(pkg("my-notes").name).toBe("my-notes");
     expect(readFileSync(join(cwd, "my-notes", "go.mod"), "utf8")).toContain("module my-notes");
     expect(readFileSync(join(cwd, "my-notes", "main.go"), "utf8")).toContain('"my-notes/api"');
-    // deeper than the root: the full template names itself in its layout
+    // the brand the layout renders comes from env.ts: the name lands in the
+    // client variable's default, and the layout reads it typed
+    expect(readFileSync(join(cwd, "my-notes", "env.ts"), "utf8")).toContain('default: "my-notes"');
     const layout = readFileSync(join(cwd, "my-notes", "pages", "_layout.tsx"), "utf8");
-    expect(layout).toContain("my-notes");
+    expect(layout).toContain("env.BORGO_PUBLIC_APP_NAME");
     expect(layout).not.toContain("{{name}}");
   });
 
@@ -2040,7 +2042,9 @@ describe("installing and starting", () => {
 // is public - the title, the repo and the hostname all carry it - so anyone can
 // compute the HMAC and mint a session as anybody.
 const SESSION_SECRET_MIN = 32;
-const SECRET_ASSIGNMENT = /SESSION_SECRET[=:]\s*["']?([^"'\s,}]*)/g;
+// `{` excluded from the capture: `SESSION_SECRET: { optional: true, ... }` in
+// env.ts declares the variable's schema, it assigns no value
+const SECRET_ASSIGNMENT = /SESSION_SECRET[=:]\s*["']?([^"'\s,{}]*)/g;
 
 describe("the generated signing key", () => {
   test("the full template writes a real one into .env", () => {
@@ -2088,7 +2092,7 @@ describe("the generated signing key", () => {
         for (const [, value] of text.matchAll(SECRET_ASSIGNMENT)) {
           // `${SESSION_SECRET}`-style references and :?error forms name the
           // variable rather than assigning a value to it
-          if (value.startsWith("$") || value === "") continue;
+          if (value.startsWith("$") || value.startsWith("?") || value === "") continue;
           // the file and the value ride in the message: a failure here has to
           // name what to go and look at
           expect(`${rel}: ${value}`.length).toBeGreaterThanOrEqual(

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { env } from "@/env";
 
 export const head = {
   title: "{{name}}",
@@ -68,7 +69,8 @@ export default function Home() {
       </div>
 
       <p className="credit">
-        Built with <a href="https://github.com/LuigiDavideMicca/borgo">borgo</a> · a framework by{" "}
+        {env.BORGO_PUBLIC_APP_NAME} · built with{" "}
+        <a href="https://github.com/LuigiDavideMicca/borgo">borgo</a> · a framework by{" "}
         <a href="https://luigimicca.com">Luigi Micca</a>
       </p>
     </main>

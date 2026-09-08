@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { apiFetch } from "borgo-framework";
+import { env } from "@/env";
 import type { Me } from "@/.borgo/api-types";
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -23,7 +24,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <header>
         <a href="/" className="brand">
           <img src="/logo.svg" alt="" width={28} height={28} />
-          {"{{name}}"}
+          {env.BORGO_PUBLIC_APP_NAME}
         </a>
         <nav>
           <a href="/">Notes</a>
