@@ -314,6 +314,8 @@ The refusal is deliberate and it is new in 0.21: before, the key went out over w
 
 ## Environment reference
 
+These are borgo's own variables. Your application's variables get the same discipline — declared, typed, refused at boot by name — through [`env.ts`](environment.md).
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `3000` | front server port |

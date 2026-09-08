@@ -135,6 +135,7 @@ Both refuse an empty name, and both reach the front server the way `Push` does â
 | `CSRF_FIELD` (`"__borgo_csrf"`) | The hidden form field name, for a page form action. | provisional |
 | `CSRF_HEADER` (`"X-CSRF-Token"`) | The header name, for an unsafe `/api/*` request. | provisional |
 | `csrfCookieValue(header)` | Reads the CSRF token from a cookie header, treating conflicting duplicates as absent. Promoted from provisional in 0.21 â€” see [finding 4](#duplicated-apis). | stable |
+| `defineEnv(schema, runtimeEnv?)` | Declares the app's [typed environment](environment.md) in `env.ts`: validated before the server binds, typed at the call site, client values allowlisted into the bundle by the `BORGO_PUBLIC_` prefix. | provisional |
 
 ### `borgo-framework` â€” types
 
@@ -149,6 +150,7 @@ Both refuse an empty name, and both reach the front server the way `Push` does â
 | `HydrateMode` | `boolean \| "visible"`. | stable |
 | `Channel<T>` | `{ publish(...), close() }` returned by `subscribe`. | stable |
 | `SubscribeOptions` | `{ onRefused? }`, the third argument of `subscribe`. | stable |
+| `Env<S>` / `EnvSchema` / `EnvSpec` / `EnvType` | The shapes behind `defineEnv`: the schema, one variable's spec, the built-in type names, the typed result. | provisional |
 | `IslandProps` | Props of `<Island>`. | stable |
 | `ApiClient` | The typed `api(...)` function's type. | stable |
 | `ApiOptions<K>` | `{ query?, headers?, timeout?, body, params }` â€” `body` and `params` become required when the route declares them. | stable |
@@ -356,6 +358,7 @@ These are as much a public API as any function: an app depends on them, and chan
 | `pages/**/_*.tsx` | Any file whose basename starts with `_` is special and is not routed. | stable |
 | `islands/*.tsx` | Island components, default-exported, referenced by `<Island name="Counter" />`. | stable |
 | `api/*.go` | The Go API package. `api/borgo.gen.go` is generated; `*_test.go` is ignored by `borgogen`. | stable |
+| `env.ts` | The app's [typed environment](environment.md), when it declares one: checked at boot, client values shipped by the build. | provisional |
 | `public/` | Served as-is. `public/assets/` is build output. | stable |
 | `index.html` | The SSR shell. | stable |
 | `style.scss` | Compiled to `public/assets/style.css` when present. | stable |

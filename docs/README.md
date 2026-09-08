@@ -14,6 +14,7 @@ CI compiles the examples on these pages against the real framework types — eve
 | [Client navigation and hydration](client-navigation.md) | client-side transitions, prefetching, scroll restoration, code splitting, hydration modes, islands |
 | [Realtime](realtime.md) | server-sent events, WebSocket topics, typed event payloads, `borgo.SSEHub` and `borgo.Push` |
 | [Auth and sessions](auth-and-sessions.md) | signed-cookie sessions, password hashing, `borgo.Auth`, guards on both sides of the bridge |
+| [Environment](environment.md) | the app's variables declared once, typed reads, boot refusal, the server/client wall |
 | [Security](security.md) | the default posture: headers, CSP and nonces, CSRF, cookie rules, limits and timeouts, and what borgo leaves to you |
 | [Dev experience](dev-experience.md) | fast refresh and its contract, styling and Tailwind, the error overlay, `borgo doctor` |
 | [PWA](pwa.md) | manifest, service worker, the precache list, guarded registration |
