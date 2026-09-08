@@ -66,12 +66,19 @@ test("scroll position restores on back and forward", async ({ page, request }) =
     // briefly destroy the execution context, so poll every position
     const scrollY = () => page.evaluate(() => window.scrollY).catch(() => NaN);
 
+    // captured at the click, not assumed to be the 300 set above: another
+    // worker's sse update can insert list items above the viewport and
+    // chrome's scroll anchoring then shifts scrollY to keep the content
+    // still - the restore faithfully brings back the shifted value, and a
+    // hardcoded 300 fails the test against a working feature
+    const before = await scrollY();
+    expect(before).toBeGreaterThan(0);
     await page.click(`ul a[href="${visibleHref}"]`);
     await expect(page.locator("a", { hasText: "Back home" })).toBeVisible();
     await expect.poll(scrollY, { timeout: 15_000 }).toBe(0);
 
     await page.goBack();
-    await expect.poll(scrollY, { timeout: 15_000 }).toBe(300);
+    await expect.poll(scrollY, { timeout: 15_000 }).toBe(before);
 
     await page.goForward();
     await expect.poll(scrollY, { timeout: 15_000 }).toBeLessThan(5);
