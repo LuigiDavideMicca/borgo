@@ -64,6 +64,13 @@ export default defineConfig({
       API_PORT: "3901",
       DB_PATH: "e2e-prod.db",
       BORGO_METRICS: "1",
+      // env.e2e.ts greps the built assets for this value: a server variable
+      // must never reach a client bundle
+      ENV_SENTINEL: "borgo-env-server-sentinel-7f3a",
+      // deliberately NOT the schema's default: a client value that matches
+      // the default cannot tell "the define shipped it" from "the browser
+      // fell back", which is exactly the survival a mutation run found
+      BORGO_PUBLIC_APP_NAME: "tasks-e2e",
     },
   },
 });

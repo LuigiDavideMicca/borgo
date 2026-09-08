@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CsrfField, apiFetch, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
+import { env } from "@/env";
 import type { Task } from "@/.borgo/api-types";
 
 export const head = {
@@ -95,6 +96,12 @@ export default function Home({
           {clearError}
         </p>
       )}
+      {/* the same typed value on both sides of the wall: the server render
+          reads the process environment, the hydrating client reads the
+          build's define - a mismatch would fail hydration, loudly. not a
+          <footer>: the layout already renders one, and the fastrefresh e2e
+          locates it strictly */}
+      <p data-testid="app-name">{env.BORGO_PUBLIC_APP_NAME}</p>
     </main>
   );
 }
