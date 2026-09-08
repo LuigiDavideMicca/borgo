@@ -1,5 +1,5 @@
 import { ApiError, CsrfField, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
-import type { Me } from "../.borgo/api-types";
+import type { Me } from "@/.borgo/api-types";
 
 export const head = { title: "Account · {{name}}" };
 

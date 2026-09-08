@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { CsrfField, apiFetch, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
-import type { Note } from "../.borgo/api-types";
+import type { Note } from "@/.borgo/api-types";
 
 export const head = {
   title: "Notes · {{name}}",

@@ -2293,6 +2293,11 @@ describe("scanImportSpecifiers", () => {
     expect(scanImportSpecifiers(source)).toEqual([]);
   });
 
+  test("the @/ alias is a specifier, a scoped package is not", () => {
+    const source = 'import { db } from "@/lib/db";\nimport ui from "@radix-ui/react-dialog";';
+    expect(scanImportSpecifiers(source)).toEqual(["@/lib/db"]);
+  });
+
   test("a specifier in a comment is not an import", () => {
     expect(scanImportSpecifiers('// import { x } from "./old";\nconst y = 1;')).toEqual([]);
     expect(scanImportSpecifiers('/* import "./gone.css"; */')).toEqual([]);
@@ -2330,6 +2335,24 @@ describe("miscasedImport", () => {
   test("./helper against Helper.ts is the defect, and the extension is not part of it", () => {
     const dir = tree({ "app/lib": ["Helper.ts"] });
     expect(miscasedImport("app", "lib", "./helper", dir)).toEqual(["Helper.ts"]);
+  });
+
+  // the alias must be guarded exactly like the climb it replaces: making @/
+  // the default while the checker skipped it would unguard every import
+  test("@/ resolves from the app root, wherever the importer sits", () => {
+    const dir = tree({ app: ["lib", "pages"], "app/lib": ["Helper.ts"], "app/pages": ["deep"] });
+    // from a nested page, @/lib/helper is judged against app/lib, not pages/deep/lib
+    expect(miscasedImport("app", "pages/deep", "@/lib/helper", dir)).toEqual(["Helper.ts"]);
+  });
+
+  test("an exactly spelled @/ import is silence", () => {
+    const dir = tree({ app: ["lib"], "app/lib": ["helper.ts"] });
+    expect(miscasedImport("app", "pages/deep", "@/lib/helper", dir)).toBeNull();
+  });
+
+  test("a miscased directory inside an @/ path is named like a relative one", () => {
+    const dir = tree({ app: ["Lib"], "app/Lib": ["helper.ts"] });
+    expect(miscasedImport("app", "pages", "@/lib/helper", dir)).toEqual(["Lib"]);
   });
 
   test("the exact spelling is never reported, whichever extension carries it", () => {

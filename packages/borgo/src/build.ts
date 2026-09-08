@@ -394,9 +394,12 @@ const SPEC_PATTERNS = [
   /\brequire\s*\(\s*(["'])([^"'\n]+)\1\s*\)/g,
 ];
 
-// relative specifiers only: bare ones resolve through node_modules, a
-// different mechanism. A keyword inside a string is generated code's text
-// (borgo's own manifests), not this file's import
+// relative and root-aliased specifiers: bare ones resolve through
+// node_modules, a different mechanism. `@/` is unambiguous - an npm scope is
+// never empty, so no package can claim that prefix - and it resolves from
+// the app root, which makes it as checkable as `../` without the climb.
+// A keyword inside a string is generated code's text (borgo's own
+// manifests), not this file's import
 export function scanImportSpecifiers(source: string): string[] {
   const { code, strings } = scanCode(source);
   const found = new Set<string>();
@@ -405,7 +408,7 @@ export function scanImportSpecifiers(source: string): string[] {
       const at = match.index;
       if (strings.some(([from, to]) => at >= from && at < to)) continue;
       const spec = match[2];
-      if (spec.startsWith("./") || spec.startsWith("../")) found.add(spec);
+      if (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("@/")) found.add(spec);
     }
   }
   return [...found];
@@ -423,8 +426,16 @@ export function miscasedImport(
   dir: DirEntries,
 ): string[] | null {
   const hits = (names: string[]) => (names.length ? [...names].sort() : null);
-  const parts = spec.split(/[?#]/)[0].split("/");
+  let body = spec.split(/[?#]/)[0];
   let at = fromDir;
+  // `@/` walks from the app root, wherever the importing file sits: the
+  // spelling check must cover the alias exactly as it covers the climb it
+  // replaces, or making it the default would silently unguard every import
+  if (body.startsWith("@/")) {
+    at = "";
+    body = body.slice(2);
+  }
+  const parts = body.split("/");
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     if (part === "" || part === ".") continue;

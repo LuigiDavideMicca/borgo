@@ -1,5 +1,5 @@
 import { ApiError, type Head, type LoaderContext } from "borgo-framework";
-import type { Task } from "../../.borgo/api-types";
+import type { Task } from "@/.borgo/api-types";
 
 export const head = (props: Record<string, unknown>): Head => {
   const task = props.task as Task | null;

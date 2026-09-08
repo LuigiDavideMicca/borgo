@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { apiFetch } from "borgo-framework";
-import type { Me } from "../.borgo/api-types";
+import type { Me } from "@/.borgo/api-types";
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   // client-side session lookup: hydrating pages show "ciao <user> · logout",

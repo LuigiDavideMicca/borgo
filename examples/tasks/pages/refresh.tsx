@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useCounter } from "../lib/use-counter";
+import { useCounter } from "@/lib/use-counter";
 
 export const head = { title: "Refresh · borgo tasks" };
 
