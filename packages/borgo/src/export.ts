@@ -120,6 +120,10 @@ export function markStaticExport(env: NodeJS.ProcessEnv = process.env) {
 // (scriptJson), so only a real tag can match.
 export type Residue = { what: string; why: string[] };
 
+// named so isr can tell this residue apart: an export is a dead file and must
+// refuse a nonce, a live cache can re-mint one per replay
+export const NONCE_RESIDUE = "a csp nonce";
+
 const RESIDUE: Array<Residue & { test: RegExp }> = [
   {
     test: new RegExp(`<input\\b[^>]*\\bname="${CSRF_FIELD}"`),
@@ -132,7 +136,7 @@ const RESIDUE: Array<Residue & { test: RegExp }> = [
   },
   {
     test: /<(?:script|style)\b[^>]*\snonce="/i,
-    what: "a csp nonce",
+    what: NONCE_RESIDUE,
     why: [
       "the header that would name the nonce does not ship with the file, so the value is public, permanent, and allows whatever can read the page",
       "borgo export renders with no csp for exactly that reason: set the policy on your static host",

@@ -477,8 +477,20 @@ export async function serve({
   // production only, like the asset index: dev rebuilds under stable names
   // and a cached page would fight the reload the dev channel just asked for.
   // pages opt in with `export const revalidate`; everything else cannot tell
-  // this exists
-  const isr = dev ? null : new Isr();
+  // this exists. the build id keying the persisted copies is the hashed
+  // output inventory: a new build writes new names, and every copy the old
+  // one rendered is swept at boot rather than served against a new tree
+  const isr = dev
+    ? null
+    : new Isr({
+        persist: {
+          dir: process.env.BORGO_CACHE_DIR || join(".borgo", "cache", "html"),
+          buildId: new Bun.CryptoHasher("sha256")
+            .update(JSON.stringify([...readBuildOutputs().sizes.entries()].sort()))
+            .digest("hex")
+            .slice(0, 16),
+        },
+      });
 
   // hashed build outputs cache forever, compressible types are served from the
   // .gz/.br siblings `borgo build` emitted; dev has no siblings and serves

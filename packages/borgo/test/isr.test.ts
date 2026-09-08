@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   anonymised,
   CACHE_STATE_HEADER,
@@ -80,9 +83,24 @@ describe("unstorable", () => {
     expect(got?.reason).toContain("CsrfField");
   });
 
-  test("a nonce in the bytes refuses the copy", () => {
+  test("a nonce without the header that minted it refuses the copy", () => {
     const withNonce = '<html><script nonce="abc123">x()</script></html>';
     expect(unstorable(200, new Headers(), withNonce)?.reason).toContain("per-request");
+  });
+
+  // the exporter refuses a nonce because a file cannot change; a live cache
+  // re-mints it per replay, so the render's own nonce is storable
+  test("a nonce the render itself minted is storable", () => {
+    const h = new Headers({ "Content-Security-Policy": "script-src 'self' 'nonce-abc123'" });
+    const withNonce = '<html><script nonce="abc123">x()</script></html>';
+    expect(unstorable(200, h, withNonce)).toBeNull();
+  });
+
+  test("a nonce that is not the header's refuses the copy - not ours to re-mint", () => {
+    const h = new Headers({ "Content-Security-Policy": "script-src 'self' 'nonce-abc123'" });
+    const foreign =
+      '<html><script nonce="abc123">x()</script><script nonce="other">y()</script></html>';
+    expect(unstorable(200, h, foreign)?.reason).toContain("per-request");
   });
 
   // react escapes < in text and scriptJson escapes it in props: only a real
@@ -165,11 +183,11 @@ describe("the orchestrator", () => {
   const reqFor = (url: string, headers: Record<string, string> = {}) =>
     new Request(`http://x${url}`, { headers });
 
-  function harness(over: { now?: () => number; body?: () => string; log?: string[] } = {}) {
+  function harness(over: { now?: () => number; body?: () => string; log?: string[]; persist?: { dir: string; buildId: string } } = {}) {
     const log = over.log ?? [];
     const renders: Request[] = [];
     let body = over.body ?? (() => "<html>v1</html>");
-    const isr = new Isr((line) => log.push(line), over.now ?? (() => 1_000_000));
+    const isr = new Isr({ log: (line) => log.push(line), now: over.now ?? (() => 1_000_000), persist: over.persist });
     const render = async (req: Request) => {
       renders.push(req);
       return new Response(body(), {
@@ -214,7 +232,7 @@ describe("the orchestrator", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const renders: Request[] = [];
-    const isr = new Isr(() => {});
+    const isr = new Isr({ log: () => {} });
     const render = async (req: Request) => {
       renders.push(req);
       await gate;
@@ -254,7 +272,7 @@ describe("the orchestrator", () => {
     let t = 1_000_000;
     let fail = false;
     const log: string[] = [];
-    const isr = new Isr((line) => log.push(line), () => t);
+    const isr = new Isr({ log: (line) => log.push(line), now: () => t });
     const render = async () => {
       if (fail) throw new Error("api down");
       return new Response("<html>good</html>", { headers: { "Content-Type": "text/html" } });
@@ -279,7 +297,7 @@ describe("the orchestrator", () => {
   test("a response that sets a cookie is bypassed, warned once, and never shared", async () => {
     const log: string[] = [];
     const renders: Request[] = [];
-    const isr = new Isr((line) => log.push(line));
+    const isr = new Isr({ log: (line) => log.push(line) });
     const render = async (req: Request) => {
       renders.push(req);
       const headers = new Headers({ "Content-Type": "text/html" });
@@ -363,9 +381,158 @@ describe("the orchestrator", () => {
   });
 
   function harnessNegotiation() {
-    const isr = new Isr(() => {});
+    const isr = new Isr({ log: () => {} });
     const render = async () =>
       new Response("<html>v1</html>", { headers: { "Content-Type": "text/html; charset=utf-8" } });
     return { isr, render };
   }
+});
+
+// production pages carry a csp nonce on every inline script; a copy that
+// froze one nonce for everyone would let whoever reads the page inject
+// against it. so the stored copy keeps its render's nonce as a substitution
+// key - a key that never ships, even the miss response is re-minted - and
+// every replay swaps in a fresh value, body and header in agreement
+describe("nonce re-minting", () => {
+  const route = { pattern: "/p", module: { revalidate: 60 } };
+  const noncedRender = async () =>
+    new Response(
+      '<html><script nonce="orig">x()</script><script nonce="orig">window.__PROPS__={}</script></html>',
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Security-Policy": "script-src 'self' 'nonce-orig'",
+        },
+      },
+    );
+
+  test("every response carries its own fresh nonce, the render's never ships", async () => {
+    const mints = ["m1", "m2", "m3"];
+    const isr = new Isr({ log: () => {}, mint: () => mints.shift()! });
+
+    const miss = await isr.handle(new Request("http://x/p"), route, noncedRender);
+    expect(miss!.headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    const missHtml = await miss!.text();
+    expect(missHtml).not.toContain("orig");
+    expect(missHtml.match(/nonce="m1"/g)?.length).toBe(2);
+    expect(miss!.headers.get("content-security-policy")).toBe("script-src 'self' 'nonce-m1'");
+
+    const hit = await isr.handle(new Request("http://x/p"), route, noncedRender);
+    expect(hit!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    const hitHtml = await hit!.text();
+    expect(hitHtml.match(/nonce="m2"/g)?.length).toBe(2);
+    expect(hitHtml).not.toContain("m1");
+    expect(hit!.headers.get("content-security-policy")).toBe("script-src 'self' 'nonce-m2'");
+  });
+
+  test("a re-minted replay still negotiates gzip, nonce and coding coherent", async () => {
+    const isr = new Isr({ log: () => {}, mint: () => "fresh" });
+    await isr.handle(new Request("http://x/p"), route, noncedRender);
+    const hit = await isr.handle(
+      new Request("http://x/p", { headers: { "accept-encoding": "gzip" } }),
+      route,
+      noncedRender,
+    );
+    expect(hit!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    expect(hit!.headers.get("Content-Encoding")).toBe("gzip");
+    const html = new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await hit!.arrayBuffer())));
+    expect(html).toContain('nonce="fresh"');
+    expect(html).not.toContain("orig");
+  });
+
+  test("a nonced copy survives a restart and re-mints from disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-isr-"));
+    const persist = { dir, buildId: "b1" };
+    const first = new Isr({ log: () => {}, persist, mint: () => "n1" });
+    await first.handle(new Request("http://x/p"), route, noncedRender);
+    await Bun.sleep(20);
+
+    const failingRender = async () => {
+      throw new Error("a warm restart must not render");
+    };
+    const second = new Isr({ log: () => {}, persist, mint: () => "n2" });
+    const res = await second.handle(new Request("http://x/p"), route, failingRender);
+    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    const html = await res!.text();
+    expect(html.match(/nonce="n2"/g)?.length).toBe(2);
+    expect(html).not.toContain("orig");
+    expect(html).not.toContain("n1");
+    expect(res!.headers.get("content-security-policy")).toBe("script-src 'self' 'nonce-n2'");
+  });
+});
+
+describe("persistence", () => {
+  const routeOf = (module: Record<string, unknown>, pattern = "/p") => ({ pattern, module });
+  const reqFor = (url: string) => new Request(`http://x${url}`);
+  const tmp = () => mkdtempSync(join(tmpdir(), "borgo-isr-"));
+  const route = routeOf({ revalidate: 60 });
+  const renderOnce = (renders: number[]) => async () => {
+    renders.push(1);
+    return new Response("<html>saved</html>", {
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  };
+
+  test("a restart serves from disk without rendering, gzip recomputed", async () => {
+    const dir = tmp();
+    const renders: number[] = [];
+    const first = new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
+    await first.handle(reqFor("/p"), route, renderOnce(renders));
+    // the write is fire-and-forget: give it the tick it needs
+    await Bun.sleep(20);
+
+    const second = new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
+    const res = await second.handle(reqFor("/p"), route, renderOnce(renders));
+    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    expect(await res!.text()).toBe("<html>saved</html>");
+    expect(renders.length).toBe(1);
+
+    const gz = await second.handle(
+      new Request("http://x/p", { headers: { "accept-encoding": "gzip" } }),
+      route,
+      renderOnce(renders),
+    );
+    expect(gz!.headers.get("Content-Encoding")).toBe("gzip");
+  });
+
+  // a copy from another build renders another tree: swept at boot, not served
+  test("another build's copies are swept, and the sweep leaves no files", async () => {
+    const dir = tmp();
+    const renders: number[] = [];
+    const first = new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
+    await first.handle(reqFor("/p"), route, renderOnce(renders));
+    await Bun.sleep(20);
+
+    const second = new Isr({ log: () => {}, persist: { dir, buildId: "b2" } });
+    const res = await second.handle(reqFor("/p"), route, renderOnce(renders));
+    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    expect(renders.length).toBe(2);
+    await Bun.sleep(20);
+    // only the new build's pair remains on disk
+    expect(readdirSync(dir).length).toBe(2);
+  });
+
+  test("a corrupt meta is swept, never served", async () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "deadbeef.json"), "{not json");
+    writeFileSync(join(dir, "deadbeef.html"), "<html>junk</html>");
+    const renders: number[] = [];
+    const isr = new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
+    const res = await isr.handle(reqFor("/p"), route, renderOnce(renders));
+    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    expect(readdirSync(dir)).not.toContain("deadbeef.json");
+  });
+
+  test("invalidation removes the files with the entry", async () => {
+    const dir = tmp();
+    const renders: number[] = [];
+    const isr = new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
+    await isr.handle(reqFor("/p"), route, renderOnce(renders));
+    await Bun.sleep(20);
+    expect(readdirSync(dir).length).toBe(2);
+    expect(isr.invalidatePath("/p")).toBe(1);
+    await Bun.sleep(20);
+    expect(readdirSync(dir).length).toBe(0);
+  });
 });
