@@ -44,6 +44,13 @@ export default function Home() {
           <h2>Realtime →</h2>
           <p>Server-sent events from a Go goroutine, streamed through the front server.</p>
         </a>
+        <a className="card" href="/now">
+          <h2>Cached page →</h2>
+          <p>
+            <code>revalidate = 60</code>: rendered once, shared with every visitor for a minute,
+            then re-rendered.
+          </p>
+        </a>
         <button type="button" className="card" onClick={greet}>
           <h2>Call the Go API</h2>
           <p>

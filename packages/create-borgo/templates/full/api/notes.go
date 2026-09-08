@@ -70,6 +70,9 @@ func CreateNote(w http.ResponseWriter, r *http.Request) {
 	// realtime fan-out: sse subscribers refresh, the ws topic gets a typed event
 	events.Publish("note-created", note)
 	go borgo.Push("live", "note-created", note.Title)
+	// pages/news.tsx caches its html under this tag; a write is the moment
+	// that copy stops being true
+	go borgo.RevalidateTag("notes")
 	borgo.JSON(w, http.StatusCreated, NoteItem{Note: note})
 }
 
@@ -84,5 +87,6 @@ func DeleteNote(w http.ResponseWriter, r *http.Request) {
 	delete(notes, id)
 	notesMu.Unlock()
 	events.Publish("note-deleted", id)
+	go borgo.RevalidateTag("notes")
 	borgo.WriteJSON(w, http.StatusOK, Deleted{Deleted: true})
 }

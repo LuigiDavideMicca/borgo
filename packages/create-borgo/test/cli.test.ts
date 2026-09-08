@@ -1412,11 +1412,17 @@ describe("the export script every template advertises", () => {
     symlinkSync(packageDir("react-dom"), join(nm, "react-dom"), type);
   };
 
-  type PageModule = { loader?: unknown; prerender?: unknown; prerenderPaths?: unknown };
+  type PageModule = {
+    loader?: unknown;
+    prerender?: unknown;
+    prerenderPaths?: unknown;
+    revalidate?: unknown;
+  };
 
   // exactly the partition planExport() makes in packages/borgo/src/export.ts:
-  // exportable is "no loader, or prerender === true", and a dynamic route also
-  // has to list its param sets
+  // exportable is "no loader, or prerender === true" and no revalidate export
+  // (a cached page asked for a server), and a dynamic route also has to list
+  // its param sets
   const exportablePages = async (app: string) => {
     const dir = join(cwd, app, "pages");
     const exportable: string[] = [];
@@ -1426,6 +1432,7 @@ describe("the export script every template advertises", () => {
       if (rel.split("/").some((part) => part.startsWith("_"))) continue;
       const page = (await import(pathToFileURL(join(dir, entry)).href)) as PageModule;
       const dynamic = rel.includes("[");
+      if (page.revalidate !== undefined) continue;
       if (page.loader && page.prerender !== true) continue;
       if (dynamic && typeof page.prerenderPaths !== "function") continue;
       exportable.push(rel);
