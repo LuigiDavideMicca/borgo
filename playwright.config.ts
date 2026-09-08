@@ -19,7 +19,7 @@ export default defineConfig({
   projects: [
     {
       name: "app",
-      testIgnore: /fastrefresh|export|clear-all/,
+      testIgnore: /fastrefresh|export|clear-all|isr/,
       use: { baseURL: "http://localhost:3400" },
     },
     // clear-all wipes the shared task list, so it waits for the parallel
@@ -30,10 +30,18 @@ export default defineConfig({
       dependencies: ["app"],
       use: { baseURL: "http://localhost:3400" },
     },
+    // isr asserts cache hits by render stamp, and any parallel spec that
+    // writes a task drops the news page mid-assert, so it runs alone
+    {
+      name: "isr",
+      testMatch: /isr/,
+      dependencies: ["clear-all"],
+      use: { baseURL: "http://localhost:3400" },
+    },
     {
       name: "dev",
       testMatch: /fastrefresh/,
-      dependencies: ["clear-all"],
+      dependencies: ["isr"],
       use: { baseURL: "http://localhost:3410" },
     },
     // export rebuilds the example's production assets and adds scratch pages,

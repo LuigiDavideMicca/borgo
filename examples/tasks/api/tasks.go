@@ -71,6 +71,9 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	events.Publish("task-created", task)
 	go borgo.Push("live", "task-created", task.Title)
+	// the /news page caches its html under this tag; writing a task is the
+	// moment that copy stops being true
+	go borgo.RevalidateTag("news")
 	respondTask(w, http.StatusCreated, task)
 }
 
@@ -98,6 +101,7 @@ func ClearTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events.Publish("task-deleted", "all")
+	go borgo.RevalidateTag("news")
 	borgo.WriteJSON(w, http.StatusOK, Cleared{Cleared: result.RowsAffected})
 }
 
@@ -112,5 +116,6 @@ func DeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events.Publish("task-deleted", r.PathValue("id"))
+	go borgo.RevalidateTag("news")
 	borgo.WriteJSON(w, http.StatusOK, Deleted{Deleted: true})
 }
