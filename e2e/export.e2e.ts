@@ -150,6 +150,10 @@ test("export writes the exportable pages and explains the skips", () => {
   expect(out).toContain("/exp-dyn/2");
   expect(out).toContain("zero js");
   expect(out).toMatch(/\/ +skipped . has a loader without `export const prerender = true`/);
+  // a cached page asked for a server; a frozen copy would honour neither the
+  // clock nor an invalidation
+  expect(out).toMatch(/\/news +skipped . exports `revalidate`/);
+  expect(existsSync(join(siteDir, "news", "index.html"))).toBe(false);
   expect(out).toContain("actions, sse and websocket topics need borgo start");
 
   expect(existsSync(join(siteDir, "exp-static", "index.html"))).toBe(true);

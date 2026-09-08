@@ -46,6 +46,20 @@ describe("planExport", () => {
     expect(needApi).toBe(false);
   });
 
+  // a page that asked for revalidation asked for a server: a frozen copy
+  // honours neither the clock nor an invalidation, even with prerender set
+  test("a revalidate page skips with the reason, whatever else it exports", () => {
+    const { plans, skipped } = planExport([
+      route("/news", { default: page, revalidate: 60 }),
+      route("/manual", { default: page, revalidate: "manual", prerender: true }),
+    ]);
+    expect(plans).toEqual([]);
+    expect(skipped.map((s) => s.reason)).toEqual([
+      "exports `revalidate` - serve it with borgo start",
+      "exports `revalidate` - serve it with borgo start",
+    ]);
+  });
+
   test("a loader without prerender skips with the reason", () => {
     const { plans, skipped } = planExport([route("/", { default: page, loader: async () => ({}) })]);
     expect(plans).toEqual([]);

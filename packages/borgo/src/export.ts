@@ -25,6 +25,12 @@ export function planExport(routes: Route[], notFound: Route | null = null): Expo
   for (const route of routes) {
     const module = route.module as ExportModule;
     const dynamic = route.pattern.includes(":");
+    // a page that asked to be re-rendered on a clock or on invalidation is
+    // asking for a server; a frozen copy would honour neither
+    if ((module as { revalidate?: unknown }).revalidate !== undefined) {
+      plan.skipped.push({ pattern: route.pattern, reason: "exports `revalidate` - serve it with borgo start" });
+      continue;
+    }
     if (module.loader && module.prerender !== true) {
       plan.skipped.push({ pattern: route.pattern, reason: "has a loader without `export const prerender = true`" });
       continue;
