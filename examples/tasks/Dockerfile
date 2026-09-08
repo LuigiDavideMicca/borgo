@@ -2,8 +2,8 @@
 #   docker build -f examples/tasks/Dockerfile -t borgo-tasks .
 # a standalone app scaffolded by create-borgo uses its own generated
 # dockerfile instead, which installs borgo from npm.
-FROM golang:1.25 AS build
-COPY --from=oven/bun:1.3 /usr/local/bin/bun /usr/local/bin/bun
+FROM golang:1.27 AS build
+COPY --from=oven/bun:1.4 /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /repo
 
 COPY . .
@@ -20,7 +20,7 @@ RUN mkdir /out \
  && rm -rf /out/node_modules/typescript /out/node_modules/@types /out/node_modules/.bin \
            /out/node_modules/borgo-framework/node_modules/typescript /out/node_modules/borgo-framework/node_modules/@types
 
-FROM oven/bun:1.3-slim
+FROM oven/bun:1.4-slim
 WORKDIR /app
 ENV NODE_ENV=production DB_PATH=/data/tasks.db
 # bun's outbound fetch pool defaults to 256 requests, and the front server
