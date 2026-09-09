@@ -13,7 +13,7 @@ export interface Item {
 }
 
 export interface ItemList {
-  items: Array<Item>;
+  items: Array<Item> | null;
   count: number;
 }
 
