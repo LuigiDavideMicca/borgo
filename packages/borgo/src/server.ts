@@ -34,6 +34,7 @@ import {
   createKeepWarm,
   csrfRejects,
   decodeChanged,
+  devMode,
   headResponse,
   isForwarded,
   isUpstream,
@@ -56,6 +57,17 @@ import {
   type RenderPageOptions,
   type Switches,
 } from "./util";
+
+// react's cjs entry chooses its build by NODE_ENV at the moment of require,
+// and `borgo start` in a plain shell leaves NODE_ENV unset - which loaded the
+// DEVELOPMENT react-dom into a production server: every render paid prop
+// validation, freeze and warning machinery (measured on the bench app's ssr
+// page, alternated arms: ~1240 req/s dev vs ~1690 prod, +36%). defaulted from
+// the same switch that decides everything else about the mode, before the
+// requires below, and only defaulted: an explicit NODE_ENV stays the
+// operator's word. dev.ts sets BORGO_DEV for its child, so the dev loop keeps
+// dev react and its warnings
+process.env.NODE_ENV ||= devMode(process.env) ? "development" : "production";
 
 // react from the app, not from this package: with a linked borgo checkout
 // the two would be different copies and hooks would break
