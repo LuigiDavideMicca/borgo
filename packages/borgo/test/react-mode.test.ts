@@ -1,45 +1,59 @@
 import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { startEnv, startNeedsReexec } from "../src/util";
 
-// react's cjs entry picks development or production AT REQUIRE TIME from
-// NODE_ENV, and server.ts requires react at module load - so the default has
-// to land before that module evaluates, in a process whose environment is the
-// one under test. measured before the fix: production ssr ran the development
-// react-dom (~1240 vs ~1690 req/s on the bench page, alternated arms).
-const serverTs = fileURLToPath(new URL("../src/server.ts", import.meta.url));
-// an app directory with react installed, for server.ts's appRequire
-const appDir = join(import.meta.dir, "..", "..", "..", "examples", "tasks");
-
-function nodeEnvAfterImport(env: Record<string, string | undefined>): string {
-  const clean: Record<string, string> = {};
-  for (const [k, v] of Object.entries({ ...process.env, ...env })) {
-    if (v !== undefined) clean[k] = v;
-  }
-  delete clean.NODE_ENV;
-  if (env.NODE_ENV !== undefined) clean.NODE_ENV = env.NODE_ENV;
-  const proc = Bun.spawnSync(
-    [
-      process.execPath,
-      "-e",
-      `await import(${JSON.stringify(serverTs)}); console.log(process.env.NODE_ENV);`,
-    ],
-    { cwd: appDir, env: clean, stdout: "pipe", stderr: "pipe" },
-  );
-  if (proc.exitCode !== 0) throw new Error(`import failed:\n${proc.stderr.toString()}`);
-  return proc.stdout.toString().trim();
-}
-
-describe("the react build the server loads", () => {
-  test("a bare environment defaults to production before react is required", () => {
-    expect(nodeEnvAfterImport({ BORGO_DEV: undefined })).toBe("production");
-  });
-
-  test("the dev loop keeps development react and its warnings", () => {
-    expect(nodeEnvAfterImport({ BORGO_DEV: "1" })).toBe("development");
+// react's cjs entry picks development or production from NODE_ENV at require
+// time, and bun can pin a page's jsx transform before any module code runs -
+// so the default has to ride the LAUNCH environment, via the re-exec in
+// cli.ts. a mid-module `process.env.NODE_ENV ||= ...` was tried and produced
+// a render crash on a real app: a jsxDEV-compiled layout meeting the
+// production react-dom (`dispatcher.getOwner is not a function`). measured
+// stakes: the bench ssr page at ~1240 req/s under development react against
+// ~1690 under production, alternated arms.
+describe("what `borgo start` guarantees its launch environment", () => {
+  test("a bare environment re-execs, and the re-exec carries both defaults", () => {
+    expect(startNeedsReexec({})).toBe(true);
+    expect(startEnv({})).toEqual({
+      BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
+      NODE_ENV: "production",
+    });
   });
 
   test("an explicit NODE_ENV is the operator's word, not borgo's", () => {
-    expect(nodeEnvAfterImport({ NODE_ENV: "staging", BORGO_DEV: undefined })).toBe("staging");
+    expect(startEnv({ NODE_ENV: "staging" }).NODE_ENV).toBe("staging");
+    expect(startEnv({ BUN_CONFIG_MAX_HTTP_REQUESTS: "256" }).BUN_CONFIG_MAX_HTTP_REQUESTS).toBe("256");
+  });
+
+  test("with both present nothing re-execs - the process shape stays flat", () => {
+    expect(
+      startNeedsReexec({ BUN_CONFIG_MAX_HTTP_REQUESTS: "16384", NODE_ENV: "production" }),
+    ).toBe(false);
+    expect(startNeedsReexec({ BUN_CONFIG_MAX_HTTP_REQUESTS: "16384" })).toBe(true);
+    expect(startNeedsReexec({ NODE_ENV: "production" })).toBe(true);
+  });
+});
+
+// the counterpart guarantee: importing the server module must NOT assign
+// NODE_ENV - a module-time default is exactly the mismatch above, and an
+// embedder with a bare environment gets development react everywhere, which
+// is slow and coherent rather than fast and broken
+describe("what importing the server does not do", () => {
+  test("server.ts leaves an unset NODE_ENV unset", () => {
+    const serverTs = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const appDir = join(import.meta.dir, "..", "..", "..", "examples", "tasks");
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) clean[k] = v;
+    delete clean.NODE_ENV;
+    const proc = Bun.spawnSync(
+      [
+        process.execPath,
+        "-e",
+        `await import(${JSON.stringify(serverTs)}); console.log(String(process.env.NODE_ENV));`,
+      ],
+      { cwd: appDir, env: clean, stdout: "pipe", stderr: "pipe" },
+    );
+    if (proc.exitCode !== 0) throw new Error(`import failed:\n${proc.stderr.toString()}`);
+    expect(proc.stdout.toString().trim()).toBe("undefined");
   });
 });

@@ -453,6 +453,21 @@ export const devMode = (env: Record<string, string | undefined>): boolean =>
 export const reloadBanner = (env: Record<string, string | undefined>): boolean =>
   envBool("BORGO_RELOAD", env.BORGO_RELOAD, "the full banner") ?? false;
 
+// what `borgo start` must have in its LAUNCH environment, defaulted only.
+// both values are read before any module code can assign them: bun sizes its
+// fetch pool at boot, and bun's jsx transform for a page can be pinned before
+// server.ts runs a line - a mid-module NODE_ENV default left a jsxDEV-compiled
+// layout meeting the production react-dom, which is a render crash
+// (`dispatcher.getOwner is not a function`), so the only reliable place is
+// the environment of the process itself, set by the re-exec in cli.ts
+export const startEnv = (env: Record<string, string | undefined>): Record<string, string> => ({
+  BUN_CONFIG_MAX_HTTP_REQUESTS: env.BUN_CONFIG_MAX_HTTP_REQUESTS ?? "16384",
+  NODE_ENV: env.NODE_ENV ?? "production",
+});
+
+export const startNeedsReexec = (env: Record<string, string | undefined>): boolean =>
+  !env.BUN_CONFIG_MAX_HTTP_REQUESTS || !env.NODE_ENV;
+
 // go's strconv.ParseBool grammar, exactly: SESSION_SECURE is read by both
 // halves and `true` must not give the session cookie Secure and the csrf
 // cookie not

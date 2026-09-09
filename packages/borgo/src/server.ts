@@ -34,7 +34,6 @@ import {
   createKeepWarm,
   csrfRejects,
   decodeChanged,
-  devMode,
   headResponse,
   isForwarded,
   isUpstream,
@@ -60,15 +59,17 @@ import {
 
 // react's cjs entry chooses its build by NODE_ENV at the moment of require,
 // and `borgo start` in a plain shell leaves NODE_ENV unset - which loaded the
-// DEVELOPMENT react-dom into a production server: every render paid prop
-// validation, freeze and warning machinery (measured on the bench app's ssr
-// page, alternated arms: ~1240 req/s dev vs ~1690 prod, +36%). defaulted from
-// the same switch that decides everything else about the mode, before the
-// requires below, and only defaulted: an explicit NODE_ENV stays the
-// operator's word. dev.ts sets BORGO_DEV for its child, so the dev loop keeps
-// dev react and its warnings
-process.env.NODE_ENV ||= devMode(process.env) ? "development" : "production";
-
+// DEVELOPMENT react-dom into a production server. the default is NOT applied
+// here: assigning process.env from module code is too late for the jsx
+// transform bun may already have chosen for a page, and the mismatch is a
+// render crash (`dispatcher.getOwner is not a function`: a jsxDEV-compiled
+// layout meeting the production react-dom - measured, not theorised). only
+// the LAUNCH environment is early enough, so `borgo start` re-execs with
+// NODE_ENV=production when unset, in cli.ts, the same way it already does
+// for BUN_CONFIG_MAX_HTTP_REQUESTS. an embedder calling serve() directly
+// with a bare environment gets development react everywhere: slower, never
+// incoherent.
+//
 // react from the app, not from this package: with a linked borgo checkout
 // the two would be different copies and hooks would break
 const appRequire = createRequire(join(process.cwd(), "package.json"));

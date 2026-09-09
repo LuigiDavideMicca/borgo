@@ -60,6 +60,9 @@ export default defineConfig({
     timeout: 180_000,
     env: {
       ...process.env,
+      // explicit rather than left to `borgo start`'s re-exec default, so the
+      // production build under test is served without an extra supervisor hop
+      NODE_ENV: "production",
       PORT: "3400",
       API_PORT: "3901",
       DB_PATH: "e2e-prod.db",

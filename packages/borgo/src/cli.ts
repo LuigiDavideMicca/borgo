@@ -12,7 +12,7 @@ import {
 } from "./build";
 import { banner, c, fmtMs, g } from "./colors";
 import { parseInitArgv, unknownArg } from "./deploy";
-import { goBinName, runBorgogen } from "./util";
+import { goBinName, runBorgogen, startEnv, startNeedsReexec } from "./util";
 
 const command = process.argv[2];
 
@@ -101,10 +101,13 @@ switch (command) {
   }
 
   case "start": {
-    // bun sizes its fetch pool at boot (default 256) and a proxied event stream
-    // holds a slot for hours: assigning process.env after boot changes nothing,
-    // so re-exec with it set. The deployments borgo writes already set it.
-    if (!process.env.BUN_CONFIG_MAX_HTTP_REQUESTS) {
+    // two values only the LAUNCH environment can carry, so a missing one
+    // re-execs with both set. bun sizes its fetch pool at boot (default 256)
+    // and a proxied event stream holds a slot for hours; NODE_ENV picks the
+    // react build AND the jsx transform, and assigning it from module code is
+    // too late for the transform - the mismatch renders as a crash, not as a
+    // warning. The deployments borgo writes already set both.
+    if (startNeedsReexec(process.env)) {
       // not the bin shim: killing a shim leaves the real server on the port
       const child = Bun.spawn([process.execPath, import.meta.path, ...process.argv.slice(2)], {
         stdout: "inherit",
@@ -112,7 +115,7 @@ switch (command) {
         stdin: "inherit",
         env: {
           ...process.env,
-          BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
+          ...startEnv(process.env),
           // a hard kill delivers no signal on windows, and the api's own
           // watchdog only watches the child
           BORGO_SUPERVISOR_PID: String(process.pid),
