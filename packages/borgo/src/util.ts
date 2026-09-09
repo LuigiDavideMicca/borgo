@@ -460,9 +460,13 @@ export const reloadBanner = (env: Record<string, string | undefined>): boolean =
 // layout meeting the production react-dom, which is a render crash
 // (`dispatcher.getOwner is not a function`), so the only reliable place is
 // the environment of the process itself, set by the re-exec in cli.ts
+// || rather than ??, deliberately: the re-exec fires on a falsy value, so a
+// defaulting that preserves the empty string (`NODE_ENV=` in a .env) would
+// hand the child the same falsy value and the child would re-exec again -
+// forever. the invariant the test pins: one re-exec always settles it
 export const startEnv = (env: Record<string, string | undefined>): Record<string, string> => ({
-  BUN_CONFIG_MAX_HTTP_REQUESTS: env.BUN_CONFIG_MAX_HTTP_REQUESTS ?? "16384",
-  NODE_ENV: env.NODE_ENV ?? "production",
+  BUN_CONFIG_MAX_HTTP_REQUESTS: env.BUN_CONFIG_MAX_HTTP_REQUESTS || "16384",
+  NODE_ENV: env.NODE_ENV || "production",
 });
 
 export const startNeedsReexec = (env: Record<string, string | undefined>): boolean =>

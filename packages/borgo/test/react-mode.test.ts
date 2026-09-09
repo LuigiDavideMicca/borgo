@@ -25,6 +25,25 @@ describe("what `borgo start` guarantees its launch environment", () => {
     expect(startEnv({ BUN_CONFIG_MAX_HTTP_REQUESTS: "256" }).BUN_CONFIG_MAX_HTTP_REQUESTS).toBe("256");
   });
 
+  // found hunting: `NODE_ENV=` (empty, one malformed .env line) made the
+  // re-exec fire, the ?? defaulting kept the empty string, the child fired
+  // again - a supervisor chain growing forever. the invariant is that one
+  // re-exec always settles it, whatever the environment held
+  test("one re-exec settles it: the child never re-execs, empty values included", () => {
+    for (const env of [
+      {},
+      { NODE_ENV: "" },
+      { BUN_CONFIG_MAX_HTTP_REQUESTS: "" },
+      { NODE_ENV: "", BUN_CONFIG_MAX_HTTP_REQUESTS: "" },
+      { NODE_ENV: "staging" },
+      { BUN_CONFIG_MAX_HTTP_REQUESTS: "256" },
+    ]) {
+      expect(startNeedsReexec({ ...env, ...startEnv(env) })).toBe(false);
+    }
+    expect(startEnv({ NODE_ENV: "" }).NODE_ENV).toBe("production");
+    expect(startEnv({ BUN_CONFIG_MAX_HTTP_REQUESTS: "" }).BUN_CONFIG_MAX_HTTP_REQUESTS).toBe("16384");
+  });
+
   test("with both present nothing re-execs - the process shape stays flat", () => {
     expect(
       startNeedsReexec({ BUN_CONFIG_MAX_HTTP_REQUESTS: "16384", NODE_ENV: "production" }),
