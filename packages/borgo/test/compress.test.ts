@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+﻿import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   copyFileSync,
@@ -49,7 +49,7 @@ import {
 // its assertion wants, and the others compare file contents
 const CONTENDED = 60_000;
 
-describe("pickEncoding", () => {
+describe("pickEncoding", async () => {
   const cases: Array<[string, string | null, readonly string[], string | null]> = [
     ["no header", null, ["br", "gzip"], null],
     ["gzip only", "gzip", ["br", "gzip"], "gzip"],
@@ -74,14 +74,14 @@ describe("pickEncoding", () => {
     ["mixed case name and parameter", "GZIP;Q=0", ["gzip"], null],
   ];
   for (const [name, header, preferred, want] of cases) {
-    test(name, () => {
+    test(name, async () => {
       expect(pickEncoding(header, preferred)).toBe(want);
     });
   }
 });
 
-describe("asset classification", () => {
-  test("compressible types", () => {
+describe("asset classification", async () => {
+  test("compressible types", async () => {
     for (const path of ["a/client.js", "style.css", "index.html", "logo.svg", "data.json"]) {
       expect(isCompressiblePath(path)).toBe(true);
     }
@@ -102,7 +102,7 @@ describe("asset classification", () => {
   };
   const IMMUTABLE = "public, max-age=31536000, immutable";
 
-  test("an eight-letter word does not buy a year", () => {
+  test("an eight-letter word does not buy a year", async () => {
     for (const name of [
       "stripe-checkout.js",
       "vendor-database.css",
@@ -115,7 +115,7 @@ describe("asset classification", () => {
     }
   });
 
-  test("only a name the build recorded, at the length it recorded, is pinned", () => {
+  test("only a name the build recorded, at the length it recorded, is pinned", async () => {
     expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, 100)).toBe(IMMUTABLE);
     // the extensions the old js/css rule refused, which bun hashes all the same
     expect(assetCacheControl("public/assets/logo-6nnjve26.png", OUT, 200)).toBe(IMMUTABLE);
@@ -127,7 +127,7 @@ describe("asset classification", () => {
 
   // the manifest vouches for bytes, not for a name: a chunk recreated after
   // boot keeps the name and the entry
-  test("a recorded name at the wrong length is not the file that was hashed", () => {
+  test("a recorded name at the wrong length is not the file that was hashed", async () => {
     expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, 101)).toBe("no-cache");
     expect(assetCacheControl("public/assets/client-50dbnr0a.js", OUT, 0)).toBe("no-cache");
     // an unstattable file settles the same way: unknown is not a promise
@@ -136,7 +136,7 @@ describe("asset classification", () => {
 
   // the directory is matched whole: a path segment called "assets" pinned
   // /copy/assets/... on the wire, and every bundle copied into public/ ships one
-  test("only the build's own output directory, not any folder spelled assets", () => {
+  test("only the build's own output directory, not any folder spelled assets", async () => {
     for (const path of [
       "public/copy/assets/client-50dbnr0a.js",
       "public/deep/nested/assets/client-50dbnr0a.js",
@@ -152,7 +152,7 @@ describe("asset classification", () => {
 
   // readBuildOutputs drops manifest keys carrying a separator, but the type
   // permits one: "directly in the output directory" has to hold here too
-  test("a manifest key with a separator still cannot reach below the directory", () => {
+  test("a manifest key with a separator still cannot reach below the directory", async () => {
     const sneaky: BuildOutputs = {
       dir: "public/assets",
       sizes: new Map([["sub/client-50dbnr0a.js", 100]]),
@@ -163,7 +163,7 @@ describe("asset classification", () => {
   // both lengths: the identity alone pinned a replaced .gz (749 -> 75 bytes,
   // `immutable`); the representation alone would keep pinning a .gz whose
   // identity a partial deploy had rewritten
-  test("a sibling is pinned only when it and its identity are both vouched for", () => {
+  test("a sibling is pinned only when it and its identity are both vouched for", async () => {
     const out: BuildOutputs = {
       dir: "public/assets",
       sizes: new Map([
@@ -191,14 +191,14 @@ describe("asset classification", () => {
     ).toBe("no-cache");
   });
 
-  test("with no manifest nothing is pinned, and everything still gets a header", () => {
+  test("with no manifest nothing is pinned, and everything still gets a header", async () => {
     for (const p of ["public/assets/client-50dbnr0a.js", "public/assets/client.js", "public/a.png"]) {
       expect(assetCacheControl(p)).toBe("no-cache");
       expect(assetCacheControl(p, NO_BUILD_OUTPUTS, 100)).toBe("no-cache");
     }
   });
 
-  test("windows separators resolve to the same policy as forward slashes", () => {
+  test("windows separators resolve to the same policy as forward slashes", async () => {
     expect(assetCacheControl("public\\assets\\client-50dbnr0a.js", OUT, 100)).toBe(IMMUTABLE);
     expect(assetCacheControl("public\\sw.js", OUT, 100)).toBe("no-cache");
     // and a manifest whose dir was recorded with backslashes still matches
@@ -208,13 +208,13 @@ describe("asset classification", () => {
 
   // sw.js is not in the output directory, so it could only be pinned by a
   // manifest that named it - and it must not be, whatever a manifest says
-  test("the service worker is never pinned, even by a manifest that names it", () => {
+  test("the service worker is never pinned, even by a manifest that names it", async () => {
     const rogue: BuildOutputs = { dir: "public", sizes: new Map([["sw.js", 42]]) };
     expect(assetCacheControl("public/sw.js", rogue, 42)).toBe("no-cache");
   });
 });
 
-describe("precompressAssets", () => {
+describe("precompressAssets", async () => {
   test("writes smaller .gz and .br siblings, skips what would not shrink", async () => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-precompress-"));
     try {
@@ -274,7 +274,7 @@ describe("precompressAssets", () => {
   }, CONTENDED);
 });
 
-describe("buildAssetIndex", () => {
+describe("buildAssetIndex", async () => {
   const withAssets = async (fn: (dir: string) => Promise<void>) => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-assets-"));
     try {
@@ -336,7 +336,7 @@ describe("buildAssetIndex", () => {
     });
   });
 
-  test("a missing directory is not fatal", () => {
+  test("a missing directory is not fatal", async () => {
     expect(buildAssetIndex(join(tmpdir(), "borgo-does-not-exist-" + Date.now())).size).toBe(0);
   });
 
@@ -364,7 +364,7 @@ describe("buildAssetIndex", () => {
     });
   });
 
-  test("cache-control: vouched-for files forever, everything else revalidates", () => {
+  test("cache-control: vouched-for files forever, everything else revalidates", async () => {
     const out: BuildOutputs = {
       dir: "public/assets",
       sizes: new Map([["client-6f5e37fs.js", 14]]),
@@ -379,18 +379,18 @@ describe("buildAssetIndex", () => {
   });
 });
 
-describe("isNotModified", () => {
+describe("isNotModified", async () => {
   const at = Date.parse("Wed, 21 Oct 2026 07:28:00 GMT");
   const req = (headers: Record<string, string>) => new Request("http://x/a.css", { headers });
 
-  test("a matching etag revalidates", () => {
+  test("a matching etag revalidates", async () => {
     expect(isNotModified(req({ "if-none-match": '"abc"' }), '"abc"', at)).toBe(true);
     expect(isNotModified(req({ "if-none-match": 'W/"abc"' }), '"abc"', at)).toBe(true);
     expect(isNotModified(req({ "if-none-match": '"x", "abc"' }), '"abc"', at)).toBe(true);
     expect(isNotModified(req({ "if-none-match": "*" }), '"abc"', at)).toBe(true);
   });
 
-  test("a different etag is a miss, and wins over if-modified-since", () => {
+  test("a different etag is a miss, and wins over if-modified-since", async () => {
     expect(isNotModified(req({ "if-none-match": '"other"' }), '"abc"', at)).toBe(false);
     const both = req({
       "if-none-match": '"other"',
@@ -399,7 +399,7 @@ describe("isNotModified", () => {
     expect(isNotModified(both, '"abc"', at)).toBe(false);
   });
 
-  test("if-modified-since compares at second resolution", () => {
+  test("if-modified-since compares at second resolution", async () => {
     expect(
       isNotModified(req({ "if-modified-since": "Wed, 21 Oct 2026 07:28:00 GMT" }), '"a"', at + 400),
     ).toBe(true);
@@ -409,12 +409,12 @@ describe("isNotModified", () => {
     expect(isNotModified(req({ "if-modified-since": "not a date" }), '"a"', at)).toBe(false);
   });
 
-  test("an unconditional request is never a 304", () => {
+  test("an unconditional request is never a 304", async () => {
     expect(isNotModified(req({}), '"abc"', at)).toBe(false);
   });
 });
 
-describe("documentStream", () => {
+describe("documentStream", async () => {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
 
@@ -511,7 +511,7 @@ describe("documentStream", () => {
   });
 });
 
-describe("gzipStream", () => {
+describe("gzipStream", async () => {
   const encoder = new TextEncoder();
 
   test("round-trips a multi-chunk stream", async () => {
@@ -660,7 +660,7 @@ describe("gzipStream", () => {
   });
 });
 
-describe("jsonResponse", () => {
+describe("jsonResponse", async () => {
   const withEncoding = (value: string | null) =>
     new Request("http://localhost/", value ? { headers: { "accept-encoding": value } } : {});
 
@@ -688,25 +688,25 @@ describe("jsonResponse", () => {
     expect(await res.json()).toEqual(value);
   });
 
-  test("keeps the caller's status", () => {
+  test("keeps the caller's status", async () => {
     const res = jsonResponse(withEncoding("gzip"), { notFound: true }, { status: 404 });
     expect(res.status).toBe(404);
   });
 });
 
-describe("isRangeStale", () => {
+describe("isRangeStale", async () => {
   const req = (headers: Record<string, string>) => new Request("http://x/a.css", { headers });
   const ETAG = '"1ni-ms8ppm9r"';
   const LM = "Wed, 30 Jul 2026 09:00:00 GMT";
 
-  test("no range, or no if-range, is never stale", () => {
+  test("no range, or no if-range, is never stale", async () => {
     expect(isRangeStale(req({}), ETAG)).toBe(false);
     expect(isRangeStale(req({ range: "bytes=0-9" }), ETAG)).toBe(false);
     // an if-range without a range means nothing at all
     expect(isRangeStale(req({ "if-range": '"other"' }), ETAG)).toBe(false);
   });
 
-  test("a validator that still matches lets the range through", () => {
+  test("a validator that still matches lets the range through", async () => {
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": ETAG }), ETAG)).toBe(false);
     // the date is NOT accepted: every encoding variant of one url shares it
     // (measured before: a 206 of brotli bytes handed to a client assembling css)
@@ -714,12 +714,12 @@ describe("isRangeStale", () => {
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": ` ${ETAG} ` }), ETAG)).toBe(false);
   });
 
-  test("a validator that no longer matches refuses it", () => {
+  test("a validator that no longer matches refuses it", async () => {
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": '"deadbeef-0"' }), ETAG)).toBe(true);
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": "Mon, 01 Jan 2001 00:00:00 GMT" }), ETAG)).toBe(true);
   });
 
-  test("resuming across a change of encoding is a mismatch, not a range", () => {
+  test("resuming across a change of encoding is a mismatch, not a range", async () => {
     // the prefix the client holds is brotli; this request negotiated identity.
     // filling it from the identity file would hand back a spliced file
     const brEtag = '"fc-ms8ppmnf-br"';
@@ -727,7 +727,7 @@ describe("isRangeStale", () => {
     expect(isRangeStale(req({ range: "bytes=100-", "if-range": brEtag }), brEtag)).toBe(false);
   });
 
-  test("a weak validator can never authorise a range", () => {
+  test("a weak validator can never authorise a range", async () => {
     expect(isRangeStale(req({ range: "bytes=0-9", "if-range": `W/${ETAG}` }), ETAG)).toBe(true);
     // weak on our side is the same refusal: every tag borgo emits is weak, so a
     // client quoting the validator it was given still gets the whole body
@@ -742,9 +742,9 @@ describe("isRangeStale", () => {
 // the validator on real files: both halves are forgeable by ordinary tools,
 // so every case below is a real stat, served through the production path.
 // asserted per case: If-None-Match alone, If-Modified-Since alone, both
-// (rfc 9110 §13.1.3: the etag decides). a 304 on bytes the client does not
+// (rfc 9110 Â§13.1.3: the etag decides). a 304 on bytes the client does not
 // have is asserted as such, with the validator required to have declared itself weak
-describe("asset validators, on real files", () => {
+describe("asset validators, on real files", async () => {
   let dir: string;
   let index: Map<string, AssetInfo>;
 
@@ -823,21 +823,21 @@ describe("asset validators, on real files", () => {
   const serve = (url: string, headers: Record<string, string> = {}) =>
     serveIndexed(new Request(`http://app.test${url}`, { headers }), info(url));
 
-  const validators = (url: string) => {
-    const res = serve(url, { "accept-encoding": "identity" });
+  const validators = async (url: string) => {
+    const res = await serve(url, { "accept-encoding": "identity" });
     return { etag: res.headers.get("ETag")!, date: res.headers.get("Last-Modified")! };
   };
 
   // one url, one validator pair the client claims to hold, three request shapes
-  const conditional = (url: string, etag: string, date: string) => ({
-    inm: serve(url, { "if-none-match": etag }).status,
-    ims: serve(url, { "if-modified-since": date }).status,
-    both: serve(url, { "if-none-match": etag, "if-modified-since": date }).status,
+  const conditional = async (url: string, etag: string, date: string) => ({
+    inm: (await serve(url, { "if-none-match": etag })).status,
+    ims: (await serve(url, { "if-modified-since": date })).status,
+    both: (await serve(url, { "if-none-match": etag, "if-modified-since": date })).status,
   });
 
   const isWeak = (tag: string) => tag.startsWith('W/"');
 
-  test("every validator borgo emits declares itself weak", () => {
+  test("every validator borgo emits declares itself weak", async () => {
     for (const url of [
       "/twin-a.txt",
       "/copy.txt",
@@ -848,7 +848,7 @@ describe("asset validators, on real files", () => {
       `/${HASHED}`,
       "/site.css",
     ]) {
-      expect(isWeak(validators(url).etag)).toBe(true);
+      expect(isWeak((await validators(url)).etag)).toBe(true);
     }
     // including the negotiated siblings, whose suffix rides inside the quotes
     expect(assetEtag(23, SHARED_MTIME, "-br")).toBe(
@@ -857,23 +857,23 @@ describe("asset validators, on real files", () => {
   });
 
   // 1. two files of equal length with the same mtime
-  test("two different files of equal length and equal mtime share one validator", () => {
-    const a = validators("/twin-a.txt");
-    const b = validators("/twin-b.txt");
+  test("two different files of equal length and equal mtime share one validator", async () => {
+    const a = await validators("/twin-a.txt");
+    const b = await validators("/twin-b.txt");
     expect(a.etag).toBe(b.etag);
     expect(a.date).toBe(b.date);
     // a client holding twin-a's bytes revalidates twin-b and is told to keep
     // them. Nothing in the pair can separate the two files, which is why the
     // tag says W/ instead of pretending otherwise.
-    expect(conditional("/twin-b.txt", a.etag, a.date)).toEqual({ inm: 304, ims: 304, both: 304 });
+    expect(await conditional("/twin-b.txt", a.etag, a.date)).toEqual({ inm: 304, ims: 304, both: 304 });
   });
 
   // 2. the same content copied with cp -p
-  test("cp -p reproduces the validator, and here the 304 is right", () => {
-    const origin = validators("/origin.txt");
-    const copy = validators("/copy.txt");
+  test("cp -p reproduces the validator, and here the 304 is right", async () => {
+    const origin = await validators("/origin.txt");
+    const copy = await validators("/copy.txt");
     expect(copy.etag).toBe(origin.etag);
-    expect(conditional("/copy.txt", origin.etag, origin.date)).toEqual({
+    expect(await conditional("/copy.txt", origin.etag, origin.date)).toEqual({
       inm: 304,
       ims: 304,
       both: 304,
@@ -884,28 +884,30 @@ describe("asset validators, on real files", () => {
   });
 
   // 3. a file touched to a past date
-  test("touching a file to a past date moves the etag and back-dates the 304", () => {
-    const before = validators("/dated.txt");
+  test("touching a file to a past date moves the etag and back-dates the 304", async () => {
+    const before = await validators("/dated.txt");
     const heldDate = before.date;
     setMtime("dated.txt", Date.parse("2020-01-01T00:00:00.000Z"));
-    const after = validators("/dated.txt");
+    const after = await validators("/dated.txt");
     expect(after.etag).not.toBe(before.etag);
     // the etag moved, so a client holding the old one is served the body...
-    expect(conditional("/dated.txt", before.etag, before.date).inm).toBe(200);
+    expect(await (await conditional("/dated.txt", before.etag, before.date)).inm).toBe(200);
     // a date-only client is told nothing changed: back-dating is what tar and
     // restored backups do
-    expect(serve("/dated.txt", { "if-modified-since": heldDate }).status).toBe(304);
-    // both headers: the etag decides and the date is ignored (§13.1.3)
-    expect(serve("/dated.txt", { "if-none-match": before.etag, "if-modified-since": heldDate })
-      .status).toBe(200);
+    expect((await serve("/dated.txt", { "if-modified-since": heldDate })).status).toBe(304);
+    // both headers: the etag decides and the date is ignored (Â§13.1.3)
+    expect(
+      (await serve("/dated.txt", { "if-none-match": before.etag, "if-modified-since": heldDate }))
+        .status,
+    ).toBe(200);
   });
 
   // 4. THE CASE: one byte substituted, length and mtime unchanged
-  test("a byte substituted at constant length under a preserved mtime is invisible", () => {
-    const before = validators("/edited.txt");
+  test("a byte substituted at constant length under a preserved mtime is invisible", async () => {
+    const before = await validators("/edited.txt");
     const bodyBefore = readFileSync(at("edited.txt")).toString();
     substituteByte("edited.txt", 8, "2");
-    const after = validators("/edited.txt");
+    const after = await validators("/edited.txt");
     const bodyAfter = readFileSync(at("edited.txt")).toString();
 
     // the bytes changed and the validator did not
@@ -915,7 +917,7 @@ describe("asset validators, on real files", () => {
     expect(after.date).toBe(before.date);
 
     // every conditional shape 304s over changed bytes: size and mtime are all a request has
-    expect(conditional("/edited.txt", before.etag, before.date)).toEqual({
+    expect(await conditional("/edited.txt", before.etag, before.date)).toEqual({
       inm: 304,
       ims: 304,
       both: 304,
@@ -946,7 +948,7 @@ describe("asset validators, on real files", () => {
       },
     });
     try {
-      const { etag } = validators("/edited.txt");
+      const { etag } = await validators("/edited.txt");
       const res = await fetch(`http://localhost:${server.port}/edited.txt`, {
         headers: { range: "bytes=0-3", "if-range": etag, "accept-encoding": "identity" },
       });
@@ -959,17 +961,17 @@ describe("asset validators, on real files", () => {
   });
 
   // 5. chmod: ctime moves, mtime does not
-  test("a chmod leaves the validator alone, which is why ctime is not in it", () => {
-    const before = validators("/moded.txt");
+  test("a chmod leaves the validator alone, which is why ctime is not in it", async () => {
+    const before = await validators("/moded.txt");
     const mtimeBefore = mtimeOf("moded.txt");
     const ctimeBefore = statSync(at("moded.txt")).ctimeMs;
     chmodSync(at("moded.txt"), 0o444);
-    const after = validators("/moded.txt");
+    const after = await validators("/moded.txt");
 
     // the bytes did not change, so nothing about the answer should
     expect(mtimeOf("moded.txt")).toBe(mtimeBefore);
     expect(after.etag).toBe(before.etag);
-    expect(conditional("/moded.txt", before.etag, before.date)).toEqual({
+    expect(await conditional("/moded.txt", before.etag, before.date)).toEqual({
       inm: 304,
       ims: 304,
       both: 304,
@@ -980,17 +982,17 @@ describe("asset validators, on real files", () => {
   });
 
   // 6. sw.js, the file this was measured on
-  test("sw.js is never pinned, and its validator is as weak as any other", () => {
-    const res = serve("/sw.js", { "accept-encoding": "identity" });
+  test("sw.js is never pinned, and its validator is as weak as any other", async () => {
+    const res = await serve("/sw.js", { "accept-encoding": "identity" });
     // it controls every url in its scope, so it always revalidates...
     expect(res.headers.get("Cache-Control")).toBe("no-cache");
-    const before = validators("/sw.js");
+    const before = await validators("/sw.js");
     substituteByte("sw.js", 0, "S");
-    const after = validators("/sw.js");
+    const after = await validators("/sw.js");
     // ...and that revalidation is the one this edit walks straight through
     expect(readFileSync(at("sw.js")).toString()).not.toBe(SW_BODY);
     expect(after.etag).toBe(before.etag);
-    expect(conditional("/sw.js", before.etag, before.date)).toEqual({
+    expect(await conditional("/sw.js", before.etag, before.date)).toEqual({
       inm: 304,
       ims: 304,
       both: 304,
@@ -999,19 +1001,19 @@ describe("asset validators, on real files", () => {
   });
 
   // 7. a file the build hashed and recorded
-  test("a hashed asset keeps its year and still says W/", () => {
-    const res = serve(`/${HASHED}`, { "accept-encoding": "identity" });
+  test("a hashed asset keeps its year and still says W/", async () => {
+    const res = await serve(`/${HASHED}`, { "accept-encoding": "identity" });
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
-    const before = validators(`/${HASHED}`);
+    const before = await validators(`/${HASHED}`);
     substituteByte(HASHED, 7, "X");
-    const after = serve(`/${HASHED}`, { "accept-encoding": "identity" });
+    const after = await serve(`/${HASHED}`, { "accept-encoding": "identity" });
     // the length is what pinPolicy checks and the length did not move, so the
     // year survives the edit too. The name's content hash is not a validator
     // the server can verify per request - it is a claim about what the build
     // wrote, checked against exactly the size this edit preserves.
     expect(after.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
     expect(after.headers.get("ETag")).toBe(before.etag);
-    expect(conditional(`/${HASHED}`, before.etag, before.date)).toEqual({
+    expect(await conditional(`/${HASHED}`, before.etag, before.date)).toEqual({
       inm: 304,
       ims: 304,
       both: 304,
@@ -1020,18 +1022,18 @@ describe("asset validators, on real files", () => {
   });
 
   // 8. a file no build vouched for
-  test("an unhashed asset revalidates every load, which is what bounds the blast radius", () => {
-    const res = serve("/site.css", { "accept-encoding": "identity" });
+  test("an unhashed asset revalidates every load, which is what bounds the blast radius", async () => {
+    const res = await serve("/site.css", { "accept-encoding": "identity" });
     expect(res.headers.get("Cache-Control")).toBe("no-cache");
-    const { etag, date } = validators("/site.css");
-    expect(conditional("/site.css", etag, date)).toEqual({ inm: 304, ims: 304, both: 304 });
+    const { etag, date } = await validators("/site.css");
+    expect(await conditional("/site.css", etag, date)).toEqual({ inm: 304, ims: 304, both: 304 });
     // a stale answer here is corrected by the next revalidation; under
     // `immutable` there is no next revalidation for a year
     expect(isWeak(etag)).toBe(true);
   });
 
   // the live path (dev, and anything written after boot) must say the same
-  test("serveAsset emits the same weak validator as the indexed path", () => {
+  test("serveAsset emits the same weak validator as the indexed path", async () => {
     const path = at("site.css");
     const res = serveAsset(
       new Request("http://app.test/site.css", { headers: { "accept-encoding": "identity" } }),
@@ -1039,25 +1041,25 @@ describe("asset validators, on real files", () => {
       Bun.file(path),
       { dev: false },
     );
-    expect(res.headers.get("ETag")).toBe(validators("/site.css").etag);
+    expect(res.headers.get("ETag")).toBe((await validators("/site.css")).etag);
     expect(isWeak(res.headers.get("ETag")!)).toBe(true);
   });
 
-  test("a client echoing the weak validator still gets its 304", () => {
+  test("a client echoing the weak validator still gets its 304", async () => {
     // the weak comparison strips the marker from both sides: client-side alone
     // turns every revalidation into a full download once our tags are weak
-    const { etag } = validators("/site.css");
+    const { etag } = await validators("/site.css");
     const r = (h: Record<string, string>) => new Request("http://app.test/site.css", { headers: h });
     expect(isNotModified(r({ "if-none-match": etag }), etag, 0)).toBe(true);
     expect(isNotModified(r({ "if-none-match": etag.replace("W/", "") }), etag, 0)).toBe(true);
-    expect(serve("/site.css", { "if-none-match": etag }).status).toBe(304);
+    expect((await serve("/site.css", { "if-none-match": etag })).status).toBe(304);
   });
 });
 
 // the `false` half of CASE_INSENSITIVE_FS is the one linux runs: with
 // assets/Logo.png alone on disk, `true` answers Logo.png, logo.png and
 // LOGO.PNG, `false` answers the exact spelling only
-describe("findAsset where the filesystem tells the cases apart", () => {
+describe("findAsset where the filesystem tells the cases apart", async () => {
   const withDir = async (fn: (dir: string) => Promise<void>) => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-case-"));
     try {
@@ -1153,7 +1155,7 @@ describe("findAsset where the filesystem tells the cases apart", () => {
 
 // a dot on the file, never on the directory, without an allowlist: a
 // misspelled allowlist breaks certificate renewal
-describe("isHiddenAsset", () => {
+describe("isHiddenAsset", async () => {
   const hidden = [
     ".DS_Store",
     "public/.DS_Store",
@@ -1183,7 +1185,7 @@ describe("isHiddenAsset", () => {
     "public/assets/jquery.min.js",
   ];
 
-  test("a leading dot on the name, and nothing else", () => {
+  test("a leading dot on the name, and nothing else", async () => {
     for (const path of hidden) expect(`${path}: ${isHiddenAsset(path)}`).toBe(`${path}: true`);
     for (const path of served) expect(`${path}: ${isHiddenAsset(path)}`).toBe(`${path}: false`);
   });
@@ -1192,7 +1194,7 @@ describe("isHiddenAsset", () => {
 // process.platform is wrong on every deliberate choice (an APFS volume
 // formatted case-sensitive, a case-sensitive NTFS directory, a share mounted
 // on windows): foldsCase asks the disk, read-only, off the names just read
-describe("foldsCase", () => {
+describe("foldsCase", async () => {
   const withDir = async (fn: (dir: string) => Promise<void>) => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-folds-"));
     try {
@@ -1262,7 +1264,7 @@ describe("foldsCase", () => {
     });
   });
 
-  test("nothing to probe falls back to the caller's guess", () => {
+  test("nothing to probe falls back to the caller's guess", async () => {
     expect(foldsCase([], true)).toBe(true);
     expect(foldsCase([], false)).toBe(false);
     // no ascii letter in the name, so no other spelling of it exists
@@ -1272,19 +1274,19 @@ describe("foldsCase", () => {
 
   // the flip is on the last segment only: an ancestor may be on another mount,
   // and on windows the case-sensitive attribute is per directory
-  test("only the file's own name is flipped", () => {
+  test("only the file's own name is flipped", async () => {
     expect(foldsCase(["/Pub/Assets/123"], false)).toBe(false);
     expect(foldsCase(["/Pub/Assets/123"], true)).toBe(true);
   });
 
-  test("the default fallback is the platform constant", () => {
+  test("the default fallback is the platform constant", async () => {
     expect(foldsCase([])).toBe(CASE_INSENSITIVE_FS);
   });
 });
 
 // a lookup must not read an index under the rule it was not built with: the
 // agreement is carried by the index itself, not by a shared constant
-describe("findAsset takes its rule from the index it is given", () => {
+describe("findAsset takes its rule from the index it is given", async () => {
   const withDir = async (fn: (dir: string) => Promise<void>) => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-fold-of-"));
     try {
@@ -1344,7 +1346,7 @@ const caseSensitiveDir = (): string | null => {
 // tests rather than as passing ones
 const CS_ROOT = caseSensitiveDir();
 
-describe.skipIf(CS_ROOT === null)("on a case-sensitive filesystem", () => {
+describe.skipIf(CS_ROOT === null)("on a case-sensitive filesystem", async () => {
   const pub = join(CS_ROOT ?? tmpdir(), "public").replaceAll("\\", "/");
 
   beforeAll(async () => {
@@ -1367,7 +1369,7 @@ describe.skipIf(CS_ROOT === null)("on a case-sensitive filesystem", () => {
     rmSync(join(pub, "assets/logo.png"));
   });
 
-  test("the measurement reads it as case-sensitive", () => {
+  test("the measurement reads it as case-sensitive", async () => {
     expect(foldsCase([join(pub, "assets/Logo.png").replaceAll("\\", "/")])).toBe(false);
     // and the platform still says the opposite, which is the whole point
     expect(CASE_INSENSITIVE_FS).toBe(true);
@@ -1375,7 +1377,7 @@ describe.skipIf(CS_ROOT === null)("on a case-sensitive filesystem", () => {
 
   // what the platform constant did here: two urls with no file behind them,
   // answered with another file's bytes
-  test("the index no longer invents a url the filesystem does not have", () => {
+  test("the index no longer invents a url the filesystem does not have", async () => {
     const index = buildAssetIndex(pub);
     expect([...index.keys()].sort()).toEqual(["/assets/Logo.png"]);
     expect(indexFoldsCase(index)).toBe(false);

@@ -360,8 +360,8 @@ describe("golden: asset headers", () => {
     s.replace(/\b[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT\b/g, "{{HTTP_DATE}}");
   const scrub = (s: string) => scrubHash(scrubDate(scrubEtag(s)));
 
-  function shot(label: string, url: string, headers: Record<string, string> = {}): string {
-    const res = serveIndexed(new Request(`http://app.test${url}`, { headers }), info(url));
+  async function shot(label: string, url: string, headers: Record<string, string> = {}): Promise<string> {
+    const res = await serveIndexed(new Request(`http://app.test${url}`, { headers }), info(url));
     const lines = [`### ${label}`, `GET ${scrub(url)}`];
     for (const [name, value] of Object.entries(headers)) lines.push(`  ${name}: ${scrub(value)}`);
     lines.push(`--> ${res.status}${res.body === null ? " (no body)" : ""}`);
@@ -369,10 +369,10 @@ describe("golden: asset headers", () => {
     return lines.join("\n");
   }
 
-  test("the header set of every asset shape", () => {
+  test("the header set of every asset shape", async () => {
     const js = info("/assets/app-a1b2c3d4.js");
     const br = js.variants.find((v) => v.encoding === "br")!;
-    const cases = [
+    const cases = await Promise.all([
       shot("hashed chunk, no accept-encoding", "/assets/app-a1b2c3d4.js"),
       shot("hashed chunk, br and gzip offered", "/assets/app-a1b2c3d4.js", {
         "accept-encoding": "gzip, br",
@@ -406,7 +406,7 @@ describe("golden: asset headers", () => {
       shot("revalidation by date", "/assets/app-a1b2c3d4.js", {
         "if-modified-since": js.lastModified,
       }),
-    ];
+    ]);
     assertGolden("asset-headers.txt", cases.join("\n\n") + "\n");
   });
 });

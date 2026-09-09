@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { brotliCompressSync, constants, createGzip, gzipSync } from "node:zlib";
 
@@ -340,6 +341,12 @@ const statOf = (path: string) => {
   }
 };
 
+// the serving path's spelling of statOf: the same live answer without holding
+// the event loop for the syscall - statSync under concurrent load serialised
+// every static response behind the disk (measured on the bench asset at c=50:
+// statSync was 48% of the front server's cpu profile, self time)
+const statLive = (path: string) => stat(path).catch(() => null);
+
 // the platform is only the fallback, not the question: an APFS volume
 // formatted case-sensitive, a case-sensitive NTFS directory and a network share
 // all make it wrong. measured on a case-sensitive directory with only
@@ -411,7 +418,7 @@ export function findAsset(
 
 // the indexed path: variants chosen from the snapshot, etag, date and length
 // from a live stat
-export function serveIndexed(req: Request, info: AssetInfo): Response {
+export async function serveIndexed(req: Request, info: AssetInfo): Promise<Response> {
   let variant = info.identity;
   if (info.variants.length) {
     // negotiate against the encodings this asset has: offering br for a file
@@ -427,16 +434,24 @@ export function serveIndexed(req: Request, info: AssetInfo): Response {
   // `new Response(Bun.file(missing))` is bun's own 67,016-byte fallback page
   // whose base64 payload decodes to the file's absolute path), and the length
   // below (bun recomputes Content-Length from the file on a GET and ignores
-  // ours, so a stale index made HEAD and GET disagree, 1400 against 5600)
-  let live = statOf(variant.path);
-  if (!live && variant.encoding) {
-    variant = info.identity;
-    live = statOf(variant.path);
+  // ours, so a stale index made HEAD and GET disagree, 1400 against 5600).
+  // asked without holding the event loop, and both files at once when a
+  // sibling is in play - the sibling path needs the identity's answer anyway
+  let live: Awaited<ReturnType<typeof statLive>>;
+  let identityLive: Awaited<ReturnType<typeof statLive>>;
+  if (variant.encoding) {
+    [live, identityLive] = await Promise.all([statLive(variant.path), statLive(info.identity.path)]);
+    if (!live) {
+      // gone sibling: degrade to identity, whose stat is already in hand
+      variant = info.identity;
+      live = identityLive;
+    }
+  } else {
+    live = identityLive = await statLive(variant.path);
   }
   if (!live) return new Response("not found", { status: 404 });
   // a sibling whose identity file is gone is refused, as serveAsset and a
   // restart would: serving it made one url answer 200 or 404 by Accept-Encoding alone
-  const identityLive = variant.encoding ? statOf(info.identity.path) : live;
   if (!identityLive) return new Response("not found", { status: 404 });
 
   const headers = new Headers();

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+﻿import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +25,7 @@ let outputs: BuildOutputs;
 const RAW_JS = "console.log('identity javascript payload');";
 const RAW_CSS = "body { color: rebeccapurple; }";
 const RAW_PNG = "PNG bytes, not really";
-const RAW_SW = "self.addEventListener('fetch', () => {});";
+const RAW_SW = "self.addEventListener('fetch', async () => {});";
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "borgo-serve-assets-"));
@@ -58,10 +58,10 @@ const info = (url: string) => {
   return found;
 };
 
-describe("serveIndexed: variant selection", () => {
+describe("serveIndexed: variant selection", async () => {
   test("no accept-encoding serves identity, with etag, length and immutable caching", async () => {
     const i = info("/assets/client-abcd1234.js");
-    const res = serveIndexed(req(), i);
+    const res = await serveIndexed(req(), i);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe(RAW_JS);
     expect(res.headers.get("Content-Encoding")).toBeNull();
@@ -74,7 +74,7 @@ describe("serveIndexed: variant selection", () => {
 
   test("br wins over gzip when the client takes both", async () => {
     const i = info("/assets/client-abcd1234.js");
-    const res = serveIndexed(req({ "accept-encoding": "gzip, br" }), i);
+    const res = await serveIndexed(req({ "accept-encoding": "gzip, br" }), i);
     expect(res.headers.get("Content-Encoding")).toBe("br");
     const brVariant = i.variants.find((v) => v.encoding === "br")!;
     expect(res.headers.get("ETag")).toBe(brVariant.etag);
@@ -85,7 +85,7 @@ describe("serveIndexed: variant selection", () => {
   });
 
   test("gzip-only client gets the gzip sibling", async () => {
-    const res = serveIndexed(req({ "accept-encoding": "gzip" }), info("/assets/client-abcd1234.js"));
+    const res = await serveIndexed(req({ "accept-encoding": "gzip" }), info("/assets/client-abcd1234.js"));
     expect(res.headers.get("Content-Encoding")).toBe("gzip");
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array(gzipSync(RAW_JS)));
   });
@@ -95,7 +95,7 @@ describe("serveIndexed: variant selection", () => {
     // borgo knows would resolve "br, gzip" to br, miss, and serve identity -
     // shipping raw bytes past a compressed file sitting on disk
     const i = info("/style.css");
-    const res = serveIndexed(
+    const res = await serveIndexed(
       new Request("http://app.test/style.css", { headers: { "accept-encoding": "br, gzip" } }),
       i,
     );
@@ -109,7 +109,7 @@ describe("serveIndexed: variant selection", () => {
     // identity is the honest answer rather than a body labelled with an
     // encoding it was never compressed with
     const i = info("/style.css");
-    const res = serveIndexed(
+    const res = await serveIndexed(
       new Request("http://app.test/style.css", { headers: { "accept-encoding": "br" } }),
       i,
     );
@@ -120,7 +120,7 @@ describe("serveIndexed: variant selection", () => {
 
   test("server preference still decides when the asset has both", async () => {
     const i = info("/assets/client-abcd1234.js");
-    const res = serveIndexed(
+    const res = await serveIndexed(
       new Request("http://app.test/assets/client-abcd1234.js", {
         headers: { "accept-encoding": "gzip, br" },
       }),
@@ -133,7 +133,7 @@ describe("serveIndexed: variant selection", () => {
 
   test("a non-compressible file has no variants and no vary", async () => {
     const i = info("/logo.png");
-    const res = serveIndexed(
+    const res = await serveIndexed(
       new Request("http://app.test/logo.png", { headers: { "accept-encoding": "br, gzip" } }),
       i,
     );
@@ -142,16 +142,16 @@ describe("serveIndexed: variant selection", () => {
     expect(await res.text()).toBe(RAW_PNG);
   });
 
-  test("the service worker is never heuristically cached", () => {
-    const res = serveIndexed(new Request("http://app.test/sw.js"), info("/sw.js"));
+  test("the service worker is never heuristically cached", async () => {
+    const res = await serveIndexed(new Request("http://app.test/sw.js"), info("/sw.js"));
     expect(res.headers.get("Cache-Control")).toBe("no-cache");
   });
 });
 
-describe("serveIndexed: conditional requests", () => {
+describe("serveIndexed: conditional requests", async () => {
   test("if-none-match on the identity etag is a 304 with validators intact", async () => {
     const i = info("/assets/client-abcd1234.js");
-    const res = serveIndexed(req({ "if-none-match": i.identity.etag }), i);
+    const res = await serveIndexed(req({ "if-none-match": i.identity.etag }), i);
     expect(res.status).toBe(304);
     expect(res.body).toBeNull();
     expect(res.headers.get("ETag")).toBe(i.identity.etag);
@@ -159,43 +159,43 @@ describe("serveIndexed: conditional requests", () => {
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
   });
 
-  test("the etag compared is the negotiated variant's, not the identity's", () => {
+  test("the etag compared is the negotiated variant's, not the identity's", async () => {
     const i = info("/assets/client-abcd1234.js");
     const br = i.variants.find((v) => v.encoding === "br")!;
     // holding the br representation and asking for br again: 304
-    expect(serveIndexed(req({ "accept-encoding": "br", "if-none-match": br.etag }), i).status).toBe(304);
+    expect((await serveIndexed(req({ "accept-encoding": "br", "if-none-match": br.etag }), i)).status).toBe(304);
     // holding the identity etag but negotiating br: different representation, 200
     expect(
-      serveIndexed(req({ "accept-encoding": "br", "if-none-match": i.identity.etag }), i).status,
+      (await serveIndexed(req({ "accept-encoding": "br", "if-none-match": i.identity.etag }), i)).status,
     ).toBe(200);
     // and the reverse: a br etag cannot revalidate the identity
-    expect(serveIndexed(req({ "if-none-match": br.etag }), i).status).toBe(200);
+    expect((await serveIndexed(req({ "if-none-match": br.etag }), i)).status).toBe(200);
   });
 
-  test("if-none-match: * and weak/list forms match", () => {
+  test("if-none-match: * and weak/list forms match", async () => {
     const i = info("/assets/client-abcd1234.js");
-    expect(serveIndexed(req({ "if-none-match": "*" }), i).status).toBe(304);
+    expect((await serveIndexed(req({ "if-none-match": "*" }), i)).status).toBe(304);
     // the tag is already weak, and "W/W/\"...\"" is not an entity-tag at all
-    // (RFC 9110 §8.8.3) - refusing it is the right answer, so the fixture asks
+    // (RFC 9110 Â§8.8.3) - refusing it is the right answer, so the fixture asks
     // the question it meant to ask: the same tag, quoted as the client sends it
-    expect(serveIndexed(req({ "if-none-match": i.identity.etag }), i).status).toBe(304);
-    expect(serveIndexed(req({ "if-none-match": `"nope", ${i.identity.etag}` }), i).status).toBe(304);
+    expect((await serveIndexed(req({ "if-none-match": i.identity.etag }), i)).status).toBe(304);
+    expect((await serveIndexed(req({ "if-none-match": `"nope", ${i.identity.etag}` }), i)).status).toBe(304);
   });
 
-  test("if-modified-since answers only when no etag was given", () => {
+  test("if-modified-since answers only when no etag was given", async () => {
     const i = info("/assets/client-abcd1234.js");
-    expect(serveIndexed(req({ "if-modified-since": i.lastModified }), i).status).toBe(304);
+    expect((await serveIndexed(req({ "if-modified-since": i.lastModified }), i)).status).toBe(304);
     expect(
-      serveIndexed(req({ "if-modified-since": new Date(0).toUTCString() }), i).status,
+      (await serveIndexed(req({ "if-modified-since": new Date(0).toUTCString() }), i)).status,
     ).toBe(200);
     // a mismatched etag wins over a fresh date: rfc 9110 precedence
     expect(
-      serveIndexed(req({ "if-none-match": '"stale"', "if-modified-since": i.lastModified }), i).status,
+      (await serveIndexed(req({ "if-none-match": '"stale"', "if-modified-since": i.lastModified }), i)).status,
     ).toBe(200);
   });
 });
 
-describe("serveIndexed: over a real socket (range, if-range, head)", () => {
+describe("serveIndexed: over a real socket (range, if-range, head)", async () => {
   let server: ReturnType<typeof Bun.serve>;
   let base: string;
 
@@ -227,7 +227,7 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
   });
 
   // the validator is size+mtime, which two files can share, and a range is
-  // where a wrong match CORRUPTS instead of staling: rfc 9110 §13.1.5 lets only
+  // where a wrong match CORRUPTS instead of staling: rfc 9110 Â§13.1.5 lets only
   // a strong validator authorise one, so ours never does
   test("a range is refused even when the client quotes back the validator we sent", async () => {
     const i = info("/style.css");
@@ -331,7 +331,7 @@ describe("serveIndexed: over a real socket (range, if-range, head)", () => {
   });
 });
 
-describe("serveAsset: the unindexed path", () => {
+describe("serveAsset: the unindexed path", async () => {
   // the server builds this path as "public" + url.pathname: always forward
   // slashes, which the sw.js cache rule and the hash pattern both expect
   const p = (...parts: string[]) => join(dir, ...parts).replaceAll("\\", "/");
@@ -432,7 +432,7 @@ describe("serveAsset: the unindexed path", () => {
   // this path negotiates br/gz per request off one url and hands back a
   // rangeable Bun.file body: the cross-encoding splice serveIndexed refuses,
   // and it emitted no validator a client could even have sent
-  describe("validators", () => {
+  describe("validators", async () => {
     const serve = (path: string, headers: Record<string, string> = {}, dev = false) =>
       serveAsset(new Request("http://app.test/style.css", { headers }), path, Bun.file(path), { dev });
 
@@ -477,13 +477,13 @@ describe("serveAsset: the unindexed path", () => {
       expect(crossed.headers.get("Content-Encoding")).toBe("gzip");
     });
 
-    // rfc 9110 §13.1.5: a range whose validator no longer matches must be
+    // rfc 9110 Â§13.1.5: a range whose validator no longer matches must be
     // answered with the whole representation, or the client splices new bytes
     // onto an old prefix and calls the result a file. bun ranges a Bun.file
     // body without ever consulting If-Range, so the refusal is spelled as a
     // stream body - which bun does not range. Only bun's own server turns a
     // Range into a 206, so these two go over a real socket.
-    describe("over a real socket", () => {
+    describe("over a real socket", async () => {
       let server: ReturnType<typeof Bun.serve>;
       let base: string;
 
@@ -576,7 +576,7 @@ test("a precompressed sibling deleted after boot degrades to identity, not a 500
 
   // the sibling vanishes the way a parallel `borgo dev` build removes it
   rmSync(file + ".gz");
-  const res = serveIndexed(
+  const res = await serveIndexed(
     new Request("http://x/app.js", { headers: { "accept-encoding": "gzip" } }),
     info,
   );
@@ -594,7 +594,7 @@ test("a precompressed sibling deleted after boot degrades to identity, not a 500
 // max quality on a real tree runs past bun's 5s default
 const WIRE_TIMEOUT = 60_000;
 
-describe("cache-control on the wire: every serving path, every encoding", () => {
+describe("cache-control on the wire: every serving path, every encoding", async () => {
   let root: string;
   let servers: { name: string; base: string; stop: () => void }[];
 
@@ -698,7 +698,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
       return serveAsset(r, path, Bun.file(path), { dev, outputs: MANIFEST });
     };
     const indexed = buildAssetIndex(pub.replaceAll("\\", "/"), undefined, MANIFEST);
-    const routes: [string, (r: Request) => Response][] = [
+    const routes: [string, (r: Request) => Response | Promise<Response>][] = [
       // production, boot-time snapshot: the path that shipped no header at all
       [
         "indexed",
@@ -834,11 +834,11 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
           new Request(`http://app.test/assets/${name}`, { headers: { "accept-encoding": accept } }),
           info,
         );
-      const brRes = serve("br");
+      const brRes = await serve("br");
       expect(brRes.headers.get("Content-Encoding")).toBe("br");
       expect(brRes.headers.get("Cache-Control")).toBe("no-cache");
       // and the measured sibling beside it is unaffected
-      const gzRes = serve("gzip");
+      const gzRes = await serve("gzip");
       expect(gzRes.headers.get("Content-Encoding")).toBe("gzip");
       expect(gzRes.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
     } finally {
@@ -937,7 +937,7 @@ describe("cache-control on the wire: every serving path, every encoding", () => 
 // gf = 591 in base36, on a 557-byte body), and no-cache is precisely what
 // sends a browser down this path. over a socket, on both serving paths, with
 // the files replaced under the running servers: a return value cannot say which path answered
-describe("validators on the wire: an in-place deploy under a running server", () => {
+describe("validators on the wire: an in-place deploy under a running server", async () => {
   let root: string;
   let servers: { name: string; base: string; stop: () => void }[];
   let MANIFEST: BuildOutputs;
@@ -946,7 +946,7 @@ describe("validators on the wire: an in-place deploy under a running server", ()
   const V1: Record<string, string> = {
     "assets/app.js": "console.log('v1 of the unhashed entry bundle');",
     [HASHED]: "console.log('v1 of the hashed chunk');",
-    "sw.js": "self.addEventListener('fetch', () => { /* v1 */ });",
+    "sw.js": "self.addEventListener('fetch', async () => { /* v1 */ });",
   };
   // shorter on purpose: a stale etag's own size field then contradicts the
   // Content-Length in the very same response, which is how this was spotted
@@ -997,7 +997,7 @@ describe("validators on the wire: an in-place deploy under a running server", ()
       ]),
     };
     const indexed = buildAssetIndex(pub, undefined, MANIFEST);
-    const routes: [string, (r: Request) => Response][] = [
+    const routes: [string, (r: Request) => Response | Promise<Response>][] = [
       [
         "indexed",
         (r) => {
@@ -1238,7 +1238,7 @@ describe("validators on the wire: an in-place deploy under a running server", ()
 // .env, a killed doctor's probe all answered 200. server.ts's whole block,
 // index first and live fallback second: a filter in the index alone removes a
 // dotfile from no url. and .well-known/ (rfc 8615, acme http-01) has to survive it
-describe("dotfiles on the wire", () => {
+describe("dotfiles on the wire", async () => {
   let root: string;
   let server: { base: string; stop: () => void };
 
