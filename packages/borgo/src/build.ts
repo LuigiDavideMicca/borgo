@@ -1607,6 +1607,29 @@ export function codeMask(js: string): string {
   return out.join("");
 }
 
+// the one wrapper shape neither bun's pass nor hocRegistrations could reach:
+// `export default memo(...)` binds no name, so nothing registered it and the
+// component was a fresh identity on every rebuild - its subtree remounted
+// and lost state on each edit (measured, adversarial round; the e2e corpus
+// had no memo default). the statement HEAD is renamed to a binding - the
+// expression body stays in place whatever its extent - the default is
+// re-exported at the end, and the binding registered through the same
+// indirection hocRegistrations uses. found on the mask, so a page QUOTING
+// this shape in a string is left alone; the $ prefix keeps the name out of
+// hocRegistrations' [A-Z] pattern, so it is never registered twice
+export function nameDefaultHoc(js: string, moduleId: string): string {
+  const m = codeMask(js).match(/^export\s+default\s+((?:React\s*\.\s*)?(?:memo|forwardRef))\s*\(/m);
+  if (!m || m.index === undefined) return js;
+  // replace exactly the `export default ` prefix, keeping the wrapper call
+  const wrapperAt = m.index + m[0].indexOf(m[1]);
+  const out =
+    js.slice(0, m.index) +
+    "const $borgoDefaultHoc = " +
+    js.slice(wrapperAt) +
+    `\nexport default $borgoDefaultHoc;\n{ const reg = globalThis["$Refresh" + "Reg$"]; if (reg) { reg($borgoDefaultHoc, ${JSON.stringify(`${moduleId}:default`)}); } }\n`;
+  return out;
+}
+
 // bun's fast-refresh transform registers plain function components and skips
 // the results of memo() and forwardRef() - measured against the babel plugin
 // on a hostile corpus, the one divergence in 31 files. unregistered, those
@@ -1724,6 +1747,7 @@ function appTranspile(define: Record<string, string>, dev: boolean): import("bun
         const transpiler = isPage ? pageTranspiler : rel.endsWith(".tsx") ? plainTranspiler : tsTranspiler;
         let js = transpiler.transformSync(source);
         if (dev) {
+          js = nameDefaultHoc(js, rel);
           js += hocRegistrations(js, rel);
           if (isPage) js += `\nglobalThis[${JSON.stringify("borgo-page:" + rel.slice("pages/".length))}] = 1;\n`;
         }

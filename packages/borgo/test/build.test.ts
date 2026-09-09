@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+﻿import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   existsSync,
   mkdirSync,
@@ -54,6 +54,7 @@ import {
   codeMask,
   fixRefreshRedeclare,
   hocRegistrations,
+  nameDefaultHoc,
   renameUnsafeChunks,
   reservedRoutes,
   reportBuildFailure,
@@ -415,6 +416,35 @@ describe("hocRegistrations", () => {
     const out = hocRegistrations(js, "p.tsx");
     expect(out).toContain("reg(AfterAll");
     for (const ghost of ["CommentM", "BlockM", "QuoteM"]) expect(out).not.toContain(ghost);
+  });
+});
+
+describe("nameDefaultHoc", () => {
+  // found adversarially: this shape had no binding, so neither bun's pass nor
+  // hocRegistrations registered it - a fresh identity per rebuild, the
+  // subtree remounting and losing state on every edit
+  test("export default memo gains a binding, a re-export and a registration", () => {
+    const js = "import { memo } from \"react\";\nexport default memo(function Card() {\n  return null;\n});\n";
+    const out = nameDefaultHoc(js, "pages/card.tsx");
+    expect(out).toContain("const $borgoDefaultHoc = memo(function Card()");
+    expect(out).toContain("export default $borgoDefaultHoc;");
+    expect(out).toContain('reg($borgoDefaultHoc, "pages/card.tsx:default")');
+    expect(out).not.toMatch(/^export default memo\(/m);
+    // through the indirection, never the literal that silences bun's pass
+    expect(out).not.toContain("$RefreshReg$(");
+    // and hocRegistrations must not register the $-name a second time
+    expect(hocRegistrations(out, "pages/card.tsx")).toBe("");
+  });
+
+  test("React.forwardRef and plain defaults behave, strings do not", () => {
+    const fwd = nameDefaultHoc("export default React.forwardRef((p, r) => null);", "p.tsx");
+    expect(fwd).toContain("const $borgoDefaultHoc = React.forwardRef((p, r) => null);");
+
+    const plain = "export default function Page() { return null; }\n";
+    expect(nameDefaultHoc(plain, "p.tsx")).toBe(plain);
+
+    const quoted = "export const doc = `\nexport default memo(Base);\n`;\n";
+    expect(nameDefaultHoc(quoted, "p.tsx")).toBe(quoted);
   });
 });
 
