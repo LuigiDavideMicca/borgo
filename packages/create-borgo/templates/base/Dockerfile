@@ -16,7 +16,7 @@ ENV CGO_ENABLED=0
 RUN bun run build
 
 RUN mkdir /out \
- && cp -r package.json bun.lock index.html public pages .borgo dist /out/ \
+ && cp -r package.json bun.lock tsconfig.json env.ts index.html public pages .borgo dist /out/ \
  && for d in islands components lib; do [ -d "$d" ] && cp -r "$d" /out/; done; \
     cd /out && bun install --production
 
