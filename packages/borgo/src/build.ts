@@ -1482,6 +1482,131 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   return { assets, chunkMap, names };
 }
 
+// the two passes below ask textual questions of emitted code, and a string
+// must not answer them: a template literal carrying `const M = memo(Base);`
+// as TEXT produced reg(M) for a name that never existed - ReferenceError,
+// page dead in dev - and fixRefreshRedeclare deleted lines out of user
+// strings and rewrote $RefreshSig$N inside them (all measured, adversarial
+// round). the mask is the same code with every literal's CONTENT blanked to
+// spaces - string bodies, template chunks, comments, regex bodies - same
+// length, newlines kept, so an index found on the mask addresses the
+// original and ^/$ still see the same lines. interpolation bodies inside
+// templates stay code and are scanned recursively. regex literals are
+// recognised with the standard preceding-token heuristic (a `/` after a
+// value is division); it is the one known approximation, and it errs by
+// masking too much only in shapes like `if (x) /re/.test(y)` that the
+// emitters here do not produce
+const REGEX_PRECEDERS = new Set([..."(,=:[!&|?{};+-*%<>^~"]);
+const REGEX_KEYWORDS = new Set([
+  "return", "typeof", "instanceof", "in", "of", "new", "void", "delete",
+  "case", "do", "else", "yield", "await", "throw",
+]);
+const WORD_CHAR = /[A-Za-z0-9_$]/;
+
+export function codeMask(js: string): string {
+  const out = js.split("");
+  let lastSig = "";
+  let lastWord = "";
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < Math.min(to, js.length); k++) if (out[k] !== "\n") out[k] = " ";
+  };
+  const regexCanFollow = () =>
+    lastSig === "" || REGEX_PRECEDERS.has(lastSig) || REGEX_KEYWORDS.has(lastWord);
+
+  // one position in code context: a literal is consumed and blanked whole,
+  // anything else advances; returns the next index
+  const step = (i: number): number => {
+    const c = js[i];
+    if (c === "/" && js[i + 1] === "/") {
+      let j = js.indexOf("\n", i + 2);
+      if (j === -1) j = js.length;
+      blank(i, j);
+      return j;
+    }
+    if (c === "/" && js[i + 1] === "*") {
+      let j = js.indexOf("*/", i + 2);
+      j = j === -1 ? js.length : j + 2;
+      blank(i, j);
+      return j;
+    }
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < js.length && js[j] !== c && js[j] !== "\n") j += js[j] === "\\" ? 2 : 1;
+      blank(i + 1, j);
+      lastSig = c;
+      lastWord = "";
+      return Math.min(j + 1, js.length);
+    }
+    if (c === "`") {
+      const j = template(i);
+      lastSig = "`";
+      lastWord = "";
+      return j;
+    }
+    if (c === "/" && regexCanFollow()) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < js.length && js[j] !== "\n" && (inClass || js[j] !== "/")) {
+        if (js[j] === "\\") j++;
+        else if (js[j] === "[") inClass = true;
+        else if (js[j] === "]") inClass = false;
+        j++;
+      }
+      blank(i + 1, j);
+      lastSig = "/";
+      lastWord = "";
+      return Math.min(j + 1, js.length);
+    }
+    if (WORD_CHAR.test(c)) {
+      let j = i + 1;
+      while (j < js.length && WORD_CHAR.test(js[j])) j++;
+      lastWord = js.slice(i, j);
+      lastSig = js[j - 1];
+      return j;
+    }
+    if (!/\s/.test(c)) {
+      lastSig = c;
+      lastWord = "";
+    }
+    return i + 1;
+  };
+
+  // a template's chunks are blanked; each ${...} body is code again
+  function template(start: number): number {
+    let i = start + 1;
+    while (i < js.length) {
+      const c = js[i];
+      if (c === "\\") {
+        blank(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (c === "`") return i + 1;
+      if (c === "$" && js[i + 1] === "{") {
+        i += 2;
+        let depth = 0;
+        while (i < js.length) {
+          if (js[i] === "}" && depth === 0) {
+            i++;
+            break;
+          }
+          if (js[i] === "{") depth++;
+          else if (js[i] === "}") depth--;
+          i = step(i);
+        }
+        continue;
+      }
+      blank(i, i + 1);
+      i++;
+    }
+    return i;
+  }
+
+  let i = 0;
+  while (i < js.length) i = step(i);
+  return out.join("");
+}
+
 // bun's fast-refresh transform registers plain function components and skips
 // the results of memo() and forwardRef() - measured against the babel plugin
 // on a hostile corpus, the one divergence in 31 files. unregistered, those
@@ -1496,7 +1621,11 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
 // harmless, the runtime keys by (type, id)
 export function hocRegistrations(js: string, moduleId: string): string {
   const found: string[] = [];
-  for (const m of js.matchAll(
+  // asked of the mask: a template literal carrying this exact line as text
+  // registered a name that never existed, and the ReferenceError took the
+  // whole chunk down in dev. identifiers outside literals read the same on
+  // both, so the captured name is the original's
+  for (const m of codeMask(js).matchAll(
     /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Z][\w$]*)\s*=\s*(?:React\s*\.\s*)?(?:memo|forwardRef)\s*\(/g,
   )) {
     found.push(m[1]);
@@ -1516,13 +1645,25 @@ export function hocRegistrations(js: string, moduleId: string): string {
 // removing the line cannot change the behaviour of any code that had one.
 // the day bun stops emitting the pair, the test pinning this goes green with
 // zero lines removed and the pass is deletable
+// every question and every edit goes through the mask: the pass used to
+// delete `var X = X;` lines out of user template literals and rewrite
+// $RefreshSig$N inside string content (measured), and a string that merely
+// LOOKED like a declaration suppressed the rewrite the chunk needed. matches
+// are found on the mask and applied to the original at the same indices,
+// back to front so the indices hold
 export function fixRefreshRedeclare(js: string): { code: string; removed: number } {
   let removed = 0;
-  let code = js.replace(/^var ([A-Za-z_$][\w$]*) = \1;\r?\n/gm, (line, name: string) => {
-    if (!new RegExp(`^const ${name} = _s\\d*\\(`, "m").test(js)) return line;
+  let code = js;
+  let mask = codeMask(js);
+  const cuts: Array<{ start: number; end: number }> = [];
+  for (const m of mask.matchAll(/^var ([A-Za-z_$][\w$]*) = \1;\r?\n/gm)) {
+    if (!new RegExp(`^const ${m[1]} = _s\\d*\\(`, "m").test(mask)) continue;
+    cuts.push({ start: m.index, end: m.index + m[0].length });
+  }
+  for (const cut of cuts.reverse()) {
+    code = code.slice(0, cut.start) + code.slice(cut.end);
     removed++;
-    return "";
-  });
+  }
   // the second defect of the same family: merging two transformed modules
   // into one chunk, the bundler renames the second module's reference to the
   // GLOBAL $RefreshSig$/$RefreshReg$ as if it were a chunk-local binding -
@@ -1530,14 +1671,19 @@ export function fixRefreshRedeclare(js: string): { code: string; removed: number
   // rewritten back only when the chunk declares no binding by that name, so
   // the reference was an undefined global about to throw: the rewrite cannot
   // change the behaviour of any code that worked
-  code = code.replace(/\$Refresh(Sig|Reg)\$(\d+)\b/g, (whole, kind: string, n: string) => {
+  if (cuts.length) mask = codeMask(code);
+  const swaps: Array<{ start: number; end: number; to: string }> = [];
+  for (const m of mask.matchAll(/\$Refresh(Sig|Reg)\$(\d+)\b/g)) {
     const declared = new RegExp(
-      `(?:\\b(?:var|let|const|function)\\s+|,\\s*)\\$Refresh${kind}\\$${n}\\b\\s*[=(]`,
-    ).test(js);
-    if (declared) return whole;
+      `(?:\\b(?:var|let|const|function)\\s+|,\\s*)\\$Refresh${m[1]}\\$${m[2]}\\b\\s*[=(]`,
+    ).test(mask);
+    if (declared) continue;
+    swaps.push({ start: m.index, end: m.index + m[0].length, to: `$Refresh${m[1]}$` });
+  }
+  for (const swap of swaps.reverse()) {
+    code = code.slice(0, swap.start) + swap.to + code.slice(swap.end);
     removed++;
-    return `$Refresh${kind}$`;
-  });
+  }
   return { code, removed };
 }
 

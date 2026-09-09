@@ -51,6 +51,7 @@ import {
   readBuildOutputs,
   rebuildBeforeServing,
   recordedOutputSizes,
+  codeMask,
   fixRefreshRedeclare,
   hocRegistrations,
   renameUnsafeChunks,
@@ -324,6 +325,44 @@ describe("fixRefreshRedeclare", () => {
     expect(removed).toBe(0);
     expect(code).toBe(js);
   });
+
+  // found adversarially, three ways at once: the pass deleted a line out of a
+  // user template literal, rewrote $RefreshSig$N inside string content, and a
+  // string that merely LOOKED like a declaration suppressed the rewrite the
+  // chunk really needed
+  test("string content is data: never deleted, never rewritten", () => {
+    const snippet =
+      "export const snippet = `\nconst Home = _s(function Home() {});\nvar Home = Home;\n`;\n";
+    const a = fixRefreshRedeclare(snippet);
+    expect(a.removed).toBe(0);
+    expect(a.code).toBe(snippet);
+
+    const doc = 'export const doc = "bundler emits $RefreshSig$2 when modules collide";\n';
+    const b = fixRefreshRedeclare(doc);
+    expect(b.removed).toBe(0);
+    expect(b.code).toBe(doc);
+  });
+
+  test("a declaration-looking string does not suppress the rewrite the chunk needs", () => {
+    const js =
+      'const note = "fix: var $RefreshSig$2 = stub was wrong";\n' +
+      "var _s2 = $RefreshSig$2();\n";
+    const { code, removed } = fixRefreshRedeclare(js);
+    expect(removed).toBe(1);
+    expect(code).toContain("var _s2 = $RefreshSig$();");
+    // and the string itself is untouched
+    expect(code).toContain('"fix: var $RefreshSig$2 = stub was wrong"');
+  });
+
+  test("the real defect beside a string decoy is still cured", () => {
+    const js =
+      "const Home = _s(function Home() {});\nvar Home = Home;\n" +
+      "export const text = `\nvar Fake = Fake;\n`;\n";
+    const { code, removed } = fixRefreshRedeclare(js);
+    expect(removed).toBe(1);
+    expect(code).not.toMatch(/^var Home = Home;$/m);
+    expect(code).toContain("var Fake = Fake;");
+  });
 });
 
 describe("hocRegistrations", () => {
@@ -349,6 +388,61 @@ describe("hocRegistrations", () => {
     expect(hocRegistrations("export default function A() { return 1; }", "a.tsx")).toBe("");
     // memo used as a value, not a wrapper assignment, is not a registration
     expect(hocRegistrations("fn(memo);", "b.tsx")).toBe("");
+  });
+
+  // found adversarially: a docs page carrying this line as TEXT in a template
+  // literal produced reg(M) for a name that never existed - ReferenceError at
+  // module scope, the whole chunk dead in dev
+  test("a wrapper line inside a template literal registers nothing", () => {
+    const js = "export const example = `\nconst M = memo(Base);\n`;";
+    expect(hocRegistrations(js, "pages/docs.tsx")).toBe("");
+    const real = 'const Real = memo(Base);\nconst doc = `\nconst Fake = memo(Base);\n`;';
+    const out = hocRegistrations(real, "p.tsx");
+    expect(out).toContain("reg(Real");
+    expect(out).not.toContain("Fake");
+  });
+
+  // an interpolation body is code again: a wrapper declared inside it is not
+  // this module's top level and must not register either (it would not be in
+  // scope), while the mask must not eat past the closing brace
+  test("string and comment decoys stay silent, code after them is still seen", () => {
+    const js = [
+      '// const CommentM = memo(Base);',
+      '/* const BlockM = memo(Base); */',
+      "const s = 'const QuoteM = memo(Base);';",
+      "const AfterAll = memo(Base);",
+    ].join("\n");
+    const out = hocRegistrations(js, "p.tsx");
+    expect(out).toContain("reg(AfterAll");
+    for (const ghost of ["CommentM", "BlockM", "QuoteM"]) expect(out).not.toContain(ghost);
+  });
+});
+
+describe("codeMask", () => {
+  test("literal content blanks, code and newlines survive at the same indices", () => {
+    const js = 'const a = "hi";\nconst b = `x${a}y`;\n// gone\nconst c = /["\'&<>]/;';
+    const mask = codeMask(js);
+    expect(mask.length).toBe(js.length);
+    expect(mask.split("\n").length).toBe(js.split("\n").length);
+    expect(mask).toContain("const a =");
+    expect(mask).not.toContain("hi");
+    expect(mask).not.toContain("gone");
+    // the interpolation body is code and stays; the chunks around it blank
+    expect(mask).toContain("${a}");
+    expect(mask).not.toMatch(/x\$\{/);
+    // a react-style regex full of quotes must not desync the scanner
+    expect(mask).not.toContain('"\'');
+    expect(mask).toContain("const c =");
+  });
+
+  test("division is not a regex, and nested templates close where they opened", () => {
+    const js = "const r = a / b / c;\nconst t = `outer${`inner${x}`}end`;\nconst after = 1;";
+    const mask = codeMask(js);
+    expect(mask).toContain("const r = a / b / c;");
+    expect(mask).toContain("const after = 1;");
+    expect(mask).not.toContain("outer");
+    expect(mask).not.toContain("inner");
+    expect(mask).not.toContain("end`");
   });
 });
 
