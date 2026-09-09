@@ -573,6 +573,7 @@ export async function serve({
     // checked on what will be opened; on windows also ntfs alternate streams
     // (file.css::$DATA) and reserved characters, which alias a file under names
     // the path checks never saw. get/head only: a public/ file must not shadow a post
+    let probeLate: string | null = null;
     if (req.method === "GET" || req.method === "HEAD") {
       const assetPath = safeDecode(url.pathname);
       if (
@@ -585,10 +586,21 @@ export async function serve({
       ) {
         const indexed = findAsset(assetIndex, assetPath);
         if (indexed) return serveIndexed(req, indexed);
-        const path = "public" + assetPath;
-        const asset = Bun.file(path);
-        if (await asset.exists()) {
-          return serveAsset(req, path, asset, { dev, outputs: buildOutputs });
+        // a path with an extension is a file's name and keeps the probe here,
+        // so /tasks/readme.txt beats the dynamic route it sits under - but an
+        // extension-less path is almost always a page, and the disk stat it
+        // paid on EVERY page request was 4.6% of the ssr profile. those probe
+        // only after the router comes up empty, which also means a route now
+        // beats an extension-less file of the same name (decided 9/9: the
+        // shadowing was an operator mistake wearing a feature's clothes)
+        if (/\.[^/]+$/.test(assetPath)) {
+          const path = "public" + assetPath;
+          const asset = Bun.file(path);
+          if (await asset.exists()) {
+            return serveAsset(req, path, asset, { dev, outputs: buildOutputs });
+          }
+        } else {
+          probeLate = assetPath;
         }
       }
     }
@@ -610,6 +622,15 @@ export async function serve({
     const wantsProps = url.searchParams.get("__borgo") === "props";
 
     if (!matched) {
+      // the router came up empty: NOW the extension-less disk probe runs, so
+      // a plain file in public/ that collides with no route is still served
+      if (probeLate) {
+        const path = "public" + probeLate;
+        const asset = Bun.file(path);
+        if (await asset.exists()) {
+          return serveAsset(req, path, asset, { dev, outputs: buildOutputs });
+        }
+      }
       if (wantsProps) return sendJson(req, { notFound: true }, { status: 404 });
       if (notFound) return renderPage(req, notFound, {}, 404);
       return new Response("not found", { status: 404 });

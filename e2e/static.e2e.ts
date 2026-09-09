@@ -13,6 +13,33 @@ const assetUrls = async (request: { get: (url: string) => Promise<{ text: () => 
   return { entry: find(/\/assets\/client-.*\.js$/), style: find(/\/assets\/style-.*\.css$/) };
 };
 
+// decided 9/9: a route beats an extension-less file of the same name (the
+// shadowing was an operator mistake wearing a feature's clothes), and the
+// page path stopped paying a disk stat per request for it - while an
+// extension-less file that collides with nothing is still served after the
+// router comes up empty
+test("a route outranks an extension-less file, which still serves where no route is", async ({ request }) => {
+  const { mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const pub = join(process.cwd(), "examples", "tasks", "public");
+  writeFileSync(join(pub, "about"), "the impostor file");
+  mkdirSync(join(pub, "downloads"), { recursive: true });
+  writeFileSync(join(pub, "downloads", "notes"), "a real extension-less file");
+  try {
+    const page = await request.get("/about");
+    expect(page.status()).toBe(200);
+    expect(await page.text()).toContain("<h1>About</h1>");
+    expect(await page.text()).not.toContain("impostor");
+
+    const file = await request.get("/downloads/notes");
+    expect(file.status()).toBe(200);
+    expect(await file.text()).toBe("a real extension-less file");
+  } finally {
+    rmSync(join(pub, "about"), { force: true });
+    rmSync(join(pub, "downloads"), { recursive: true, force: true });
+  }
+});
+
 test("percent-encoded asset paths decode to the real file", async ({ request }) => {
   const { entry } = await assetUrls(request);
   const res = await request.get(entry.replace(/\.js$/, "%2Ejs"));
