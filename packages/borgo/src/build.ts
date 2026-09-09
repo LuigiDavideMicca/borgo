@@ -1365,7 +1365,9 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   // the app's client env rides into the bundle as one explicit define; a
   // broken client variable fails the build here, because its value is about
   // to be frozen into every asset. server variables are the boot check's
-  const envMetas = await appEnvMetas();
+  // fresh in dev: the memo hashes env.ts alone, and a rebuild triggered by a
+  // file env.ts imports would otherwise keep serving the old schema
+  const envMetas = await appEnvMetas(process.cwd(), { fresh: dev });
   const envBroken = clientEnvRefusal(envMetas);
   if (envBroken) throw new Error(envBroken);
   const define = { ...buildDefine(dev), ...clientEnvDefine(envMetas) };
