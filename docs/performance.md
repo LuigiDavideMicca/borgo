@@ -153,7 +153,7 @@ The list below is where borgo will lose, and to whom.
 
 **The page route table is a linear scan.** Every request walks the route array splitting path segments until something matches. Perfectly fine at the scale a `pages/` directory reaches; a framework with a compiled radix trie wins on an app with a thousand routes.
 
-**The front server does not pool its gzip streams.** Go pools its writers; the Bun side allocates a fresh zlib gzip stream per compressed document. That is one allocation on a path that also renders a React tree, so it is not where the time goes — but it is asymmetric with the Go side, and it is not a claim borgo can make about both halves.
+**Documents are gzipped through a pooled stream.** Both halves now pool: Go its writers, and the front server a small pool of zlib streams reused across documents (a fresh stream's native init and teardown measured at 18% of the bench ssr profile before the pool). A finished document flushes its gzip trailer without ending the transform, resets the native stream, and parks it — capped at 32 streams, ~26MB at the ceiling, reached only after a burst of that many concurrent compressed documents; a stream any failure touched dies instead of parking.
 
 **The API hop is a real HTTP round trip.** Every loader call serializes JSON in Go, crosses loopback, and parses it in Bun. A monolith calls a function. Six sequential API calls in one loader cost six round trips — use `Promise.all` — and no amount of framework tuning removes the boundary, because the boundary is the design.
 

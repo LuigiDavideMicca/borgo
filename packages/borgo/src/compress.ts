@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
+﻿import { readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { brotliCompressSync, constants, createGzip, gzipSync } from "node:zlib";
@@ -264,7 +264,7 @@ export function buildAssetIndex(
   return index;
 }
 
-// rfc 9111 §4.2.2 lets a cache invent a freshness lifetime, and browsers take
+// rfc 9111 Â§4.2.2 lets a cache invent a freshness lifetime, and browsers take
 // ~10% of (now - Last-Modified): an asset untouched for 100 days is fresh for
 // ~10, so a returning browser runs yesterday's /assets/client.js against
 // today's ssr markup without asking. no-cache is "revalidate before reuse",
@@ -299,7 +299,7 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
   const ifNoneMatch = req.headers.get("if-none-match");
   if (ifNoneMatch !== null) {
     if (ifNoneMatch.trim() === "*") return true;
-    // §8.8.3.2: if-none-match compares weakly, so the marker comes off both
+    // Â§8.8.3.2: if-none-match compares weakly, so the marker comes off both
     // sides, or a client echoing our own W/"..." never matches
     for (const candidate of ifNoneMatch.split(",")) {
       if (strong(candidate.trim()) === strong(etag)) return true;
@@ -312,12 +312,12 @@ export function isNotModified(req: Request, etag: string, mtimeMs: number): bool
   // DECLARED LIMITATION: http dates resolve to one second, so a rewrite inside
   // the second of the date sent 304s over changed bytes (500 -> 9999 bytes at
   // +997ms). reachable only without an etag, bounded to that second, self-healing
-  // on the next revalidation. rfc 9110 §8.8.2.2's mitigation (refuse a date 304
+  // on the next revalidation. rfc 9110 Â§8.8.2.2's mitigation (refuse a date 304
   // while mtime is in the current second) is declined: it makes the answer depend on the wall clock
   return !Number.isNaN(since) && Math.floor(mtimeMs / 1000) * 1000 <= since;
 }
 
-// rfc 9110 §13.1.5: a range conditional on the client still holding the
+// rfc 9110 Â§13.1.5: a range conditional on the client still holding the
 // representation it started; on mismatch the whole representation goes, or
 // the client splices new bytes onto an old prefix. not exotic here: the same
 // url negotiates to a different encoding per Accept-Encoding. the rfc wants
@@ -354,7 +354,7 @@ const statLive = (path: string) => stat(path).catch(() => null);
 // both 200 with Logo.png's bytes where the filesystem says nothing is there
 export const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
 
-// ascii only: ß uppercases to two characters and a dotless ı is not the fold
+// ascii only: ÃŸ uppercases to two characters and a dotless Ä± is not the fold
 // any filesystem applies
 const flipAscii = (name: string): string | null => {
   let flipped = "";
@@ -612,9 +612,39 @@ export function documentStream(
   });
 }
 
+// the front server used to allocate a fresh zlib stream per compressed
+// document and tear it down after - measured on the bench ssr page as 18% of
+// the whole cpu profile in native init and close alone (the same ~800KB of
+// window and hash tables that made Go pool ITS writers). node's zlib cannot
+// be re-ended, but a Z_FINISH flush writes the gzip trailer without
+// finishing the transform, and reset() returns the native stream to its
+// initial state - measured: three documents through one stream, each output
+// independently gunzip-valid, no cross-document leak. only a cleanly
+// finished stream is pooled; a destroyed or errored one keeps whatever
+// state the failure left and dies instead
+type PooledGzip = ReturnType<typeof createGzip> & { reset: () => void };
+const gzipPool: PooledGzip[] = [];
+const GZIP_POOL_MAX = 32;
+
+const acquireGzip = (): PooledGzip =>
+  gzipPool.pop() ?? (createGzip({ flush: constants.Z_SYNC_FLUSH }) as PooledGzip);
+
+// observable for the tests that pin the reuse itself: behaviour alone cannot
+// tell a pool from a fresh allocation per response
+export const pooledGzipCount = (): number => gzipPool.length;
+
+const releaseGzip = (gzip: PooledGzip): void => {
+  if (gzip.destroyed || gzipPool.length >= GZIP_POOL_MAX) {
+    gzip.destroy();
+    return;
+  }
+  gzip.reset();
+  gzipPool.push(gzip);
+};
+
 // a sync flush per chunk, so every react flush reaches the client and streamed ssr stays progressive
 export function gzipStream(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-  const gzip = createGzip({ flush: constants.Z_SYNC_FLUSH });
+  const gzip = acquireGzip();
   // the pump holds the source's lock, so a disconnect must cancel through the
   // reader: cancelling a locked stream throws, and from bun's cancel callback
   // that took the whole server process down
@@ -630,24 +660,46 @@ export function gzipStream(source: ReadableStream<Uint8Array>): ReadableStream<U
     resume = null;
     r?.();
   };
+  // per-response listeners on a stream that outlives the response: every one
+  // of them is removed in cleanup, or the second document would replay into
+  // the first document's controller
+  const onData = (chunk: Buffer) => {
+    if (!cancelled) controller!.enqueue(new Uint8Array(chunk));
+  };
+  let onBroken!: () => void;
+  const broken = new Promise<void>((resolve) => {
+    onBroken = resolve;
+  });
+  const onError = (error: Error) => {
+    onBroken();
+    if (!cancelled) controller!.error(error);
+  };
+  let released = false;
+  const cleanup = (pool: boolean) => {
+    if (released) return;
+    released = true;
+    gzip.off("data", onData);
+    gzip.off("error", onError);
+    gzip.off("close", onBroken);
+    // a drain once-listener parked by a lost race must not ride into the
+    // next document
+    gzip.removeAllListeners("drain");
+    if (pool) releaseGzip(gzip);
+    else gzip.destroy();
+  };
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   return new ReadableStream<Uint8Array>({
-    start(controller) {
-      const closed = new Promise<void>((resolve) => gzip.once("close", resolve));
-      gzip.on("data", (chunk: Buffer) => {
-        if (!cancelled) controller.enqueue(new Uint8Array(chunk));
-      });
-      gzip.on("end", () => {
-        if (!cancelled) controller.close();
-      });
-      gzip.on("error", (error) => {
-        if (!cancelled) controller.error(error);
-      });
+    start(c) {
+      controller = c;
+      gzip.on("data", onData);
+      gzip.on("error", onError);
+      gzip.once("close", onBroken);
       void (async () => {
         try {
           for (;;) {
             // desiredSize is null once the stream is errored or closed; treat
             // that as room and let the read below settle it
-            if (!cancelled && !gzip.destroyed && (controller.desiredSize ?? 1) <= 0) {
+            if (!cancelled && !gzip.destroyed && (c.desiredSize ?? 1) <= 0) {
               await new Promise<void>((resolve) => {
                 resume = resolve;
               });
@@ -656,13 +708,24 @@ export function gzipStream(source: ReadableStream<Uint8Array>): ReadableStream<U
             const { done, value } = await reader.read();
             if (done || gzip.destroyed) break;
             if (!gzip.write(value)) {
-              await Promise.race([new Promise((resolve) => gzip.once("drain", resolve)), closed]);
+              await Promise.race([new Promise((resolve) => gzip.once("drain", resolve)), broken]);
               if (gzip.destroyed) break;
             }
           }
-          if (!gzip.destroyed) gzip.end();
+          if (!cancelled && !gzip.destroyed) {
+            // the trailer without end(): a finished transform cannot be
+            // reused, a FINISH-flushed one resets. the callback runs after
+            // the trailer bytes have gone through the data handler
+            gzip.flush(constants.Z_FINISH, () => {
+              if (!cancelled) c.close();
+              cleanup(!cancelled);
+            });
+          } else {
+            cleanup(false);
+          }
         } catch (error) {
           gzip.destroy(error instanceof Error ? error : new Error(String(error)));
+          cleanup(false);
         }
       })();
     },
@@ -672,7 +735,7 @@ export function gzipStream(source: ReadableStream<Uint8Array>): ReadableStream<U
     cancel(reason) {
       cancelled = true;
       wake();
-      gzip.destroy();
+      cleanup(false);
       void reader.cancel(reason).catch(() => {});
     },
   });

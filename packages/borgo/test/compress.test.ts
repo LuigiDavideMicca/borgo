@@ -28,6 +28,7 @@ import {
   indexFoldsCase,
   documentStream,
   gzipStream,
+  pooledGzipCount,
   isCompressiblePath,
   isNotModified,
   jsonResponse,
@@ -529,6 +530,60 @@ describe("gzipStream", async () => {
     );
     expect(gunzipSync(compressed).toString()).toBe(parts.join(""));
     expect(compressed.length).toBeLessThan(parts.join("").length);
+  });
+
+  // the pool is the point: init+close of a fresh zlib stream per document was
+  // 18% of the bench ssr profile. behaviour alone cannot tell a pool from a
+  // fresh allocation, so the count is asserted alongside the round-trips
+  test("documents reuse one pooled stream, and outputs stay independent", async () => {
+    const doc = (text: string) =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(text));
+          controller.close();
+        },
+      });
+    const drain = async (s: ReadableStream<Uint8Array>) =>
+      Buffer.concat((await Array.fromAsync(s as unknown as AsyncIterable<Uint8Array>)).map((c) => Buffer.from(c)));
+
+    const one = await drain(gzipStream(doc("first document ".repeat(40))));
+    // a clean finish parks its stream
+    const parked = pooledGzipCount();
+    expect(parked).toBeGreaterThanOrEqual(1);
+    const two = await drain(gzipStream(doc("SECOND ".repeat(60))));
+    // reused, not grown: the second document popped and re-parked the same one
+    expect(pooledGzipCount()).toBe(parked);
+    expect(gunzipSync(one).toString()).toContain("first document");
+    expect(gunzipSync(two).toString()).toContain("SECOND");
+    expect(gunzipSync(two).toString()).not.toContain("first");
+  });
+
+  test("a cancelled document never reaches the pool, and the next one is clean", async () => {
+    const before = pooledGzipCount();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("doomed ".repeat(200)));
+      },
+    });
+    const reader = gzipStream(source).getReader();
+    await reader.read();
+    await reader.cancel("gone");
+    // the wrecked stream died instead of parking: the pool never grew
+    expect(pooledGzipCount()).toBeLessThanOrEqual(before);
+
+    const clean = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("healthy after the wreck"));
+        controller.close();
+      },
+    });
+    const out = Buffer.concat(
+      (await Array.fromAsync(gzipStream(clean) as unknown as AsyncIterable<Uint8Array>)).map((c) =>
+        Buffer.from(c),
+      ),
+    );
+    expect(gunzipSync(out).toString()).toBe("healthy after the wreck");
+    expect(gunzipSync(out).toString()).not.toContain("doomed");
   });
 
   test("a client disconnect mid-stream cancels cleanly and reaches the source", async () => {
