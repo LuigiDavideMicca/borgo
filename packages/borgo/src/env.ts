@@ -84,12 +84,24 @@ const BOOL: Record<string, boolean> = {
   "0": false, f: false, F: false, FALSE: false, false: false, False: false,
 };
 
+// a thrown non-Error must still name something readable: "[object Object]"
+// names nothing (found adversarially)
+const thrownText = (error: unknown): string => {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+};
+
 function parseValue(name: string, raw: string, spec: EnvSpec): { value?: unknown; error?: string } {
   if (spec.validate) {
     try {
       return { value: spec.validate(raw) };
     } catch (error) {
-      return { error: `${name}: ${error instanceof Error ? error.message : error}` };
+      return { error: `${name}: ${thrownText(error)}` };
     }
   }
   switch (spec.type ?? "string") {
@@ -128,6 +140,49 @@ function parseValue(name: string, raw: string, spec: EnvSpec): { value?: unknown
 }
 
 const describe = (spec: EnvSpec) => (spec.validate ? "a value its validator accepts" : `a ${spec.type ?? "string"}`);
+
+// a default that skips the contract is the contract's own antithesis: the
+// one value guaranteed to reach production would be the one nobody checked
+// (found adversarially: { type: "number", default: "x" } compiled as number
+// and multiplied to NaN in production). asked at define time, of the author
+function defaultMistake(name: string, spec: EnvSpec): string | null {
+  const d = spec.default;
+  if (d === undefined) return null;
+  if (spec.validate) {
+    if (typeof d !== "string") {
+      return `${name}: a default for a validate spec must be the raw string the validator accepts`;
+    }
+    try {
+      spec.validate(d);
+      return null;
+    } catch (error) {
+      return `${name}: the default does not pass its own validator (${thrownText(error)})`;
+    }
+  }
+  switch (spec.type ?? "string") {
+    case "string":
+      return typeof d === "string" ? null : `${name}: the default must be a string, got ${typeof d}`;
+    case "number":
+      return typeof d === "number" && Number.isFinite(d)
+        ? null
+        : `${name}: the default must be a finite number, got ${JSON.stringify(d)}`;
+    case "boolean":
+      return typeof d === "boolean" ? null : `${name}: the default must be a boolean, got ${JSON.stringify(d)}`;
+    case "port":
+      return typeof d === "number" && Number.isInteger(d) && d >= 0 && d <= 65535
+        ? null
+        : `${name}: the default must be a port (an integer 0-65535), got ${JSON.stringify(d)}`;
+    case "url": {
+      if (typeof d !== "string") return `${name}: the default must be an absolute url string, got ${typeof d}`;
+      try {
+        new URL(d);
+        return null;
+      } catch {
+        return `${name}: the default must be an absolute url, got ${JSON.stringify(d)}`;
+      }
+    }
+  }
+}
 
 export function defineEnv<const S extends EnvSchema>(
   schema: S,
@@ -196,10 +251,16 @@ export function defineEnv<const S extends EnvSchema>(
       // the browser owns no server values, so there is nothing to validate
       // there: access is what must fail, and it fails by name below
       if (side === "server" && shipped) continue;
+      // a broken default is the author's mistake, thrown at define: the one
+      // value guaranteed to reach production must not be the one unchecked
+      const mistake = defaultMistake(name, spec);
+      if (mistake) throw new Error(`borgo env: ${mistake}`);
       const raw = runtimeEnv[name];
       if (raw === undefined || raw === "") {
         if (spec.default !== undefined) {
-          values[name] = spec.default;
+          // a validate spec's default goes through its own validator, so the
+          // value read at the call site is the parsed one either way
+          values[name] = spec.validate ? spec.validate(spec.default as string) : spec.default;
         } else if (!spec.optional) {
           refuse(side, `${name}: missing (expected ${describe(spec)})`);
         } else {
@@ -208,9 +269,26 @@ export function defineEnv<const S extends EnvSchema>(
       } else {
         const { value, error } = parseValue(name, raw, spec);
         if (error) refuse(side, error);
-        else values[name] = value;
+        else if (value === undefined && !spec.optional) {
+          // a validator with a forgotten return in one branch must not
+          // degrade a required variable to an optional one in silence
+          refuse(side, `${name}: its validator returned undefined for a required variable`);
+        } else values[name] = value;
       }
-      if (side === "client") clientValues[name] = values[name];
+      if (side === "client") {
+        const v = values[name];
+        const t = typeof v;
+        if (v !== undefined && t !== "string" && t !== "number" && t !== "boolean") {
+          // the browser receives json: a Date flattens to a string, a Map to
+          // {}, and the two sides of the wall would disagree in silence
+          refuse(
+            "client",
+            `${name}: a client value must be a json primitive (string, number or boolean), got ${t}`,
+          );
+          delete values[name];
+        }
+        clientValues[name] = values[name];
+      }
     }
   }
 
@@ -226,10 +304,19 @@ export function defineEnv<const S extends EnvSchema>(
   // name: a server variable asked for in the browser, and any variable asked
   // for while the environment is known to be broken - the boot check in
   // serve() reports every failure at once, this is the backstop for scripts
-  // that never boot a server
-  return new Proxy({} as Env<S>, {
-    get(_, prop) {
+  // that never boot a server.
+  // the inspect symbol sits on the TARGET: bun consults the target for its
+  // presence before any trap runs (measured), and console.log(env) printed
+  // the target's honest emptiness - {} - instead of the values
+  const target = {} as Record<PropertyKey, unknown>;
+  target[Symbol.for("nodejs.util.inspect.custom")] = () =>
+    failures.length ? `[borgo env: ${failures.length} refused]` : { ...values };
+  return new Proxy(target as Env<S>, {
+    get(target_, prop) {
       if (prop === ENV_META) return meta;
+      if (prop === Symbol.for("nodejs.util.inspect.custom")) {
+        return (target_ as Record<PropertyKey, unknown>)[prop];
+      }
       if (typeof prop !== "string") return undefined;
       if (shipped && prop in server) {
         throw new Error(

@@ -153,6 +153,75 @@ describe("the grammar", () => {
     expect(env.LIMIT).toBe(3);
   });
 
+  // found adversarially: the default branch skipped both the parse and the
+  // validator - the one value guaranteed to reach production was the one
+  // value nobody checked, with the compiled type lying beside it
+  test("a default that breaks its own contract is the author's error, thrown at define", () => {
+    expect(() => defineEnv({ server: { N: { type: "number", default: "x" as never } } }, {})).toThrow(
+      "must be a finite number",
+    );
+    expect(() => defineEnv({ server: { P: { type: "port", default: 99999 } } }, {})).toThrow(
+      "integer 0-65535",
+    );
+    expect(() => defineEnv({ server: { B: { type: "boolean", default: "yes" as never } } }, {})).toThrow(
+      "must be a boolean",
+    );
+    expect(() => defineEnv({ server: { U: { type: "url", default: "/relative" } } }, {})).toThrow(
+      "absolute url",
+    );
+    expect(() =>
+      defineEnv(
+        {
+          server: {
+            V: {
+              default: "raw",
+              validate: () => {
+                throw new Error("never accepts");
+              },
+            },
+          },
+        },
+        {},
+      ),
+    ).toThrow("does not pass its own validator");
+    // and a healthy default of a validate spec is read PARSED, not raw
+    const env = defineEnv(
+      { server: { LIST: { default: "a,b", validate: (raw) => raw.split(",") } } },
+      {},
+    );
+    expect(env.LIST).toEqual(["a", "b"]);
+  });
+
+  test("a validator returning undefined does not degrade a required variable", () => {
+    const env = defineEnv({ server: { REQ: { validate: () => undefined } } }, { REQ: "set" });
+    expect(read(env, "REQ")).toThrow("returned undefined for a required variable");
+    // optional keeps the freedom: undefined is a value it declared possible
+    const opt = defineEnv(
+      { server: { MAYBE: { optional: true, validate: () => undefined } } },
+      { MAYBE: "set" },
+    );
+    expect(opt.MAYBE).toBeUndefined();
+  });
+
+  // the browser receives json: a Date flattens to its iso string, a Map to
+  // {}, and the two sides of the wall would disagree in silence
+  test("a client value that is not a json primitive refuses the build by name", () => {
+    const env = defineEnv(
+      { client: { BORGO_PUBLIC_WHEN: { validate: (raw) => new Date(raw) } } },
+      { BORGO_PUBLIC_WHEN: "2026-01-01" },
+    );
+    const meta = metaOf(env);
+    expect(meta.clientFailures).toHaveLength(1);
+    expect(meta.clientFailures[0]).toContain("json primitive");
+  });
+
+  test("a debug print shows the values, or the refusal count - never {}", () => {
+    const env = defineEnv({ server: { A: { default: "x" } } }, {});
+    expect(Bun.inspect(env)).toContain("x");
+    const broken = defineEnv({ server: { B: { type: "number" } } }, { B: "nope" });
+    expect(Bun.inspect(broken)).toContain("1 refused");
+  });
+
   test("validate is the escape hatch: its return is the value, its throw the named failure", () => {
     const ok = defineEnv(
       { server: { LIST: { validate: (raw) => raw.split(",") } } },
