@@ -360,6 +360,63 @@ export function checkBunShim(d: DoctorEnv): Check | null {
   };
 }
 
+// found the hard way: a stale bun in ~/.bun answered every BIN SHIM while a
+// current one answered `bun --version` on PATH - so the floor check passed
+// and `bun run start` still transpiled with the old bun (1.3.14 emitted the
+// jsxDEV transform where 1.4 emits production: measured, and against the
+// production react-dom it was a render crash). bunx-style shims exec
+// ~/.bun/bin/bun directly, so that copy is load-bearing whether or not PATH
+// ever mentions it
+const samePath = (a: string, b: string, platform: NodeJS.Platform) => {
+  const norm = (p: string) => p.replaceAll("\\", "/");
+  return platform === "win32"
+    ? norm(a).toLowerCase() === norm(b).toLowerCase()
+    : norm(a) === norm(b);
+};
+
+export function checkSecondBun(d: DoctorEnv): Check | null {
+  const name = "a second bun";
+  const home = d.env.USERPROFILE ?? d.env.HOME;
+  if (!home) return null;
+  const sep = d.platform === "win32" ? "\\" : "/";
+  const shimBun = `${home}${sep}.bun${sep}bin${sep}bun${d.platform === "win32" ? ".exe" : ""}`;
+  if (!d.exists(shimBun)) return null;
+  const onPath = d.which(d.platform === "win32" ? "bun.exe" : "bun");
+  if (onPath && samePath(onPath, shimBun, d.platform)) return null;
+  const ver = d.exec([shimBun, "--version"]);
+  const version = ver.code === 0 ? ver.out.trim() : "";
+  if (!version) {
+    return {
+      name,
+      ok: false,
+      info: true,
+      detail: `${shimBun} exists but did not answer --version - the bin shims that exec it will fail the same way`,
+      fix: `reinstall it: ${bunInstall(d.platform)}`,
+    };
+  }
+  const { min, source } = bunMinimum(d);
+  if (!versionAtLeast(version, min)) {
+    return {
+      name,
+      ok: false,
+      detail: `${shimBun} is ${version}, older than the required ${min} (${source}) - bin shims (borgo included) exec THIS bun, not the one on PATH`,
+      fix: `"${shimBun}" upgrade`,
+    };
+  }
+  const pathVer = d.exec(["bun", "--version"]);
+  const pathVersion = pathVer.code === 0 ? pathVer.out.trim() : "";
+  if (pathVersion && pathVersion !== version) {
+    return {
+      name,
+      ok: false,
+      info: true,
+      detail: `${version} in ~${sep}.bun and ${pathVersion} on PATH - bin shims run the first, everything else the second`,
+      fix: "keep them equal: `bun upgrade` for each, or remove one install",
+    };
+  }
+  return null;
+}
+
 // borgo needs no node; a plugin, a lint step or a playwright install might
 export function checkNode(d: DoctorEnv): Check {
   const name = "node";
@@ -691,6 +748,7 @@ export async function runChecks(d: DoctorEnv): Promise<Check[]> {
     // toolchain
     checkBun(d),
     checkBunShim(d),
+    checkSecondBun(d),
     checkEnginesBun(d),
     checkGo(d),
     checkNode(d),

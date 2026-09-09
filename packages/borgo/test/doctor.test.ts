@@ -1,10 +1,11 @@
-import { describe, expect, test } from "bun:test";
+﻿import { describe, expect, test } from "bun:test";
 import {
   bunMinimum,
   checkApiBinary,
   checkApiTypes,
   checkBun,
   checkBunShim,
+  checkSecondBun,
   checkDeps,
   checkEnginesBun,
   declaredFloor,
@@ -295,6 +296,58 @@ describe("checkBunShim", () => {
     });
     expect(checkBunShim(d)).toBeNull();
     expect(isFailure(checkBun(d))).toBe(true);
+  });
+});
+
+// found live: a stale ~/.bun answered every bin shim while the PATH bun
+// passed the floor - `bun run start` transpiled with 1.3.14 (jsxDEV) against
+// the production react-dom, a render crash the doctor never saw coming
+describe("checkSecondBun", () => {
+  const twoBuns = (shimVersion: string, over: Partial<DoctorEnv> = {}) =>
+    fakeEnv({
+      platform: "win32",
+      env: { USERPROFILE: "C:\\Users\\x" },
+      which: () => "C:\\nvm4w\\nodejs\\bun.exe",
+      exists: (p) => p === "C:\\Users\\x\\.bun\\bin\\bun.exe",
+      exec: (cmd) => ({
+        code: 0,
+        out: cmd[0].includes(".bun") ? `${shimVersion}\n` : "1.4.2\n",
+      }),
+      ...over,
+    });
+
+  test("a ~/.bun below the floor fails hard, naming who runs it", () => {
+    const r = checkSecondBun(twoBuns("1.3.14"));
+    expect(isFailure(r!)).toBe(true);
+    expect(r!.detail).toContain("1.3.14");
+    expect(r!.detail).toContain("bin shims");
+    expect(r!.fix).toContain("upgrade");
+  });
+
+  test("two healthy but different versions are a note", () => {
+    const r = checkSecondBun(twoBuns("1.4.0"));
+    expect(r!.ok).toBe(false);
+    expect(r!.info).toBe(true);
+    expect(isFailure(r!)).toBe(false);
+    expect(r!.detail).toContain("1.4.0");
+    expect(r!.detail).toContain("1.4.2");
+  });
+
+  test("equal versions, or one bun only, say nothing", () => {
+    expect(checkSecondBun(twoBuns("1.4.2"))).toBeNull();
+    expect(checkSecondBun(fakeEnv({ env: { USERPROFILE: "C:\\Users\\x" } }))).toBeNull();
+    // PATH resolving to the ~/.bun copy itself is one install, not two
+    expect(
+      checkSecondBun(
+        twoBuns("1.3.14", { which: () => "c:/users/x/.bun/bin/BUN.EXE" }),
+      ),
+    ).toBeNull();
+  });
+
+  test("a copy that cannot answer --version is a note with the reinstall fix", () => {
+    const r = checkSecondBun(twoBuns("", { exec: () => ({ code: 1, out: "" }) }));
+    expect(r!.info).toBe(true);
+    expect(r!.detail).toContain("did not answer");
   });
 });
 
