@@ -1,4 +1,4 @@
-import { Glob } from "bun";
+﻿import { Glob } from "bun";
 import {
   existsSync,
   mkdirSync,
@@ -1609,6 +1609,43 @@ export function codeMask(js: string): string {
   return out.join("");
 }
 
+// which local names are react's memo and forwardRef in THIS module: a
+// memoize library's memo() used to produce a registration too (found
+// adversarially - a non-component handed to the refresh runtime), and an
+// aliased `import { memo as m } from "react"` produced none. the wrapper is
+// react's exactly when the module's own imports say so; asked of the mask,
+// like every other textual question here
+export function reactHocNames(js: string, mask: string): { wrappers: string[]; namespaces: string[] } {
+  const wrappers: string[] = [];
+  const namespaces: string[] = [];
+  // positions from the mask (an import quoted inside a template must not
+  // count), the specifier from the original (the mask blanks string content,
+  // "react" included - measured the hard way)
+  for (const m of mask.matchAll(
+    /import\s+(?:([\w$]+)\s*,\s*)?(?:\{([^}]*)\}|\*\s+as\s+([\w$]+))?\s*from\s*["'][^"'\n]*["']/g,
+  )) {
+    const original = js.slice(m.index, m.index + m[0].length);
+    if (!/from\s*["']react["']$/.test(original)) continue;
+    // a default or namespace import reaches them as members: React.memo
+    if (m[1]) namespaces.push(m[1]);
+    if (m[3]) namespaces.push(m[3]);
+    if (m[2]) {
+      for (const part of m[2].split(",")) {
+        const [orig, local] = part.split(/\s+as\s+/).map((s) => s.trim());
+        if (orig === "memo" || orig === "forwardRef") wrappers.push(local ?? orig);
+      }
+    }
+  }
+  return { wrappers, namespaces };
+}
+
+const hocCallPattern = ({ wrappers, namespaces }: ReturnType<typeof reactHocNames>): string | null => {
+  const forms: string[] = [];
+  if (wrappers.length) forms.push(`(?:${wrappers.join("|")})`);
+  if (namespaces.length) forms.push(`(?:${namespaces.join("|")})\\s*\\.\\s*(?:memo|forwardRef)`);
+  return forms.length ? `(?:${forms.join("|")})` : null;
+};
+
 // the one wrapper shape neither bun's pass nor hocRegistrations could reach:
 // `export default memo(...)` binds no name, so nothing registered it and the
 // component was a fresh identity on every rebuild - its subtree remounted
@@ -1620,7 +1657,10 @@ export function codeMask(js: string): string {
 // this shape in a string is left alone; the $ prefix keeps the name out of
 // hocRegistrations' [A-Z] pattern, so it is never registered twice
 export function nameDefaultHoc(js: string, moduleId: string): string {
-  const m = codeMask(js).match(/^export\s+default\s+((?:React\s*\.\s*)?(?:memo|forwardRef))\s*\(/m);
+  const mask = codeMask(js);
+  const call = hocCallPattern(reactHocNames(js, mask));
+  if (!call) return js;
+  const m = mask.match(new RegExp(`^export\\s+default\\s+(${call})\\s*\\(`, "m"));
   if (!m || m.index === undefined) return js;
   // replace exactly the `export default ` prefix, keeping the wrapper call
   const wrapperAt = m.index + m[0].indexOf(m[1]);
@@ -1649,9 +1689,17 @@ export function hocRegistrations(js: string, moduleId: string): string {
   // asked of the mask: a template literal carrying this exact line as text
   // registered a name that never existed, and the ReferenceError took the
   // whole chunk down in dev. identifiers outside literals read the same on
-  // both, so the captured name is the original's
-  for (const m of codeMask(js).matchAll(
-    /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Z][\w$]*)\s*=\s*(?:React\s*\.\s*)?(?:memo|forwardRef)\s*\(/g,
+  // both, so the captured name is the original's. and only the names this
+  // module imported FROM react count: a memoize library's memo() is not a
+  // component, and an aliased react memo is
+  const mask = codeMask(js);
+  const call = hocCallPattern(reactHocNames(js, mask));
+  if (!call) return "";
+  for (const m of mask.matchAll(
+    new RegExp(
+      `(?:^|\\n)\\s*(?:export\\s+)?(?:const|let|var)\\s+([A-Z][\\w$]*)\\s*=\\s*${call}\\s*\\(`,
+      "g",
+    ),
   )) {
     found.push(m[1]);
   }

@@ -369,7 +369,7 @@ describe("fixRefreshRedeclare", () => {
 describe("hocRegistrations", () => {
   test("memo and forwardRef results are registered through the indirection", () => {
     const js = [
-      'import { memo, forwardRef } from "react";',
+      'import React, { memo, forwardRef } from "react";',
       "const Base = (p) => p;",
       "export const M = memo(Base);",
       "export const F = forwardRef((p, r) => null);",
@@ -395,12 +395,25 @@ describe("hocRegistrations", () => {
   // literal produced reg(M) for a name that never existed - ReferenceError at
   // module scope, the whole chunk dead in dev
   test("a wrapper line inside a template literal registers nothing", () => {
-    const js = "export const example = `\nconst M = memo(Base);\n`;";
+    const js = 'import { memo } from "react";\nexport const example = `\nconst M = memo(Base);\n`;';
     expect(hocRegistrations(js, "pages/docs.tsx")).toBe("");
-    const real = 'const Real = memo(Base);\nconst doc = `\nconst Fake = memo(Base);\n`;';
+    const real =
+      'import { memo } from "react";\nconst Real = memo(Base);\nconst doc = `\nconst Fake = memo(Base);\n`;';
     const out = hocRegistrations(real, "p.tsx");
     expect(out).toContain("reg(Real");
     expect(out).not.toContain("Fake");
+  });
+
+  // found adversarially, both directions at once: a memoize library's memo()
+  // handed a non-component to the refresh runtime, while react's own memo
+  // under an alias registered nothing. the import is what says whose memo it is
+  test("only wrappers imported from react register, aliases included", () => {
+    const foreign = 'import memo from "memoizee";\nconst FetchUser = memo(fetchUser);';
+    expect(hocRegistrations(foreign, "lib/cache.ts")).toBe("");
+
+    const aliased = 'import { memo as m } from "react";\nexport const Card = m(function Card() {});';
+    const out = hocRegistrations(aliased, "pages/card.tsx");
+    expect(out).toContain('reg(Card, "pages/card.tsx:Card")');
   });
 
   // an interpolation body is code again: a wrapper declared inside it is not
@@ -408,6 +421,7 @@ describe("hocRegistrations", () => {
   // scope), while the mask must not eat past the closing brace
   test("string and comment decoys stay silent, code after them is still seen", () => {
     const js = [
+      'import { memo } from "react";',
       '// const CommentM = memo(Base);',
       '/* const BlockM = memo(Base); */',
       "const s = 'const QuoteM = memo(Base);';",
@@ -436,15 +450,22 @@ describe("nameDefaultHoc", () => {
     expect(hocRegistrations(out, "pages/card.tsx")).toBe("");
   });
 
-  test("React.forwardRef and plain defaults behave, strings do not", () => {
-    const fwd = nameDefaultHoc("export default React.forwardRef((p, r) => null);", "p.tsx");
+  test("React.forwardRef and plain defaults behave, strings and foreign memos do not", () => {
+    const fwd = nameDefaultHoc(
+      'import * as React from "react";\nexport default React.forwardRef((p, r) => null);',
+      "p.tsx",
+    );
     expect(fwd).toContain("const $borgoDefaultHoc = React.forwardRef((p, r) => null);");
 
     const plain = "export default function Page() { return null; }\n";
     expect(nameDefaultHoc(plain, "p.tsx")).toBe(plain);
 
-    const quoted = "export const doc = `\nexport default memo(Base);\n`;\n";
+    const quoted = 'import { memo } from "react";\nexport const doc = `\nexport default memo(Base);\n`;\n';
     expect(nameDefaultHoc(quoted, "p.tsx")).toBe(quoted);
+
+    // a memoize library's default export is not a component to register
+    const foreign = 'import memo from "memoizee";\nexport default memo(fetchUser);';
+    expect(nameDefaultHoc(foreign, "lib/x.ts")).toBe(foreign);
   });
 });
 
