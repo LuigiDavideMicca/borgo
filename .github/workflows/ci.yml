@@ -90,11 +90,13 @@ jobs:
       - name: typecheck
         run: bun run typecheck
 
-      - name: bench harness typechecks
+      - name: bench harness typechecks and its tests hold
         working-directory: bench
         run: |
           bun install --frozen-lockfile
           bun run typecheck
+          cd site && bun install --frozen-lockfile && cd ..
+          bun run test
 
       - name: bun tests
         run: bun run test

@@ -1,0 +1,120 @@
+/* two full themes from one token set; the bar hue is validated against both
+   surfaces (light #2e7d54 on #faf9f6, dark #1f9e6a on #141715) */
+:root {
+  --paper: #faf9f6;
+  --card: #ffffff;
+  --ink: #232824;
+  --muted: #5d655e;
+  --line: #e4e3dc;
+  --bar: #2e7d54;
+  --accent: #2e7d54;
+  --code-bg: #efeee8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #141715;
+    --card: #1b1f1c;
+    --ink: #dde2da;
+    --muted: #99a29a;
+    --line: #2a2e2a;
+    --bar: #1f9e6a;
+    --accent: #4cbf8f;
+    --code-bg: #21261f;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+  padding: 0 1.25rem 5rem;
+}
+
+main { max-width: 54rem; margin: 0 auto; }
+
+header { padding: 3rem 0 0.5rem; }
+
+h1 {
+  font-size: clamp(1.8rem, 4.5vw, 2.4rem);
+  line-height: 1.15;
+  margin: 0 0 0.5rem;
+  letter-spacing: -0.01em;
+}
+
+.tagline { color: var(--muted); font-size: 1.05rem; margin: 0; max-width: 44rem; }
+
+h2 { font-size: 1.3rem; margin: 2.75rem 0 0.25rem; }
+h3 { font-size: 1rem; margin: 1.5rem 0 0.25rem; color: var(--muted); font-weight: 600; }
+
+a { color: var(--accent); }
+
+code {
+  font-family: Consolas, "JetBrains Mono", monospace;
+  font-size: 0.85em;
+  background: var(--code-bg);
+  border-radius: 3px;
+  padding: 0.1em 0.35em;
+}
+
+.what { color: var(--muted); font-size: 0.95rem; margin: 0 0 0.75rem; }
+
+/* the biases live above the fold on purpose */
+.biases {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: var(--card);
+  padding: 0.75rem 1.25rem 1rem;
+  margin-top: 1.75rem;
+}
+.biases h2 { margin-top: 0.5rem; }
+.biases ol { margin: 0.5rem 0; padding-left: 1.2rem; }
+.biases li { margin: 0.45rem 0; }
+.biases p { margin: 0.75rem 0 0.25rem; font-size: 0.95rem; color: var(--muted); }
+
+.identity dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1.25rem;
+  margin: 0.75rem 0 0;
+  font-size: 0.95rem;
+}
+.identity dl div { display: contents; }
+.identity dt { color: var(--muted); }
+.identity dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+figure { margin: 0.5rem 0 0; }
+
+svg { width: 100%; height: auto; display: block; }
+
+.bar { fill: var(--bar); }
+.name { fill: var(--ink); font-size: 13px; font-weight: 600; }
+.value { fill: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; }
+.detail { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+details { margin: 0.25rem 0 0; font-size: 0.9rem; }
+summary { color: var(--muted); cursor: pointer; }
+
+table { border-collapse: collapse; margin: 0.5rem 0; }
+th, td { text-align: left; padding: 0.25rem 1rem 0.25rem 0; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
+td { font-variant-numeric: tabular-nums; }
+
+.notes { padding-left: 1.2rem; }
+.notes li { margin: 0.6rem 0; font-size: 0.95rem; }
+.rt { color: var(--muted); }
+
+footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* wide content scrolls inside itself, never the page */
+figure, table { max-width: 100%; }
+details { overflow-x: auto; }

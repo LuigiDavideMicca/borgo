@@ -1,13 +1,15 @@
 {
-  "name": "bench-borgo",
+  "name": "bench-site",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "borgo build",
+    "generate": "bun generate.ts",
+    "build": "bun generate.ts && borgo build",
+    "export": "bun generate.ts && borgo export",
     "start": "borgo start"
   },
   "dependencies": {
-    "borgo-framework": "file:../../../packages/borgo",
+    "borgo-framework": "file:../../packages/borgo",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

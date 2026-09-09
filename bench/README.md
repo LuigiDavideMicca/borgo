@@ -12,6 +12,12 @@ a reader to find.
 implementation must serve), then the runner (`run.ts`), then whatever is in
 [results/](results/).
 
+The published page lives in [site/](site/) — a borgo app, exported with
+`borgo export`, whose charts are inline SVG baked at build from the newest
+json in results/. `bench/test/site.test.ts` holds the page's numbers equal to
+the committed json mechanically, and the biases below render above every
+number there too.
+
 ---
 
 ## The biases, stated first

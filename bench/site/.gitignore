@@ -1,0 +1,5 @@
+﻿node_modules/
+dist/
+public/assets/
+.borgo/*
+!.borgo/api-types.d.ts

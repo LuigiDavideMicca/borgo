@@ -1,0 +1,16 @@
+module benchsite
+
+go 1.27.0
+
+require github.com/LuigiDavideMicca/borgo v0.0.0
+
+require (
+	golang.org/x/mod v0.38.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/tools v0.48.0 // indirect
+)
+
+// the page shows the numbers of the borgo in this checkout, and runs on it too
+replace github.com/LuigiDavideMicca/borgo => ../..
+
+tool github.com/LuigiDavideMicca/borgo/cmd/borgogen

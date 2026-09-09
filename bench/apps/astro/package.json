@@ -7,10 +7,10 @@
     "start": "node ./dist/server/entry.mjs"
   },
   "dependencies": {
-    "@astrojs/node": "^9.0.0",
-    "@astrojs/react": "^4.1.0",
-    "astro": "^5.1.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "@astrojs/node": "^11.1.5",
+    "@astrojs/react": "^6.0.5",
+    "astro": "^7.3.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   }
 }
