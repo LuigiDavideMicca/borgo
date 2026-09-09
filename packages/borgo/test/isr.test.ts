@@ -402,6 +402,68 @@ describe("the orchestrator", () => {
     expect(renders.length).toBe(3);
   });
 
+  // found hunting: an invalidation arriving while a regeneration was in
+  // flight was lost - the render that had read the OLD data was stored after
+  // the drop, and under "manual" the risen copy lived forever
+  test("an invalidation dooms the render in flight: served once, never stored", async () => {
+    let db = "v1";
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const isr = new Isr({ log: () => {} });
+    const render = async () => {
+      const read = db;
+      await gate;
+      return new Response(`<html>${read}</html>`, { headers: { "Content-Type": "text/html" } });
+    };
+    const route = routeOf({ revalidate: "manual", tags: ["news"] });
+    const inFlight = isr.handle(reqFor("/p"), route, render);
+    await Bun.sleep(0);
+    // the handler's natural order: write the data, then invalidate
+    db = "v2";
+    isr.invalidateTag("news");
+    release();
+    // the waiter is served the render it joined - as old as one that
+    // finished a moment earlier
+    expect(await ((await inFlight) as Response).text()).toBe("<html>v1</html>");
+    // but the copy was never stored: the next request reads the new data
+    const next = await isr.handle(reqFor("/p"), route, async () => {
+      return new Response(`<html>${db}</html>`, { headers: { "Content-Type": "text/html" } });
+    });
+    expect((next as Response).headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    expect(await (next as Response).text()).toBe("<html>v2</html>");
+  });
+
+  test("a background regeneration from stale is doomed the same way, by path too", async () => {
+    let t = 1_000_000;
+    let db = "v1";
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let gated = false;
+    const isr = new Isr({ log: () => {}, now: () => t });
+    const render = async () => {
+      const read = db;
+      if (gated) await gate;
+      return new Response(`<html>${read}</html>`, { headers: { "Content-Type": "text/html" } });
+    };
+    const route = routeOf({ revalidate: 60 });
+    await isr.handle(reqFor("/p"), route, render);
+
+    t += 61_000;
+    gated = true;
+    // stale served now, regeneration (reading v1) parked in flight
+    const stale = await isr.handle(reqFor("/p"), route, render);
+    expect((stale as Response).headers.get(CACHE_STATE_HEADER)).toBe("stale");
+    db = "v2";
+    isr.invalidatePath("/p");
+    release();
+    await Bun.sleep(0);
+    // the doomed result must not have risen: fresh render, fresh data
+    gated = false;
+    const next = await isr.handle(reqFor("/p"), route, render);
+    expect((next as Response).headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    expect(await (next as Response).text()).toBe("<html>v2</html>");
+  });
+
   test("anonymised strips what personalises, and the coding too", () => {
     const req = new Request("http://x/p?q=1", {
       method: "GET",

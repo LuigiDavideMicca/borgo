@@ -270,6 +270,12 @@ export class Isr {
   // with the policy's own tags kept so RevalidateTag can lift the mark. same
   // bound as the cache, same reason: the key carries the query string
   private refused = new Map<string, { at: number; tags: string[] }>();
+  // what an invalidation must be able to reach about a render still in
+  // flight: found hunting - RevalidateTag during a regeneration was lost,
+  // the pre-invalidation copy was stored AFTER the drop and rose again, and
+  // under "manual" it lived forever (persisted, too). a doomed flight's
+  // result is served once to its waiters and never stored
+  private flightMeta = new Map<string, { doomed: boolean; tags: string[] }>();
   private log: (line: string) => void;
   private now: () => number;
   private persist?: IsrPersist;
@@ -450,6 +456,11 @@ export class Isr {
   ): Promise<CachedPage | "refused"> {
     const running = this.inflight.get(key);
     if (running) return running;
+    // registered before the render starts: an invalidation arriving while
+    // the render is in flight dooms it, or the copy it read from the old
+    // data would be stored after the drop and rise again
+    const meta = { doomed: false, tags: policy.tags };
+    this.flightMeta.set(key, meta);
     const flight = (async (): Promise<CachedPage | "refused"> => {
       const rendered = await render(anonymised(req));
       const html = await rendered.text();
@@ -459,6 +470,9 @@ export class Isr {
           `store:${key}`,
           `${key}: declares revalidate but ${refusal.reason} - served fresh, never cached`,
         );
+        // a doomed refusal marks nothing: the data changed under it, and the
+        // mark it would leave was lifted by that very invalidation
+        if (meta.doomed) return "refused";
         // remembered with the policy's tags, so RevalidateTag can lift the
         // mark; a copy stored before the page turned personal is dropped -
         // replaying it would freeze content the render no longer stands by
@@ -480,11 +494,19 @@ export class Isr {
         storedAt: this.now(),
         tags: policy.tags,
       };
-      this.cache.store(key, entry);
-      this.saveEntry(key, entry);
+      // doomed: served once to this flight's waiters - a page rendered a
+      // moment before the invalidation would have been just as old - but
+      // never stored and never persisted; the next request reads fresh data
+      if (!meta.doomed) {
+        this.cache.store(key, entry);
+        this.saveEntry(key, entry);
+      }
       this.noted.delete(`regen:${key}`);
       return entry;
-    })().finally(() => this.inflight.delete(key));
+    })().finally(() => {
+      this.inflight.delete(key);
+      this.flightMeta.delete(key);
+    });
     this.inflight.set(key, flight);
     return flight;
   }
@@ -522,6 +544,9 @@ export class Isr {
     for (const key of [...this.refused.keys()]) {
       if (pathMatchesKey(path, key)) this.refused.delete(key);
     }
+    for (const [key, meta] of this.flightMeta) {
+      if (pathMatchesKey(path, key)) meta.doomed = true;
+    }
     this.log(`revalidate ${path}: ${dropped} cached ${dropped === 1 ? "copy" : "copies"} dropped`);
     return dropped;
   }
@@ -530,6 +555,9 @@ export class Isr {
     const dropped = this.cache.invalidateTag(tag);
     for (const [key, refusal] of [...this.refused]) {
       if (refusal.tags.includes(tag)) this.refused.delete(key);
+    }
+    for (const meta of this.flightMeta.values()) {
+      if (meta.tags.includes(tag)) meta.doomed = true;
     }
     this.log(`revalidate tag ${tag}: ${dropped} cached ${dropped === 1 ? "copy" : "copies"} dropped`);
     return dropped;
