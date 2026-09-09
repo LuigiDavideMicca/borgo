@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { listApps } from "../lib/manifest";
 import { ALL_SCENARIO_IDS, scenarioById } from "../lib/scenarios";
@@ -5,6 +6,13 @@ import { benchRoot } from "../lib/paths";
 
 const apps = listApps();
 const implemented = apps.filter((a) => a.manifest.status === "implemented");
+
+// the shipped copies are build output (copy-assets), not committed: on a fresh
+// checkout none exist, and a zero-file pass would assert nothing. skip there;
+// any built app arms the full check, so a partial or drifted copy still fails.
+const anyBuilt = implemented.some((a) =>
+  ["public/static", "static/static"].some((d) => existsSync(`${a.dir}/${d}/payload.json`)),
+);
 
 /**
  * A launcher in a start argv is not free: the runner charges RSS over the whole
@@ -66,19 +74,22 @@ describe("the static asset is pinned to the committed file", () => {
     expect(scenario.expect.sha256).toBe(hasher.digest("hex"));
   });
 
-  test("every implementation ships that exact file, so nobody serves different bytes", async () => {
-    const canonical = await Bun.file(`${benchRoot()}/shared/payload.json`).text();
-    let checked = 0;
-    for (const app of implemented) {
-      for (const dir of ["public/static", "static/static"]) {
-        const file = Bun.file(`${app.dir}/${dir}/payload.json`);
-        if (!(await file.exists())) continue;
-        expect(await file.text()).toBe(canonical);
-        checked++;
+  test.skipIf(!anyBuilt)(
+    "every implementation ships that exact file, so nobody serves different bytes",
+    async () => {
+      const canonical = await Bun.file(`${benchRoot()}/shared/payload.json`).text();
+      let checked = 0;
+      for (const app of implemented) {
+        for (const dir of ["public/static", "static/static"]) {
+          const file = Bun.file(`${app.dir}/${dir}/payload.json`);
+          if (!(await file.exists())) continue;
+          expect(await file.text()).toBe(canonical);
+          checked++;
+        }
       }
-    }
-    expect(checked).toBe(implemented.length);
-  });
+      expect(checked).toBe(implemented.length);
+    },
+  );
 });
 
 describe("the scenarios enforce what CONTRACT.md pins", () => {

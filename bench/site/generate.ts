@@ -81,6 +81,9 @@ for (const dir of readdirSync(appsDir, { withFileTypes: true })) {
 for (const r of raw.results) {
   if (r.status !== "ok") notMeasured.push({ name: r.app, reason: r.error ?? r.status });
 }
+// readdir order is platform-dependent (alphabetical on windows, inode order on
+// linux), and the freshness test byte-compares this file against a regeneration
+notMeasured.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
 const data = {
   file: newest,
