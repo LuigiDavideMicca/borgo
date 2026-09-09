@@ -53,6 +53,55 @@ describe("what `borgo start` guarantees its launch environment", () => {
   });
 });
 
+// the whole launch matrix, pinned: one configuration once produced a page
+// compiled for jsxDEV meeting the production react-dom (the mid-module
+// default, since reverted) and the mechanism was never reproducible in
+// isolation - so the guarantee is measured per mode instead: the server
+// boots, a page renders, the jsx-dev runtime is never pulled in, and the
+// react build matches the mode
+describe("the launch matrix is coherent in every mode", () => {
+  const serverTs = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+  const appDir = join(import.meta.dir, "..", "..", "..", "examples", "tasks");
+
+  const boot = (nodeEnv: string | undefined, port: number) => {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+    delete env.NODE_ENV;
+    if (nodeEnv !== undefined) env.NODE_ENV = nodeEnv;
+    env.PORT = String(port);
+    env.BUN_CONFIG_MAX_HTTP_REQUESTS = "16384";
+    // /about has no loader, so the go api is not needed for the render
+    const script = `
+      const { serve } = await import(${JSON.stringify(serverTs)});
+      await serve({ dev: false });
+      const res = await fetch("http://localhost:" + process.env.PORT + "/about");
+      const body = await res.text();
+      const jsxDev = Object.keys(require.cache).some((k) => k.includes("jsx-dev-runtime"));
+      const prodDom = Object.keys(require.cache).some((k) => k.includes("react-dom-server.bun.production"));
+      console.log(JSON.stringify({ status: res.status, about: body.includes("<h1>About</h1>"), jsxDev, prodDom }));
+      process.exit(0);
+    `;
+    const proc = Bun.spawnSync([process.execPath, "-e", script], {
+      cwd: appDir,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (proc.exitCode !== 0) throw new Error(`boot failed:\n${proc.stderr.toString()}`);
+    const line = proc.stdout.toString().trim().split("\n").at(-1)!;
+    return JSON.parse(line) as { status: number; about: boolean; jsxDev: boolean; prodDom: boolean };
+  };
+
+  test("unset, production and development all render, and jsxDEV never loads", () => {
+    const unset = boot(undefined, 3971);
+    expect(unset).toEqual({ status: 200, about: true, jsxDev: false, prodDom: false });
+    const prod = boot("production", 3972);
+    expect(prod).toEqual({ status: 200, about: true, jsxDev: false, prodDom: true });
+    const dev = boot("development", 3973);
+    expect(dev).toEqual({ status: 200, about: true, jsxDev: false, prodDom: false });
+  }, 60_000);
+});
+
 // the counterpart guarantee: importing the server module must NOT assign
 // NODE_ENV - a module-time default is exactly the mismatch above, and an
 // embedder with a bare environment gets development react everywhere, which
