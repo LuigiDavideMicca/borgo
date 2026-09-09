@@ -413,6 +413,13 @@ describe("the orchestrator", () => {
     await isr.handle(reqFor("/p"), route, render);
     await isr.handle(reqFor("/p"), route, render);
     expect(renders.length).toBe(before);
+
+    // found by a surviving mutation: past the refusal window the mark
+    // expires, and without the drop the pre-personal copy came back as
+    // stale - the exact freeze this fix removes. the re-probe renders,
+    // finds the page still personal, and answers unstorable again
+    t += 61_000;
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
   });
 
   test("path and tag invalidation force the next request to render again", async () => {
