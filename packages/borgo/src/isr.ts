@@ -180,20 +180,8 @@ export class PageCache {
   // caller can log an invalidation that matched nothing - usually a typo
   invalidatePath(path: string): number {
     let dropped = 0;
-    if (path.endsWith("*")) {
-      const prefix = path.slice(0, -1);
-      for (const key of [...this.pages.keys()]) {
-        if (key.startsWith(prefix)) {
-          this.drop(key);
-          dropped++;
-        }
-      }
-      return dropped;
-    }
     for (const key of [...this.pages.keys()]) {
-      // the key carries the query string; an exact-path invalidation drops
-      // every query variant of that path
-      if (key === path || key.startsWith(path + "?")) {
+      if (pathMatchesKey(path, key)) {
         this.drop(key);
         dropped++;
       }
@@ -212,9 +200,22 @@ export class PageCache {
     return dropped;
   }
 
+  // one exact key, quietly: the refusal path drops the copy it just found
+  // unshareable without the invalidation log line an operator asked for
+  dropKey(key: string): void {
+    this.drop(key);
+  }
+
   get size(): number {
     return this.pages.size;
   }
+}
+
+// the same matching invalidatePath applies to cached keys, asked of one key:
+// exact, a query variant, or under a trailing-star prefix
+export function pathMatchesKey(path: string, key: string): boolean {
+  if (path.endsWith("*")) return key.startsWith(path.slice(0, -1));
+  return key === path || key.startsWith(path + "?");
 }
 
 // the copy is rendered as nobody: no cookies, no authorization, plain GET -
@@ -261,9 +262,14 @@ export type IsrOptions = {
 
 export class Isr {
   private cache: PageCache;
-  private inflight = new Map<string, Promise<CachedPage | Response>>();
+  private inflight = new Map<string, Promise<CachedPage | "refused">>();
   private policies = new Map<string, IsrPolicy | null>();
   private noted = new Set<string>();
+  // keys whose shared render was refused (a cookie, a csrf field): remembered
+  // so the wasted anonymised render happens once per window, not per request,
+  // with the policy's own tags kept so RevalidateTag can lift the mark. same
+  // bound as the cache, same reason: the key carries the query string
+  private refused = new Map<string, { at: number; tags: string[] }>();
   private log: (line: string) => void;
   private now: () => number;
   private persist?: IsrPersist;
@@ -383,21 +389,42 @@ export class Isr {
     return read;
   }
 
-  async handle(req: Request, route: RouteLike, render: SharedRender): Promise<Response | null> {
+  // "unstorable": the page opted in but its render cannot be shared (a
+  // cookie, a csrf field, a guard's redirect) - the caller must render the
+  // REAL request instead, tokens minted and guards honoured. serving the
+  // anonymised render to a real visitor was measured as a form broken for
+  // everyone and a logged-in visitor bounced to /login.
+  async handle(
+    req: Request,
+    route: RouteLike,
+    render: SharedRender,
+  ): Promise<Response | "unstorable" | null> {
     if (req.method !== "GET" && req.method !== "HEAD") return null;
     const policy = this.policyFor(route);
     if (!policy) return null;
 
     const url = new URL(req.url);
     const key = url.pathname + url.search;
+    // a remembered refusal answers without the wasted anonymised render:
+    // once per window ("manual": once until an invalidation lifts it), not
+    // once per request
+    const refusal = this.refused.get(key);
+    if (refusal) {
+      if (policy.seconds === "manual" || this.now() - refusal.at < policy.seconds * 1000) {
+        return "unstorable";
+      }
+      this.refused.delete(key);
+    }
     const entry = this.cache.get(key);
     if (entry && this.cache.fresh(entry, policy, this.now())) {
       return this.respond(req, entry, "hit");
     }
     if (entry) {
       // stale is still a page: served now, replaced in the background, one
-      // regeneration however wide the burst - and a regeneration that fails
-      // leaves the last good copy serving, said once
+      // regeneration however wide the burst - and a regeneration that THROWS
+      // leaves the last good copy serving, said once. a regeneration that
+      // comes back unshareable instead drops the copy and marks the key, so
+      // the next request renders for its own visitor
       void this.regenerate(key, req, route, policy, render).catch((error) => {
         this.note(
           `regen:${key}`,
@@ -407,7 +434,7 @@ export class Isr {
       return this.respond(req, entry, "stale");
     }
     const made = await this.regenerate(key, req, route, policy, render);
-    if (made instanceof Response) return made;
+    if (made === "refused") return "unstorable";
     return this.respond(req, made, "miss");
   }
 
@@ -420,10 +447,10 @@ export class Isr {
     route: RouteLike,
     policy: IsrPolicy,
     render: SharedRender,
-  ): Promise<CachedPage | Response> {
+  ): Promise<CachedPage | "refused"> {
     const running = this.inflight.get(key);
     if (running) return running;
-    const flight = (async (): Promise<CachedPage | Response> => {
+    const flight = (async (): Promise<CachedPage | "refused"> => {
       const rendered = await render(anonymised(req));
       const html = await rendered.text();
       const refusal = unstorable(rendered.status, rendered.headers, html);
@@ -432,10 +459,15 @@ export class Isr {
           `store:${key}`,
           `${key}: declares revalidate but ${refusal.reason} - served fresh, never cached`,
         );
-        // the body was consumed to ask the question: rebuilt, with the state named
-        const headers = new Headers(rendered.headers);
-        headers.set(CACHE_STATE_HEADER, "bypass");
-        return new Response(html, { status: rendered.status, headers });
+        // remembered with the policy's tags, so RevalidateTag can lift the
+        // mark; a copy stored before the page turned personal is dropped -
+        // replaying it would freeze content the render no longer stands by
+        this.refused.set(key, { at: this.now(), tags: policy.tags });
+        while (this.refused.size > MAX_CACHED_PAGES) {
+          this.refused.delete(this.refused.keys().next().value as string);
+        }
+        this.cache.dropKey(key);
+        return "refused";
       }
       const body = new TextEncoder().encode(html);
       const nonce = remintableNonce(rendered.headers, html) ?? undefined;
@@ -484,12 +516,21 @@ export class Isr {
 
   invalidatePath(path: string): number {
     const dropped = this.cache.invalidatePath(path);
+    // a refusal is state about the data too: the operator saying "this
+    // changed" is the escape hatch that lets a page turned personal be tried
+    // as shareable again
+    for (const key of [...this.refused.keys()]) {
+      if (pathMatchesKey(path, key)) this.refused.delete(key);
+    }
     this.log(`revalidate ${path}: ${dropped} cached ${dropped === 1 ? "copy" : "copies"} dropped`);
     return dropped;
   }
 
   invalidateTag(tag: string): number {
     const dropped = this.cache.invalidateTag(tag);
+    for (const [key, refusal] of [...this.refused]) {
+      if (refusal.tags.includes(tag)) this.refused.delete(key);
+    }
     this.log(`revalidate tag ${tag}: ${dropped} cached ${dropped === 1 ? "copy" : "copies"} dropped`);
     return dropped;
   }

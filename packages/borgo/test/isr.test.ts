@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+﻿import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -217,14 +217,14 @@ describe("the orchestrator", () => {
     const { isr, render, renders } = harness();
     const route = routeOf({ revalidate: 60 });
     const first = await isr.handle(reqFor("/p", { cookie: "session=abc" }), route, render);
-    expect(first!.headers.get(CACHE_STATE_HEADER)).toBe("miss");
-    expect(await first!.text()).toBe("<html>v1</html>");
+    expect((first as Response).headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    expect(await (first as Response).text()).toBe("<html>v1</html>");
     // the render never saw the visitor's cookie: shared by construction
     expect(renders[0].headers.get("cookie")).toBeNull();
 
     const second = await isr.handle(reqFor("/p", { cookie: "session=other" }), route, render);
-    expect(second!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
-    expect(await second!.text()).toBe("<html>v1</html>");
+    expect((second as Response).headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    expect(await (second as Response).text()).toBe("<html>v1</html>");
     expect(renders.length).toBe(1);
   });
 
@@ -247,7 +247,7 @@ describe("the orchestrator", () => {
     release();
     const responses = await burst;
     expect(renders.length).toBe(1);
-    for (const res of responses) expect(await res!.text()).toBe("<html>once</html>");
+    for (const res of responses) expect(await (res as Response).text()).toBe("<html>once</html>");
   });
 
   test("stale serves the old copy now and swaps in the new one behind", async () => {
@@ -258,14 +258,14 @@ describe("the orchestrator", () => {
     setBody(() => "<html>v2</html>");
     t += 61_000;
     const stale = await isr.handle(reqFor("/p"), route, render);
-    expect(stale!.headers.get(CACHE_STATE_HEADER)).toBe("stale");
-    expect(await stale!.text()).toBe("<html>v1</html>");
+    expect((stale as Response).headers.get(CACHE_STATE_HEADER)).toBe("stale");
+    expect(await (stale as Response).text()).toBe("<html>v1</html>");
     // the background regeneration ran exactly once
     await Bun.sleep(0);
     expect(renders.length).toBe(2);
     const after = await isr.handle(reqFor("/p"), route, render);
-    expect(after!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
-    expect(await after!.text()).toBe("<html>v2</html>");
+    expect((after as Response).headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    expect(await (after as Response).text()).toBe("<html>v2</html>");
   });
 
   test("a failed regeneration keeps serving the last good copy, said once", async () => {
@@ -283,7 +283,7 @@ describe("the orchestrator", () => {
     t += 61_000;
     for (let i = 0; i < 3; i++) {
       const res = await isr.handle(reqFor("/p"), route, render);
-      expect(await res!.text()).toBe("<html>good</html>");
+      expect(await (res as Response).text()).toBe("<html>good</html>");
       await Bun.sleep(0);
     }
     expect(log.filter((l) => l.includes("last good copy")).length).toBe(1);
@@ -294,10 +294,15 @@ describe("the orchestrator", () => {
     await Bun.sleep(0);
   });
 
-  test("a response that sets a cookie is bypassed, warned once, and never shared", async () => {
+  // the refusal answer is "unstorable", never the anonymised body: serving
+  // that render to a real visitor was a csrf form broken for everyone and a
+  // logged-in visitor bounced by their own page's guard - the caller renders
+  // the real request instead
+  test("a response that sets a cookie answers unstorable, warned once, remembered for the window", async () => {
     const log: string[] = [];
     const renders: Request[] = [];
-    const isr = new Isr({ log: (line) => log.push(line) });
+    let t = 1_000_000;
+    const isr = new Isr({ log: (line) => log.push(line), now: () => t });
     const render = async (req: Request) => {
       renders.push(req);
       const headers = new Headers({ "Content-Type": "text/html" });
@@ -305,22 +310,81 @@ describe("the orchestrator", () => {
       return new Response("<html>personal</html>", { headers });
     };
     const route = routeOf({ revalidate: 60 });
-    const first = await isr.handle(reqFor("/p"), route, render);
-    expect(first!.headers.get(CACHE_STATE_HEADER)).toBe("bypass");
-    const second = await isr.handle(reqFor("/p"), route, render);
-    expect(second!.headers.get(CACHE_STATE_HEADER)).toBe("bypass");
-    // fresh every time - a bypass must never become a shared copy
-    expect(renders.length).toBe(2);
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
+    // remembered: the wasted anonymised render happens once per window, not
+    // once per request
+    expect(renders.length).toBe(1);
     expect(log.filter((l) => l.includes("cookie")).length).toBe(1);
+    // the window over, sharing is tried again - one more probe, no more
+    t += 61_000;
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
+    expect(renders.length).toBe(2);
   });
 
-  test("a csrf field in the copy is bypassed like the exporter refuses it", async () => {
+  test("a csrf field answers unstorable like the exporter refuses it", async () => {
     const { isr, render, log, setBody } = harness();
     setBody(() => `<html><input name="${CSRF_FIELD}"></html>`);
     const route = routeOf({ revalidate: 60 });
-    const res = await isr.handle(reqFor("/p"), route, render);
-    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("bypass");
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
     expect(log.some((l) => l.includes("CsrfField"))).toBe(true);
+  });
+
+  test("with manual, only an invalidation lifts the refusal - by path or by tag", async () => {
+    const { isr, render, renders, setBody } = harness();
+    setBody(() => `<html><input name="${CSRF_FIELD}"></html>`);
+    const route = routeOf({ revalidate: "manual", tags: ["news"] });
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
+    expect(renders.length).toBe(1);
+
+    isr.invalidateTag("news");
+    setBody(() => "<html>shareable now</html>");
+    const shared = await isr.handle(reqFor("/p"), route, render);
+    expect((shared as Response).headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    expect(renders.length).toBe(2);
+
+    // and the path spelling of the same escape
+    setBody(() => `<html><input name="${CSRF_FIELD}"></html>`);
+    isr.invalidatePath("/p");
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
+    isr.invalidatePath("/p");
+    setBody(() => "<html>again</html>");
+    const again = await isr.handle(reqFor("/p"), route, render);
+    expect((again as Response).headers.get(CACHE_STATE_HEADER)).toBe("miss");
+  });
+
+  // found hunting: the stale path used to keep serving the old copy forever
+  // while burning one full render per request once the page turned personal
+  test("a cached page whose render turns personal drops the copy instead of freezing it", async () => {
+    let t = 1_000_000;
+    const log: string[] = [];
+    const renders: number[] = [];
+    let personal = false;
+    const isr = new Isr({ log: (line) => log.push(line), now: () => t });
+    const render = async () => {
+      renders.push(1);
+      const headers = new Headers({ "Content-Type": "text/html" });
+      if (personal) headers.append("Set-Cookie", "session=abc");
+      return new Response(personal ? "<html>me</html>" : "<html>shared</html>", { headers });
+    };
+    const route = routeOf({ revalidate: 60 });
+    await isr.handle(reqFor("/p"), route, render);
+
+    personal = true;
+    t += 61_000;
+    // the stale copy is still served while the background render asks
+    const stale = await isr.handle(reqFor("/p"), route, render);
+    expect((stale as Response).headers.get(CACHE_STATE_HEADER)).toBe("stale");
+    await Bun.sleep(0);
+    // the background render came back personal: copy dropped, key marked
+    expect(await isr.handle(reqFor("/p"), route, render)).toBe("unstorable");
+    // and no render per request while the mark holds
+    const before = renders.length;
+    await isr.handle(reqFor("/p"), route, render);
+    await isr.handle(reqFor("/p"), route, render);
+    expect(renders.length).toBe(before);
   });
 
   test("path and tag invalidation force the next request to render again", async () => {
@@ -330,7 +394,7 @@ describe("the orchestrator", () => {
     setBody(() => "<html>v2</html>");
     expect(isr.invalidatePath("/blog")).toBe(1);
     const after = await isr.handle(reqFor("/blog"), posts, render);
-    expect(await after!.text()).toBe("<html>v2</html>");
+    expect(await (after as Response).text()).toBe("<html>v2</html>");
     expect(renders.length).toBe(2);
 
     expect(isr.invalidateTag("posts")).toBe(1);
@@ -371,13 +435,13 @@ describe("the orchestrator", () => {
     await isr.handle(reqFor("/p"), route, render);
 
     const gz = await isr.handle(reqFor("/p", { "accept-encoding": "gzip" }), route, render);
-    expect(gz!.headers.get("Content-Encoding")).toBe("gzip");
-    const raw = new Uint8Array(await gz!.arrayBuffer());
+    expect((gz as Response).headers.get("Content-Encoding")).toBe("gzip");
+    const raw = new Uint8Array(await (gz as Response).arrayBuffer());
     expect(new TextDecoder().decode(Bun.gunzipSync(raw))).toBe("<html>v1</html>");
 
     const id = await isr.handle(reqFor("/p"), route, render);
-    expect(id!.headers.get("Content-Encoding")).toBeNull();
-    expect(await id!.text()).toBe("<html>v1</html>");
+    expect((id as Response).headers.get("Content-Encoding")).toBeNull();
+    expect(await (id as Response).text()).toBe("<html>v1</html>");
   });
 
   function harnessNegotiation() {
@@ -412,18 +476,18 @@ describe("nonce re-minting", () => {
     const isr = new Isr({ log: () => {}, mint: () => mints.shift()! });
 
     const miss = await isr.handle(new Request("http://x/p"), route, noncedRender);
-    expect(miss!.headers.get(CACHE_STATE_HEADER)).toBe("miss");
-    const missHtml = await miss!.text();
+    expect((miss as Response).headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    const missHtml = await (miss as Response).text();
     expect(missHtml).not.toContain("orig");
     expect(missHtml.match(/nonce="m1"/g)?.length).toBe(2);
-    expect(miss!.headers.get("content-security-policy")).toBe("script-src 'self' 'nonce-m1'");
+    expect((miss as Response).headers.get("content-security-policy")).toBe("script-src 'self' 'nonce-m1'");
 
     const hit = await isr.handle(new Request("http://x/p"), route, noncedRender);
-    expect(hit!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
-    const hitHtml = await hit!.text();
+    expect((hit as Response).headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    const hitHtml = await (hit as Response).text();
     expect(hitHtml.match(/nonce="m2"/g)?.length).toBe(2);
     expect(hitHtml).not.toContain("m1");
-    expect(hit!.headers.get("content-security-policy")).toBe("script-src 'self' 'nonce-m2'");
+    expect((hit as Response).headers.get("content-security-policy")).toBe("script-src 'self' 'nonce-m2'");
   });
 
   test("a re-minted replay still negotiates gzip, nonce and coding coherent", async () => {
@@ -434,9 +498,9 @@ describe("nonce re-minting", () => {
       route,
       noncedRender,
     );
-    expect(hit!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
-    expect(hit!.headers.get("Content-Encoding")).toBe("gzip");
-    const html = new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await hit!.arrayBuffer())));
+    expect((hit as Response).headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    expect((hit as Response).headers.get("Content-Encoding")).toBe("gzip");
+    const html = new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await (hit as Response).arrayBuffer())));
     expect(html).toContain('nonce="fresh"');
     expect(html).not.toContain("orig");
   });
@@ -453,12 +517,12 @@ describe("nonce re-minting", () => {
     };
     const second = new Isr({ log: () => {}, persist, mint: () => "n2" });
     const res = await second.handle(new Request("http://x/p"), route, failingRender);
-    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
-    const html = await res!.text();
+    expect((res as Response).headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    const html = await (res as Response).text();
     expect(html.match(/nonce="n2"/g)?.length).toBe(2);
     expect(html).not.toContain("orig");
     expect(html).not.toContain("n1");
-    expect(res!.headers.get("content-security-policy")).toBe("script-src 'self' 'nonce-n2'");
+    expect((res as Response).headers.get("content-security-policy")).toBe("script-src 'self' 'nonce-n2'");
   });
 });
 
@@ -484,8 +548,8 @@ describe("persistence", () => {
 
     const second = new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
     const res = await second.handle(reqFor("/p"), route, renderOnce(renders));
-    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("hit");
-    expect(await res!.text()).toBe("<html>saved</html>");
+    expect((res as Response).headers.get(CACHE_STATE_HEADER)).toBe("hit");
+    expect(await (res as Response).text()).toBe("<html>saved</html>");
     expect(renders.length).toBe(1);
 
     const gz = await second.handle(
@@ -493,7 +557,7 @@ describe("persistence", () => {
       route,
       renderOnce(renders),
     );
-    expect(gz!.headers.get("Content-Encoding")).toBe("gzip");
+    expect((gz as Response).headers.get("Content-Encoding")).toBe("gzip");
   });
 
   // a copy from another build renders another tree: swept at boot, not served
@@ -506,7 +570,7 @@ describe("persistence", () => {
 
     const second = new Isr({ log: () => {}, persist: { dir, buildId: "b2" } });
     const res = await second.handle(reqFor("/p"), route, renderOnce(renders));
-    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    expect((res as Response).headers.get(CACHE_STATE_HEADER)).toBe("miss");
     expect(renders.length).toBe(2);
     await Bun.sleep(20);
     // only the new build's pair remains on disk
@@ -520,7 +584,7 @@ describe("persistence", () => {
     const renders: number[] = [];
     const isr = new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
     const res = await isr.handle(reqFor("/p"), route, renderOnce(renders));
-    expect(res!.headers.get(CACHE_STATE_HEADER)).toBe("miss");
+    expect((res as Response).headers.get(CACHE_STATE_HEADER)).toBe("miss");
     expect(readdirSync(dir)).not.toContain("deadbeef.json");
   });
 

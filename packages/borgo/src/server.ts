@@ -24,7 +24,7 @@ import {
 } from "./compress";
 import { registerCsrf, registerIslands } from "./internal";
 import { appEnvMetas, envRefusal } from "./env-app";
-import { Isr, REVALIDATE_TOPIC } from "./isr";
+import { CACHE_STATE_HEADER, Isr, REVALIDATE_TOPIC } from "./isr";
 import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
 import { matchRoute, safeDecode, type Route } from "./router";
@@ -623,6 +623,16 @@ export async function serve({
       const cached = await isr.handle(req, matched.route, (anon) =>
         renderPage(anon, matched.route, matched.params, 200, undefined, [], true),
       );
+      // unstorable: the page opted in but its render cannot be shared - the
+      // visitor gets their OWN render below, tokens minted and guards
+      // honoured, marked so curl can still see why it is never cached.
+      // serving the anonymised copy here was a form broken for everyone and
+      // a logged-in visitor bounced by their page's own guard
+      if (cached === "unstorable") {
+        const own = await renderPage(req, matched.route, matched.params, 200);
+        own.headers.set(CACHE_STATE_HEADER, "bypass");
+        return own;
+      }
       if (cached) return cached;
     }
     return renderPage(req, matched.route, matched.params, 200);
