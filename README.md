@@ -34,7 +34,7 @@ Not a feature list — the reasoning:
 
 ## Quickstart
 
-Prerequisites: [Bun](https://bun.sh) >= 1.3, [Go](https://go.dev) >= 1.25.
+Prerequisites: [Bun](https://bun.sh) >= 1.4, [Go](https://go.dev) >= 1.27.
 
 ```bash
 bunx create-borgo@latest my-app
@@ -60,7 +60,7 @@ React components in `pages/`, routed by file name — `pages/tasks/[id].tsx` →
 
 ```tsx
 import type { LoaderContext } from "borgo-framework";
-import type { Task } from "../.borgo/api-types";
+import type { Task } from "@/.borgo/api-types";
 
 export async function loader({ params, api }: LoaderContext) {
   const { task } = await api("GET /api/tasks/{id}", { params: { id: params.id } });
@@ -185,7 +185,7 @@ Three layers, all run by CI on every pull request and on every push to `main`:
 
 ## How it compares
 
-Honest comparison with the frameworks a borgo adopter would otherwise pick. ✓ means shipped and documented here; a — links to the reasoning in the next section.
+Honest comparison with the frameworks a borgo adopter would otherwise pick. ✓ means shipped and documented here; a — links to the reasoning in the next section. For measured numbers rather than feature rows, [bench/](bench/) is a rerunnable harness with its method written before its results, and [bench/site/](bench/site/) renders the committed run as a page.
 
 | | borgo | Next.js | Nuxt | SolidStart |
 | --- | --- | --- | --- | --- |
@@ -215,7 +215,7 @@ Honest comparison with the frameworks a borgo adopter would otherwise pick. ✓ 
 
 Everything here is a deliberate choice, with the reason attached:
 
-- **No React Server Components.** Loaders returning serialized props are the model: they cover data-on-the-server with a runtime small enough to read. RSC needs deep bundler/runtime integration that would be most of the framework's weight for one feature.
+- **No React Server Components.** Loaders returning serialized props are the model: they cover data-on-the-server with a runtime small enough to read. RSC needs deep bundler/runtime integration that would be most of the framework's weight for one feature — [the argument, its costs, and what would reopen it](docs/why.md#why-no-react-server-components).
 - **No edge or serverless targets.** borgo is self-hosted by conviction — one box, two processes, a reverse proxy. Pages that declare `revalidate` are rendered once and shared with on-demand invalidation from Go — ISR economics without the edge — and `borgo export` covers the fully static case; what borgo will not do is deploy you to someone else's runtime.
 - **No image/font optimization pipeline.** The build is one `Bun.build` call and stays that way; put a CDN or `vips` in front if you need it.
 - **No plugin system.** The framework is small enough that the extension mechanism is reading the source and changing it.

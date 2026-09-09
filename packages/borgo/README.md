@@ -2,7 +2,7 @@
 
 The Bun/TypeScript core of [borgo](https://github.com/LuigiDavideMicca/borgo): SSR front server, file-based router, build pipeline and dev orchestrator. See the repository README for the full picture.
 
-Requires Bun >= 1.3. The package ships its TypeScript source directly — Bun runs it natively, and what you read on npm is what runs.
+Requires Bun >= 1.4. The package ships its TypeScript source directly — Bun runs it natively, and what you read on npm is what runs.
 
 ```bash
 bunx create-borgo@latest my-app

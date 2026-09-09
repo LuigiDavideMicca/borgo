@@ -82,6 +82,21 @@ volumes:
 
 `borgo.Push` needs the reverse direction across containers: set `FRONT_URL=http://front:3000` on the api service and the same `BORGO_PUSH_KEY` on both — plus `BORGO_PUSH_INSECURE=1`, because that URL is cleartext to another host and borgo refuses to put the key on it otherwise. On a compose network that refusal is the wrong answer, and saying so is how you tell borgo the network is yours. See [the key and cleartext](#the-key-and-cleartext) below.
 
+## Cold start, measured — and the serverless question
+
+borgo targets no serverless platform, and [why](why.md#why-self-hosted-only-no-serverless-targets) is argued where the other design positions are. What belongs here is the number that decision is usually litigated with. A scaffolded `full` app, built into its shipped `Dockerfile` and started cold — measured from the moment `docker run` is issued, polling every 15 ms:
+
+| First 200 on | Median of 5 runs |
+| --- | --- |
+| `/healthz` (both halves supervised and answering) | 330 ms |
+| `/` (a real server-rendered page) | 343 ms |
+
+Measured on Docker Desktop (WSL2) on a development laptop. Most of that is Docker, not borgo: the container's own timestamped log shows the Go API answering ~40 ms after the entrypoint runs and the front server printing `ready in 12ms` about 100 ms in — the rest is container creation, which a Linux host does faster than Docker Desktop. The runtime image is 353 MB: `oven/bun:slim` plus production `node_modules`, the app sources the SSR server needs, and the static Go binary.
+
+A third of a second matters for one deployment shape this page otherwise doesn't cover: scale-to-zero *container* platforms (Fly machines, Cloud Run and their kind), where the first visitor after an idle period pays the boot. borgo makes that visitor wait roughly a blink, and inside the container nothing platform-specific is needed — it is the same image this page builds. Two honest caveats before you do it: everything in-memory (the SSE hub, the WebSocket relay, the `full` template's session store) evaporates with the instance and is never shared across instances, and an event stream held open is exactly the connection such platforms bill or cut. If that shape fits your app anyway, the number above says the platform's cold-start economics are not the obstacle.
+
+What stays refused is function-per-request — bundling the front server into a FaaS runtime, one invocation per render. It is not a matter of boot time: the SSE hub, the topic relay, the asset index and the supervised shutdown all assume a process that outlives the request, and on a per-invocation platform each becomes either a lie or a managed service borgo would have to document and test six ways. That adapter matrix is the weight this framework exists to not carry — the [full argument, with its bill](why.md#why-self-hosted-only-no-serverless-targets), stands in one place rather than being re-fought per platform.
+
 ## Reverse proxy
 
 Only the front server needs to be reachable — it proxies `/api/*` to Go and speaks WebSockets natively. Compression is built-in — static assets are precompressed to `.gz`/`.br` at build time, dynamic responses are gzipped on the fly — so the proxy should not compress again (no `encode` directive in Caddy, `gzip off` is nginx's default). `borgo deploy init caddy` (or `nginx`) writes these configs into your project — `Caddyfile` and `site.conf` respectively — templated with your app's name and port; an existing file is never overwritten unless you pass `--force`. Caddy gives you TLS in one block, and the rest of it is the policy nginx has to spell out longhand:

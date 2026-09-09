@@ -22,7 +22,7 @@ A page may export a `loader` that runs on the server before rendering. Whatever 
 
 ```tsx
 import type { LoaderContext } from "borgo-framework";
-import type { Task } from "../.borgo/api-types";
+import type { Task } from "@/.borgo/api-types";
 
 export async function loader({ params, api }: LoaderContext) {
   const { task } = await api("GET /api/tasks/{id}", { params: { id: params.id } });

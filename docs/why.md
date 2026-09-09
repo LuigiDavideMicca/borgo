@@ -1,6 +1,6 @@
 # Why borgo works this way
 
-Six questions a skeptical engineer asks before adopting a framework, and six answers with the bill attached. The [README](../README.md#why-borgo) states the positions; this page argues them, and says what each one costs you. If you are evaluating borgo for a team, read this and [what this is not](../README.md#what-this-is-not) together — between them they describe the shape of the hole borgo will leave in your stack.
+Seven questions a skeptical engineer asks before adopting a framework, and seven answers with the bill attached. The [README](../README.md#why-borgo) states the positions; this page argues them, and says what each one costs you. If you are evaluating borgo for a team, read this and [what this is not](../README.md#what-this-is-not) together — between them they describe the shape of the hole borgo will leave in your stack.
 
 ## Why Go for the backend
 
@@ -67,6 +67,16 @@ The second thing they buy is that they are free. The usual bargain with API type
 **What it costs.** A version boundary the types cannot see: deploy a new front server against an old API and TypeScript is perfectly happy while the wire disagrees. If you deploy the two halves separately, that risk is real and yours to manage; deploying them as one unit, which is what `borgo build` and the scaffolded `Dockerfile` push you toward, mostly removes it.
 
 There is also a comfort cost. The client's type machinery — conditional types that make `params` required exactly when the pattern has placeholders, and `body` required exactly when the handler binds one — is genuinely useful and produces genuinely bad error messages when you get a call wrong. And `unknown` is a real answer, not a placeholder: when the analysis cannot see a response type you will cast, and a cast is a promise the compiler stops checking.
+
+## Why no React Server Components
+
+RSC answers two real questions: how does a component fetch its own data on the server, and how does server-only code stay out of the bundle. borgo answers both with machinery it already has. Data on the server is the loader — one per page, feeding plain components as props, with the fetch visible in one place instead of scattered down the tree. Server code staying out of the bundle is the strip transform — `loader` and `action` are cut from the page module before it is bundled — plus `hydrate = false` and deferred islands for shipping less JavaScript in the first place. What RSC buys *beyond* that is per-component granularity: a server component in the middle of a client tree, streamed as data rather than HTML.
+
+The price of that granularity is the reason it is not here. RSC is not a feature you add; it is a wire format (Flight), a serialization contract for props crossing the boundary, two module graphs with `"use client"` / `"use server"` directives policing the seam, and a bundler that understands all of it natively. In every framework that ships RSC, that integration *is* most of the framework. borgo's front half is small enough to read in a sitting precisely because it does not carry a second rendering protocol, and a version of borgo that did would be the large framework this page keeps declining to be.
+
+The decision is a judgment about cost, not a claim that the model is bad — so here is what would reopen it. Today the transform, the module graphs and the Flight encoding would all be borgo's to own; the day Bun's bundler ships RSC support natively — the dual graph and the Flight output as options of `Bun.build`, the way its fast-refresh transform already is — the integration cost collapses to wiring plus pinning tests, and the question gets asked again on those numbers. Until then, the answer is the loader.
+
+**What it costs.** Per-component server data fetching does not exist: a component deep in the tree that needs server data gets it through the page's loader and props, and a page whose sections have genuinely independent data wants composition in the loader, not colocation in the components. No zero-bundle server-only components inside a hydrated tree — hydration opt-out is per page (plus islands), coarser than RSC's per-component grain. And no streaming of partially-rendered UI as data: borgo streams HTML. If your product is a dashboard of many independent server-fed regions, RSC's shape genuinely fits it better, and Next is the honest recommendation.
 
 ## Why self-hosted only, no serverless targets
 

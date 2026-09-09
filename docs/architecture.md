@@ -169,7 +169,7 @@ The same endpoint is what hover prefetching warms. See [client navigation](clien
     api                       the go binary (api.exe on windows)
 ```
 
-The asset build is one `Bun.build` call with `splitting: true` and two entry points. A plugin transpiles your own `pages/*.tsx` with the `loader`, `action`, `prerender` and `prerenderPaths` exports eliminated and unused imports trimmed, which is why a page can `import { db } from "../db"` at the top of its loader and ship none of it to the browser. In production every output is named `[name]-[hash]`, entry points included; `index.html` keeps naming `/assets/client.js` and `/assets/style.css`, and the build records which hashed file each logical name became so the server resolves them at boot. A dev build names its entries `client.js` and `islands-client.js` whatever they contain, which is why `precache.json` carries a content stamp rather than trusting the names.
+The asset build is one `Bun.build` call with `splitting: true` and two entry points. A plugin transpiles your own `pages/*.tsx` with the `loader`, `action`, `prerender` and `prerenderPaths` exports eliminated and unused imports trimmed, which is why a page can `import { db } from "@/db"` at the top of its loader and ship none of it to the browser. In production every output is named `[name]-[hash]`, entry points included; `index.html` keeps naming `/assets/client.js` and `/assets/style.css`, and the build records which hashed file each logical name became so the server resolves them at boot. A dev build names its entries `client.js` and `islands-client.js` whatever they contain, which is why `precache.json` carries a content stamp rather than trusting the names.
 
 The build also refuses output it would not serve. Importing a file from beside a source — `import logo from "./logo.png"`, `import "./x.css"`, `new URL("./x.png", import.meta.url)` aimed at a path `public/` does not hold, or `import.meta.dir + "/x.png"` — emits a URL no route answers and, in the SSR pass, writes the machine's absolute path into the document. The check reads the *emitted* bundles, never the sources, because the same pattern is correct in a loader; any hit throws `AssetChannelRefused` before the build mark is cleared, so the next `borgo start` rebuilds and refuses again rather than serving the leak.
 
@@ -248,7 +248,7 @@ Because `ApiRoutes` is an interface the framework declares empty and `borgogen` 
 
 ```tsx
 import type { LoaderContext } from "borgo-framework";
-import type { Task } from "../.borgo/api-types";
+import type { Task } from "@/.borgo/api-types";
 
 export async function loader({ api }: LoaderContext) {
   const { tasks } = await api("GET /api/tasks");

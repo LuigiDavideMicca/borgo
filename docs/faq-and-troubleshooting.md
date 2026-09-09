@@ -14,7 +14,7 @@ No, by design — the API side is Go. But loaders and actions run in Bun on the 
 Yes. Pages are server-rendered, forms post natively (the client runtime only *enhances* them when present), and `hydrate = false` pages ship no page JavaScript at all. See [client navigation and hydration](client-navigation.md).
 
 **Are there React Server Components?**
-No. borgo's model is one loader per page feeding plain components — simpler to reason about, and honest about where code runs. The [README](../README.md) lists what borgo deliberately is not.
+No. borgo's model is one loader per page feeding plain components — simpler to reason about, and honest about where code runs. [Why, what it costs, and what would reopen the decision](why.md#why-no-react-server-components) is argued with the other design positions.
 
 **Which databases can I use?**
 Any — the API is plain Go, so every Go driver works. The examples use SQLite with a `/data` volume (`DB_PATH`); swap in Postgres or anything else without touching the framework.

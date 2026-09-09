@@ -1,6 +1,6 @@
 # Performance
 
-Where borgo's speed comes from, mechanically: what work has been moved out of the request path, what the network is asked to carry, and where the streams push back. No numbers on this page — it is about the machinery, and every claim on it is something you can go read in the source. Where borgo will lose is at the end, in as much detail as the rest.
+Where borgo's speed comes from, mechanically: what work has been moved out of the request path, what the network is asked to carry, and where the streams push back. No numbers on this page — it is about the machinery, and every claim on it is something you can go read in the source. Where borgo will lose is at the end, in as much detail as the rest. The numbers live in [bench/](../bench/), a harness written so that somebody who does not trust us can rerun it, with its committed results rendered as [a page](../bench/site/) that is itself a borgo app.
 
 If you are looking for the shape of the system first, read [architecture](architecture.md); this page assumes it.
 

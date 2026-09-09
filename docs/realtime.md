@@ -51,7 +51,7 @@ And in the page:
 
 ```tsx
 import { useEffect, useState } from "react";
-import type { Task } from "../.borgo/api-types";
+import type { Task } from "@/.borgo/api-types";
 
 export default function Tasks({ tasks: initial }: { tasks: Task[] }) {
   const [tasks, setTasks] = useState(initial);

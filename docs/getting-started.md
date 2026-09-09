@@ -1,6 +1,6 @@
 # Getting started
 
-Build something small and complete: a page that reads data from a Go API, a form that writes back, and one interactive island. Follow it top to bottom and you will have touched every convention borgo has. It takes about twenty minutes, and you need [Bun](https://bun.sh) 1.3+ and [Go](https://go.dev) 1.25+.
+Build something small and complete: a page that reads data from a Go API, a form that writes back, and one interactive island. Follow it top to bottom and you will have touched every convention borgo has. It takes about twenty minutes, and you need [Bun](https://bun.sh) 1.4+ and [Go](https://go.dev) 1.27+.
 
 ## Scaffold
 
@@ -127,7 +127,7 @@ Replace `pages/index.tsx` with:
 
 ```tsx no-check
 import type { LoaderContext } from "borgo-framework";
-import type { Note } from "../.borgo/api-types";
+import type { Note } from "@/.borgo/api-types";
 
 export const head = { title: "Notes" };
 
@@ -191,7 +191,7 @@ Then give the page an `action` and a form:
 
 ```tsx no-check
 import { CsrfField, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
-import type { Note } from "../.borgo/api-types";
+import type { Note } from "@/.borgo/api-types";
 
 export const head = { title: "Notes" };
 

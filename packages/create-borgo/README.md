@@ -50,7 +50,7 @@ bunx create-borgo@latest ci-app --yes --no-git --no-docker
 
 The `full` template also gets a `.env` with a fresh `SESSION_SECRET` (48 CSPRNG bytes, generated per scaffold; `.env` is gitignored and dockerignored in every template): `bun run` loads it and borgo hands it to the Go binary, so sessions work out of the box and no key ever sits in the source. Keep it out of the repository; `borgo deploy init systemd` reads it from the same file.
 
-Requires Bun >= 1.3 and Go >= 1.25 — `bun run doctor` checks both, plus Docker, permissions and the Bun shim. Every scaffold ships pages, a Go `api/` package with `//borgo:route` handlers and pregenerated api types (so the typed client works before the first dev run) — see the [repository README](https://github.com/LuigiDavideMicca/borgo) for the full picture.
+Requires Bun >= 1.4 and Go >= 1.27 — `bun run doctor` checks both, plus Docker, permissions and the Bun shim. Every scaffold ships pages, a Go `api/` package with `//borgo:route` handlers and pregenerated api types (so the typed client works before the first dev run) — see the [repository README](https://github.com/LuigiDavideMicca/borgo) for the full picture.
 
 ---
 
