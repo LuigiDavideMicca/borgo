@@ -142,6 +142,34 @@ describe("PageCache", () => {
     expect(cache.get("/docs/c")).toBeDefined();
   });
 
+  // found hunting: the comment promised "/blog/* drops /blog and everything
+  // below it" while the code only took what was below - with "manual" the
+  // index page was never droppable by prefix
+  test("the starred prefix drops its own base page and the base's query variants", () => {
+    const cache = new PageCache();
+    cache.store("/blog", page());
+    cache.store("/blog?page=2", page());
+    cache.store("/blog/a", page());
+    cache.store("/blogging", page());
+    expect(cache.invalidatePath("/blog/*")).toBe(3);
+    expect(cache.get("/blogging")).toBeDefined();
+  });
+
+  // found hunting: the cache keys the percent-encoded pathname, and a go
+  // handler writes borgo.Revalidate("/caffè") in its own spelling - both
+  // spellings must meet. over-dropping (an encoded %2F read as a slash) is
+  // the safe direction: an extra render shows itself, a stale copy hides
+  test("an invalidation matches whichever percent-spelling the caller used", () => {
+    const cache = new PageCache();
+    cache.store("/caff%C3%A8", page());
+    expect(cache.invalidatePath("/caffè")).toBe(1);
+    cache.store("/caff%C3%A8", page());
+    expect(cache.invalidatePath("/caff%C3%A8")).toBe(1);
+    // and the deliberate over-drop: an encoded slash reads as a real one
+    cache.store("/a%2Fb", page());
+    expect(cache.invalidatePath("/a/b")).toBe(1);
+  });
+
   test("a tag drops every page that declared it, and only those", () => {
     const cache = new PageCache();
     cache.store("/a", page({ tags: ["posts"] }));

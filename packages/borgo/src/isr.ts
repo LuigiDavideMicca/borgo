@@ -212,10 +212,32 @@ export class PageCache {
 }
 
 // the same matching invalidatePath applies to cached keys, asked of one key:
-// exact, a query variant, or under a trailing-star prefix
+// exact, a query variant, or under a trailing star. found hunting, twice:
+// "/blog/*" now drops /blog itself too, as its own comment always promised
+// (with "manual" the index page was otherwise never droppable by prefix);
+// and both spellings are compared, because the cache keys the encoded
+// pathname while borgo.Revalidate("/caffè") arrives as the author wrote it.
+// decoding both sides can only drop MORE (an encoded %2F reads as a slash),
+// which is the safe direction for an invalidation - stale is the failure
+// that hides, an extra render is the one that does not
+const decodedForm = (s: string) => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+};
+
 export function pathMatchesKey(path: string, key: string): boolean {
-  if (path.endsWith("*")) return key.startsWith(path.slice(0, -1));
-  return key === path || key.startsWith(path + "?");
+  const matches = (p: string, k: string): boolean => {
+    if (p.endsWith("/*")) {
+      const base = p.slice(0, -2) || "/";
+      return k === base || k.startsWith(base + "?") || k.startsWith(p.slice(0, -1));
+    }
+    if (p.endsWith("*")) return k.startsWith(p.slice(0, -1));
+    return k === p || k.startsWith(p + "?");
+  };
+  return matches(path, key) || matches(decodedForm(path), decodedForm(key));
 }
 
 // the copy is rendered as nobody: no cookies, no authorization, plain GET -
