@@ -24,7 +24,10 @@ type RawRun = {
     repo: { commit: string; dirty: boolean; borgoVersion: string };
     loadTool: { name: string; version: string };
     note?: string;
-    machineBusyWarning?: string;
+    // schema 2: the run's own idle check, before the first app and after
+    // the last kill - the contamination evidence rides with the numbers
+    idleCheck?: { busyRatioAtStart: number; quietThreshold: number; quiet: boolean };
+    close?: { busyRatioAtEnd: number };
   };
   config: {
     connections: number;
@@ -79,11 +82,49 @@ for (const dir of readdirSync(appsDir, { withFileTypes: true })) {
   }
 }
 for (const r of raw.results) {
-  if (r.status !== "ok") notMeasured.push({ name: r.app, reason: r.error ?? r.status });
+  // a two-sweep campaign lists every app twice; one reason per name
+  if (r.status !== "ok" && !notMeasured.some((n) => n.name === r.app)) {
+    notMeasured.push({ name: r.app, reason: r.error ?? r.status });
+  }
 }
 // readdir order is platform-dependent (alphabetical on windows, inode order on
 // linux), and the freshness test byte-compares this file against a regeneration
 notMeasured.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+// a campaign measures every app once per sweep (the run order table in the
+// committed report shows both), so the same app arrives here twice. the page
+// draws ONE bar per app, and it draws the WORSE of the two sweeps - the
+// conservative reading of a shared machine, immune to cherry-picking by
+// construction, and it applies to borgo exactly as it applies to everyone.
+// worse means: lower req/s for a load scenario (p50/p99 travel with the
+// sweep that owned that number), higher bytes-per-connection and higher
+// idle rss for memory
+type OkResult = RawRun["results"][number];
+const byApp = new Map<string, OkResult[]>();
+for (const r of raw.results) {
+  if (r.status !== "ok") continue;
+  const list = byApp.get(r.app) ?? [];
+  list.push(r);
+  byApp.set(r.app, list);
+}
+const mergedResults = [...byApp.values()].map((sweeps) => {
+  const first = sweeps[0]!;
+  const scenarios = new Map<string, OkResult["scenarios"][number]>();
+  for (const sweep of sweeps) {
+    for (const s of sweep.scenarios) {
+      if (s.status !== "ok") continue;
+      const held = scenarios.get(s.scenario);
+      if (!held) {
+        scenarios.set(s.scenario, s);
+      } else if (s.load && held.load) {
+        if (s.load.median.requestsPerSec < held.load.median.requestsPerSec) scenarios.set(s.scenario, s);
+      } else if (s.memory && held.memory) {
+        if (s.memory.bytesPerConnection > held.memory.bytesPerConnection) scenarios.set(s.scenario, s);
+      }
+    }
+  }
+  return { ...first, scenarios: [...scenarios.values()] };
+});
 
 const data = {
   file: newest,
@@ -94,10 +135,23 @@ const data = {
     repo: raw.environment.repo,
     loadTool: raw.environment.loadTool,
     note: raw.environment.note ?? null,
+    // the run's own verdict on its machine: rendered as a banner when the
+    // idle check failed, because a caveat the report prints and the page
+    // hides is a caveat the reader who matters never sees
+    idle: raw.environment.idleCheck
+      ? {
+          busyAtStart: raw.environment.idleCheck.busyRatioAtStart,
+          busyAtEnd: raw.environment.close?.busyRatioAtEnd ?? null,
+          threshold: raw.environment.idleCheck.quietThreshold,
+          quiet: raw.environment.idleCheck.quiet,
+        }
+      : null,
   },
   config: raw.config,
-  apps: raw.results
-    .filter((r) => r.status === "ok")
+  // how many times the campaign swept the app list: rendered beside the
+  // worse-of-sweeps rule so the reader knows what "worse" is worse OF
+  sweeps: Math.max(1, ...[...byApp.values()].map((s) => s.length)),
+  apps: mergedResults
     .map((r) => ({
       name: r.app,
       framework: r.manifest.framework,

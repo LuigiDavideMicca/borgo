@@ -1,0 +1,6011 @@
+{
+  "schema": 2,
+  "environment": {
+    "capturedAt": "2026-09-10T15:46:47.624Z",
+    "host": {
+      "platform": "win32",
+      "osType": "Windows_NT",
+      "osRelease": "10.0.26200",
+      "arch": "x64",
+      "cpuModel": "11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz",
+      "cpuCount": 8,
+      "cpuMhz": 2803,
+      "totalMemBytes": 34024464384,
+      "freeMemBytesAtStart": 17242935296
+    },
+    "versions": {
+      "go": "go version go1.27.0 windows/amd64",
+      "bun": "1.4.2",
+      "node": "v24.16.0",
+      "npm": "11.13.0",
+      "deno": "not installed"
+    },
+    "repo": {
+      "commit": "cf3e1f608df7c08674adc7e3d74b85342fca51a2",
+      "dirty": false,
+      "borgoVersion": "0.21.0"
+    },
+    "loadTool": {
+      "name": "oha",
+      "path": "C:\\Users\\luigi\\Developer\\borgo\\bench\\.tools\\v1.15.0-oha-windows-amd64.exe",
+      "version": "oha 1.15.0"
+    },
+    "note": "dev laptop, mains power; VS Code and an agent session idle in background during the run - read the cpu-idle rows and the drift-between-sweeps table before reading any row as a comparison",
+    "idleCheck": {
+      "busyRatioAtStart": 0.22284226190476186,
+      "sampleMs": 1000,
+      "quietThreshold": 0.1,
+      "quiet": false
+    },
+    "close": {
+      "finishedAt": "2026-09-10T17:12:42.534Z",
+      "freeMemBytesAtEnd": 20992720896,
+      "busyRatioAtEnd": 0.23682902584493037,
+      "elapsedSeconds": 5154.91
+    }
+  },
+  "config": {
+    "connections": 64,
+    "durationSeconds": 30,
+    "warmupSeconds": 5,
+    "runs": 3,
+    "memoryConnections": 1000,
+    "scenarios": [
+      "hello-json",
+      "api-list",
+      "ssr-page",
+      "static-asset",
+      "memory-conn"
+    ],
+    "apps": [
+      "astro",
+      "borgo",
+      "elysia",
+      "express",
+      "fastify",
+      "fresh",
+      "hono",
+      "nextjs"
+    ],
+    "passes": 2,
+    "passOrders": [
+      [
+        "astro",
+        "borgo",
+        "elysia",
+        "express",
+        "fastify",
+        "fresh",
+        "hono",
+        "nextjs"
+      ],
+      [
+        "nextjs",
+        "hono",
+        "fresh",
+        "fastify",
+        "express",
+        "elysia",
+        "borgo",
+        "astro"
+      ]
+    ],
+    "skipBuild": false,
+    "skipInstall": false,
+    "loadArgvTemplate": "-z 30s -c 64 --no-tui --output-format json --disable-compression <url>"
+  },
+  "results": [
+    {
+      "app": "astro",
+      "manifest": {
+        "name": "astro",
+        "framework": "Astro 5 (node standalone adapter)",
+        "language": "JavaScript (Astro + React island)",
+        "runtime": "node",
+        "status": "implemented",
+        "port": 43021,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static",
+            "src/lib"
+          ],
+          [
+            "bun",
+            "x",
+            "astro",
+            "build"
+          ]
+        ],
+        "start": [
+          "node",
+          "./dist/server/entry.mjs"
+        ],
+        "env": {
+          "PORT": "${PORT}",
+          "HOST": "127.0.0.1",
+          "NODE_ENV": "production"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "ssr-page",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Server output with the standalone Node adapter - self-hosted, like borgo. Every route sets `prerender = false`, because Astro's default would turn /page into a build-time static file and the scenario is per-request rendering. The React counter is an island (client:load), which is Astro's idiom; Astro therefore ships less client JS than the React frameworks here by design, not by accident. The shared dataset module is copied into src/lib at build time.",
+        "versionCommand": [
+          "node",
+          "-e",
+          "console.log(require('astro/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 69525504,
+            "loadedRssBytes": 126099456,
+            "deltaBytes": 56573952,
+            "bytesPerConnection": 56573.952,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 8416,
+                "rssBytes": 96641024,
+                "command": "node.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 3449.2910128841927,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 103472,
+                "latencyMs": {
+                  "p50": 15.728099999999998,
+                  "p90": 22.4686,
+                  "p95": 28.9076,
+                  "p99": 66.5846,
+                  "p9999": 397.5901
+                },
+                "statusCodes": {
+                  "200": 103472
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 3963.526862831552,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 118887,
+                "latencyMs": {
+                  "p50": 15.019,
+                  "p90": 19.942999999999998,
+                  "p95": 21.729200000000002,
+                  "p99": 28.76,
+                  "p9999": 65.5963
+                },
+                "statusCodes": {
+                  "200": 118887
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 3937.8537945454445,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 118119,
+                "latencyMs": {
+                  "p50": 15.1588,
+                  "p90": 19.927,
+                  "p95": 21.553099999999997,
+                  "p99": 29.2803,
+                  "p9999": 68.1109
+                },
+                "statusCodes": {
+                  "200": 118119
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 3937.8537945454445,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 118119,
+              "latencyMs": {
+                "p50": 15.1588,
+                "p90": 19.942999999999998,
+                "p95": 21.729200000000002,
+                "p99": 29.2803,
+                "p9999": 68.1109
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 340478,
+              "statusCodes": {
+                "200": 340478
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 3213.073022203239,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 96382,
+                "latencyMs": {
+                  "p50": 18.5043,
+                  "p90": 24.2322,
+                  "p95": 27.249200000000002,
+                  "p99": 36.1171,
+                  "p9999": 62.1078
+                },
+                "statusCodes": {
+                  "200": 96382
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 3256.084581481874,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 97656,
+                "latencyMs": {
+                  "p50": 18.3565,
+                  "p90": 23.8352,
+                  "p95": 26.2835,
+                  "p99": 31.927200000000003,
+                  "p9999": 80.2736
+                },
+                "statusCodes": {
+                  "200": 97656
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 3290.923796535455,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 98724,
+                "latencyMs": {
+                  "p50": 18.2754,
+                  "p90": 23.424899999999997,
+                  "p95": 25.4602,
+                  "p99": 31.1414,
+                  "p9999": 58.8573
+                },
+                "statusCodes": {
+                  "200": 98724
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 3256.084581481874,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 97656,
+              "latencyMs": {
+                "p50": 18.3565,
+                "p90": 23.8352,
+                "p95": 26.2835,
+                "p99": 31.927200000000003,
+                "p9999": 62.1078
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 292762,
+              "statusCodes": {
+                "200": 292762
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "text/html",
+            "bytes": 8311
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 2287.6760326778885,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 68575,
+                "latencyMs": {
+                  "p50": 26.357499999999998,
+                  "p90": 33.371199999999995,
+                  "p95": 36.592600000000004,
+                  "p99": 46.2488,
+                  "p9999": 68.0914
+                },
+                "statusCodes": {
+                  "200": 68575
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2301.2253168632283,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 69012,
+                "latencyMs": {
+                  "p50": 26.112199999999998,
+                  "p90": 32.9379,
+                  "p95": 36.8042,
+                  "p99": 47.037299999999995,
+                  "p9999": 77.7143
+                },
+                "statusCodes": {
+                  "200": 69012
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2294.4835937391194,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 68785,
+                "latencyMs": {
+                  "p50": 26.239700000000003,
+                  "p90": 33.2162,
+                  "p95": 36.678399999999996,
+                  "p99": 45.004599999999996,
+                  "p9999": 70.1707
+                },
+                "statusCodes": {
+                  "200": 68785
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 2294.4835937391194,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 68785,
+              "latencyMs": {
+                "p50": 26.239700000000003,
+                "p90": 33.2162,
+                "p95": 36.678399999999996,
+                "p99": 46.2488,
+                "p9999": 70.1707
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 206372,
+              "statusCodes": {
+                "200": 206372
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 4948.721879930877,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 148439,
+                "latencyMs": {
+                  "p50": 12.2138,
+                  "p90": 15.5702,
+                  "p95": 17.6525,
+                  "p99": 20.8704,
+                  "p9999": 53.6254
+                },
+                "statusCodes": {
+                  "200": 148439
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 4910.763912208023,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 147334,
+                "latencyMs": {
+                  "p50": 12.1904,
+                  "p90": 16.0686,
+                  "p95": 18.3519,
+                  "p99": 21.6475,
+                  "p9999": 56.86709999999999
+                },
+                "statusCodes": {
+                  "200": 147334
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 4970.222762841891,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 149101,
+                "latencyMs": {
+                  "p50": 12.072299999999998,
+                  "p90": 15.603,
+                  "p95": 17.8289,
+                  "p99": 22.0848,
+                  "p9999": 56.2603
+                },
+                "statusCodes": {
+                  "200": 149101
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 4948.721879930877,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 148439,
+              "latencyMs": {
+                "p50": 12.1904,
+                "p90": 15.603,
+                "p95": 17.8289,
+                "p99": 21.6475,
+                "p9999": 56.2603
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 444874,
+              "statusCodes": {
+                "200": 444874
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "7.3.2",
+      "startup": {
+        "timeToFirstResponseMs": 331.89800000000014,
+        "bootRssBytes": 78127104,
+        "bootRssStable": true
+      },
+      "pass": 1,
+      "orderIndex": 1
+    },
+    {
+      "app": "borgo",
+      "manifest": {
+        "name": "borgo",
+        "framework": "borgo (this repo)",
+        "language": "TypeScript + Go",
+        "runtime": "bun (SSR front server) + go (API binary)",
+        "status": "implemented",
+        "port": 43000,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ],
+          [
+            "go",
+            "mod",
+            "tidy"
+          ],
+          [
+            "bun",
+            "run",
+            "build"
+          ]
+        ],
+        "start": [
+          "bun",
+          "node_modules/borgo-framework/src/cli.ts",
+          "start"
+        ],
+        "env": {
+          "PORT": "${PORT}",
+          "API_PORT": "${API_PORT}",
+          "SESSION_SECRET": "bench-only-secret-0123456789abcdef",
+          "BUN_CONFIG_MAX_HTTP_REQUESTS": "16384",
+          "NODE_ENV": "production"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "ssr-page",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Two processes: the Bun front server on PORT and the Go API binary on API_PORT. /api/* is proxied by the front server, which is what a deployed borgo app does - so the JSON scenarios include the proxy hop. Measured against the borgo source in this repo (go.mod replace, package.json file: link), not a published release. BUN_CONFIG_MAX_HTTP_REQUESTS is raised from Bun's default of 256 because that default caps the number of concurrent requests the front server can have in flight to the Go API - which silently ceilings concurrent SSE streams at ~255. This is disclosed rather than quietly applied: see the finding in bench/README.md. Started via the CLI entrypoint directly, exactly as the shipped Dockerfile does, rather than through `bun run start`: the latter adds a shell and two launcher processes that RSS-of-the-tree would otherwise charge to borgo, and that no production deployment runs.",
+        "versionCommand": [
+          "bun",
+          "-e",
+          "console.log(require('borgo-framework/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 56217600,
+            "loadedRssBytes": 122783744,
+            "deltaBytes": 66566144,
+            "bytesPerConnection": 66566.144,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 9552,
+                "rssBytes": 63000576,
+                "command": "bun.exe"
+              },
+              {
+                "pid": 2532,
+                "rssBytes": 59777024,
+                "command": "api.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 27
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 14213.373671696936,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 426520,
+                "latencyMs": {
+                  "p50": 3.9924,
+                  "p90": 5.372199999999999,
+                  "p95": 6.9393,
+                  "p99": 14.232,
+                  "p9999": 57.3059
+                },
+                "statusCodes": {
+                  "200": 426520
+                },
+                "errors": {
+                  "aborted due to deadline": 62
+                }
+              },
+              {
+                "requestsPerSec": 14394.633404721673,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 431861,
+                "latencyMs": {
+                  "p50": 3.9283,
+                  "p90": 5.2369,
+                  "p95": 6.6697,
+                  "p99": 14.5946,
+                  "p9999": 50.6541
+                },
+                "statusCodes": {
+                  "200": 431861
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 14612.845455126286,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 438357,
+                "latencyMs": {
+                  "p50": 3.9022,
+                  "p90": 5.091,
+                  "p95": 6.6290000000000004,
+                  "p99": 14.291500000000001,
+                  "p9999": 42.7398
+                },
+                "statusCodes": {
+                  "200": 438357
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 14394.633404721673,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 431861,
+              "latencyMs": {
+                "p50": 3.9283,
+                "p90": 5.2369,
+                "p95": 6.6697,
+                "p99": 14.291500000000001,
+                "p9999": 50.6541
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1296738,
+              "statusCodes": {
+                "200": 1296738
+              },
+              "errors": {
+                "aborted due to deadline": 190
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 8950
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 10948.405848233853,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 328450,
+                "latencyMs": {
+                  "p50": 5.1573,
+                  "p90": 8.713500000000002,
+                  "p95": 10.4928,
+                  "p99": 16.561,
+                  "p9999": 59.7012
+                },
+                "statusCodes": {
+                  "200": 328450
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 10944.047288166368,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 328454,
+                "latencyMs": {
+                  "p50": 5.1604,
+                  "p90": 8.5963,
+                  "p95": 10.3741,
+                  "p99": 17.1005,
+                  "p9999": 55.5072
+                },
+                "statusCodes": {
+                  "200": 328454
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 8828.901276561888,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 264908,
+                "latencyMs": {
+                  "p50": 5.9017,
+                  "p90": 11.142900000000001,
+                  "p95": 14.4856,
+                  "p99": 26.6658,
+                  "p9999": 275.5045
+                },
+                "statusCodes": {
+                  "200": 264908
+                },
+                "errors": {
+                  "aborted due to deadline": 59
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 10944.047288166368,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 328450,
+              "latencyMs": {
+                "p50": 5.1604,
+                "p90": 8.713500000000002,
+                "p95": 10.4928,
+                "p99": 17.1005,
+                "p9999": 59.7012
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 921812,
+              "statusCodes": {
+                "200": 921812
+              },
+              "errors": {
+                "aborted due to deadline": 187
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "text/html; charset=utf-8",
+            "bytes": 2169
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 4137.32166757164,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 124105,
+                "latencyMs": {
+                  "p50": 13.5879,
+                  "p90": 22.0138,
+                  "p95": 25.96,
+                  "p99": 34.8003,
+                  "p9999": 242.25969999999998
+                },
+                "statusCodes": {
+                  "200": 124105
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 4468.37543354446,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 134015,
+                "latencyMs": {
+                  "p50": 13.5071,
+                  "p90": 18.2167,
+                  "p95": 20.079900000000002,
+                  "p99": 23.712500000000002,
+                  "p9999": 58.418699999999994
+                },
+                "statusCodes": {
+                  "200": 134015
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 4946.250719967227,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 148411,
+                "latencyMs": {
+                  "p50": 12.1378,
+                  "p90": 16.2557,
+                  "p95": 17.8734,
+                  "p99": 21.3245,
+                  "p9999": 59.6513
+                },
+                "statusCodes": {
+                  "200": 148411
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 4468.37543354446,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 134015,
+              "latencyMs": {
+                "p50": 13.5071,
+                "p90": 18.2167,
+                "p95": 20.079900000000002,
+                "p99": 23.712500000000002,
+                "p9999": 59.6513
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 406531,
+              "statusCodes": {
+                "200": 406531
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json;charset=utf-8",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 4903.455684748974,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 147117,
+                "latencyMs": {
+                  "p50": 12.7165,
+                  "p90": 15.5275,
+                  "p95": 16.685499999999998,
+                  "p99": 20.5893,
+                  "p9999": 59.7989
+                },
+                "statusCodes": {
+                  "200": 147117
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 4856.0556834381405,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 145697,
+                "latencyMs": {
+                  "p50": 12.724900000000002,
+                  "p90": 15.9075,
+                  "p95": 17.2855,
+                  "p99": 23.029999999999998,
+                  "p9999": 62.0301
+                },
+                "statusCodes": {
+                  "200": 145697
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 4922.245304644073,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 147658,
+                "latencyMs": {
+                  "p50": 12.671800000000001,
+                  "p90": 15.5043,
+                  "p95": 16.6366,
+                  "p99": 20.7245,
+                  "p9999": 60.5795
+                },
+                "statusCodes": {
+                  "200": 147658
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 4903.455684748974,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 147117,
+              "latencyMs": {
+                "p50": 12.7165,
+                "p90": 15.5275,
+                "p95": 16.685499999999998,
+                "p99": 20.7245,
+                "p9999": 60.5795
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 440472,
+              "statusCodes": {
+                "200": 440472
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "0.21.0",
+      "startup": {
+        "timeToFirstResponseMs": 310.69430000003194,
+        "bootRssBytes": 55857152,
+        "bootRssStable": true
+      },
+      "pass": 1,
+      "orderIndex": 2
+    },
+    {
+      "app": "elysia",
+      "manifest": {
+        "name": "elysia",
+        "framework": "Elysia",
+        "language": "JavaScript",
+        "runtime": "bun",
+        "status": "implemented",
+        "port": 43011,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ]
+        ],
+        "start": [
+          "bun",
+          "server.js"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Bun-native router. Like Hono it does not claim the ssr-page scenario. Elysia's own benchmarks lean on compile-time schema specialisation that this plain implementation does not use, so treat these numbers as Elysia-as-written-here rather than Elysia-at-its-best.",
+        "versionCommand": [
+          "bun",
+          "-e",
+          "console.log(require('elysia/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 47091712,
+            "loadedRssBytes": 52477952,
+            "deltaBytes": 5386240,
+            "bytesPerConnection": 5386.24,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 19272,
+                "rssBytes": 52477952,
+                "command": "bun.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json;charset=utf-8",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 37285.95019202755,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1118821,
+                "latencyMs": {
+                  "p50": 1.64,
+                  "p90": 2.0694,
+                  "p95": 2.3012,
+                  "p99": 3.0078,
+                  "p9999": 9.5705
+                },
+                "statusCodes": {
+                  "200": 1118821
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 37119.9243972046,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1114232,
+                "latencyMs": {
+                  "p50": 1.6524,
+                  "p90": 2.0565,
+                  "p95": 2.2801,
+                  "p99": 2.9797000000000002,
+                  "p9999": 35.3652
+                },
+                "statusCodes": {
+                  "200": 1114232
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 37683.14041023164,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1130957,
+                "latencyMs": {
+                  "p50": 1.6398000000000001,
+                  "p90": 2.0295,
+                  "p95": 2.2547,
+                  "p99": 2.9402999999999997,
+                  "p9999": 14.0862
+                },
+                "statusCodes": {
+                  "200": 1130957
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 37285.95019202755,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 1118821,
+              "latencyMs": {
+                "p50": 1.64,
+                "p90": 2.0565,
+                "p95": 2.2801,
+                "p99": 2.9797000000000002,
+                "p9999": 14.0862
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 3364010,
+              "statusCodes": {
+                "200": 3364010
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json;charset=utf-8",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 18398.931214612578,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 552002,
+                "latencyMs": {
+                  "p50": 3.1500999999999997,
+                  "p90": 4.457,
+                  "p95": 4.9538,
+                  "p99": 5.8514,
+                  "p9999": 37.1434
+                },
+                "statusCodes": {
+                  "200": 552002
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 18204.159993176298,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 546298,
+                "latencyMs": {
+                  "p50": 3.1696,
+                  "p90": 4.5088,
+                  "p95": 5.0422,
+                  "p99": 5.9932,
+                  "p9999": 23.2991
+                },
+                "statusCodes": {
+                  "200": 546298
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 18126.69156991588,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 543874,
+                "latencyMs": {
+                  "p50": 3.1814,
+                  "p90": 4.4774,
+                  "p95": 5.0306,
+                  "p99": 6.259200000000001,
+                  "p9999": 33.3596
+                },
+                "statusCodes": {
+                  "200": 543874
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 18204.159993176298,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 546298,
+              "latencyMs": {
+                "p50": 3.1696,
+                "p90": 4.4774,
+                "p95": 5.0306,
+                "p99": 5.9932,
+                "p9999": 33.3596
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1642174,
+              "statusCodes": {
+                "200": 1642174
+              },
+              "errors": {
+                "aborted due to deadline": 190
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "skipped",
+          "reason": "the manifest does not claim this scenario"
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 21066.38018987495,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 632009,
+                "latencyMs": {
+                  "p50": 2.7142999999999997,
+                  "p90": 3.8672,
+                  "p95": 4.227200000000001,
+                  "p99": 5.1917,
+                  "p9999": 40.2578
+                },
+                "statusCodes": {
+                  "200": 632009
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 21445.048339897832,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 643488,
+                "latencyMs": {
+                  "p50": 2.6626000000000003,
+                  "p90": 3.7875,
+                  "p95": 4.0565,
+                  "p99": 4.9298,
+                  "p9999": 26.4943
+                },
+                "statusCodes": {
+                  "200": 643488
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 21111.3444895016,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 633537,
+                "latencyMs": {
+                  "p50": 2.7077,
+                  "p90": 3.8621,
+                  "p95": 4.1526000000000005,
+                  "p99": 5.1122,
+                  "p9999": 28.3594
+                },
+                "statusCodes": {
+                  "200": 633537
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 21111.3444895016,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 633537,
+              "latencyMs": {
+                "p50": 2.7077,
+                "p90": 3.8621,
+                "p95": 4.1526000000000005,
+                "p99": 5.1122,
+                "p9999": 28.3594
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1909034,
+              "statusCodes": {
+                "200": 1909034
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "1.4.30",
+      "startup": {
+        "timeToFirstResponseMs": 1303.922499999986,
+        "bootRssBytes": 46116864,
+        "bootRssStable": true
+      },
+      "pass": 1,
+      "orderIndex": 3
+    },
+    {
+      "app": "express",
+      "manifest": {
+        "name": "express",
+        "framework": "Express 4",
+        "language": "JavaScript",
+        "runtime": "node",
+        "status": "implemented",
+        "port": 43012,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ]
+        ],
+        "start": [
+          "node",
+          "server.js"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Run on Node, which is where Express lives; running it on Bun would be a different product. ETag generation is disabled because none of the other implementations hash their bodies - leaving it on would charge Express for a feature the comparison does not ask for. Does not claim ssr-page.",
+        "versionCommand": [
+          "node",
+          "-e",
+          "console.log(require('express/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 53673984,
+            "loadedRssBytes": 75800576,
+            "deltaBytes": 22126592,
+            "bytesPerConnection": 22126.592,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 3524,
+                "rssBytes": 75800576,
+                "command": "node.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 16557.233224553696,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 496885,
+                "latencyMs": {
+                  "p50": 3.6701,
+                  "p90": 4.3361,
+                  "p95": 5.2149,
+                  "p99": 7.9872,
+                  "p9999": 60.818
+                },
+                "statusCodes": {
+                  "200": 496885
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 16827.60894602342,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 504851,
+                "latencyMs": {
+                  "p50": 3.6487,
+                  "p90": 4.179399999999999,
+                  "p95": 4.7817,
+                  "p99": 7.5706999999999995,
+                  "p9999": 39.5477
+                },
+                "statusCodes": {
+                  "200": 504851
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 16903.819719633084,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 507153,
+                "latencyMs": {
+                  "p50": 3.6332999999999998,
+                  "p90": 4.1405,
+                  "p95": 4.783,
+                  "p99": 7.4977,
+                  "p9999": 37.9018
+                },
+                "statusCodes": {
+                  "200": 507153
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 16827.60894602342,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 504851,
+              "latencyMs": {
+                "p50": 3.6487,
+                "p90": 4.179399999999999,
+                "p95": 4.783,
+                "p99": 7.5706999999999995,
+                "p9999": 39.5477
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1508889,
+              "statusCodes": {
+                "200": 1508889
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 9872.58198768004,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 296171,
+                "latencyMs": {
+                  "p50": 6.272200000000001,
+                  "p90": 7.1466,
+                  "p95": 8.262500000000001,
+                  "p99": 11.0748,
+                  "p9999": 39.7985
+                },
+                "statusCodes": {
+                  "200": 296171
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 9971.771416088139,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 299202,
+                "latencyMs": {
+                  "p50": 6.1543,
+                  "p90": 7.1331,
+                  "p95": 8.330300000000001,
+                  "p99": 12.5708,
+                  "p9999": 41.9755
+                },
+                "statusCodes": {
+                  "200": 299202
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 10242.33654360776,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 307315,
+                "latencyMs": {
+                  "p50": 6.011500000000001,
+                  "p90": 6.9026,
+                  "p95": 7.859100000000001,
+                  "p99": 11.024600000000001,
+                  "p9999": 49.164100000000005
+                },
+                "statusCodes": {
+                  "200": 307315
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 9971.771416088139,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 299202,
+              "latencyMs": {
+                "p50": 6.1543,
+                "p90": 7.1331,
+                "p95": 8.262500000000001,
+                "p99": 11.0748,
+                "p9999": 41.9755
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 902688,
+              "statusCodes": {
+                "200": 902688
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "skipped",
+          "reason": "the manifest does not claim this scenario"
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 17402.394296456594,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 522189,
+                "latencyMs": {
+                  "p50": 3.5002,
+                  "p90": 4.0716,
+                  "p95": 4.7911,
+                  "p99": 6.9309,
+                  "p9999": 39.819100000000006
+                },
+                "statusCodes": {
+                  "200": 522189
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 17655.8400438794,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 529716,
+                "latencyMs": {
+                  "p50": 3.4795999999999996,
+                  "p90": 4.011500000000001,
+                  "p95": 4.6157,
+                  "p99": 6.7253,
+                  "p9999": 38.8641
+                },
+                "statusCodes": {
+                  "200": 529716
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 17445.783630603088,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 523566,
+                "latencyMs": {
+                  "p50": 3.5006999999999997,
+                  "p90": 4.0993,
+                  "p95": 4.805000000000001,
+                  "p99": 6.761299999999999,
+                  "p9999": 31.598599999999998
+                },
+                "statusCodes": {
+                  "200": 523566
+                },
+                "errors": {
+                  "aborted due to deadline": 60
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 17445.783630603088,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 523566,
+              "latencyMs": {
+                "p50": 3.5002,
+                "p90": 4.0716,
+                "p95": 4.7911,
+                "p99": 6.761299999999999,
+                "p9999": 38.8641
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1575471,
+              "statusCodes": {
+                "200": 1575471
+              },
+              "errors": {
+                "aborted due to deadline": 187
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "5.2.1",
+      "startup": {
+        "timeToFirstResponseMs": 2347.9528999999166,
+        "bootRssBytes": 57577472,
+        "bootRssStable": true
+      },
+      "pass": 1,
+      "orderIndex": 4
+    },
+    {
+      "app": "fastify",
+      "manifest": {
+        "name": "fastify",
+        "framework": "Fastify 5",
+        "language": "JavaScript",
+        "runtime": "node",
+        "status": "implemented",
+        "port": 43013,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ]
+        ],
+        "start": [
+          "node",
+          "server.js"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Run on Node with the logger off. Fastify is fastest when given JSON response schemas so it can compile a serialiser; this implementation does not use them, because the contract's list is generated per request and the other implementations serialise generically. Fastify-with-schemas would be a fair separate entry, not a substitute for this one. Does not claim ssr-page.",
+        "versionCommand": [
+          "node",
+          "-e",
+          "console.log(require('fastify/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 60018688,
+            "loadedRssBytes": 80646144,
+            "deltaBytes": 20627456,
+            "bytesPerConnection": 20627.456,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 19940,
+                "rssBytes": 80646144,
+                "command": "node.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 22138.801347473836,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 664201,
+                "latencyMs": {
+                  "p50": 2.7455000000000003,
+                  "p90": 3.2662,
+                  "p95": 3.8838000000000004,
+                  "p99": 4.9228,
+                  "p9999": 36.0903
+                },
+                "statusCodes": {
+                  "200": 664201
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 22306.360590906137,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 669541,
+                "latencyMs": {
+                  "p50": 2.7314000000000003,
+                  "p90": 3.1863,
+                  "p95": 3.7988000000000004,
+                  "p99": 4.7362,
+                  "p9999": 37.0531
+                },
+                "statusCodes": {
+                  "200": 669541
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 22327.66336139668,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 670122,
+                "latencyMs": {
+                  "p50": 2.7316,
+                  "p90": 3.1763999999999997,
+                  "p95": 3.6837,
+                  "p99": 4.7568,
+                  "p9999": 39.2742
+                },
+                "statusCodes": {
+                  "200": 670122
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 22306.360590906137,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 669541,
+              "latencyMs": {
+                "p50": 2.7316,
+                "p90": 3.1863,
+                "p95": 3.7988000000000004,
+                "p99": 4.7568,
+                "p9999": 37.0531
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 2003864,
+              "statusCodes": {
+                "200": 2003864
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 13041.593647309877,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 391253,
+                "latencyMs": {
+                  "p50": 4.7006,
+                  "p90": 5.4091000000000005,
+                  "p95": 6.3953,
+                  "p99": 8.2578,
+                  "p9999": 40.4363
+                },
+                "statusCodes": {
+                  "200": 391253
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 13057.711910615864,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 391747,
+                "latencyMs": {
+                  "p50": 4.6917,
+                  "p90": 5.4011,
+                  "p95": 6.339700000000001,
+                  "p99": 8.177800000000001,
+                  "p9999": 39.7727
+                },
+                "statusCodes": {
+                  "200": 391747
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 13083.149154914021,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 392599,
+                "latencyMs": {
+                  "p50": 4.6781,
+                  "p90": 5.3486,
+                  "p95": 6.2914,
+                  "p99": 8.2229,
+                  "p9999": 43.798700000000004
+                },
+                "statusCodes": {
+                  "200": 392599
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 13057.711910615864,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 391747,
+              "latencyMs": {
+                "p50": 4.6917,
+                "p90": 5.4011,
+                "p95": 6.339700000000001,
+                "p99": 8.2229,
+                "p9999": 40.4363
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1175599,
+              "statusCodes": {
+                "200": 1175599
+              },
+              "errors": {
+                "aborted due to deadline": 190
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "skipped",
+          "reason": "the manifest does not claim this scenario"
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 18897.773387425696,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 567083,
+                "latencyMs": {
+                  "p50": 3.2263,
+                  "p90": 3.7935999999999996,
+                  "p95": 4.4761999999999995,
+                  "p99": 6.787999999999999,
+                  "p9999": 30.3078
+                },
+                "statusCodes": {
+                  "200": 567083
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 19000.55137300087,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 570201,
+                "latencyMs": {
+                  "p50": 3.2156,
+                  "p90": 3.7107,
+                  "p95": 4.2991,
+                  "p99": 6.4413,
+                  "p9999": 37.4986
+                },
+                "statusCodes": {
+                  "200": 570201
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 19103.968672353836,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 573364,
+                "latencyMs": {
+                  "p50": 3.2041,
+                  "p90": 3.6934,
+                  "p95": 4.2648,
+                  "p99": 6.3121,
+                  "p9999": 36.7406
+                },
+                "statusCodes": {
+                  "200": 573364
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 19000.55137300087,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 570201,
+              "latencyMs": {
+                "p50": 3.2156,
+                "p90": 3.7107,
+                "p95": 4.2991,
+                "p99": 6.4413,
+                "p9999": 36.7406
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1710648,
+              "statusCodes": {
+                "200": 1710648
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "5.12.3",
+      "startup": {
+        "timeToFirstResponseMs": 4786.0456999999005,
+        "bootRssBytes": 65224704,
+        "bootRssStable": true
+      },
+      "pass": 1,
+      "orderIndex": 5
+    },
+    {
+      "app": "fresh",
+      "manifest": {
+        "name": "fresh",
+        "framework": "Fresh (Deno)",
+        "language": "TypeScript (Preact)",
+        "runtime": "deno",
+        "status": "stub",
+        "port": 43022,
+        "readyPath": "/api/hello",
+        "install": [
+          "deno",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "static/static"
+          ]
+        ],
+        "start": [
+          "deno",
+          "run",
+          "-A",
+          "main.ts"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [],
+        "todo": "Deno is not installed on the machine this harness was built on, so a Fresh implementation could not be written and verified - only guessed at. It is left unimplemented on purpose: an unrun competitor is honest, a competitor we wrote blind and could not test is not. To finish it: install Deno, scaffold Fresh 2, implement routes/api/hello.ts, routes/api/items.ts, routes/api/events.ts (SSE with an immediate `: ping` flush) and routes/page.tsx per CONTRACT.md, copy the shared payload into static/, then flip status to \"implemented\" and fill in \"implements\".",
+        "notes": "Fresh renders Preact rather than React and does islands by default, so it is not a like-for-like React comparison; read its ssr-page number, when it exists, with that in mind."
+      },
+      "status": "stub",
+      "reason": "Deno is not installed on the machine this harness was built on, so a Fresh implementation could not be written and verified - only guessed at. It is left unimplemented on purpose: an unrun competitor is honest, a competitor we wrote blind and could not test is not. To finish it: install Deno, scaffold Fresh 2, implement routes/api/hello.ts, routes/api/items.ts, routes/api/events.ts (SSE with an immediate `: ping` flush) and routes/page.tsx per CONTRACT.md, copy the shared payload into static/, then flip status to \"implemented\" and fill in \"implements\".",
+      "scenarios": [],
+      "pass": 1,
+      "orderIndex": 6
+    },
+    {
+      "app": "hono",
+      "manifest": {
+        "name": "hono",
+        "framework": "Hono (Bun adapter)",
+        "language": "JavaScript",
+        "runtime": "bun",
+        "status": "implemented",
+        "port": 43010,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ]
+        ],
+        "start": [
+          "bun",
+          "server.js"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "A router, not a meta-framework: it does not claim the ssr-page scenario, because rendering React through Hono would be an application we wrote rather than anything Hono provides. Included as a floor - it shows what the request plumbing costs when there is almost no framework above it.",
+        "versionCommand": [
+          "bun",
+          "-e",
+          "console.log(require('hono/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 40407040,
+            "loadedRssBytes": 47427584,
+            "deltaBytes": 7020544,
+            "bytesPerConnection": 7020.544,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 18656,
+                "rssBytes": 47427584,
+                "command": "bun.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 36999.88512705206,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1110355,
+                "latencyMs": {
+                  "p50": 1.6257000000000001,
+                  "p90": 2.0986999999999996,
+                  "p95": 2.3854,
+                  "p99": 3.0525,
+                  "p9999": 29.1871
+                },
+                "statusCodes": {
+                  "200": 1110355
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 35696.483982994374,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1071243,
+                "latencyMs": {
+                  "p50": 1.7015,
+                  "p90": 2.1647,
+                  "p95": 2.4214,
+                  "p99": 3.0660000000000003,
+                  "p9999": 35.6862
+                },
+                "statusCodes": {
+                  "200": 1071243
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 36847.77006996808,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1105756,
+                "latencyMs": {
+                  "p50": 1.6462,
+                  "p90": 2.0906000000000002,
+                  "p95": 2.3654,
+                  "p99": 2.9704,
+                  "p9999": 6.6799
+                },
+                "statusCodes": {
+                  "200": 1105756
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 36847.77006996808,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 1105756,
+              "latencyMs": {
+                "p50": 1.6462,
+                "p90": 2.0986999999999996,
+                "p95": 2.3854,
+                "p99": 3.0525,
+                "p9999": 29.1871
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 3287354,
+              "statusCodes": {
+                "200": 3287354
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 17037.909693901143,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 511322,
+                "latencyMs": {
+                  "p50": 3.3658,
+                  "p90": 4.8523000000000005,
+                  "p95": 5.3527000000000005,
+                  "p99": 6.473,
+                  "p9999": 29.1132
+                },
+                "statusCodes": {
+                  "200": 511322
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 16699.254320000327,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 501107,
+                "latencyMs": {
+                  "p50": 3.4137999999999997,
+                  "p90": 5.0539000000000005,
+                  "p95": 5.6049999999999995,
+                  "p99": 6.9264,
+                  "p9999": 38.195100000000004
+                },
+                "statusCodes": {
+                  "200": 501107
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 17064.87393934651,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 512038,
+                "latencyMs": {
+                  "p50": 3.3575,
+                  "p90": 4.84,
+                  "p95": 5.3252999999999995,
+                  "p99": 6.2888,
+                  "p9999": 36.4274
+                },
+                "statusCodes": {
+                  "200": 512038
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 17037.909693901143,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 511322,
+              "latencyMs": {
+                "p50": 3.3658,
+                "p90": 4.8523000000000005,
+                "p95": 5.3527000000000005,
+                "p99": 6.473,
+                "p9999": 36.4274
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1524467,
+              "statusCodes": {
+                "200": 1524467
+              },
+              "errors": {
+                "aborted due to deadline": 190
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "skipped",
+          "reason": "the manifest does not claim this scenario"
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 22618.728073217044,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 678806,
+                "latencyMs": {
+                  "p50": 2.5332000000000003,
+                  "p90": 3.6626,
+                  "p95": 3.9163999999999994,
+                  "p99": 4.669300000000001,
+                  "p9999": 32.6301
+                },
+                "statusCodes": {
+                  "200": 678806
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 20975.56032041336,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 629473,
+                "latencyMs": {
+                  "p50": 2.722,
+                  "p90": 3.8983,
+                  "p95": 4.162800000000001,
+                  "p99": 5.1062,
+                  "p9999": 30.7031
+                },
+                "statusCodes": {
+                  "200": 629473
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 21161.225462807506,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 634996,
+                "latencyMs": {
+                  "p50": 2.7013,
+                  "p90": 3.8813,
+                  "p95": 4.1598,
+                  "p99": 5.0280000000000005,
+                  "p9999": 35.4855
+                },
+                "statusCodes": {
+                  "200": 634996
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 21161.225462807506,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 634996,
+              "latencyMs": {
+                "p50": 2.7013,
+                "p90": 3.8813,
+                "p95": 4.1598,
+                "p99": 5.0280000000000005,
+                "p9999": 32.6301
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1943275,
+              "statusCodes": {
+                "200": 1943275
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "4.13.7",
+      "startup": {
+        "timeToFirstResponseMs": 310.5185000000056,
+        "bootRssBytes": 39768064,
+        "bootRssStable": true
+      },
+      "pass": 1,
+      "orderIndex": 7
+    },
+    {
+      "app": "nextjs",
+      "manifest": {
+        "name": "nextjs",
+        "framework": "Next.js (App Router)",
+        "language": "JavaScript (React)",
+        "runtime": "node",
+        "status": "implemented",
+        "port": 43020,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static",
+            "lib"
+          ],
+          [
+            "bun",
+            "x",
+            "next",
+            "build"
+          ]
+        ],
+        "start": [
+          "node",
+          "node_modules/next/dist/bin/next",
+          "start",
+          "--port",
+          "${PORT}"
+        ],
+        "env": {
+          "PORT": "${PORT}",
+          "NODE_ENV": "production"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "ssr-page",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Production build, self-hosted with `next start` on Node - the deployment borgo actually competes with, not Vercel's edge. Every route sets `dynamic = 'force-dynamic'`: left alone Next would prerender /page at build time and serve a static file, which is a different and much faster thing than server-rendering per request. Compression is off in next.config.mjs so every implementation ships identical bytes. The shared dataset module is copied into lib/ at build time because Next's bundler will not reach outside the project root. Started by invoking Next's own bin on node directly rather than through `bun x next start`: the runner charges RSS over the whole process tree, and `bun x` interposes a launcher that borgo - which is deliberately started without one, for exactly this reason - was not being charged for. Same rule for everyone or the memory table is not a comparison.",
+        "versionCommand": [
+          "node",
+          "-e",
+          "console.log(require('next/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 91664384,
+            "loadedRssBytes": 229109760,
+            "deltaBytes": 137445376,
+            "bytesPerConnection": 137445.376,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 17352,
+                "rssBytes": 147025920,
+                "command": "node.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 2298.667990424972,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 68904,
+                "latencyMs": {
+                  "p50": 25.9703,
+                  "p90": 38.3364,
+                  "p95": 44.7314,
+                  "p99": 61.7181,
+                  "p9999": 127.54960000000001
+                },
+                "statusCodes": {
+                  "200": 68904
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2376.712831812244,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 71275,
+                "latencyMs": {
+                  "p50": 24.861600000000003,
+                  "p90": 36.003,
+                  "p95": 42.1714,
+                  "p99": 53.9387,
+                  "p9999": 89.5416
+                },
+                "statusCodes": {
+                  "200": 71275
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2367.7006179038003,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 71009,
+                "latencyMs": {
+                  "p50": 25.0166,
+                  "p90": 36.6519,
+                  "p95": 43.4271,
+                  "p99": 57.148900000000005,
+                  "p9999": 108.05099999999999
+                },
+                "statusCodes": {
+                  "200": 71009
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 2367.7006179038003,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 71009,
+              "latencyMs": {
+                "p50": 25.0166,
+                "p90": 36.6519,
+                "p95": 43.4271,
+                "p99": 57.148900000000005,
+                "p9999": 108.05099999999999
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 211188,
+              "statusCodes": {
+                "200": 211188
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 2033.5800644935011,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 60951,
+                "latencyMs": {
+                  "p50": 29.3752,
+                  "p90": 42.2728,
+                  "p95": 50.1098,
+                  "p99": 67.1413,
+                  "p9999": 104.2631
+                },
+                "statusCodes": {
+                  "200": 60951
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2044.7883056065011,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 61293,
+                "latencyMs": {
+                  "p50": 29.275,
+                  "p90": 42.899300000000004,
+                  "p95": 48.9585,
+                  "p99": 62.700199999999995,
+                  "p9999": 88.74319999999999
+                },
+                "statusCodes": {
+                  "200": 61293
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2033.2895669456482,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 60947,
+                "latencyMs": {
+                  "p50": 29.2046,
+                  "p90": 41.7142,
+                  "p95": 48.3431,
+                  "p99": 63.523999999999994,
+                  "p9999": 97.8526
+                },
+                "statusCodes": {
+                  "200": 60947
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 2033.5800644935011,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 60951,
+              "latencyMs": {
+                "p50": 29.275,
+                "p90": 42.2728,
+                "p95": 48.9585,
+                "p99": 63.523999999999994,
+                "p9999": 97.8526
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 183191,
+              "statusCodes": {
+                "200": 183191
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "text/html; charset=utf-8",
+            "bytes": 12025
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 586.6366054203343,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 17539,
+                "latencyMs": {
+                  "p50": 105.7809,
+                  "p90": 124.84389999999999,
+                  "p95": 130.83339999999998,
+                  "p99": 149.54410000000001,
+                  "p9999": 164.3953
+                },
+                "statusCodes": {
+                  "200": 17539
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 605.6080881625703,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 18112,
+                "latencyMs": {
+                  "p50": 102.1667,
+                  "p90": 117.60220000000001,
+                  "p95": 128.35170000000002,
+                  "p99": 146.3083,
+                  "p9999": 159.69910000000002
+                },
+                "statusCodes": {
+                  "200": 18112
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 605.7809284725902,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 18112,
+                "latencyMs": {
+                  "p50": 101.75919999999999,
+                  "p90": 119.5521,
+                  "p95": 131.13400000000001,
+                  "p99": 150.19389999999999,
+                  "p9999": 174.38680000000002
+                },
+                "statusCodes": {
+                  "200": 18112
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 605.6080881625703,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 18112,
+              "latencyMs": {
+                "p50": 102.1667,
+                "p90": 119.5521,
+                "p95": 130.83339999999998,
+                "p99": 149.54410000000001,
+                "p9999": 164.3953
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 53763,
+              "statusCodes": {
+                "200": 53763
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=UTF-8",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 5923.773168734968,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 177731,
+                "latencyMs": {
+                  "p50": 9.8531,
+                  "p90": 14.1083,
+                  "p95": 16.4122,
+                  "p99": 19.7624,
+                  "p9999": 61.4751
+                },
+                "statusCodes": {
+                  "200": 177731
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 5880.5876196624495,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 176395,
+                "latencyMs": {
+                  "p50": 9.7917,
+                  "p90": 14.5559,
+                  "p95": 16.5399,
+                  "p99": 21.778100000000002,
+                  "p9999": 68.5115
+                },
+                "statusCodes": {
+                  "200": 176395
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 5998.421893076543,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 179935,
+                "latencyMs": {
+                  "p50": 9.7846,
+                  "p90": 13.555299999999999,
+                  "p95": 16.2942,
+                  "p99": 19.8283,
+                  "p9999": 57.5992
+                },
+                "statusCodes": {
+                  "200": 179935
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 5923.773168734968,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 177731,
+              "latencyMs": {
+                "p50": 9.7917,
+                "p90": 14.1083,
+                "p95": 16.4122,
+                "p99": 19.8283,
+                "p9999": 61.4751
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 534061,
+              "statusCodes": {
+                "200": 534061
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "16.3.4",
+      "startup": {
+        "timeToFirstResponseMs": 577.9953000000678,
+        "bootRssBytes": 90972160,
+        "bootRssStable": true
+      },
+      "pass": 1,
+      "orderIndex": 8
+    },
+    {
+      "app": "nextjs",
+      "manifest": {
+        "name": "nextjs",
+        "framework": "Next.js (App Router)",
+        "language": "JavaScript (React)",
+        "runtime": "node",
+        "status": "implemented",
+        "port": 43020,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static",
+            "lib"
+          ],
+          [
+            "bun",
+            "x",
+            "next",
+            "build"
+          ]
+        ],
+        "start": [
+          "node",
+          "node_modules/next/dist/bin/next",
+          "start",
+          "--port",
+          "${PORT}"
+        ],
+        "env": {
+          "PORT": "${PORT}",
+          "NODE_ENV": "production"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "ssr-page",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Production build, self-hosted with `next start` on Node - the deployment borgo actually competes with, not Vercel's edge. Every route sets `dynamic = 'force-dynamic'`: left alone Next would prerender /page at build time and serve a static file, which is a different and much faster thing than server-rendering per request. Compression is off in next.config.mjs so every implementation ships identical bytes. The shared dataset module is copied into lib/ at build time because Next's bundler will not reach outside the project root. Started by invoking Next's own bin on node directly rather than through `bun x next start`: the runner charges RSS over the whole process tree, and `bun x` interposes a launcher that borgo - which is deliberately started without one, for exactly this reason - was not being charged for. Same rule for everyone or the memory table is not a comparison.",
+        "versionCommand": [
+          "node",
+          "-e",
+          "console.log(require('next/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 90533888,
+            "loadedRssBytes": 228704256,
+            "deltaBytes": 138170368,
+            "bytesPerConnection": 138170.368,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 21776,
+                "rssBytes": 147079168,
+                "command": "node.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 2283.9925255527473,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 68487,
+                "latencyMs": {
+                  "p50": 25.922,
+                  "p90": 37.7427,
+                  "p95": 44.5854,
+                  "p99": 62.413000000000004,
+                  "p9999": 119.6015
+                },
+                "statusCodes": {
+                  "200": 68487
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2348.9491314303305,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 70425,
+                "latencyMs": {
+                  "p50": 25.372,
+                  "p90": 35.7002,
+                  "p95": 41.3789,
+                  "p99": 53.4564,
+                  "p9999": 85.5784
+                },
+                "statusCodes": {
+                  "200": 70425
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2361.182666224963,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 70782,
+                "latencyMs": {
+                  "p50": 25.1717,
+                  "p90": 35.4571,
+                  "p95": 40.430099999999996,
+                  "p99": 51.985499999999995,
+                  "p9999": 111.80229999999999
+                },
+                "statusCodes": {
+                  "200": 70782
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 2348.9491314303305,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 70425,
+              "latencyMs": {
+                "p50": 25.372,
+                "p90": 35.7002,
+                "p95": 41.3789,
+                "p99": 53.4564,
+                "p9999": 111.80229999999999
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 209694,
+              "statusCodes": {
+                "200": 209694
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 2018.96453205808,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 60529,
+                "latencyMs": {
+                  "p50": 29.4823,
+                  "p90": 41.9207,
+                  "p95": 49.2801,
+                  "p99": 63.8369,
+                  "p9999": 132.328
+                },
+                "statusCodes": {
+                  "200": 60529
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2018.8756829910778,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 60529,
+                "latencyMs": {
+                  "p50": 29.63,
+                  "p90": 42.291000000000004,
+                  "p95": 48.1632,
+                  "p99": 63.0693,
+                  "p9999": 109.8493
+                },
+                "statusCodes": {
+                  "200": 60529
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2014.3450011895206,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 60378,
+                "latencyMs": {
+                  "p50": 29.7043,
+                  "p90": 42.6652,
+                  "p95": 48.768,
+                  "p99": 64.56739999999999,
+                  "p9999": 108.3413
+                },
+                "statusCodes": {
+                  "200": 60378
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 2018.8756829910778,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 60529,
+              "latencyMs": {
+                "p50": 29.63,
+                "p90": 42.291000000000004,
+                "p95": 48.768,
+                "p99": 63.8369,
+                "p9999": 109.8493
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 181436,
+              "statusCodes": {
+                "200": 181436
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "text/html; charset=utf-8",
+            "bytes": 12025
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 569.5167708191125,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 17024,
+                "latencyMs": {
+                  "p50": 108.0629,
+                  "p90": 127.54660000000001,
+                  "p95": 139.01839999999999,
+                  "p99": 161.51399999999998,
+                  "p9999": 212.53
+                },
+                "statusCodes": {
+                  "200": 17024
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 598.4825680819384,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 17905,
+                "latencyMs": {
+                  "p50": 103.98,
+                  "p90": 118.8091,
+                  "p95": 128.3118,
+                  "p99": 148.28150000000002,
+                  "p9999": 158.08530000000002
+                },
+                "statusCodes": {
+                  "200": 17905
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 597.1823258292087,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 17856,
+                "latencyMs": {
+                  "p50": 104.252,
+                  "p90": 119.3104,
+                  "p95": 125.4459,
+                  "p99": 140.243,
+                  "p9999": 152.0523
+                },
+                "statusCodes": {
+                  "200": 17856
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 597.1823258292087,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 17856,
+              "latencyMs": {
+                "p50": 104.252,
+                "p90": 119.3104,
+                "p95": 128.3118,
+                "p99": 148.28150000000002,
+                "p9999": 158.08530000000002
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 52785,
+              "statusCodes": {
+                "200": 52785
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=UTF-8",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 5989.309745185223,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 179729,
+                "latencyMs": {
+                  "p50": 9.832699999999999,
+                  "p90": 13.6109,
+                  "p95": 16.0932,
+                  "p99": 19.6477,
+                  "p9999": 47.445
+                },
+                "statusCodes": {
+                  "200": 179729
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 5963.820369334667,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 178937,
+                "latencyMs": {
+                  "p50": 9.848,
+                  "p90": 13.7732,
+                  "p95": 16.262700000000002,
+                  "p99": 19.6435,
+                  "p9999": 60.190599999999996
+                },
+                "statusCodes": {
+                  "200": 178937
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 5983.144561739383,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 179535,
+                "latencyMs": {
+                  "p50": 9.827499999999999,
+                  "p90": 13.8652,
+                  "p95": 16.0299,
+                  "p99": 19.6046,
+                  "p9999": 62.3342
+                },
+                "statusCodes": {
+                  "200": 179535
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 5983.144561739383,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 179535,
+              "latencyMs": {
+                "p50": 9.832699999999999,
+                "p90": 13.7732,
+                "p95": 16.0932,
+                "p99": 19.6435,
+                "p9999": 60.190599999999996
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 538201,
+              "statusCodes": {
+                "200": 538201
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "16.3.4",
+      "startup": {
+        "timeToFirstResponseMs": 510.6820000000298,
+        "bootRssBytes": 89481216,
+        "bootRssStable": true
+      },
+      "pass": 2,
+      "orderIndex": 1
+    },
+    {
+      "app": "hono",
+      "manifest": {
+        "name": "hono",
+        "framework": "Hono (Bun adapter)",
+        "language": "JavaScript",
+        "runtime": "bun",
+        "status": "implemented",
+        "port": 43010,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ]
+        ],
+        "start": [
+          "bun",
+          "server.js"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "A router, not a meta-framework: it does not claim the ssr-page scenario, because rendering React through Hono would be an application we wrote rather than anything Hono provides. Included as a floor - it shows what the request plumbing costs when there is almost no framework above it.",
+        "versionCommand": [
+          "bun",
+          "-e",
+          "console.log(require('hono/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 40034304,
+            "loadedRssBytes": 46870528,
+            "deltaBytes": 6836224,
+            "bytesPerConnection": 6836.224,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 16764,
+                "rssBytes": 46870528,
+                "command": "bun.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 36709.34438360341,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1101736,
+                "latencyMs": {
+                  "p50": 1.643,
+                  "p90": 2.1101,
+                  "p95": 2.3835,
+                  "p99": 3.0877,
+                  "p9999": 34.5706
+                },
+                "statusCodes": {
+                  "200": 1101736
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 35773.6142168713,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1073937,
+                "latencyMs": {
+                  "p50": 1.7007,
+                  "p90": 2.1309,
+                  "p95": 2.4042,
+                  "p99": 2.9996,
+                  "p9999": 28.3155
+                },
+                "statusCodes": {
+                  "200": 1073937
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 36482.67034505431,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1094798,
+                "latencyMs": {
+                  "p50": 1.6524,
+                  "p90": 2.1165,
+                  "p95": 2.3933,
+                  "p99": 2.9831,
+                  "p9999": 35.0497
+                },
+                "statusCodes": {
+                  "200": 1094798
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 36482.67034505431,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 1094798,
+              "latencyMs": {
+                "p50": 1.6524,
+                "p90": 2.1165,
+                "p95": 2.3933,
+                "p99": 2.9996,
+                "p9999": 34.5706
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 3270471,
+              "statusCodes": {
+                "200": 3270471
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 17114.115399017643,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 513608,
+                "latencyMs": {
+                  "p50": 3.3557,
+                  "p90": 4.7834,
+                  "p95": 5.3218,
+                  "p99": 6.3826,
+                  "p9999": 33.577000000000005
+                },
+                "statusCodes": {
+                  "200": 513608
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 16924.18331575504,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 507800,
+                "latencyMs": {
+                  "p50": 3.3823,
+                  "p90": 4.8602,
+                  "p95": 5.3694,
+                  "p99": 6.502,
+                  "p9999": 42.3568
+                },
+                "statusCodes": {
+                  "200": 507800
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 15694.768971127465,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 470960,
+                "latencyMs": {
+                  "p50": 3.6886,
+                  "p90": 5.3581,
+                  "p95": 5.9216,
+                  "p99": 7.5176,
+                  "p9999": 33.5736
+                },
+                "statusCodes": {
+                  "200": 470960
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 16924.18331575504,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 507800,
+              "latencyMs": {
+                "p50": 3.3823,
+                "p90": 4.8602,
+                "p95": 5.3694,
+                "p99": 6.502,
+                "p9999": 33.577000000000005
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1492368,
+              "statusCodes": {
+                "200": 1492368
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "skipped",
+          "reason": "the manifest does not claim this scenario"
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 21332.427662029866,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 640274,
+                "latencyMs": {
+                  "p50": 2.6877,
+                  "p90": 3.8467000000000002,
+                  "p95": 4.1116,
+                  "p99": 4.9716,
+                  "p9999": 36.2731
+                },
+                "statusCodes": {
+                  "200": 640274
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 21157.234012629004,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 634833,
+                "latencyMs": {
+                  "p50": 2.713,
+                  "p90": 3.8775,
+                  "p95": 4.150799999999999,
+                  "p99": 5.0396,
+                  "p9999": 34.181799999999996
+                },
+                "statusCodes": {
+                  "200": 634833
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 21104.778818820192,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 633260,
+                "latencyMs": {
+                  "p50": 2.7117,
+                  "p90": 3.8653,
+                  "p95": 4.1178,
+                  "p99": 5.0131000000000006,
+                  "p9999": 33.141799999999996
+                },
+                "statusCodes": {
+                  "200": 633260
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 21157.234012629004,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 634833,
+              "latencyMs": {
+                "p50": 2.7117,
+                "p90": 3.8653,
+                "p95": 4.1178,
+                "p99": 5.0131000000000006,
+                "p9999": 34.181799999999996
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1908367,
+              "statusCodes": {
+                "200": 1908367
+              },
+              "errors": {
+                "aborted due to deadline": 189
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "4.13.7",
+      "startup": {
+        "timeToFirstResponseMs": 106.60880000004545,
+        "bootRssBytes": 39391232,
+        "bootRssStable": true
+      },
+      "pass": 2,
+      "orderIndex": 2
+    },
+    {
+      "app": "fresh",
+      "manifest": {
+        "name": "fresh",
+        "framework": "Fresh (Deno)",
+        "language": "TypeScript (Preact)",
+        "runtime": "deno",
+        "status": "stub",
+        "port": 43022,
+        "readyPath": "/api/hello",
+        "install": [
+          "deno",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "static/static"
+          ]
+        ],
+        "start": [
+          "deno",
+          "run",
+          "-A",
+          "main.ts"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [],
+        "todo": "Deno is not installed on the machine this harness was built on, so a Fresh implementation could not be written and verified - only guessed at. It is left unimplemented on purpose: an unrun competitor is honest, a competitor we wrote blind and could not test is not. To finish it: install Deno, scaffold Fresh 2, implement routes/api/hello.ts, routes/api/items.ts, routes/api/events.ts (SSE with an immediate `: ping` flush) and routes/page.tsx per CONTRACT.md, copy the shared payload into static/, then flip status to \"implemented\" and fill in \"implements\".",
+        "notes": "Fresh renders Preact rather than React and does islands by default, so it is not a like-for-like React comparison; read its ssr-page number, when it exists, with that in mind."
+      },
+      "status": "stub",
+      "reason": "Deno is not installed on the machine this harness was built on, so a Fresh implementation could not be written and verified - only guessed at. It is left unimplemented on purpose: an unrun competitor is honest, a competitor we wrote blind and could not test is not. To finish it: install Deno, scaffold Fresh 2, implement routes/api/hello.ts, routes/api/items.ts, routes/api/events.ts (SSE with an immediate `: ping` flush) and routes/page.tsx per CONTRACT.md, copy the shared payload into static/, then flip status to \"implemented\" and fill in \"implements\".",
+      "scenarios": [],
+      "pass": 2,
+      "orderIndex": 3
+    },
+    {
+      "app": "fastify",
+      "manifest": {
+        "name": "fastify",
+        "framework": "Fastify 5",
+        "language": "JavaScript",
+        "runtime": "node",
+        "status": "implemented",
+        "port": 43013,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ]
+        ],
+        "start": [
+          "node",
+          "server.js"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Run on Node with the logger off. Fastify is fastest when given JSON response schemas so it can compile a serialiser; this implementation does not use them, because the contract's list is generated per request and the other implementations serialise generically. Fastify-with-schemas would be a fair separate entry, not a substitute for this one. Does not claim ssr-page.",
+        "versionCommand": [
+          "node",
+          "-e",
+          "console.log(require('fastify/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 59408384,
+            "loadedRssBytes": 79831040,
+            "deltaBytes": 20422656,
+            "bytesPerConnection": 20422.656,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 24552,
+                "rssBytes": 79831040,
+                "command": "node.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 21713.950628438113,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 651532,
+                "latencyMs": {
+                  "p50": 2.7901,
+                  "p90": 3.313,
+                  "p95": 3.9334000000000002,
+                  "p99": 5.0704,
+                  "p9999": 38.9251
+                },
+                "statusCodes": {
+                  "200": 651532
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 21946.05121310041,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 658471,
+                "latencyMs": {
+                  "p50": 2.774,
+                  "p90": 3.2879,
+                  "p95": 3.8962,
+                  "p99": 4.9369000000000005,
+                  "p9999": 21.3613
+                },
+                "statusCodes": {
+                  "200": 658471
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 22025.931783097898,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 660995,
+                "latencyMs": {
+                  "p50": 2.7701000000000002,
+                  "p90": 3.2584,
+                  "p95": 3.7941,
+                  "p99": 4.8121,
+                  "p9999": 31.1812
+                },
+                "statusCodes": {
+                  "200": 660995
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 21946.05121310041,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 658471,
+              "latencyMs": {
+                "p50": 2.774,
+                "p90": 3.2879,
+                "p95": 3.8962,
+                "p99": 4.9369000000000005,
+                "p9999": 31.1812
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1970998,
+              "statusCodes": {
+                "200": 1970998
+              },
+              "errors": {
+                "aborted due to deadline": 190
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 12860.873969433656,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 385855,
+                "latencyMs": {
+                  "p50": 4.778700000000001,
+                  "p90": 5.4802,
+                  "p95": 6.2963000000000005,
+                  "p99": 8.244,
+                  "p9999": 40.3648
+                },
+                "statusCodes": {
+                  "200": 385855
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 12981.000224383492,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 389575,
+                "latencyMs": {
+                  "p50": 4.7241,
+                  "p90": 5.417199999999999,
+                  "p95": 6.332800000000001,
+                  "p99": 8.2829,
+                  "p9999": 49.9427
+                },
+                "statusCodes": {
+                  "200": 389575
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 13024.180279240774,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 390719,
+                "latencyMs": {
+                  "p50": 4.716200000000001,
+                  "p90": 5.3903,
+                  "p95": 6.3258,
+                  "p99": 8.211,
+                  "p9999": 40.1372
+                },
+                "statusCodes": {
+                  "200": 390719
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 12981.000224383492,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 389575,
+              "latencyMs": {
+                "p50": 4.7241,
+                "p90": 5.417199999999999,
+                "p95": 6.3258,
+                "p99": 8.244,
+                "p9999": 40.3648
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1166149,
+              "statusCodes": {
+                "200": 1166149
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "skipped",
+          "reason": "the manifest does not claim this scenario"
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 18971.606320221872,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 569325,
+                "latencyMs": {
+                  "p50": 3.2287000000000003,
+                  "p90": 3.7468,
+                  "p95": 4.2914,
+                  "p99": 6.3884,
+                  "p9999": 15.351
+                },
+                "statusCodes": {
+                  "200": 569325
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 18864.783946423704,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 566025,
+                "latencyMs": {
+                  "p50": 3.2342999999999997,
+                  "p90": 3.7626,
+                  "p95": 4.3856,
+                  "p99": 6.577999999999999,
+                  "p9999": 38.6797
+                },
+                "statusCodes": {
+                  "200": 566025
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 18989.357073763116,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 569770,
+                "latencyMs": {
+                  "p50": 3.2220999999999997,
+                  "p90": 3.7604,
+                  "p95": 4.3422,
+                  "p99": 6.5652,
+                  "p9999": 38.4559
+                },
+                "statusCodes": {
+                  "200": 569770
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 18971.606320221872,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 569325,
+              "latencyMs": {
+                "p50": 3.2287000000000003,
+                "p90": 3.7604,
+                "p95": 4.3422,
+                "p99": 6.5652,
+                "p9999": 38.4559
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1705120,
+              "statusCodes": {
+                "200": 1705120
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "5.12.3",
+      "startup": {
+        "timeToFirstResponseMs": 314.9977000001818,
+        "bootRssBytes": 65048576,
+        "bootRssStable": true
+      },
+      "pass": 2,
+      "orderIndex": 4
+    },
+    {
+      "app": "express",
+      "manifest": {
+        "name": "express",
+        "framework": "Express 4",
+        "language": "JavaScript",
+        "runtime": "node",
+        "status": "implemented",
+        "port": 43012,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ]
+        ],
+        "start": [
+          "node",
+          "server.js"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Run on Node, which is where Express lives; running it on Bun would be a different product. ETag generation is disabled because none of the other implementations hash their bodies - leaving it on would charge Express for a feature the comparison does not ask for. Does not claim ssr-page.",
+        "versionCommand": [
+          "node",
+          "-e",
+          "console.log(require('express/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 54030336,
+            "loadedRssBytes": 76156928,
+            "deltaBytes": 22126592,
+            "bytesPerConnection": 22126.592,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 7852,
+                "rssBytes": 76156928,
+                "command": "node.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 16432.48632952895,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 493186,
+                "latencyMs": {
+                  "p50": 3.7224,
+                  "p90": 4.3264000000000005,
+                  "p95": 5.066400000000001,
+                  "p99": 8.060400000000001,
+                  "p9999": 26.4768
+                },
+                "statusCodes": {
+                  "200": 493186
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 16522.390730360617,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 495707,
+                "latencyMs": {
+                  "p50": 3.6943,
+                  "p90": 4.2623,
+                  "p95": 4.973199999999999,
+                  "p99": 8.6431,
+                  "p9999": 33.9325
+                },
+                "statusCodes": {
+                  "200": 495707
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 16483.90077567781,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 494539,
+                "latencyMs": {
+                  "p50": 3.7271,
+                  "p90": 4.2536,
+                  "p95": 4.8525,
+                  "p99": 7.4782,
+                  "p9999": 37.1799
+                },
+                "statusCodes": {
+                  "200": 494539
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 16483.90077567781,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 494539,
+              "latencyMs": {
+                "p50": 3.7224,
+                "p90": 4.2623,
+                "p95": 4.973199999999999,
+                "p99": 8.060400000000001,
+                "p9999": 33.9325
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1483432,
+              "statusCodes": {
+                "200": 1483432
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 10052.658043130634,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 301656,
+                "latencyMs": {
+                  "p50": 6.164700000000001,
+                  "p90": 7.0066,
+                  "p95": 7.9637,
+                  "p99": 11.173,
+                  "p9999": 43.7492
+                },
+                "statusCodes": {
+                  "200": 301656
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 10205.60552018105,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 306191,
+                "latencyMs": {
+                  "p50": 6.0581000000000005,
+                  "p90": 6.8462000000000005,
+                  "p95": 7.9404,
+                  "p99": 11.2809,
+                  "p9999": 44.123999999999995
+                },
+                "statusCodes": {
+                  "200": 306191
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 10365.396690010366,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 310929,
+                "latencyMs": {
+                  "p50": 5.9394,
+                  "p90": 6.810700000000001,
+                  "p95": 7.896,
+                  "p99": 11.0613,
+                  "p9999": 44.2329
+                },
+                "statusCodes": {
+                  "200": 310929
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 10205.60552018105,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 306191,
+              "latencyMs": {
+                "p50": 6.0581000000000005,
+                "p90": 6.8462000000000005,
+                "p95": 7.9404,
+                "p99": 11.173,
+                "p9999": 44.123999999999995
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 918776,
+              "statusCodes": {
+                "200": 918776
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "skipped",
+          "reason": "the manifest does not claim this scenario"
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 17344.22881402392,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 520491,
+                "latencyMs": {
+                  "p50": 3.5423,
+                  "p90": 4.064500000000001,
+                  "p95": 4.7296,
+                  "p99": 6.8872,
+                  "p9999": 17.0675
+                },
+                "statusCodes": {
+                  "200": 520491
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 17300.538552441445,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 519042,
+                "latencyMs": {
+                  "p50": 3.5346,
+                  "p90": 4.0816,
+                  "p95": 4.8128,
+                  "p99": 6.843,
+                  "p9999": 37.2948
+                },
+                "statusCodes": {
+                  "200": 519042
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 17229.1819961219,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 516879,
+                "latencyMs": {
+                  "p50": 3.5463,
+                  "p90": 4.1156,
+                  "p95": 4.8004,
+                  "p99": 6.8609,
+                  "p9999": 42.6833
+                },
+                "statusCodes": {
+                  "200": 516879
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 17300.538552441445,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 519042,
+              "latencyMs": {
+                "p50": 3.5423,
+                "p90": 4.0816,
+                "p95": 4.8004,
+                "p99": 6.8609,
+                "p9999": 37.2948
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1556412,
+              "statusCodes": {
+                "200": 1556412
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "5.2.1",
+      "startup": {
+        "timeToFirstResponseMs": 212.3721000002697,
+        "bootRssBytes": 57966592,
+        "bootRssStable": true
+      },
+      "pass": 2,
+      "orderIndex": 5
+    },
+    {
+      "app": "elysia",
+      "manifest": {
+        "name": "elysia",
+        "framework": "Elysia",
+        "language": "JavaScript",
+        "runtime": "bun",
+        "status": "implemented",
+        "port": 43011,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ]
+        ],
+        "start": [
+          "bun",
+          "server.js"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Bun-native router. Like Hono it does not claim the ssr-page scenario. Elysia's own benchmarks lean on compile-time schema specialisation that this plain implementation does not use, so treat these numbers as Elysia-as-written-here rather than Elysia-at-its-best.",
+        "versionCommand": [
+          "bun",
+          "-e",
+          "console.log(require('elysia/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 47132672,
+            "loadedRssBytes": 52432896,
+            "deltaBytes": 5300224,
+            "bytesPerConnection": 5300.224,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 22172,
+                "rssBytes": 52432896,
+                "command": "bun.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json;charset=utf-8",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 37524.17504934975,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1126047,
+                "latencyMs": {
+                  "p50": 1.6260999999999999,
+                  "p90": 2.064,
+                  "p95": 2.2983000000000002,
+                  "p99": 2.9941,
+                  "p9999": 6.941199999999999
+                },
+                "statusCodes": {
+                  "200": 1126047
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 38518.47454429292,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1155908,
+                "latencyMs": {
+                  "p50": 1.5864,
+                  "p90": 2.0016000000000003,
+                  "p95": 2.2276000000000002,
+                  "p99": 2.9324,
+                  "p9999": 12.9326
+                },
+                "statusCodes": {
+                  "200": 1155908
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 37665.30441945938,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 1130386,
+                "latencyMs": {
+                  "p50": 1.6093,
+                  "p90": 2.0408,
+                  "p95": 2.2667,
+                  "p99": 2.9992,
+                  "p9999": 34.367799999999995
+                },
+                "statusCodes": {
+                  "200": 1130386
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 37665.30441945938,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 1130386,
+              "latencyMs": {
+                "p50": 1.6093,
+                "p90": 2.0408,
+                "p95": 2.2667,
+                "p99": 2.9941,
+                "p9999": 12.9326
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 3412341,
+              "statusCodes": {
+                "200": 3412341
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json;charset=utf-8",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 18199.893519798527,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 546048,
+                "latencyMs": {
+                  "p50": 3.173,
+                  "p90": 4.5193,
+                  "p95": 5.0084,
+                  "p99": 5.9494,
+                  "p9999": 13.0543
+                },
+                "statusCodes": {
+                  "200": 546048
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 18209.29215901042,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 546449,
+                "latencyMs": {
+                  "p50": 3.1769,
+                  "p90": 4.497,
+                  "p95": 5.0317,
+                  "p99": 5.9463,
+                  "p9999": 26.9315
+                },
+                "statusCodes": {
+                  "200": 546449
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 18206.888752551462,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 546427,
+                "latencyMs": {
+                  "p50": 3.1782999999999997,
+                  "p90": 4.5028999999999995,
+                  "p95": 5.0169999999999995,
+                  "p99": 5.9816,
+                  "p9999": 21.836299999999998
+                },
+                "statusCodes": {
+                  "200": 546427
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 18206.888752551462,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 546427,
+              "latencyMs": {
+                "p50": 3.1769,
+                "p90": 4.5028999999999995,
+                "p95": 5.0169999999999995,
+                "p99": 5.9494,
+                "p9999": 21.836299999999998
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1638924,
+              "statusCodes": {
+                "200": 1638924
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "skipped",
+          "reason": "the manifest does not claim this scenario"
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 21243.444692778605,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 637396,
+                "latencyMs": {
+                  "p50": 2.6869,
+                  "p90": 3.827,
+                  "p95": 4.1061,
+                  "p99": 4.9185,
+                  "p9999": 31.548199999999998
+                },
+                "statusCodes": {
+                  "200": 637396
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 21166.10644887767,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 635297,
+                "latencyMs": {
+                  "p50": 2.7039999999999997,
+                  "p90": 3.839,
+                  "p95": 4.1141,
+                  "p99": 4.9235,
+                  "p9999": 31.496299999999998
+                },
+                "statusCodes": {
+                  "200": 635297
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 21615.25147588592,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 648652,
+                "latencyMs": {
+                  "p50": 2.6504,
+                  "p90": 3.7951,
+                  "p95": 4.1269,
+                  "p99": 5.1726,
+                  "p9999": 27.881800000000002
+                },
+                "statusCodes": {
+                  "200": 648652
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 21243.444692778605,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 637396,
+              "latencyMs": {
+                "p50": 2.6869,
+                "p90": 3.827,
+                "p95": 4.1141,
+                "p99": 4.9235,
+                "p9999": 31.496299999999998
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1921345,
+              "statusCodes": {
+                "200": 1921345
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "1.4.30",
+      "startup": {
+        "timeToFirstResponseMs": 106.22270000027493,
+        "bootRssBytes": 46219264,
+        "bootRssStable": true
+      },
+      "pass": 2,
+      "orderIndex": 6
+    },
+    {
+      "app": "borgo",
+      "manifest": {
+        "name": "borgo",
+        "framework": "borgo (this repo)",
+        "language": "TypeScript + Go",
+        "runtime": "bun (SSR front server) + go (API binary)",
+        "status": "implemented",
+        "port": 43000,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ],
+          [
+            "go",
+            "mod",
+            "tidy"
+          ],
+          [
+            "bun",
+            "run",
+            "build"
+          ]
+        ],
+        "start": [
+          "bun",
+          "node_modules/borgo-framework/src/cli.ts",
+          "start"
+        ],
+        "env": {
+          "PORT": "${PORT}",
+          "API_PORT": "${API_PORT}",
+          "SESSION_SECRET": "bench-only-secret-0123456789abcdef",
+          "BUN_CONFIG_MAX_HTTP_REQUESTS": "16384",
+          "NODE_ENV": "production"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "ssr-page",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Two processes: the Bun front server on PORT and the Go API binary on API_PORT. /api/* is proxied by the front server, which is what a deployed borgo app does - so the JSON scenarios include the proxy hop. Measured against the borgo source in this repo (go.mod replace, package.json file: link), not a published release. BUN_CONFIG_MAX_HTTP_REQUESTS is raised from Bun's default of 256 because that default caps the number of concurrent requests the front server can have in flight to the Go API - which silently ceilings concurrent SSE streams at ~255. This is disclosed rather than quietly applied: see the finding in bench/README.md. Started via the CLI entrypoint directly, exactly as the shipped Dockerfile does, rather than through `bun run start`: the latter adds a shell and two launcher processes that RSS-of-the-tree would otherwise charge to borgo, and that no production deployment runs.",
+        "versionCommand": [
+          "bun",
+          "-e",
+          "console.log(require('borgo-framework/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 57151488,
+            "loadedRssBytes": 123052032,
+            "deltaBytes": 65900544,
+            "bytesPerConnection": 65900.544,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 15760,
+                "rssBytes": 63737856,
+                "command": "bun.exe"
+              },
+              {
+                "pid": 19708,
+                "rssBytes": 59322368,
+                "command": "api.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 27
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 15076.314784572818,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 452503,
+                "latencyMs": {
+                  "p50": 3.7951,
+                  "p90": 4.680499999999999,
+                  "p95": 6.215199999999999,
+                  "p99": 14.2775,
+                  "p9999": 61.867
+                },
+                "statusCodes": {
+                  "200": 452503
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 15249.341911109957,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 457541,
+                "latencyMs": {
+                  "p50": 3.7864,
+                  "p90": 4.6344,
+                  "p95": 6.0169999999999995,
+                  "p99": 13.822,
+                  "p9999": 59.739399999999996
+                },
+                "statusCodes": {
+                  "200": 457541
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 15274.975748692288,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 458444,
+                "latencyMs": {
+                  "p50": 3.7594999999999996,
+                  "p90": 4.631200000000001,
+                  "p95": 6.126,
+                  "p99": 13.979000000000001,
+                  "p9999": 48.9427
+                },
+                "statusCodes": {
+                  "200": 458444
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 15249.341911109957,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 457541,
+              "latencyMs": {
+                "p50": 3.7864,
+                "p90": 4.6344,
+                "p95": 6.126,
+                "p99": 13.979000000000001,
+                "p9999": 59.739399999999996
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1368488,
+              "statusCodes": {
+                "200": 1368488
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 8950
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 11336.178711612614,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 340080,
+                "latencyMs": {
+                  "p50": 4.9875,
+                  "p90": 8.4592,
+                  "p95": 10.0818,
+                  "p99": 15.005700000000001,
+                  "p9999": 55.2242
+                },
+                "statusCodes": {
+                  "200": 340080
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 11319.710883291487,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 339651,
+                "latencyMs": {
+                  "p50": 4.9913,
+                  "p90": 8.2874,
+                  "p95": 9.8928,
+                  "p99": 15.803700000000001,
+                  "p9999": 54.3591
+                },
+                "statusCodes": {
+                  "200": 339651
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 10921.591846402065,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 327712,
+                "latencyMs": {
+                  "p50": 5.1393,
+                  "p90": 8.7645,
+                  "p95": 10.486,
+                  "p99": 16.2179,
+                  "p9999": 72.463
+                },
+                "statusCodes": {
+                  "200": 327712
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 11319.710883291487,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 339651,
+              "latencyMs": {
+                "p50": 4.9913,
+                "p90": 8.4592,
+                "p95": 10.0818,
+                "p99": 15.803700000000001,
+                "p9999": 55.2242
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 1007443,
+              "statusCodes": {
+                "200": 1007443
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "text/html; charset=utf-8",
+            "bytes": 2169
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 5114.385614671903,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 153417,
+                "latencyMs": {
+                  "p50": 11.6545,
+                  "p90": 15.573699999999999,
+                  "p95": 17.0728,
+                  "p99": 19.9792,
+                  "p9999": 47.2003
+                },
+                "statusCodes": {
+                  "200": 153417
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 5101.957815635236,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 153075,
+                "latencyMs": {
+                  "p50": 11.686399999999999,
+                  "p90": 15.4851,
+                  "p95": 17.0026,
+                  "p99": 20.8544,
+                  "p9999": 56.750299999999996
+                },
+                "statusCodes": {
+                  "200": 153075
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 5128.08703187497,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 153809,
+                "latencyMs": {
+                  "p50": 11.5365,
+                  "p90": 15.5651,
+                  "p95": 17.1102,
+                  "p99": 20.453300000000002,
+                  "p9999": 51.0183
+                },
+                "statusCodes": {
+                  "200": 153809
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 5114.385614671903,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 153417,
+              "latencyMs": {
+                "p50": 11.6545,
+                "p90": 15.5651,
+                "p95": 17.0728,
+                "p99": 20.453300000000002,
+                "p9999": 51.0183
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 460301,
+              "statusCodes": {
+                "200": 460301
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json;charset=utf-8",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 4881.42865128418,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 146470,
+                "latencyMs": {
+                  "p50": 12.7688,
+                  "p90": 15.7353,
+                  "p95": 16.9224,
+                  "p99": 21.9832,
+                  "p9999": 63.22089999999999
+                },
+                "statusCodes": {
+                  "200": 146470
+                },
+                "errors": {
+                  "aborted due to deadline": 63
+                }
+              },
+              {
+                "requestsPerSec": 4942.940085723226,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 148302,
+                "latencyMs": {
+                  "p50": 12.6356,
+                  "p90": 15.467699999999999,
+                  "p95": 16.5058,
+                  "p99": 19.963600000000003,
+                  "p9999": 69.7382
+                },
+                "statusCodes": {
+                  "200": 148302
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 4911.501056715884,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 147349,
+                "latencyMs": {
+                  "p50": 12.7281,
+                  "p90": 15.5848,
+                  "p95": 16.725,
+                  "p99": 20.6698,
+                  "p9999": 59.3966
+                },
+                "statusCodes": {
+                  "200": 147349
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 4911.501056715884,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 147349,
+              "latencyMs": {
+                "p50": 12.7281,
+                "p90": 15.5848,
+                "p95": 16.725,
+                "p99": 20.6698,
+                "p9999": 63.22089999999999
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 442121,
+              "statusCodes": {
+                "200": 442121
+              },
+              "errors": {
+                "aborted due to deadline": 191
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "0.21.0",
+      "startup": {
+        "timeToFirstResponseMs": 106.51229999959469,
+        "bootRssBytes": 56541184,
+        "bootRssStable": true
+      },
+      "pass": 2,
+      "orderIndex": 7
+    },
+    {
+      "app": "astro",
+      "manifest": {
+        "name": "astro",
+        "framework": "Astro 5 (node standalone adapter)",
+        "language": "JavaScript (Astro + React island)",
+        "runtime": "node",
+        "status": "implemented",
+        "port": 43021,
+        "readyPath": "/api/hello",
+        "install": [
+          "bun",
+          "install"
+        ],
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static",
+            "src/lib"
+          ],
+          [
+            "bun",
+            "x",
+            "astro",
+            "build"
+          ]
+        ],
+        "start": [
+          "node",
+          "./dist/server/entry.mjs"
+        ],
+        "env": {
+          "PORT": "${PORT}",
+          "HOST": "127.0.0.1",
+          "NODE_ENV": "production"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "ssr-page",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "Server output with the standalone Node adapter - self-hosted, like borgo. Every route sets `prerender = false`, because Astro's default would turn /page into a build-time static file and the scenario is per-request rendering. The React counter is an island (client:load), which is Astro's idiom; Astro therefore ships less client JS than the React frameworks here by design, not by accident. The shared dataset module is copied into src/lib at build time.",
+        "versionCommand": [
+          "node",
+          "-e",
+          "console.log(require('astro/package.json').version)"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 69767168,
+            "loadedRssBytes": 126312448,
+            "deltaBytes": 56545280,
+            "bytesPerConnection": 56545.28,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 17584,
+                "rssBytes": 95363072,
+                "command": "node.exe"
+              }
+            ]
+          }
+        },
+        {
+          "scenario": "hello-json",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 26
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 4064.8586554371977,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 121916,
+                "latencyMs": {
+                  "p50": 14.774600000000001,
+                  "p90": 19.6954,
+                  "p95": 20.8127,
+                  "p99": 24.1267,
+                  "p9999": 53.467800000000004
+                },
+                "statusCodes": {
+                  "200": 121916
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 4120.038057203791,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 123580,
+                "latencyMs": {
+                  "p50": 14.578199999999999,
+                  "p90": 19.3915,
+                  "p95": 20.4057,
+                  "p99": 22.9954,
+                  "p9999": 59.7506
+                },
+                "statusCodes": {
+                  "200": 123580
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 4084.2038492902493,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 122527,
+                "latencyMs": {
+                  "p50": 14.7522,
+                  "p90": 19.5789,
+                  "p95": 20.6632,
+                  "p99": 23.526,
+                  "p9999": 56.3579
+                },
+                "statusCodes": {
+                  "200": 122527
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 4084.2038492902493,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 122527,
+              "latencyMs": {
+                "p50": 14.7522,
+                "p90": 19.5789,
+                "p95": 20.6632,
+                "p99": 23.526,
+                "p9999": 56.3579
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 368023,
+              "statusCodes": {
+                "200": 368023
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "api-list",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json",
+            "bytes": 8949
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 3264.2644180579377,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 97915,
+                "latencyMs": {
+                  "p50": 17.8963,
+                  "p90": 24.586299999999998,
+                  "p95": 25.9729,
+                  "p99": 30.5595,
+                  "p9999": 66.6533
+                },
+                "statusCodes": {
+                  "200": 97915
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 3235.7401009725254,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 97040,
+                "latencyMs": {
+                  "p50": 18.1054,
+                  "p90": 24.7895,
+                  "p95": 26.4392,
+                  "p99": 30.637500000000003,
+                  "p9999": 60.415499999999994
+                },
+                "statusCodes": {
+                  "200": 97040
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 3273.2804264188717,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 98162,
+                "latencyMs": {
+                  "p50": 17.835,
+                  "p90": 24.5746,
+                  "p95": 26.4288,
+                  "p99": 30.7975,
+                  "p9999": 61.2809
+                },
+                "statusCodes": {
+                  "200": 98162
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 3264.2644180579377,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 97915,
+              "latencyMs": {
+                "p50": 17.8963,
+                "p90": 24.586299999999998,
+                "p95": 26.4288,
+                "p99": 30.637500000000003,
+                "p9999": 61.2809
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 293117,
+              "statusCodes": {
+                "200": 293117
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "ssr-page",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "text/html",
+            "bytes": 8311
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 2382.4632078356276,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 71450,
+                "latencyMs": {
+                  "p50": 25.211399999999998,
+                  "p90": 30.7683,
+                  "p95": 33.5196,
+                  "p99": 47.0327,
+                  "p9999": 68.685
+                },
+                "statusCodes": {
+                  "200": 71450
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2147.0677438252937,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 64382,
+                "latencyMs": {
+                  "p50": 28.3851,
+                  "p90": 36.820899999999995,
+                  "p95": 41.2742,
+                  "p99": 56.179300000000005,
+                  "p9999": 89.01140000000001
+                },
+                "statusCodes": {
+                  "200": 64382
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 2220.4960436458045,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 66564,
+                "latencyMs": {
+                  "p50": 27.2683,
+                  "p90": 34.0696,
+                  "p95": 38.1419,
+                  "p99": 50.1755,
+                  "p9999": 92.2225
+                },
+                "statusCodes": {
+                  "200": 66564
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 2220.4960436458045,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 66564,
+              "latencyMs": {
+                "p50": 27.2683,
+                "p90": 34.0696,
+                "p95": 38.1419,
+                "p99": 50.1755,
+                "p9999": 89.01140000000001
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 202396,
+              "statusCodes": {
+                "200": 202396
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        },
+        {
+          "scenario": "static-asset",
+          "status": "ok",
+          "sample": {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "bytes": 31607
+          },
+          "load": {
+            "runs": [
+              {
+                "requestsPerSec": 4961.7727992637165,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 148857,
+                "latencyMs": {
+                  "p50": 12.1129,
+                  "p90": 15.3911,
+                  "p95": 17.1737,
+                  "p99": 22.6882,
+                  "p9999": 61.695600000000006
+                },
+                "statusCodes": {
+                  "200": 148857
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 5170.128277763857,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 155086,
+                "latencyMs": {
+                  "p50": 11.8484,
+                  "p90": 14.2682,
+                  "p95": 15.5876,
+                  "p99": 18.6635,
+                  "p9999": 48.232200000000006
+                },
+                "statusCodes": {
+                  "200": 155086
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              },
+              {
+                "requestsPerSec": 5218.230663673541,
+                "successRate": 1,
+                "non2xxRate": 0,
+                "totalRequests": 156557,
+                "latencyMs": {
+                  "p50": 11.8017,
+                  "p90": 14.0792,
+                  "p95": 15.2721,
+                  "p99": 18.7802,
+                  "p9999": 54.883500000000005
+                },
+                "statusCodes": {
+                  "200": 156557
+                },
+                "errors": {
+                  "aborted due to deadline": 64
+                }
+              }
+            ],
+            "median": {
+              "requestsPerSec": 5170.128277763857,
+              "successRate": 1,
+              "non2xxRate": 0,
+              "totalRequests": 155086,
+              "latencyMs": {
+                "p50": 11.8484,
+                "p90": 14.2682,
+                "p95": 15.5876,
+                "p99": 18.7802,
+                "p9999": 54.883500000000005
+              }
+            },
+            "totals": {
+              "runs": 3,
+              "requests": 460500,
+              "statusCodes": {
+                "200": 460500
+              },
+              "errors": {
+                "aborted due to deadline": 192
+              }
+            },
+            "worst": {
+              "successRate": 1,
+              "non2xxRate": 0
+            }
+          }
+        }
+      ],
+      "frameworkVersion": "7.3.2",
+      "startup": {
+        "timeToFirstResponseMs": 324.5873999996111,
+        "bootRssBytes": 77926400,
+        "bootRssStable": true
+      },
+      "pass": 2,
+      "orderIndex": 8
+    }
+  ]
+}

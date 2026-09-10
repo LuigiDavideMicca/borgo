@@ -12,6 +12,13 @@ const siteDir = join(benchDir, "site");
 const resultsDir = join(benchDir, "results");
 const hasGo = Bun.which("go") !== null;
 
+type RawScenario = {
+  scenario: string;
+  status: string;
+  load?: { median: { requestsPerSec: number; latencyMs: { p50: number; p99: number } } };
+  memory?: { idleRssBytes: number; bytesPerConnection: number };
+};
+
 const newestRun = () => {
   const runs = readdirSync(resultsDir)
     .filter((f) => f.startsWith("run-") && f.endsWith(".json"))
@@ -40,26 +47,48 @@ describe("the benchmark page and its numbers", () => {
     expect(readFileSync(join(siteDir, "data.gen.ts"), "utf8")).toBe(committed);
   });
 
-  test("the generator reduces the newest json faithfully, value for value", () => {
+  // a campaign sweeps the app list more than once, so one app arrives as
+  // several raw entries: the page's rule is the WORSE sweep per scenario -
+  // conservative for everyone, cherry-picking impossible by construction -
+  // and this test holds the reduction to that rule value for value
+  test("the generator reduces the newest json faithfully: one app, its worse sweep", () => {
     regenerate();
     const raw = newestRun();
     const data = parseDataGen();
     expect(data.environment.repo.commit).toBe(raw.environment.repo.commit);
+    // one entry per app, however many sweeps the campaign ran
+    const names = data.apps.map((a: { name: string }) => a.name);
+    expect(new Set(names).size).toBe(names.length);
     for (const app of data.apps) {
-      const rawApp = raw.results.find((r: { app: string }) => r.app === app.name)!;
-      expect(rawApp).toBeTruthy();
+      const sweeps = raw.results.filter(
+        (r: { app: string; status: string }) => r.app === app.name && r.status === "ok",
+      );
+      expect(sweeps.length).toBeGreaterThan(0);
+      expect(data.sweeps).toBeGreaterThanOrEqual(sweeps.length);
       for (const [scenario, load] of Object.entries(app.load) as Array<
         [string, { rps: number; p50: number; p99: number }]
       >) {
-        const rawScenario = rawApp.scenarios.find((s: { scenario: string }) => s.scenario === scenario)!;
-        expect(load.rps).toBe(rawScenario.load.median.requestsPerSec);
-        expect(load.p50).toBe(rawScenario.load.median.latencyMs.p50);
-        expect(load.p99).toBe(rawScenario.load.median.latencyMs.p99);
+        const measured = sweeps
+          .flatMap((s: { scenarios: RawScenario[] }) => s.scenarios)
+          .filter((s: RawScenario) => s.scenario === scenario && s.status === "ok" && s.load);
+        expect(measured.length).toBeGreaterThan(0);
+        const worst = measured.reduce((a: (typeof measured)[number], b: (typeof measured)[number]) =>
+          b.load!.median.requestsPerSec < a.load!.median.requestsPerSec ? b : a,
+        );
+        expect(load.rps).toBe(worst.load!.median.requestsPerSec);
+        // latency travels with the sweep that owned the worse throughput
+        expect(load.p50).toBe(worst.load!.median.latencyMs.p50);
+        expect(load.p99).toBe(worst.load!.median.latencyMs.p99);
       }
       if (app.memory) {
-        const rawMem = rawApp.scenarios.find((s: { scenario: string }) => s.scenario === "memory-conn")!;
-        expect(app.memory.idleRssBytes).toBe(rawMem.memory.idleRssBytes);
-        expect(app.memory.bytesPerConnection).toBe(rawMem.memory.bytesPerConnection);
+        const measured = sweeps
+          .flatMap((s: { scenarios: RawScenario[] }) => s.scenarios)
+          .filter((s: RawScenario) => s.scenario === "memory-conn" && s.status === "ok" && s.memory);
+        const worst = measured.reduce((a: (typeof measured)[number], b: (typeof measured)[number]) =>
+          b.memory!.bytesPerConnection > a.memory!.bytesPerConnection ? b : a,
+        );
+        expect(app.memory.idleRssBytes).toBe(worst.memory!.idleRssBytes);
+        expect(app.memory.bytesPerConnection).toBe(worst.memory!.bytesPerConnection);
       }
     }
   });

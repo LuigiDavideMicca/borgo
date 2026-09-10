@@ -192,6 +192,16 @@ export default function Bench() {
               {run.config.runs} runs (median shown) · {run.config.warmupSeconds}s warmup
             </dd>
           </div>
+          {run.sweeps > 1 && (
+            <div>
+              <dt>sweeps</dt>
+              <dd>
+                {run.sweeps}, in opposite directions — each bar below is the app's <strong>worse</strong> sweep,
+                the conservative reading of a shared machine; the committed report shows both, with the drift
+                between them
+              </dd>
+            </div>
+          )}
           {env.note && (
             <div>
               <dt>note</dt>
@@ -200,6 +210,21 @@ export default function Bench() {
           )}
         </dl>
       </section>
+
+      {env.idle && !env.idle.quiet && (
+        <section className="contamination" aria-labelledby="contamination-h">
+          <h2 id="contamination-h">This run's machine was not idle</h2>
+          <p>
+            The harness measured <strong>{(env.idle.busyAtStart * 100).toFixed(1)}% CPU busy</strong> before the
+            first app started
+            {env.idle.busyAtEnd != null && <> and {(env.idle.busyAtEnd * 100).toFixed(1)}% after the last was killed</>}
+            , against its own {(env.idle.threshold * 100).toFixed(0)}% threshold — so it marks every number below
+            as contaminated by an unknown amount. Read the orderings as indicative, not as verdicts; the committed
+            report carries the per-scenario drift table between the two sweeps, which is where the machine's noise
+            shows itself. A clean two-machine run replaces this one the day it exists.
+          </p>
+        </section>
+      )}
 
       {SCENARIOS.map((s) => {
         const rows = loadRows(s.id);

@@ -8,6 +8,7 @@
   --line: #e4e3dc;
   --bar: #2e7d54;
   --accent: #2e7d54;
+  --warn: #9a6b00;
   --code-bg: #efeee8;
 }
 @media (prefers-color-scheme: dark) {
@@ -19,6 +20,7 @@
     --line: #2a2e2a;
     --bar: #1f9e6a;
     --accent: #4cbf8f;
+    --warn: #d9a441;
     --code-bg: #21261f;
   }
 }
@@ -71,6 +73,19 @@ code {
   margin-top: 1.75rem;
 }
 .biases h2 { margin-top: 0.5rem; }
+
+/* the run's own failed idle check, rendered where the reader is - never
+   only in the committed report. amber, not the accent: it is a warning */
+.contamination {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: 0 6px 6px 0;
+  background: var(--card);
+  padding: 0.75rem 1.25rem 1rem;
+  margin-top: 1.75rem;
+}
+.contamination h2 { margin-top: 0.5rem; }
+.contamination p { margin: 0.5rem 0 0.25rem; font-size: 0.95rem; }
 .biases ol { margin: 0.5rem 0; padding-left: 1.2rem; }
 .biases li { margin: 0.45rem 0; }
 .biases p { margin: 0.75rem 0 0.25rem; font-size: 0.95rem; color: var(--muted); }
