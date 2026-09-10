@@ -30,11 +30,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # first run enables pages on the repo (source: github actions), so there
-      # is no settings step to remember; later runs find it enabled and move on
+      # pages must be enabled ONCE by a human: settings > pages > source:
+      # "github actions". the workflow token cannot create the pages site
+      # itself (measured: "resource not accessible by integration"), so until
+      # that click happens this step is where the run fails - by design, with
+      # this comment as the error's explanation
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       # same pins as ci.yml, for the same reasons
       - uses: oven-sh/setup-bun@v2
