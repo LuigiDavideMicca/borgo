@@ -27,7 +27,7 @@ import { appEnvMetas, envRefusal } from "./env-app";
 import { CACHE_STATE_HEADER, Isr, REVALIDATE_TOPIC } from "./isr";
 import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
-import { matchRoute, safeDecode, type Route } from "./router";
+import { canonicalPath, matchRoute, safeDecode, type Route } from "./router";
 import {
   apiCsrfRejects,
   bodyTooLarge,
@@ -340,7 +340,7 @@ export async function serve({
   // the app's declared environment is checked before anything binds: a
   // missing or malformed variable refuses the boot naming every failure at
   // once, instead of surfacing at whichever request reads it first
-  const refusal = envRefusal(await appEnvMetas());
+  const refusal = envRefusal((await appEnvMetas()).metas);
   if (refusal) throw new Error(`borgo: ${refusal}`);
   let chunkMap: Record<string, string> = {};
   // every name the last build recorded: a production build names its outputs
@@ -836,6 +836,14 @@ export async function serve({
     async fetch(req) {
       const t0 = performance.now();
       const url = new URL(req.url);
+      // one spelling per path, before anything routes or caches on it: a
+      // percent-alias of an unreserved character (/ne%77s for /news) was a
+      // distinct isr cache key, and a flood of spellings stored a render
+      // pair each. 308 keeps the method and body across the redirect
+      const canonical = canonicalPath(url.pathname);
+      if (canonical !== url.pathname) {
+        return new Response(null, { status: 308, headers: { location: canonical + url.search } });
+      }
       // a request with no body is entirely in hand (bun calls fetch once headers
       // are in), so from here on whatever the response does is the server working.
       // held before any handler runs: a handler slower than the deadline is one

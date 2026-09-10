@@ -3272,3 +3272,67 @@ describe("the build refuses a file referenced beside its own source", () => {
     120_000,
   );
 });
+
+describe("hunting round 2: codeMask after a close-paren", () => {
+  // a `/` after `)` is a regex exactly when the paren closed an
+  // if/while/for/catch head. before the paren stack, the regex body was
+  // scanned as code, its backtick opened a phantom template, and the mask
+  // went blind for the rest of the chunk - both repair passes with it
+  // (measured: a shipped chunk the browser refused to parse)
+  test("a regex after a control head's paren is masked, backtick body included", () => {
+    const js = "if (s.check(line)) /[`*_]/.test(line) && s.mark();\nconst after = `tpl`;\n";
+    const mask = codeMask(js);
+    // the regex body is blank on the mask
+    expect(mask).not.toContain("[`*_]");
+    // and the template AFTER it is still recognised as a literal
+    expect(mask).not.toContain("tpl");
+    expect(mask).toContain("const after =");
+  });
+
+  test("while and for heads count too, call parens do not", () => {
+    expect(codeMask("while (a) /x`y/.test(b);\nvar Z = `t`;\n")).not.toContain("x`y");
+    expect(codeMask("for (;;) /q`w/.exec(s);\n")).not.toContain("q`w");
+    // after a CALL's paren, / is division - the operand must stay code
+    const division = codeMask("const half = f(a) / g(b);\n");
+    expect(division).toContain("g(b)");
+    const arith = codeMask("const x = (a + b) / 2;\n");
+    expect(arith).toContain("/ 2");
+  });
+
+  test("nested parens resolve to the head that actually closed", () => {
+    // the closing paren is if's, not x's: regex position
+    expect(codeMask("if (x(y)) /z`k/.test(w);\nconst t = `u`;\n")).not.toContain("z`k");
+  });
+});
+
+describe("hunting round 2: hocRegistrations is top-level only", () => {
+  // `\s*` accepted indented declarations, and a memo() inside a function
+  // got a module-scope reg() for a binding the bundler was free to rename:
+  // ReferenceError, chunk dead in dev (measured)
+  test("a function-local memo binding is not registered", () => {
+    const js = [
+      'import { memo } from "react";',
+      "export function makeRow() {",
+      "  const Row = memo(() => null);",
+      "  return Row;",
+      "}",
+      "",
+    ].join("\n");
+    expect(hocRegistrations(js, "pages/factory.tsx")).toBe("");
+  });
+
+  test("top-level bindings still register, beside a local that must not", () => {
+    const js = [
+      'import { memo } from "react";',
+      "export const Card = memo(() => null);",
+      "function helper() {",
+      "  const Inner = memo(() => null);",
+      "  return Inner;",
+      "}",
+      "",
+    ].join("\n");
+    const out = hocRegistrations(js, "pages/mix.tsx");
+    expect(out).toContain("reg(Card,");
+    expect(out).not.toContain("reg(Inner,");
+  });
+});

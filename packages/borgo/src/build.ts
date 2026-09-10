@@ -12,7 +12,7 @@ import {
 import { basename, dirname, extname, join, sep } from "node:path";
 import { c, g } from "./colors";
 import { NO_BUILD_OUTPUTS, precompressAssets, type BuildOutputs } from "./compress";
-import { appEnvMetas, clientEnvDefine, clientEnvRefusal } from "./env-app";
+import { APP_ENV_FILE, appEnvMetas, clientEnvDefine, clientEnvRefusal, envClientShim } from "./env-app";
 import { stampWorkerFile } from "./pwa";
 import { filePathToPattern } from "./router";
 import { metricsEnabled, type AssetNames } from "./util";
@@ -1367,10 +1367,24 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
   // to be frozen into every asset. server variables are the boot check's
   // fresh in dev: the memo hashes env.ts alone, and a rebuild triggered by a
   // file env.ts imports would otherwise keep serving the old schema
-  const envMetas = await appEnvMetas(process.cwd(), { fresh: dev });
-  const envBroken = clientEnvRefusal(envMetas);
+  const appEnv = await appEnvMetas(process.cwd(), { fresh: dev });
+  const envBroken = clientEnvRefusal(appEnv.metas);
   if (envBroken) throw new Error(envBroken);
-  const define = { ...buildDefine(dev), ...clientEnvDefine(envMetas) };
+  // the client bundle replaces env.ts wholesale with a schema-less shim -
+  // bundled as written, the schema literal shipped server defaults,
+  // validator closures and the full server name inventory in a served asset
+  // (measured). a module that mixes env schemas with other exports cannot be
+  // replaced without breaking its importers, so the mix is refused by name
+  if (appEnv.envExports.length > 0 && appEnv.otherExports.length > 0) {
+    throw new Error(
+      `env.ts is the environment contract, and client bundles replace it wholesale so the schema never ships - it can export only defineEnv schemas. move ${appEnv.otherExports.join(", ")} to another module`,
+    );
+  }
+  const envSwap =
+    appEnv.envExports.length > 0
+      ? { path: join(process.cwd(), APP_ENV_FILE), contents: envClientShim(appEnv) }
+      : null;
+  const define = { ...buildDefine(dev), ...clientEnvDefine(appEnv.metas) };
   const result = await Bun.build({
     entrypoints: [
       `${genDir}/client.tsx`,
@@ -1389,7 +1403,7 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
     // dev keeps the entry name fixed: the shell is resolved once at boot
     naming: { entry: dev ? "[name].[ext]" : "[name]-[hash].[ext]", chunk: "[name]-[hash].[ext]" },
     define,
-    plugins: [appTranspile(define, dev)],
+    plugins: [appTranspile(define, dev, envSwap)],
     // bun's own fast-refresh transform, in place of the babel plugin this
     // codebase carried for it. the option is real but absent from bun's
     // types, so it rides through a cast and a test pins its existence -
@@ -1494,26 +1508,37 @@ export async function buildAssets(dev = false): Promise<BuildResult> {
 // length, newlines kept, so an index found on the mask addresses the
 // original and ^/$ still see the same lines. interpolation bodies inside
 // templates stay code and are scanned recursively. regex literals are
-// recognised with the standard preceding-token heuristic (a `/` after a
-// value is division); it is the one known approximation, and it errs by
-// masking too much only in shapes like `if (x) /re/.test(y)` that the
-// emitters here do not produce
+// recognised with the preceding-token heuristic (a `/` after a value is
+// division) plus a paren stack: after `)` the grammar allows a regex only
+// when that paren closed an if/while/for/catch head, so the stack records
+// which opens those were. before the stack, `if (s.check(line)) /[\`*_]/`
+// took the division path, the backtick in the regex body opened a phantom
+// template, and the mask went blind for the rest of the chunk - both repair
+// passes with it (measured: a shipped chunk the browser refused to parse)
 const REGEX_PRECEDERS = new Set([..."(,=:[!&|?{};+-*%<>^~"]);
 const REGEX_KEYWORDS = new Set([
   "return", "typeof", "instanceof", "in", "of", "new", "void", "delete",
   "case", "do", "else", "yield", "await", "throw",
 ]);
+const CONTROL_HEADS = new Set(["if", "while", "for", "catch"]);
 const WORD_CHAR = /[A-Za-z0-9_$]/;
 
 export function codeMask(js: string): string {
   const out = js.split("");
   let lastSig = "";
   let lastWord = "";
+  // parens opened after if/while/for/catch push true; a `/` right after a
+  // `)` is a regex exactly when the paren it closed was one of those heads
+  const parens: boolean[] = [];
+  let lastParenControl = false;
   const blank = (from: number, to: number) => {
     for (let k = from; k < Math.min(to, js.length); k++) if (out[k] !== "\n") out[k] = " ";
   };
   const regexCanFollow = () =>
-    lastSig === "" || REGEX_PRECEDERS.has(lastSig) || REGEX_KEYWORDS.has(lastWord);
+    lastSig === "" ||
+    REGEX_PRECEDERS.has(lastSig) ||
+    REGEX_KEYWORDS.has(lastWord) ||
+    (lastSig === ")" && lastParenControl);
 
   // one position in code context: a literal is consumed and blanked whole,
   // anything else advances; returns the next index
@@ -1567,6 +1592,8 @@ export function codeMask(js: string): string {
       return j;
     }
     if (!/\s/.test(c)) {
+      if (c === "(") parens.push(CONTROL_HEADS.has(lastWord));
+      else if (c === ")") lastParenControl = parens.pop() ?? false;
       lastSig = c;
       lastWord = "";
     }
@@ -1695,12 +1722,26 @@ export function hocRegistrations(js: string, moduleId: string): string {
   const mask = codeMask(js);
   const call = hocCallPattern(reactHocNames(js, mask));
   if (!call) return "";
+  // top-level means brace depth zero, counted on the mask where literal
+  // braces are already blank - `\s*` alone accepted indented declarations,
+  // and a `const Row = memo(...)` inside a function got a module-scope
+  // reg(Row) for a binding the bundler was free to rename: ReferenceError,
+  // chunk dead in dev (measured). the appended reg() block sits at module
+  // scope, so only names bound at module scope may reach it
+  const depth = new Int32Array(mask.length);
+  let d = 0;
+  for (let k = 0; k < mask.length; k++) {
+    depth[k] = d;
+    if (mask[k] === "{") d++;
+    else if (mask[k] === "}") d--;
+  }
   for (const m of mask.matchAll(
     new RegExp(
       `(?:^|\\n)\\s*(?:export\\s+)?(?:const|let|var)\\s+([A-Z][\\w$]*)\\s*=\\s*${call}\\s*\\(`,
       "g",
     ),
   )) {
+    if (depth[m.index] > 0) continue;
     found.push(m[1]);
   }
   if (!found.length) return "";
@@ -1760,7 +1801,11 @@ export function fixRefreshRedeclare(js: string): { code: string; removed: number
   return { code, removed };
 }
 
-function appTranspile(define: Record<string, string>, dev: boolean): import("bun").BunPlugin {
+function appTranspile(
+  define: Record<string, string>,
+  dev: boolean,
+  envSwap: { path: string; contents: string } | null = null,
+): import("bun").BunPlugin {
   const cwd = process.cwd() + sep;
   const pagesDir = join(process.cwd(), "pages") + sep;
   const pageTranspiler = new Bun.Transpiler({
@@ -1788,6 +1833,11 @@ function appTranspile(define: Record<string, string>, dev: boolean): import("bun
       }
       // .ts too: a custom hook without a signature force-remounts every component using it
       build.onLoad({ filter: /\.tsx?$/ }, async (args) => {
+        // the app's env.ts never reaches a client bundle as written: the
+        // schema-less shim goes in its place, before any transpile touches it
+        if (envSwap && args.path === envSwap.path) {
+          return { contents: envSwap.contents, loader: "ts" };
+        }
         if (!args.path.startsWith(cwd) || args.path.includes("node_modules")) return undefined;
         const rel = args.path.slice(cwd.length).replaceAll("\\", "/");
         if (rel.startsWith(".borgo/")) return undefined;

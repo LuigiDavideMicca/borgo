@@ -1472,3 +1472,36 @@ describe.skipIf(CS_ROOT === null)("on a case-sensitive filesystem", async () => 
     }
   });
 });
+
+describe("hunting round 2: hidden ancestors, not just hidden names", () => {
+  // a file inside public/.git was indexed (memory spent on what no request
+  // can reach) and its compressible siblings would have been precompressed
+  // INTO the hidden directory - the serve-time guard held, but build and
+  // boot must apply the same rule
+  test("the asset index skips files whose ancestors are hidden", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-hidden-anc-"));
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(join(dir, ".git", "config"), "[core]");
+    mkdirSync(join(dir, ".well-known", "acme-challenge"), { recursive: true });
+    writeFileSync(join(dir, ".well-known", "acme-challenge", "token"), "ok");
+    writeFileSync(join(dir, "logo.txt"), "visible");
+    const index = buildAssetIndex(dir);
+    const urls = [...index.keys()];
+    expect(urls.some((u) => u.includes(".git"))).toBe(false);
+    // rfc 8615: .well-known stays served, so it stays indexed
+    expect(urls).toContain("/.well-known/acme-challenge/token");
+    expect(urls).toContain("/logo.txt");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("precompress never writes into a hidden directory", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-hidden-gz-"));
+    mkdirSync(join(dir, ".secrets"), { recursive: true });
+    writeFileSync(join(dir, ".secrets", "notes.txt"), "x".repeat(4096));
+    writeFileSync(join(dir, "public.txt"), "y".repeat(4096));
+    await precompressAssets(dir);
+    expect(existsSync(join(dir, ".secrets", "notes.txt.gz"))).toBe(false);
+    expect(existsSync(join(dir, "public.txt.gz"))).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

@@ -61,6 +61,33 @@ export type Route = {
   islands?: boolean;
 };
 
+// percent-encodings of unreserved characters are aliases of the plain
+// spelling (rfc 3986: %77 IS w), and every alias the router accepted became
+// its own isr cache key - /ne%77s stored a second copy of /news, and a
+// flood of spellings stored one render pair each, unbounded (measured, 15
+// spellings -> 12 extra stored renders). collapsed once at the door with a
+// 308, so routing, caching and metrics all see one spelling. only
+// unreserved octets decode - %2F stays %2F, a param carrying a slash keeps
+// it - and a kept triplet gets uppercase hex, the rfc's canonical form, so
+// hex-case aliases collapse too. malformed escapes pass through untouched
+const UNRESERVED = /[A-Za-z0-9\-._~]/;
+const HEX = /[0-9a-fA-F]/;
+export function canonicalPath(pathname: string): string {
+  let out = "";
+  for (let i = 0; i < pathname.length; i++) {
+    const c = pathname[i]!;
+    if (c !== "%" || !HEX.test(pathname[i + 1] ?? "") || !HEX.test(pathname[i + 2] ?? "")) {
+      out += c;
+      continue;
+    }
+    const hex = pathname.slice(i + 1, i + 3);
+    const decoded = String.fromCharCode(parseInt(hex, 16));
+    out += UNRESERVED.test(decoded) ? decoded : `%${hex.toUpperCase()}`;
+    i += 2;
+  }
+  return out;
+}
+
 // a raw "%" (or any malformed escape) in a url must not take the router
 // down; the segment is used as-is instead
 export function safeDecode(s: string): string {

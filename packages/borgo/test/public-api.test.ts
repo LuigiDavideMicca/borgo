@@ -30,7 +30,10 @@ const ROOT_VALUES = [
   "Island",
   "apiFetch",
   "csrfCookieValue",
-  // 0.22: the typed app environment - a deliberate stability promise
+  // 0.22: the typed app environment - a deliberate stability promise.
+  // browserEnv is what the client bundle's env.ts shim re-exports: the
+  // schema-less proxy, public because the generated shim imports it by name
+  "browserEnv",
   "defineEnv",
   "redirect",
   "registerServiceWorker",

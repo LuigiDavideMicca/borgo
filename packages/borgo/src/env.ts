@@ -115,7 +115,10 @@ function parseValue(name: string, raw: string, spec: EnvSpec): { value?: unknown
       return { value: n };
     }
     case "boolean": {
-      const b = BOOL[raw];
+      // own property only: BOOL["__proto__"] and BOOL["constructor"] answer
+      // from the prototype chain with truthy objects, and FLAG=__proto__
+      // sailed through a grammar whose whole point is refusal by name
+      const b = Object.hasOwn(BOOL, raw) ? BOOL[raw] : undefined;
       if (b === undefined) {
         return { error: `${name}: expected a boolean (1/0, true/false, t/f), got ${JSON.stringify(raw)}` };
       }
@@ -214,7 +217,7 @@ export function defineEnv<const S extends EnvSchema>(
         `borgo env: ${name} is borgo's own - the framework already validates it at boot, and declaring it here would give it two sources of truth`,
       );
     }
-    if (name in client) {
+    if (Object.hasOwn(client, name)) {
       throw new Error(`borgo env: ${name} is declared as both server and client`);
     }
   }
@@ -286,6 +289,15 @@ export function defineEnv<const S extends EnvSchema>(
             `${name}: a client value must be a json primitive (string, number or boolean), got ${t}`,
           );
           delete values[name];
+        } else if (t === "number" && !Number.isFinite(v as number)) {
+          // typeof NaN is "number", but json has no NaN: the define shipped
+          // null while the server read NaN - the exact silent divergence
+          // this gate exists to refuse
+          refuse(
+            "client",
+            `${name}: a client number must be finite - ${String(v)} becomes null in json, and the two sides of the wall would disagree`,
+          );
+          delete values[name];
         }
         clientValues[name] = values[name];
       }
@@ -318,29 +330,81 @@ export function defineEnv<const S extends EnvSchema>(
         return (target_ as Record<PropertyKey, unknown>)[prop];
       }
       if (typeof prop !== "string") return undefined;
-      if (shipped && prop in server) {
+      // own properties only, everywhere a schema is consulted: `"toString"
+      // in server` answers from Object.prototype, and in the browser that
+      // turned every stringification of the env into a false "toString is a
+      // server variable" throw
+      if (shipped && Object.hasOwn(server, prop)) {
         throw new Error(
           `borgo env: ${prop} is a server variable - it never reaches the browser. values for the client carry the ${CLIENT_ENV_PREFIX} prefix and are declared under client`,
         );
       }
-      if (!(prop in server) && !(prop in client)) {
-        // probes serializers and inspectors make on any object are answered,
-        // not punished - only a variable read by name deserves the throw
-        if (prop === "toJSON" || prop === "then" || prop === "constructor") return undefined;
+      if (!Object.hasOwn(server, prop) && !Object.hasOwn(client, prop)) {
+        // probes serializers, template literals and inspectors make on any
+        // object are answered, not punished - only a variable read by name
+        // deserves the throw
+        if (prop === "toString") {
+          return () => (failures.length ? `[borgo env: ${failures.length} refused]` : "[borgo env]");
+        }
+        if (prop === "toJSON" || prop === "valueOf" || prop === "then" || prop === "constructor" || prop === "hasOwnProperty") {
+          return undefined;
+        }
         throw new Error(`borgo env: ${prop} is not declared in the schema`);
       }
       if (failures.length > 0) throw refusal();
       return values[prop];
     },
     has(_, prop) {
-      return typeof prop === "string" && (prop in server || prop in client);
+      return typeof prop === "string" && (Object.hasOwn(server, prop) || Object.hasOwn(client, prop));
     },
     ownKeys() {
       return [...Object.keys(server), ...Object.keys(client)];
     },
     getOwnPropertyDescriptor(_, prop) {
-      if (typeof prop === "string" && (prop in server || prop in client)) {
+      if (typeof prop === "string" && (Object.hasOwn(server, prop) || Object.hasOwn(client, prop))) {
         return { enumerable: true, configurable: true, value: undefined };
+      }
+      return undefined;
+    },
+  });
+}
+
+// the client bundle never carries the app's schema: the build swaps env.ts
+// for a shim exporting this proxy instead, so server defaults, validators
+// and even server variable NAMES stay on the machine that owns them - the
+// schema literal in a served asset was measured leaking all three. answers
+// come from the one allowlisted object the define shipped, by own property
+// and never the prototype chain; a miss throws without naming any server
+// variable, because the browser no longer knows the server's names - which
+// is the point
+export function browserEnv(): Record<string, unknown> {
+  const shipped =
+    (typeof __BORGO_CLIENT_ENV__ !== "undefined"
+      ? __BORGO_CLIENT_ENV__
+      : ((globalThis as Record<string, unknown>).__BORGO_CLIENT_ENV__ as
+          | Record<string, unknown>
+          | undefined)) ?? {};
+  return new Proxy({} as Record<string, unknown>, {
+    get(_, prop) {
+      if (typeof prop !== "string") return undefined;
+      if (Object.hasOwn(shipped, prop)) return shipped[prop];
+      // probes serializers and template literals make on any object are
+      // answered, not punished - only a variable read by name deserves the
+      // throw. toString/valueOf return real answers so `${env}` logs instead
+      // of crashing the component that logged it
+      if (prop === "toString") return () => "[borgo env]";
+      if (prop === "toJSON" || prop === "valueOf" || prop === "then" || prop === "constructor" || prop === "hasOwnProperty") {
+        return undefined;
+      }
+      throw new Error(
+        `borgo env: ${prop} is not in the client environment - client variables carry the ${CLIENT_ENV_PREFIX} prefix and are declared under client; a server variable never reaches the browser`,
+      );
+    },
+    has: (_, prop) => typeof prop === "string" && Object.hasOwn(shipped, prop),
+    ownKeys: () => Object.keys(shipped),
+    getOwnPropertyDescriptor(_, prop) {
+      if (typeof prop === "string" && Object.hasOwn(shipped, prop)) {
+        return { enumerable: true, configurable: true, value: shipped[prop] };
       }
       return undefined;
     },

@@ -463,14 +463,18 @@ export const reloadBanner = (env: Record<string, string | undefined>): boolean =
 // || rather than ??, deliberately: the re-exec fires on a falsy value, so a
 // defaulting that preserves the empty string (`NODE_ENV=` in a .env) would
 // hand the child the same falsy value and the child would re-exec again -
-// forever. the invariant the test pins: one re-exec always settles it
+// forever. the invariant the test pins: one re-exec always settles it.
+// whitespace trims to the same fate as empty: `NODE_ENV=" "` is nobody's
+// deliberate mode, and passed through it reached react as a non-production
+// value on a production server
+const settled = (v: string | undefined): string | undefined => (v?.trim() ? v.trim() : undefined);
 export const startEnv = (env: Record<string, string | undefined>): Record<string, string> => ({
-  BUN_CONFIG_MAX_HTTP_REQUESTS: env.BUN_CONFIG_MAX_HTTP_REQUESTS || "16384",
-  NODE_ENV: env.NODE_ENV || "production",
+  BUN_CONFIG_MAX_HTTP_REQUESTS: settled(env.BUN_CONFIG_MAX_HTTP_REQUESTS) || "16384",
+  NODE_ENV: settled(env.NODE_ENV) || "production",
 });
 
 export const startNeedsReexec = (env: Record<string, string | undefined>): boolean =>
-  !env.BUN_CONFIG_MAX_HTTP_REQUESTS || !env.NODE_ENV;
+  !settled(env.BUN_CONFIG_MAX_HTTP_REQUESTS) || !settled(env.NODE_ENV);
 
 // go's strconv.ParseBool grammar, exactly: SESSION_SECURE is read by both
 // halves and `true` must not give the session cookie Secure and the csrf

@@ -150,6 +150,17 @@ jobs:
           grep -q "borgo-server-only-sentinel" pages/index.tsx
           ! grep -rq "borgo-server-only-sentinel" public/assets
 
+      # the schema itself is server-only: bundled as written, env.ts shipped
+      # server defaults, validator closures and the server name inventory in
+      # a served asset (hunting round 2). the client bundle carries the
+      # schema-less shim instead, so not even the NAMES may appear
+      - name: the env schema stays out of client assets
+        working-directory: examples/tasks
+        run: |
+          grep -q "ENV_SENTINEL" env.ts
+          ! grep -rq "ENV_SENTINEL" public/assets
+          ! grep -rq "HTTP_TIMEOUT_MS" public/assets
+
       - name: smoke test example app
         working-directory: examples/tasks
         run: |

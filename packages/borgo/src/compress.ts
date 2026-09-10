@@ -123,10 +123,14 @@ export function pickEncoding(
 // build time: write .gz and .br siblings next to every compressible asset,
 // so serving them costs nothing at runtime. skipped when not smaller.
 export async function precompressAssets(dir: string) {
+  const rootLen = dir.replaceAll("\\", "/").replace(/\/+$/, "").length;
   for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
     // what serveAsset refuses is only build time here: the same rule, not a copy of it
     if (!entry.isFile() || !isCompressiblePath(entry.name) || isHiddenAsset(entry.name)) continue;
     const path = join(entry.parentPath, entry.name);
+    // and hidden ancestors: writing .gz siblings into public/.git is a
+    // build-time write into a directory the server refuses to serve
+    if (inHiddenDirectory(path.replaceAll("\\", "/").slice(rootLen))) continue;
     // the listing is a snapshot: `borgo dev` deletes stale hashed chunks, and a
     // file gone between scan and read is not a reason to fail the build
     let raw: Buffer;
@@ -198,9 +202,16 @@ export function buildAssetIndex(
   } catch {
     return new Map();
   }
+  const rootLen = dir.replaceAll("\\", "/").replace(/\/+$/, "").length;
   for (const entry of entries) {
     if (!entry.isFile() || isHiddenAsset(entry.name)) continue;
     const path = join(entry.parentPath, entry.name).replaceAll("\\", "/");
+    // hidden ancestors too, the same rule the serve path enforces: a file
+    // inside public/.git was indexed (memory spent) and its compressible
+    // siblings would be precompressed INTO the hidden directory - never
+    // served, the request-time guard held, but the index must not carry
+    // what no request can reach
+    if (inHiddenDirectory(path.slice(rootLen))) continue;
     try {
       const stat = statSync(path);
       files.set(path, { size: stat.size, mtimeMs: stat.mtimeMs });

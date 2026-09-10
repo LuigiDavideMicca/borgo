@@ -306,3 +306,80 @@ describe("the meta the boot check and the build read", () => {
     expect(envMetaOf({})).toBeNull();
   });
 });
+
+describe("hunting round 2: the prototype chain answers for nobody", () => {
+  // BOOL["__proto__"] is Object.prototype - truthy, typeof "object" - and
+  // FLAG=__proto__ sailed through a grammar whose point is refusal by name
+  test("proto-chain keys are not booleans", () => {
+    for (const raw of ["__proto__", "constructor", "toString", "valueOf", "hasOwnProperty"]) {
+      const env = defineEnv({ server: { FLAG: { type: "boolean" } } }, { FLAG: raw });
+      expect(metaOf(env).failures).toHaveLength(1);
+      expect(metaOf(env).failures[0]).toContain("expected a boolean");
+    }
+  });
+
+  // typeof NaN is "number", but json has no NaN: the define shipped null
+  // while the server read NaN - a silent divergence across the wall
+  test("a client number must be finite, or the wall refuses it by name", () => {
+    for (const raw of ["not-a-number", "1/0"]) {
+      const env = defineEnv(
+        { client: { BORGO_PUBLIC_RATIO: { validate: (r) => Number(r) } } },
+        { BORGO_PUBLIC_RATIO: raw },
+      );
+      expect(metaOf(env).clientFailures).toHaveLength(1);
+      expect(metaOf(env).clientFailures[0]).toContain("finite");
+      expect(metaOf(env).clientValues.BORGO_PUBLIC_RATIO).toBeUndefined();
+    }
+  });
+
+  // `"toString" in server` answered from Object.prototype, and in the
+  // browser every stringification threw "toString is a server variable"
+  test("stringifying the env is answered, not punished - in the browser too", () => {
+    (globalThis as Record<string, unknown>).__BORGO_CLIENT_ENV__ = { BORGO_PUBLIC_A: "x" };
+    const env = defineEnv({ server: { SECRET: {} }, client: { BORGO_PUBLIC_A: {} } }, {});
+    expect(`${env}`).toBe("[borgo env]");
+    // JSON.stringify enumerates the DECLARED keys, and enumerating SECRET in
+    // the browser is reading a server variable by name: that throw is the
+    // contract, not a punished probe (the schema-less browserEnv, which is
+    // what client bundles actually hold, stringifies clean - tested below)
+    expect(() => JSON.stringify(env)).toThrow("server variable");
+    // the declared reads keep their contracts
+    expect((env as Record<string, unknown>).BORGO_PUBLIC_A).toBe("x");
+    expect(() => (env as Record<string, unknown>).SECRET).toThrow("server variable");
+  });
+
+  test("a broken env still stringifies, naming the count", () => {
+    const env = defineEnv({ server: { MISSING: {} } }, {});
+    expect(`${env}`).toBe("[borgo env: 1 refused]");
+  });
+});
+
+describe("browserEnv, the schema-less client proxy", () => {
+  // the client bundle gets this in env.ts's place: it knows the shipped
+  // values and nothing else - no server names, no defaults, no validators
+  test("answers shipped values by own property, and probes politely", async () => {
+    const { browserEnv } = await import("../src/env");
+    (globalThis as Record<string, unknown>).__BORGO_CLIENT_ENV__ = { BORGO_PUBLIC_MSG: "hi" };
+    const env = browserEnv();
+    expect(env.BORGO_PUBLIC_MSG).toBe("hi");
+    expect(`${env}`).toBe("[borgo env]");
+    expect(() => JSON.stringify(env)).not.toThrow();
+    expect(Object.keys(env)).toEqual(["BORGO_PUBLIC_MSG"]);
+    // proto-chain keys of the shipped object are not values
+    expect(() => env.__proto__).toThrow("not in the client environment");
+  });
+
+  test("a miss throws without naming any server variable", async () => {
+    const { browserEnv } = await import("../src/env");
+    (globalThis as Record<string, unknown>).__BORGO_CLIENT_ENV__ = {};
+    const env = browserEnv();
+    expect(() => env.DATABASE_URL).toThrow("never reaches the browser");
+    try {
+      env.DATABASE_URL;
+    } catch (e) {
+      // the message may echo the asked-for name, but must not distinguish
+      // "a server variable exists by this name" from "nothing does"
+      expect((e as Error).message).not.toContain("is a server variable");
+    }
+  });
+});

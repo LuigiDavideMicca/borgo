@@ -105,6 +105,20 @@ test("pages without a revalidate export are untouched", async ({ request }) => {
   expect(res.headers()["x-borgo-cache"]).toBeUndefined();
 });
 
+// hunting round 2: /ne%77s IS /news per rfc 3986, and every spelling the
+// server accepted became its own cache key - one page, unbounded stored
+// renders under an unauthenticated flood. one spelling survives, at the door
+test("a percent-alias of a cached page is redirected, never cached apart", async ({ request }) => {
+  await settleHit(() => request.get("/news"));
+  const res = await request.get("/ne%77s", { maxRedirects: 0 });
+  expect(res.status()).toBe(308);
+  expect(res.headers().location).toBe("/news");
+  // and following it lands on the one shared copy
+  const followed = await request.get("/ne%77s");
+  expect(followed.status()).toBe(200);
+  expect(followed.headers()["x-borgo-cache"]).toBe("hit");
+});
+
 // a restart with the same build must come back warm: same stamp, no re-render.
 // this needs its own instance - killing the shared webServer is not an option -
 // with its own cache dir, or it would trade pages with the :3400 server

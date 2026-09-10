@@ -30,21 +30,42 @@ const url = JSON.parse(process.argv.at(-2));
 const out = JSON.parse(process.argv.at(-1));
 const module = await import(url);
 const metas = [];
-for (const exported of Object.values(module)) {
+const seen = new Set();
+const envExports = [];
+const otherExports = [];
+for (const [name, exported] of Object.entries(module)) {
   const meta = exported === null || typeof exported !== "object" ? undefined : exported[Symbol.for("borgo.env")];
-  if (meta) metas.push(meta);
+  if (meta) {
+    envExports.push(name);
+    // the same proxy exported under two names (export const env + export
+    // default env, the idiomatic pair) is ONE schema: counted twice it
+    // double-reported every boot failure and false-refused the build as
+    // "declared by more than one exported schema"
+    if (!seen.has(exported)) { seen.add(exported); metas.push(meta); }
+  } else {
+    otherExports.push(name);
+  }
 }
-await Bun.write(out, JSON.stringify(metas));
+await Bun.write(out, JSON.stringify({ metas, envExports, otherExports }));
 `;
 
-const memo = new Map<string, EnvMeta[]>();
+// the shape of the app's env.ts as the build and the boot see it: the
+// schemas' metas, plus which export names carried an env (the client shim
+// re-exports exactly those) and which carried anything else
+export type AppEnv = {
+  metas: EnvMeta[];
+  envExports: string[];
+  otherExports: string[];
+};
+
+const memo = new Map<string, AppEnv>();
 
 export async function appEnvMetas(
   root = process.cwd(),
   { fresh = false }: { fresh?: boolean } = {},
-): Promise<EnvMeta[]> {
+): Promise<AppEnv> {
   const file = join(root, APP_ENV_FILE);
-  if (!existsSync(file)) return [];
+  if (!existsSync(file)) return { metas: [], envExports: [], otherExports: [] };
   const key = `${file}:${Bun.hash(readFileSync(file)).toString(36)}`;
   if (!fresh) {
     const known = memo.get(key);
@@ -55,12 +76,21 @@ export async function appEnvMetas(
   try {
     const proc = Bun.spawnSync(
       [process.execPath, "-e", READ_METAS, JSON.stringify(pathToFileURL(file).href), JSON.stringify(out)],
-      { cwd: root, stdout: "pipe", stderr: "pipe" },
+      // bounded: an env.ts whose import never completes - a top-level await
+      // on a connection that never answers is the natural gesture - froze
+      // the build, every dev rebuild and the boot, silently and forever,
+      // because spawnSync stops the parent's event loop while it waits
+      { cwd: root, stdout: "pipe", stderr: "pipe", timeout: 10_000 },
     );
     // the app's own output, wherever it went, reaches the person debugging
     const said = proc.stdout.toString().trim();
     if (said) console.log(said);
     if (proc.exitCode !== 0) {
+      if (proc.exitCode === null || proc.signalCode != null) {
+        throw new Error(
+          "borgo: env.ts did not finish importing within 10s - a top-level await on something that never answers would do this. the environment module must load fast; do slow work after boot, not at import",
+        );
+      }
       // a schema mistake in env.ts is an author error and rides up as the
       // boot failure it is, with bun's own message kept
       throw new Error(`borgo: env.ts refused to load:\n${proc.stderr.toString().trim()}`);
@@ -78,17 +108,45 @@ export async function appEnvMetas(
       unlinkSync(out);
     } catch {}
   }
-  const metas = JSON.parse(answer) as EnvMeta[];
+  let app: AppEnv;
+  try {
+    app = JSON.parse(answer) as AppEnv;
+  } catch {
+    // a child killed mid-write (oom, an external kill) leaves a truncated
+    // file; a bare SyntaxError naming nothing is the failure class the file
+    // channel was built to eliminate
+    throw new Error(
+      "borgo: env.ts loaded but its schema came back unreadable - the reader process may have been killed mid-write. rerun; if it repeats, something on this machine is killing short-lived bun processes",
+    );
+  }
   // json dropped the undefined values; the define does the same, and the
   // failures and names travel whole
-  for (const meta of metas) {
+  app.metas ??= [];
+  app.envExports ??= [];
+  app.otherExports ??= [];
+  for (const meta of app.metas) {
     meta.clientValues ??= {};
     meta.failures ??= [];
     meta.clientFailures ??= [];
     meta.clientNames ??= [];
   }
-  memo.set(key, metas);
-  return metas;
+  memo.set(key, app);
+  return app;
+}
+
+// what the client bundle gets in env.ts's place: the same export names,
+// answering from the define's allowlisted object - and not one byte of the
+// schema. the module the author wrote stays on the server, where the
+// defaults, the validators and the server variable names belong; shipped in
+// an asset they were measured leaking all three
+export function envClientShim(app: AppEnv): string {
+  // the local carries a $ prefix so no legal export name can collide with
+  // it - `export const env = env` was this function's own first bug
+  const lines = ['import { browserEnv } from "borgo-framework";', "const $borgoEnv = browserEnv();"];
+  for (const name of app.envExports) {
+    lines.push(name === "default" ? "export default $borgoEnv;" : `export const ${name} = $borgoEnv;`);
+  }
+  return lines.join("\n") + "\n";
 }
 
 // every failure at once, or null when the environment is healthy (or the app

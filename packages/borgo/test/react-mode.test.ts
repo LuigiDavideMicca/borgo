@@ -37,11 +37,18 @@ describe("what `borgo start` guarantees its launch environment", () => {
       { NODE_ENV: "", BUN_CONFIG_MAX_HTTP_REQUESTS: "" },
       { NODE_ENV: "staging" },
       { BUN_CONFIG_MAX_HTTP_REQUESTS: "256" },
+      // whitespace is nobody's deliberate mode: it settles like empty
+      { NODE_ENV: " " },
+      { NODE_ENV: "\t", BUN_CONFIG_MAX_HTTP_REQUESTS: "  " },
     ]) {
       expect(startNeedsReexec({ ...env, ...startEnv(env) })).toBe(false);
     }
     expect(startEnv({ NODE_ENV: "" }).NODE_ENV).toBe("production");
     expect(startEnv({ BUN_CONFIG_MAX_HTTP_REQUESTS: "" }).BUN_CONFIG_MAX_HTTP_REQUESTS).toBe("16384");
+    // found hunting round 2: `NODE_ENV=" "` slipped past the || and reached
+    // react as a non-production value on a production server
+    expect(startNeedsReexec({ NODE_ENV: " ", BUN_CONFIG_MAX_HTTP_REQUESTS: "256" })).toBe(true);
+    expect(startEnv({ NODE_ENV: " " }).NODE_ENV).toBe("production");
   });
 
   test("with both present nothing re-execs - the process shape stays flat", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { filePathToPattern, matchRoute, resolveHead, safeHeadAttrs } from "../src/router";
+import { canonicalPath, filePathToPattern, matchRoute, resolveHead, safeHeadAttrs } from "../src/router";
 import { headHtml } from "../src/util";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -178,5 +178,40 @@ describe("safeHeadAttrs: the filter both halves render through", () => {
     // and every meta it appends is marked, so the next navigation removes it
     expect(applyHead).toContain('setAttribute("data-borgo-head", "")');
     expect(applyHead).toContain('querySelectorAll("[data-borgo-head]")');
+  });
+});
+
+describe("canonicalPath", () => {
+  // rfc 3986: a percent-encoding of an unreserved character is an alias of
+  // the plain spelling, and every alias the server accepted became its own
+  // isr cache key - measured as unbounded stored renders for one page
+  test("percent-aliases of unreserved characters collapse to the plain spelling", () => {
+    expect(canonicalPath("/ne%77s")).toBe("/news");
+    expect(canonicalPath("/%6eews")).toBe("/news");
+    expect(canonicalPath("/n%65%77s")).toBe("/news");
+    expect(canonicalPath("/%2D%2E%5F%7E")).toBe("/-._~");
+  });
+
+  test("a canonical path is already itself", () => {
+    expect(canonicalPath("/news")).toBe("/news");
+    expect(canonicalPath("/")).toBe("/");
+    expect(canonicalPath("/tasks/42")).toBe("/tasks/42");
+  });
+
+  // %2F is not an alias of "/": decoding it would change how the path
+  // splits, so reserved octets keep their triplet - with canonical hex case
+  test("reserved octets stay encoded, and their hex goes uppercase", () => {
+    expect(canonicalPath("/a%2Fb")).toBe("/a%2Fb");
+    expect(canonicalPath("/a%2fb")).toBe("/a%2Fb");
+    expect(canonicalPath("/q%3Fx")).toBe("/q%3Fx");
+    expect(canonicalPath("/s%20p")).toBe("/s%20p");
+  });
+
+  test("malformed escapes and non-ascii pass through untouched", () => {
+    expect(canonicalPath("/x%GGy")).toBe("/x%GGy");
+    expect(canonicalPath("/x%2")).toBe("/x%2");
+    expect(canonicalPath("/100%")).toBe("/100%");
+    expect(canonicalPath("/caf\u00e9")).toBe("/caf\u00e9");
+    expect(canonicalPath("/%C3%A9")).toBe("/%C3%A9");
   });
 });
