@@ -18,19 +18,15 @@
 
 File-based React pages server-rendered by Bun, API routes written in Go. You get the DX — `bunx create-borgo@latest my-app`, drop a file in `pages/`, drop a file in `api/`, one dev command — without the platform. Deployment is one Go binary and one Bun server on any box you control.
 
-Pages get nested layouts, per-page `<head>` management, streaming SSR through Suspense, client-side navigation with hover/viewport prefetching and scroll restoration, per-route code splitting, opt-out and deferred hydration plus islands, form actions that submit in place without losing your scroll (and still work with JavaScript off), live updates over server-sent events and first-class typed WebSocket topics, signed-cookie sessions, fast refresh in dev, opt-in Tailwind, the PWA mechanics (precache manifest, service worker serving, guarded registration), custom 404/500 pages, and static export for the pages that need no server — all through file conventions. Loaders and actions talk to the Go API through a client typed end to end by `borgogen`, which reads the Go handlers with `go/types` and generates the TypeScript route map, request bodies and WebSocket payloads included. Around the core: `/healthz` on both servers with opt-in Prometheus metrics, `borgo deploy init` for the blessed reverse-proxy/systemd/compose configs, and `borgo doctor` when something is off.
-
-The entire framework is about eleven thousand lines of TypeScript and Go, with the reasoning written beside them in as many lines of comments; the Go runtime has zero dependencies. It exists because most of what makes Next-style frameworks pleasant is conventions, not machinery — and conventions are cheap.
-
 ## Why borgo?
 
-Not a feature list — the reasoning:
-
-- **Go in production.** One static binary, small memory footprint, real concurrency. The API server is `net/http` with zero dependencies; what you deploy is what you read.
-- **Bun for development.** Fast builds, fast refresh, one toolchain — the dev loop of a modern meta-framework without a bundler config to own.
-- **React, unmodified.** The ecosystem you already know; no fork, no compiler magic, no proprietary component model.
-- **Types generated, not maintained.** `borgogen` reads the Go handlers and emits the TypeScript bridge — request bodies, responses, WebSocket payloads. No OpenAPI spec drifting out of date.
+- **The backend is Go.** Not Node pretending to be a backend — a static binary on `net/http` with zero dependencies, real concurrency, and tens of megabytes of memory instead of hundreds. The process that pages you at 3 a.m. is the boring one.
+- **The API types are generated from Go source.** `borgogen` reads your handlers with `go/types` and writes the TypeScript bridge — routes, response types, request bodies, WebSocket payloads. Rename a Go field and `tsc` fails on the page that read it. No OpenAPI spec to keep honest, because there is no spec: the code is the spec.
+- **React, unmodified. Bun, one toolchain.** The ecosystem you already know — no fork, no compiler magic, no proprietary component model — with the dev loop of a modern meta-framework and no bundler config to own.
 - **Self-hosted, by conviction.** Any VPS, container host or bare-metal box. React, SSR, typed APIs, WebSockets, streaming and Docker — without depending on Vercel, Cloudflare or Netlify.
+- **You can read the whole thing.** Roughly twelve thousand lines of TypeScript and Go, with the reasoning threaded through them — a comment line for every four of code, saying why rather than what. Most of what makes Next-style frameworks pleasant is conventions, not machinery — and conventions are cheap.
+
+Every position above is argued, with its bill attached, in [why borgo works this way](docs/why.md). Everything else you expect is here and is a file convention — layouts, streaming SSR, form actions that work with JavaScript off, typed SSE and WebSockets, sessions and auth, a typed environment schema, PWA plumbing, a nonced CSP by default, health checks and metrics — each with a paragraph below and a deep-dive page in [docs/](docs/README.md).
 
 ## Quickstart
 
@@ -49,6 +45,30 @@ Three templates: `base` (default — a tour of loaders, actions, islands and SSE
 Open http://localhost:3000 — edit a page and watch fast refresh keep your state. For a guided build instead of a tour, [getting started](docs/getting-started.md) takes you from here to a working feature in about twenty minutes. When it's time to ship: `docker compose up -d` (the scaffold includes the Dockerfile), or see the [deploy guide](docs/deploy.md).
 
 To poke at the full demo instead, clone this repo and run `bun install`, then `cd examples/tasks && bun run dev`.
+
+## Every page picks how it ships
+
+Most frameworks make rendering strategy an application-level decision, or a different framework entirely. In borgo it is one export, per page, and every mode composes with the same loaders, layouts and typed API client:
+
+| You write | The page is |
+| --- | --- |
+| nothing | **SSR** — rendered on every request, streamed through Suspense |
+| `export const revalidate = 300` | **ISR** — rendered once, cached and shared; re-rendered when the clock runs out |
+| `export const tags = ["notes"]` | …and (beside `revalidate`) also the moment Go calls `borgo.RevalidateTag("notes")` — on-demand invalidation from the handler that changed the data |
+| `export const prerender = true` | **static** — baked to plain HTML by `borgo export`, servable by nginx or any CDN, no server at all (`prerenderPaths` enumerates dynamic routes) |
+| `export const hydrate = false` | **zero-JS** — server HTML only, not one byte of JavaScript shipped |
+| `export const hydrate = "visible"` | **deferred** — hydration waits until the marked element (or the page root) scrolls into view |
+| `<Island name="Counter" />` | **islands** — only that component's JavaScript, inside an otherwise static page |
+
+And after the first load, every *hydrated* page gets **SPA-style client navigation** for free: plain `<a>` tags become client-side transitions with per-route code splitting, hover/viewport prefetching and scroll restoration — no `<Link>` component, no router config. A zero-JS page keeps honest full-page links, because it shipped no runtime to do otherwise.
+
+```tsx
+// pages/news.tsx - one real page from the full template
+export const revalidate = 300;      // cached and shared for five minutes...
+export const tags = ["notes"];      // ...unless Go invalidates it first
+```
+
+Deep dives: [pages and routing](docs/pages-and-routing.md) for SSR and ISR, [client navigation and hydration](docs/client-navigation.md) for hydration modes and islands, [static export](docs/deploy.md#static-export) for the no-server case.
 
 ## Conventions
 
@@ -169,7 +189,27 @@ Commands (in an app): `borgo dev` (both servers, watch, fast refresh), `borgo bu
 
 ### Deploying
 
-Scaffolded apps ship a multi-stage `Dockerfile` (Go builds static, the runtime is `oven/bun:slim`) and a `docker-compose.yml` that is as bare as the app: the port, and for the `full` template the `SESSION_SECRET` it reads from the scaffold's gitignored `.env` (declared *required*, so a missing key stops the deploy instead of breaking every login); the `/data` volume is commented in for the day you add a database — `docker compose up -d` is a deployment. The [deploy guide](docs/deploy.md) covers the single-container and two-service layouts, Caddy and nginx reverse-proxy samples (WebSockets and SSE included), a systemd unit for bare metal, static export hosting, and the full environment reference — and `borgo deploy init` writes those configs into your project, templated with the app's name and ports.
+Let's be honest about this up front, because it is the trade the whole framework is built on: **there is no Deploy button.** You cannot push borgo to Vercel, Netlify or Cloudflare — [by design](docs/why.md#why-self-hosted-only-no-serverless-targets) — and no platform stands behind your uptime. What you get instead is a deployment you own end to end, on hardware that costs a fixed few euros a month, with no platform bill that scales with your success and no runtime you have to emulate locally.
+
+Here is what that actually looks like, start to finish — a VPS with Docker and [Caddy](https://caddyserver.com) installed, and a domain pointed at it:
+
+```bash
+# on your machine: generate the reverse-proxy config, then make its two go-live
+# edits - your domain in place of example.com, and the `tls internal` line deleted
+bunx borgo deploy init caddy
+
+# ship the app, then its one secret file (.env is gitignored - it travels by hand, once)
+rsync -a --exclude node_modules --exclude .env . box:/srv/my-app/
+scp .env box:/srv/my-app/.env
+
+# on the box: build and run - the scaffolded Dockerfile compiles Go static and the client assets
+ssh box "cd /srv/my-app && docker compose up -d"
+ssh box "cp /srv/my-app/Caddyfile /etc/caddy/Caddyfile && systemctl reload caddy"
+```
+
+That is the whole first deploy; every one after it is the same `rsync` followed by `docker compose up -d --build`. Caddy handles the certificate from there, the container answers `/healthz` about [330 ms after `docker run`](docs/deploy.md#cold-start-measured--and-the-serverless-question) — measured, not estimated — and the `full` template's compose file *requires* `SESSION_SECRET` from that `.env`, so a forgotten key stops the deploy with a message instead of shipping an app whose every login fails.
+
+The honest bill: backups, monitoring, OS updates and the box itself are yours now — that part no guide takes off your hands. What the [deploy guide](docs/deploy.md) does cover is everything borgo-shaped: single-container and two-service layouts, nginx as the Caddy alternative (WebSockets and SSE included), a systemd unit for bare metal, static export hosting, and the full environment reference. `borgo deploy init <caddy|nginx|systemd|compose>` writes every one of those configs into your project, templated with your app's name and ports.
 
 ## Tests
 
@@ -181,11 +221,11 @@ Three layers, all run by CI on every pull request and on every push to `main`:
 
 ## Versioning and releases
 
-[release-please](https://github.com/googleapis/release-please) maintains a release PR from conventional commits; merging it tags `vX.Y.Z` and publishes both npm packages (`borgo-framework`, `create-borgo`) with linked versions via npm trusted publishing, provenance attached. The Go module `github.com/LuigiDavideMicca/borgo` lives at the repo root and resolves the **same** `vX.Y.Z` tag — one version number across all four artifacts that have to agree: the Go module, the two npm packages, and the `borgo` CLI that ships as `borgo-framework`'s `bin`. See [api stability](docs/api-stability.md#one-version-number-four-artifacts). Coming from 0.20? The [borgo-framework README](packages/borgo/README.md#upgrading-from-020) lists every behaviour that changed, one line each, and [the environment reference](docs/api-reference.md#environment-variables) has every variable with its grammar.
+[release-please](https://github.com/googleapis/release-please) maintains a release PR from conventional commits; merging it tags `vX.Y.Z` and publishes both npm packages (`borgo-framework`, `create-borgo`) with linked versions via npm trusted publishing, provenance attached. The Go module `github.com/LuigiDavideMicca/borgo` lives at the repo root and resolves the **same** `vX.Y.Z` tag — one version number across all four artifacts that have to agree: the Go module, the two npm packages, and the `borgo` CLI that ships as `borgo-framework`'s `bin`. See [api stability](docs/api-stability.md#one-version-number-four-artifacts). Upgrading? The borgo-framework README lists every behaviour that changed, one line each — [from 0.21](packages/borgo/README.md#upgrading-from-021) and [from 0.20](packages/borgo/README.md#upgrading-from-020) — and [the environment reference](docs/api-reference.md#environment-variables) has every variable with its grammar.
 
 ## How it compares
 
-Honest comparison with the frameworks a borgo adopter would otherwise pick. ✓ means shipped and documented here; a — links to the reasoning in the next section. For measured numbers rather than feature rows, [bench/](bench/) is a rerunnable harness with its method written before its results, and [bench/site/](bench/site/) renders the committed run as a page.
+Honest comparison with the frameworks a borgo adopter would otherwise pick. ✓ means shipped and documented here; a — links to the reasoning in the next section. For measured numbers rather than feature rows, see [Benchmarks](#benchmarks) below.
 
 | | borgo | Next.js | Nuxt | SolidStart |
 | --- | --- | --- | --- | --- |
@@ -202,14 +242,33 @@ Honest comparison with the frameworks a borgo adopter would otherwise pick. ✓ 
 | Health endpoint + metrics | ✓ built-in, opt-in Prometheus | DIY | DIY | DIY |
 | Sessions/auth | ✓ signed cookie, hashing, login helpers, CSRF | libraries | modules | libraries |
 | Security headers + CSP by default | ✓ nonced, overridable | DIY | modules | DIY |
-| Fast refresh | ✓ full transform | ✓ full transform | ✓ | ✓ |
+| Fast refresh | ✓ state-preserving, bun-native transform | ✓ | ✓ | ✓ |
 | React Server Components | — | ✓ | n/a | n/a |
 | ISR (cached pages + on-demand invalidation) | ✓ `revalidate`/`tags` + `borgo.RevalidateTag` from Go | ✓ | ✓ | ✓ |
 | Edge / serverless targets | — | ✓ | ✓ | ✓ |
 | Image/font optimization | — | ✓ | ✓ | — |
 | Plugin ecosystem | — | ✓ | ✓ | ✓ |
 | Deploy story | one box: Docker/compose/systemd, generated configs | Vercel or DIY | many presets | many presets |
-| Framework size | small enough to read: the whole thing, codegen and cli tooling included, is about eleven thousand lines of Go and TypeScript | large | large | medium |
+| Framework size | small enough to read: the whole thing, codegen and cli tooling included, is about twelve thousand lines of Go and TypeScript | large | large | medium |
+
+## Benchmarks
+
+There is a benchmark harness in [bench/](bench/), and it is built backwards from every benchmark you have learned to distrust: **the method is written before any result, and the biases are declared before the table.** "We wrote the harness and one of the subjects" is bias #1 on that list, stated in [bench/README.md](bench/README.md#the-biases-stated-first) before any number appears, with four more after it.
+
+- **Five scenarios**, pinned by a [contract](bench/CONTRACT.md): JSON floor, 15 kB serialisation, a server-rendered page, a static asset byte-identical across implementations, and memory per held SSE connection. Every implementation serves the same paths on one port, so nothing can quietly answer a cheaper route.
+- **Six implementations** beside borgo's: Next.js, Astro, Hono, Elysia, Express, Fastify — and a Fresh stub left deliberately empty, because a competitor we could not run would be a guess wearing a number.
+- **Correctness before speed**: every response is checked against the contract — exact bodies, key order on the wire, sha256 for the asset — before any load is generated. A fast wrong answer is not a result. A median success rate below 99% fails the scenario.
+- **The machine testifies**: every result file records CPU idle before and after, free memory, versions, the commit, and whether the tree was dirty. A run on a busy machine opens with a contamination warning instead of hiding it.
+
+The committed run in [bench/results/](bench/results/) is deliberately a **single-implementation proof run of borgo alone, labelled "not a comparison"** — it demonstrates the pipeline end to end on a machine that was never verified idle, and we would rather commit no comparative table than one nobody attested was clean. The harness runs all seven; the numbers worth citing are the ones you make:
+
+```bash
+bun bench/run.ts --list          # implementations and scenarios, run nothing
+bun bench/run.ts --apps borgo    # one implementation
+bun bench/run.ts                 # the full campaign, on your machine
+```
+
+The results render as a page — **live at [luigidavidemicca.github.io/borgo](https://luigidavidemicca.github.io/borgo/)**, republished on every push to `main` — itself a borgo app ([bench/site/](bench/site/)), exported static with `borgo export`, its charts inline SVG baked at build from the committed JSON, with the biases above every number. A test suite holds the page's figures byte-equal to the JSON, so the page cannot drift from the data.
 
 ## What this is not
 

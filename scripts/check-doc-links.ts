@@ -22,6 +22,7 @@ const sources = [
   "packages/create-borgo/templates/base/README.md",
   "packages/create-borgo/templates/minimal/README.md",
   "packages/create-borgo/templates/full/README.md",
+  "examples/tasks/README.md",
 ];
 
 const slug = (heading: string) =>

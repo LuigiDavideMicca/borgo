@@ -6,8 +6,8 @@ This is the `minimal` template — one page, one Go route, nothing else. Scaffol
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) >= 1.3
-- [Go](https://go.dev) >= 1.25
+- [Bun](https://bun.sh) >= 1.4
+- [Go](https://go.dev) >= 1.27
 
 ## Setup
 

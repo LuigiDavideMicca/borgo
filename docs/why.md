@@ -1,6 +1,6 @@
 # Why borgo works this way
 
-Seven questions a skeptical engineer asks before adopting a framework, and seven answers with the bill attached. The [README](../README.md#why-borgo) states the positions; this page argues them, and says what each one costs you. If you are evaluating borgo for a team, read this and [what this is not](../README.md#what-this-is-not) together — between them they describe the shape of the hole borgo will leave in your stack.
+Seven questions a skeptical engineer asks before adopting a framework, and seven answers with the bill attached. The [README](../README.md#why-borgo) states the positions in five bullets; this page argues them, and says what each one costs you. If you are evaluating borgo for a team, read this and [what this is not](../README.md#what-this-is-not) together — between them they describe the shape of the hole borgo will leave in your stack.
 
 ## Why Go for the backend
 

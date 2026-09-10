@@ -14,9 +14,11 @@ implementation must serve), then the runner (`run.ts`), then whatever is in
 
 The published page lives in [site/](site/) — a borgo app, exported with
 `borgo export`, whose charts are inline SVG baked at build from the newest
-json in results/. `bench/test/site.test.ts` holds the page's numbers equal to
-the committed json mechanically, and the biases below render above every
-number there too.
+json in results/. It is served at
+[luigidavidemicca.github.io/borgo](https://luigidavidemicca.github.io/borgo/),
+republished by CI on every push to `main`. `bench/test/site.test.ts` holds the
+page's numbers equal to the committed json mechanically, and the biases below
+render above every number there too.
 
 ---
 
@@ -133,9 +135,11 @@ Honest limits of this metric:
 
 ### What is deliberately *not* measured
 
-- **Cold start / serverless.** borgo is a self-hosted long-running process. Cold
-  start is a metric for a deployment model we do not target, and quoting it
-  would be picking a fight we set up to win.
+- **Cold start / serverless.** borgo is a self-hosted long-running process. A
+  *comparative* cold start is a metric for a deployment model we do not target,
+  and quoting one would be picking a fight we set up to win. borgo's own
+  absolute number — container start to first 200, nobody else in the table — is
+  measured in [the deploy guide](../docs/deploy.md#cold-start-measured--and-the-serverless-question).
 - **Build times and bundle sizes.** They matter, but they are a different claim
   and belong in a different table.
 - **A page that fetches through the framework's data layer.** `ssr-page` renders
@@ -307,7 +311,7 @@ Results are written to `bench/results/` as a JSON file (everything, including
 each individual run) and a markdown file (the readable table). Both carry the
 environment block.
 
-Prerequisites: Bun ≥ 1.3 and Go ≥ 1.25 for borgo; Node for the Node
+Prerequisites: Bun ≥ 1.4 and Go ≥ 1.27 for borgo; Node for the Node
 implementations; Deno if you implement Fresh. The runner downloads `oha` on
 first use unless you pass `--no-download`.
 

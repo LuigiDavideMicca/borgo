@@ -94,12 +94,13 @@ If the *build* is what broke, the fallback server keeps `/__borgo/dev` alive so 
 
 `bunx borgo doctor` diagnoses the environment — the class of problem that is never in your code:
 
-Fifteen checks, in three groups. A check that has nothing to say about your app — no `package.json`, no `api/`, no playwright dependency, a filesystem that will not report free space — is skipped rather than reported as passing.
+Sixteen checks, in three groups. A check that has nothing to say about your app — no `package.json`, no `api/`, no playwright dependency, a filesystem that will not report free space — is skipped rather than reported as passing.
 
 | Check | Group | What it catches |
 | --- | --- | --- |
 | bun | toolchain | not on `PATH`, older than the required minimum (borgo's own, or a higher floor your `package.json` declares in `engines.bun`), or an npm-installed shim shadowing the real one |
 | bun on PATH | toolchain | a `.cmd`/`.bat`/`.ps1` shim resolving ahead of a real `bun.exe` that is also installed — *informational* |
+| second bun | toolchain | a second bun in `~/.bun` that npm bin shims execute even when a newer bun is first on `PATH` — below the floor it is a failure naming the shims that run it; merely different but healthy is a note |
 | engines.bun | toolchain | an `engines.bun` range borgo cannot read as a minimum, so the bun check fell back to borgo's own floor — *informational*, and only shown when that happens |
 | go | toolchain | missing, or older than your `go.mod` requires |
 | node | toolchain | present or not, and its version — borgo needs none, so this is purely *informational* |

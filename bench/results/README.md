@@ -15,7 +15,7 @@ Every file carries a `schema` number, and it is not decoration. **Schema 1**
 artefacts store `latencyMs.max` for what is really p99.99, carry no `worst` run,
 no response-size sample and no sweep information. **Schema 2** carries all of
 them, plus a CPU-idle reading from before and after the campaign. Two payloads
-that different cannot share a version number, so they no longer do; check the
+this different cannot share a version number, so they no longer do; check the
 field before comparing two files.
 
 ## What is committed here

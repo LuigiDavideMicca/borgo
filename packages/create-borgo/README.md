@@ -1,6 +1,6 @@
 # create-borgo
 
-Scaffolds a new [borgo](https://github.com/LuigiDavideMicca/borgo) app: file-based React pages server-rendered by Bun, API routes written in Go.
+Scaffolds a new [borgo](https://github.com/LuigiDavideMicca/borgo) app: file-based React pages server-rendered by Bun, API routes written in Go, and a TypeScript client generated *from the Go source* — self-hosted on any box you control. In an interactive terminal the first command offers to install and start for you, so the rest of the block is what happens either way:
 
 ```bash
 bunx create-borgo@latest my-app

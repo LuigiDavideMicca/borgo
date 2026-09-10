@@ -6,8 +6,8 @@ This is the `full` template — a working app skeleton: notes CRUD through form 
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) >= 1.3
-- [Go](https://go.dev) >= 1.25
+- [Bun](https://bun.sh) >= 1.4
+- [Go](https://go.dev) >= 1.27
 
 ## Setup
 
