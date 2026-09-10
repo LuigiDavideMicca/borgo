@@ -1,0 +1,81 @@
+name: pages
+
+# publishes the benchmark page (bench/site, a borgo app) to github pages on
+# every push to main. the page is zero-javascript by design: nothing in the
+# html references more than one stylesheet, though the export ships its usual
+# assets directory beside it.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  # github's own pages starters say false: an in-flight production deploy is
+  # not something to cancel; a queued newer run supersedes it on completion
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # first run enables pages on the repo (source: github actions), so there
+      # is no settings step to remember; later runs find it enabled and move on
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      # same pins as ci.yml, for the same reasons
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: install workspace
+        run: bun install --frozen-lockfile
+
+      - name: install site
+        run: bun install --frozen-lockfile
+        working-directory: bench/site
+
+      - name: export the page
+        run: bun run export
+        working-directory: bench/site
+        env:
+          NODE_ENV: production
+
+      - name: rebase asset urls for the pages subpath
+        # borgo targets a server at the domain root and emits absolute asset
+        # urls; a github *project* site lives under /<repo>/, so the one
+        # stylesheet link is rewritten relative. the page ships no javascript,
+        # which is why one sed covers it - and the guard fails the deploy the
+        # day a second root-absolute reference appears instead of shipping a
+        # page that 404s its own asset
+        run: |
+          sed -i 's|href="/assets/|href="./assets/|g' dist/site/index.html
+          if grep -Eoq '(href|src)="/[^"]*"' dist/site/index.html; then
+            echo "a root-absolute reference survived the rewrite:" >&2
+            grep -Eo '(href|src)="/[^"]*"' dist/site/index.html >&2
+            exit 1
+          fi
+        working-directory: bench/site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: bench/site/dist/site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
