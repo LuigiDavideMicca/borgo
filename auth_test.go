@@ -607,3 +607,49 @@ func TestRegisterRefusesBeforeTouchingTheStore(t *testing.T) {
 		t.Fatal("register wrote to the store despite having no session secret")
 	}
 }
+
+// WithHashSlot is exported for the register handler an app has to write
+// itself: Credentials is fixed at username+password, so a sign-up form with
+// an email cannot use RegisterHandler, and hashing outside a slot drops the
+// cpu-exhaustion guard silently. Found by building a real app on 0.22.
+func TestWithHashSlotIsUsableByAppCode(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/signup", nil)
+	ran := false
+	if !WithHashSlot(w, r, func() { ran = true }) {
+		t.Fatal("a free slot must be granted")
+	}
+	if !ran {
+		t.Error("the work never ran")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("a granted slot answered %d", w.Code)
+	}
+}
+
+// the shed path, from app code: the queue full and the wait expired
+func TestWithHashSlotShedsWhenFull(t *testing.T) {
+	saved := hashWait
+	hashWait = 10 * time.Millisecond
+	defer func() { hashWait = saved }()
+	for i := 0; i < cap(hashSlots); i++ {
+		hashSlots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(hashSlots); i++ {
+			<-hashSlots
+		}
+	}()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/signup", nil)
+	if WithHashSlot(w, r, func() { t.Error("the work must not run when the queue is full") }) {
+		t.Fatal("a full queue must shed")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("shed answered %d, want 503", w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Error("a shed request must say when to come back")
+	}
+}

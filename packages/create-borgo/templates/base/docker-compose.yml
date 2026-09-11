@@ -17,6 +17,9 @@ services:
 #     DB_PATH: /data/app.db
 #   volumes:
 #     - data:/data
+# mount AT /data, never below it: the Dockerfile creates /data owned by the
+# image user, and a named volume mounted at a path the image does not have
+# (say /data/uploads) is created root-owned, so the app cannot write there
 # volumes:
 #   data:
 #

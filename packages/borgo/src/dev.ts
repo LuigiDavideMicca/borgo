@@ -1,8 +1,8 @@
-import { readFileSync, renameSync, watch } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, watch, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import { c, g } from "./colors";
-import { watchParent } from "./parent-watch";
+import { parentGone, readParent, watchParent } from "./parent-watch";
 import { encodeChanged, goBinName, runBorgogen, UNKNOWN_CHANGE } from "./util";
 
 const serverEntry = fileURLToPath(new URL("serve-entry.ts", import.meta.url));
@@ -59,6 +59,85 @@ export function createContentDedup(read: (file: string) => Uint8Array | Buffer) 
 // output dirs are ignored only at the root: an app dir sharing a name stays watched
 const ignored = /(^|[\\/])(node_modules|\.git)([\\/]|$)|^(\.borgo|public|dist)([\\/]|$)|borgo\.gen\.go$/;
 
+// The app's own write targets, read from .gitignore: an app that stores
+// uploads, a sqlite file or a cache inside its own directory storms this
+// watcher - measured, twenty uploads overflowed the event queue, and an
+// overflow forces a full rebuild that restarts the front server with
+// requests in flight. .gitignore is already the list of "not source", so
+// honouring it costs the app nothing to declare.
+//
+// Deliberately literal: a plain name (`uploads`, `tmp`) and a bare extension
+// glob (`*.db`), nothing else. A watcher that half-understands gitignore's
+// grammar would ignore a directory the developer is editing in, and silence
+// is the one failure this must not have.
+export function gitignoredMatcher(text: string): (file: string) => boolean {
+  const roots = new Set<string>();
+  const extensions = new Set<string>();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith("!")) continue;
+    const extension = /^\*(\.[A-Za-z0-9]+)$/.exec(line);
+    if (extension) {
+      extensions.add(extension[1].toLowerCase());
+      continue;
+    }
+    if (line.includes("*") || line.includes("?") || line.includes("[")) continue;
+    const name = line.replace(/^\//, "").replace(/\/+$/, "");
+    if (!name || name.includes("/")) continue;
+    roots.add(name);
+  }
+  if (!roots.size && !extensions.size) return () => false;
+  return (file: string) => {
+    const path = file.replaceAll("\\", "/");
+    const first = path.split("/")[0];
+    if (first && roots.has(first)) return true;
+    const dot = path.lastIndexOf(".");
+    return dot > 0 && extensions.has(path.slice(dot).toLowerCase());
+  };
+}
+
+const readGitignore = (): ((file: string) => boolean) => {
+  try {
+    return gitignoredMatcher(readFileSync(".gitignore", "utf8"));
+  } catch {
+    return () => false;
+  }
+};
+
+// One dev session per directory. Two share public/assets and rename each
+// other's chunks mid-build; the loser reports ENOENT on a file that existed
+// a millisecond earlier, which reads as a bundler bug and is not one (found
+// by an app that accumulated five of them). The port guard below catches the
+// same-port case; this catches the rest.
+export const DEV_LOCK = ".borgo/dev.lock";
+
+export function readDevLock(
+  text: string,
+  isAlive: (pid: number) => boolean,
+  self: number,
+): { pid: number; port: string; apiPort: string } | null {
+  let held: { pid?: unknown; port?: unknown; apiPort?: unknown };
+  try {
+    held = JSON.parse(text);
+  } catch {
+    return null; // a torn lock is not a session
+  }
+  if (typeof held.pid !== "number" || held.pid === self || !isAlive(held.pid)) return null;
+  return {
+    pid: held.pid,
+    port: String(held.port ?? "?"),
+    apiPort: String(held.apiPort ?? "?"),
+  };
+}
+
+// through the reading parent-watch already hardened, not a bare probe: a
+// signal refused with EPERM means a process we may not touch, which is a
+// LIVE one, and a bare try/catch reads that as dead. Uncertainty answers
+// "alive" here for the same reason it does there - the expensive mistake is
+// taking a directory another session is building in, not refusing one time
+// too many. dev-parent-watch.test.ts pins the absence of the bare probe.
+const pidAlive = (pid: number): boolean => !parentGone(pid, readParent(pid, false));
+
 export async function dev() {
   // the launcher is a shell bun did not start, so bun's job object does not
   // reach this process: a force-killed terminal on windows delivers no signal
@@ -76,6 +155,44 @@ export async function dev() {
   let goProc: Subprocess | null = null;
   let frontProc: Subprocess | null = null;
   let reload = false;
+
+  // before either port is touched: a session already in this directory is a
+  // refusal whatever ports it holds, because the collision is the build
+  // directory and not the socket
+  try {
+    const held = readDevLock(readFileSync(DEV_LOCK, "utf8"), pidAlive, process.pid);
+    if (held) {
+      console.error(
+        `  ${c.red(g.err)} another borgo dev is already running in this directory` +
+          ` ${c.dim(`${g.dot} pid ${held.pid}, ports ${held.port}/${held.apiPort}`)}\n` +
+          `  two sessions share public/assets and rename each other's chunks mid-build.\n` +
+          `  stop it, or if it is gone: delete ${DEV_LOCK}`,
+      );
+      process.exit(1);
+    }
+  } catch {
+    // no lock, or an unreadable one: this session takes the directory
+  }
+  mkdirSync(".borgo", { recursive: true });
+  writeFileSync(
+    DEV_LOCK,
+    JSON.stringify({ pid: process.pid, port: frontPort, apiPort, startedAt: Date.now() }),
+  );
+  const dropLock = () => {
+    try {
+      // only ours: a session that replaced a stale lock must not delete the
+      // live one that replaced it in turn
+      const mine = readDevLock(readFileSync(DEV_LOCK, "utf8"), () => true, -1);
+      if (mine?.pid === process.pid) unlinkSync(DEV_LOCK);
+    } catch {}
+  };
+  process.on("exit", dropLock);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => {
+      dropLock();
+      process.exit(0);
+    });
+  }
 
   // asked by answering, not by binding: windows SO_REUSEADDR semantics let a
   // second `borgo dev` bind an already-held port and print the full happy

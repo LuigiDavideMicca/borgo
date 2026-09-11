@@ -73,6 +73,18 @@ A publish never blocks on a slow subscriber — a subscriber whose buffer is ful
 
 ## WebSocket topics
 
+> **A topic is a public broadcast channel. Nothing sensitive may ride one.**
+> The handshake checks the browser's `Origin` and the topic's spelling, and
+> then subscribes whoever asked — there is no point at which your app is
+> consulted. Any client that can reach the server can join `channel:42` or
+> `dm:ana:luigi` and receive everything published there, session or no
+> session; a `curl`-class client is not bound by the `Origin` check at all.
+> Measured on a real app: an anonymous client with no cookie read a private
+> channel's messages, and the `__count` event told it how many people were in
+> the room. Per-topic authorization is the first item of the next release;
+> until it lands, publish only what every visitor may read, and keep private
+> data behind an authenticated API route or a per-user server-sent stream.
+
 The Bun front server is also a native WebSocket server. Browsers join named topics with the `subscribe` helper; every `{event, data}` published on a topic reaches every subscriber, including the publisher's other tabs:
 
 ```tsx

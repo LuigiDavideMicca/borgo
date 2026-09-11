@@ -128,7 +128,7 @@ Plain `<a>` tags become client-side transitions — no `<Link>` component — wi
 
 ### Realtime
 
-`borgo.SSE` and `borgo.NewSSEHub` make any handler an event stream, proxied without buffering. The front server is also a native WebSocket server: browsers join named topics with `subscribe`, Go publishes into them with `borgo.Push(topic, event, data)` — and borgogen types the payloads end to end, so checking `event` narrows `data` and an undeclared event name fails `tsc`.
+`borgo.SSE` and `borgo.NewSSEHub` make any handler an event stream, proxied without buffering. The front server is also a native WebSocket server: browsers join named topics with `subscribe`, Go publishes into them with `borgo.Push(topic, event, data)` — and borgogen types the payloads end to end, so checking `event` narrows `data` and an undeclared event name fails `tsc`. **Topics are public broadcast channels**: anyone who can reach the server can subscribe to any topic name, so keep private data behind an authenticated route ([why, and what is coming](docs/realtime.md#websocket-topics)).
 
 ```go
 borgo.Push("live", "task-created", task.Title)
@@ -281,7 +281,7 @@ Everything here is a deliberate choice, with the reason attached:
 - **Loader data is not streamed on client navigations** — one JSON payload, fetched in parallel with the route chunk (and usually prefetched on hover). Streaming applies to initial SSR, where it matters most.
 - **Auth is mechanics, not policy.** Signed cookie, hashing, login/logout/register handlers and CSRF for actions are provided; the user store, its schema, OAuth and everything beyond username/password stay in your hands.
 - **The typed bridge is static analysis, no runtime reflection.** Helpers are followed across the packages of your module, inline `json.NewEncoder(w).Encode(v)` is read, and `//borgo:type` covers custom marshalers; what stays invisible is a helper *outside* your module, an encoder stored in a variable, and a dynamically chosen type — those routes type as `unknown`, so the escape hatch is visible, not silent.
-- **WebSocket topics are a relay, not RPC.** The front server forwards `{event, data}` between subscribers and Go; per-message business logic belongs in Go routes. `borgo.Push` types the payloads end to end — the relay itself stays dumb.
+- **WebSocket topics are a relay, not RPC — and not authorized.** The front server forwards `{event, data}` between subscribers and Go; per-message business logic belongs in Go routes. The relay stays dumb in both senses: it runs no logic, and it asks your app nothing about who may join a topic. Treat every topic as public until per-topic authorization ships.
 
 Development happens in [issues](https://github.com/LuigiDavideMicca/borgo/issues).
 

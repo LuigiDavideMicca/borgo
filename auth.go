@@ -211,10 +211,24 @@ func hashSlotCount() (int, error) {
 // so tests need not wait it out.
 var hashWait = 5 * time.Second
 
-// withHashSlot runs hash while holding a slot. It reports false - having
-// already answered the request - when the queue is too long, and when the
-// client hung up before its turn came.
-func withHashSlot(w http.ResponseWriter, r *http.Request, hash func()) bool {
+// WithHashSlot runs hash while holding one of a bounded number of slots, so a
+// flood of sign-ins cannot pin every core in 600,000 rounds of PBKDF2. It
+// reports false - having already answered the request with 503 and a
+// Retry-After - when the queue is too long, and when the client hung up
+// before its turn came.
+//
+// LoginHandler and RegisterHandler hold a slot already. This is exported for
+// the handler you wrote yourself: an app whose sign-up form carries more than
+// a username and a password cannot use RegisterHandler, and hashing outside a
+// slot drops the protection silently.
+//
+//	var hash string
+//	if !borgo.WithHashSlot(w, r, func() {
+//	    hash, err = borgo.DefaultHasher().Hash(password)
+//	}) {
+//	    return
+//	}
+func WithHashSlot(w http.ResponseWriter, r *http.Request, hash func()) bool {
 	timer := time.NewTimer(hashWait)
 	defer timer.Stop()
 	select {
@@ -259,7 +273,7 @@ func (a *Auth[U]) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		hash = a.dummyHash()
 	}
 	var verified bool
-	if !withHashSlot(w, r, func() { verified = a.hasher().Verify(creds.Password, hash) }) {
+	if !WithHashSlot(w, r, func() { verified = a.hasher().Verify(creds.Password, hash) }) {
 		return
 	}
 	if err != nil || !verified {
@@ -296,7 +310,7 @@ func (a *Auth[U]) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var hash string
 	var err error
-	if !withHashSlot(w, r, func() { hash, err = a.hasher().Hash(creds.Password) }) {
+	if !WithHashSlot(w, r, func() { hash, err = a.hasher().Hash(creds.Password) }) {
 		return
 	}
 	if err != nil {
