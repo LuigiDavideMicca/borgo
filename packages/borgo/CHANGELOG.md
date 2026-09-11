@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.1](https://github.com/LuigiDavideMicca/borgo/compare/v0.22.0...v0.22.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **dev:** one session per directory, a watcher that skips the app's own files ([093ecca](https://github.com/LuigiDavideMicca/borgo/commit/093ecca072cf69247a2a2444355bc181886e41a4))
+* **test:** the csrf suite declares the origin its urls live on ([dc979f1](https://github.com/LuigiDavideMicca/borgo/commit/dc979f136a498bf4f6060f6ebcd8f062af860a4c))
+
 ## [0.22.0](https://github.com/LuigiDavideMicca/borgo/compare/v0.21.0...v0.22.0) (2026-09-11)
 
 

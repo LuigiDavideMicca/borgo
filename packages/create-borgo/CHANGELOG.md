@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/LuigiDavideMicca/borgo/compare/create-borgo-v0.22.0...create-borgo-v0.22.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **dev:** one session per directory, a watcher that skips the app's own files ([093ecca](https://github.com/LuigiDavideMicca/borgo/commit/093ecca072cf69247a2a2444355bc181886e41a4))
+
 ## [0.22.0](https://github.com/LuigiDavideMicca/borgo/compare/create-borgo-v0.21.0...create-borgo-v0.22.0) (2026-09-11)
 
 
