@@ -1,0 +1,18 @@
+{
+  "name": "go-raw",
+  "framework": "Go net/http (no framework)",
+  "language": "Go",
+  "runtime": "go",
+  "status": "implemented",
+  "port": 43030,
+  "readyPath": "/api/hello",
+  "build": [
+    ["bun", "../../shared/copy-assets.ts", "public/static"],
+    ["go", "build", "-o", "bin/server.bin", "."]
+  ],
+  "start": ["./bin/server.bin"],
+  "env": { "PORT": "${PORT}" },
+  "implements": ["hello-json", "api-list", "static-asset", "memory-conn"],
+  "notes": "A floor, not a competitor: the standard library alone, which is what borgo's Go runtime is built on. It exists to answer one question for the 0.23 topology decision - what /api, the static file and a held SSE stream cost when the Go binary answers the public port itself, with no front server in between. The static file is served from disk on every request through http.ServeFile (a stat and a sendfile), not read once into memory as some router apps here do; the contract allows both, and the disk path is what a Go front would actually run. No ssr-page: there is no renderer to measure.",
+  "versionCommand": ["go", "version"]
+}

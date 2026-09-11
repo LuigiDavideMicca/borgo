@@ -1,0 +1,226 @@
+{
+  "schema": 2,
+  "environment": {
+    "capturedAt": "2026-09-11T13:53:02.084Z",
+    "host": {
+      "platform": "win32",
+      "osType": "Windows_NT",
+      "osRelease": "10.0.26200",
+      "arch": "x64",
+      "cpuModel": "11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz",
+      "cpuCount": 8,
+      "cpuMhz": 2803,
+      "totalMemBytes": 34024464384,
+      "freeMemBytesAtStart": 19201683456
+    },
+    "versions": {
+      "go": "go version go1.27.1 windows/amd64",
+      "bun": "1.4.0",
+      "node": "v24.16.0",
+      "npm": "11.13.0",
+      "deno": "not installed"
+    },
+    "repo": {
+      "commit": "c61d1be72e3eea7789740ed9214c64a005f4e0ea",
+      "dirty": true,
+      "borgoVersion": "0.22.1"
+    },
+    "loadTool": {
+      "name": "oha",
+      "path": "C:\\Users\\luigi\\Developer\\borgo\\bench\\.tools\\v1.15.0-oha-windows-amd64.exe",
+      "version": "oha 1.15.0"
+    },
+    "note": "0.30 topology spike, control run; SSE via hijacked connections; desktop apps running",
+    "idleCheck": {
+      "busyRatioAtStart": 0.07839699436443326,
+      "sampleMs": 1000,
+      "quietThreshold": 0.1,
+      "quiet": true
+    },
+    "close": {
+      "finishedAt": "2026-09-11T13:54:08.683Z",
+      "freeMemBytesAtEnd": 19235139584,
+      "busyRatioAtEnd": 0.272390364422483,
+      "elapsedSeconds": 66.599
+    }
+  },
+  "config": {
+    "connections": 64,
+    "durationSeconds": 30,
+    "warmupSeconds": 5,
+    "runs": 3,
+    "memoryConnections": 1000,
+    "scenarios": [
+      "memory-conn"
+    ],
+    "apps": [
+      "go-raw"
+    ],
+    "passes": 2,
+    "passOrders": [
+      [
+        "go-raw"
+      ],
+      [
+        "go-raw"
+      ]
+    ],
+    "skipBuild": false,
+    "skipInstall": false,
+    "loadArgvTemplate": "-z 30s -c 64 --no-tui --output-format json --disable-compression <url>"
+  },
+  "results": [
+    {
+      "app": "go-raw",
+      "manifest": {
+        "name": "go-raw",
+        "framework": "Go net/http (no framework)",
+        "language": "Go",
+        "runtime": "go",
+        "status": "implemented",
+        "port": 43030,
+        "readyPath": "/api/hello",
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ],
+          [
+            "go",
+            "build",
+            "-o",
+            "bin/server.bin",
+            "."
+          ]
+        ],
+        "start": [
+          "./bin/server.bin"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "A floor, not a competitor: the standard library alone, which is what borgo's Go runtime is built on. It exists to answer one question for the 0.23 topology decision - what /api, the static file and a held SSE stream cost when the Go binary answers the public port itself, with no front server in between. The static file is served from disk on every request through http.ServeFile (a stat and a sendfile), not read once into memory as some router apps here do; the contract allows both, and the disk path is what a Go front would actually run. No ssr-page: there is no renderer to measure.",
+        "versionCommand": [
+          "go",
+          "version"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 9535488,
+            "loadedRssBytes": 25169920,
+            "deltaBytes": 15634432,
+            "bytesPerConnection": 15634.432,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 16376,
+                "rssBytes": 25141248,
+                "command": "server.bin"
+              }
+            ]
+          }
+        }
+      ],
+      "frameworkVersion": "go version go1.27.1 windows/amd64",
+      "startup": {
+        "timeToFirstResponseMs": 104.59069999999997,
+        "bootRssBytes": 9486336,
+        "bootRssStable": true
+      },
+      "pass": 1,
+      "orderIndex": 1
+    },
+    {
+      "app": "go-raw",
+      "manifest": {
+        "name": "go-raw",
+        "framework": "Go net/http (no framework)",
+        "language": "Go",
+        "runtime": "go",
+        "status": "implemented",
+        "port": 43030,
+        "readyPath": "/api/hello",
+        "build": [
+          [
+            "bun",
+            "../../shared/copy-assets.ts",
+            "public/static"
+          ],
+          [
+            "go",
+            "build",
+            "-o",
+            "bin/server.bin",
+            "."
+          ]
+        ],
+        "start": [
+          "./bin/server.bin"
+        ],
+        "env": {
+          "PORT": "${PORT}"
+        },
+        "implements": [
+          "hello-json",
+          "api-list",
+          "static-asset",
+          "memory-conn"
+        ],
+        "notes": "A floor, not a competitor: the standard library alone, which is what borgo's Go runtime is built on. It exists to answer one question for the 0.23 topology decision - what /api, the static file and a held SSE stream cost when the Go binary answers the public port itself, with no front server in between. The static file is served from disk on every request through http.ServeFile (a stat and a sendfile), not read once into memory as some router apps here do; the contract allows both, and the disk path is what a Go front would actually run. No ssr-page: there is no renderer to measure.",
+        "versionCommand": [
+          "go",
+          "version"
+        ]
+      },
+      "status": "ok",
+      "scenarios": [
+        {
+          "scenario": "memory-conn",
+          "status": "ok",
+          "memory": {
+            "connections": 1000,
+            "idleRssBytes": 9568256,
+            "loadedRssBytes": 26546176,
+            "deltaBytes": 16977920,
+            "bytesPerConnection": 16977.92,
+            "established": 1000,
+            "idleStable": true,
+            "reliable": true,
+            "notes": [],
+            "processes": [
+              {
+                "pid": 21892,
+                "rssBytes": 26529792,
+                "command": "server.bin"
+              }
+            ]
+          }
+        }
+      ],
+      "frameworkVersion": "go version go1.27.1 windows/amd64",
+      "startup": {
+        "timeToFirstResponseMs": 104.14879999999539,
+        "bootRssBytes": 9428992,
+        "bootRssStable": true
+      },
+      "pass": 2,
+      "orderIndex": 1
+    }
+  ]
+}
