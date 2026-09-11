@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { makeApiClient } from "../src/api";
 import { CSRF_HEADER, apiFetch, csrfCookieValue } from "../src/index";
 import { registerCsrf, withCsrf } from "../src/internal";
@@ -68,10 +68,23 @@ describe("apiFetch", () => {
     (globalThis as { document?: unknown }).document = { cookie: value };
   };
 
+  // apiFetch attaches the token same-origin only (hunting round 2), so these
+  // tests must DECLARE the origin their urls live on. pinned per test rather
+  // than inherited, because other test files leak a module-level location -
+  // subscribe's has no `origin` at all - and file order differs by platform:
+  // green on windows, red on the linux runner, for the third time this
+  // release the same readdir lesson
+  const realLocation = (globalThis as { location?: unknown }).location;
+  beforeEach(() => {
+    (globalThis as { location?: unknown }).location = { origin: "http://app.test" };
+  });
+
   afterEach(() => {
     globalThis.fetch = realFetch;
     if (realDocument === undefined) delete (globalThis as { document?: unknown }).document;
     else (globalThis as { document?: unknown }).document = realDocument;
+    if (realLocation === undefined) delete (globalThis as { location?: unknown }).location;
+    else (globalThis as { location?: unknown }).location = realLocation;
   });
 
   test("an unsafe method carries the token from the cookie", async () => {
