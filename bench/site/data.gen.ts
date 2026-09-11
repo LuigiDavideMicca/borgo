@@ -434,6 +434,10 @@ export const run = {
     {
       "name": "fresh",
       "reason": "stub: Deno is not installed on the machine this harness was built on, so a Fresh implementation could not be written and verified - only guessed at. It is left unimplemented on purpose: an unrun competitor is honest, a competitor we wrote blind and could not test is not. To finish it: install Deno, scaffold Fresh 2, implement routes/api/hello.ts, routes/api/items.ts, routes/api/events.ts (SSE with an immediate `: ping` flush) and routes/page.tsx per CONTRACT.md, copy the shared payload into static/, then flip status to \"implemented\" and fill in \"implements\"."
+    },
+    {
+      "name": "go-raw",
+      "reason": "not part of this run"
     }
   ]
 } as const;

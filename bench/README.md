@@ -463,5 +463,17 @@ bench/
     copy-assets.ts       copies the above into an implementation
   apps/<name>/           one implementation each, plus bench.manifest.json
   tools/get-oha.ts       pinned, checksummed load-generator download
-  results/               committed example output
+  results/               full campaigns only: the site is generated from the
+                         newest run-*.json here, and test/site.test.ts fails a
+                         committed site that is stale against it
+  results/spikes/        partial campaigns (a subset of apps or scenarios,
+                         diagnostic variants) kept for the record and never
+                         read by the site generator
 ```
+
+`apps/go-raw` is a floor rather than a competitor: `net/http` alone, the
+library borgo's runtime is built on, answering the contract with no front
+server in between. It exists because the 0.30 topology decision - the Go
+binary in front, Bun as the renderer - was made on its numbers, which live
+under `results/spikes/`; its manifest says which of its switches
+(`GO_RAW_STATIC=memory`, `GO_RAW_SSE=hijack`) produced which row.
