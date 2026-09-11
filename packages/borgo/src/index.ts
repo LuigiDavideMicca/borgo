@@ -192,7 +192,13 @@ export function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   // through Request, not a merge of init: for `apiFetch(new Request(...))` the
   // method and headers live on the input, not in init
   const request = new Request(input as RequestInfo, init);
-  if (unsafeMethod(request.method) && !request.headers.has(CSRF_HEADER)) {
+  // same-origin only: the token authenticates this app's proxy, and app
+  // code passing an absolute external url - a webhook, a third-party api -
+  // was shipping the csrf token to that origin (measured). Request resolved
+  // the url already, so the comparison is exact
+  const sameOrigin =
+    typeof location === "undefined" || new URL(request.url).origin === location.origin;
+  if (sameOrigin && unsafeMethod(request.method) && !request.headers.has(CSRF_HEADER)) {
     const token = typeof document === "undefined" ? "" : csrfCookieValue(document.cookie);
     if (token) request.headers.set(CSRF_HEADER, token);
   }

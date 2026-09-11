@@ -147,6 +147,17 @@ if (!/^[a-z0-9][a-z0-9._-]*$/.test(name)) {
   console.error(`invalid project name "${name}": use lowercase letters, digits, ".", "_" and "-"`);
   process.exit(1);
 }
+// windows device names and trailing dots pass the charset above and then
+// betray it: `nul` died mid-scaffold with a raw ENOTSUP stack leaving a
+// directory nothing can address, `con` scaffolded "successfully" into a
+// trap, and `app.` produced a directory win32 path apis cannot reach - the
+// same guard the exporter already applies to prerender params
+if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(name) || name.endsWith(".")) {
+  console.error(
+    `invalid project name "${name}": ${name.endsWith(".") ? "a trailing dot is stripped by windows path apis, and the directory becomes unreachable" : "a reserved windows device name cannot be a directory"}`,
+  );
+  process.exit(1);
+}
 
 const isTemplate = (t: string): t is TemplateName => TEMPLATES.some((k) => k.name === t);
 const isLinter = (l: string): l is LinterName => LINTERS.some((k) => k.name === l);
@@ -261,6 +272,13 @@ if (vscode === undefined) vscode = shouldAsk ? await askYesNo("vscode settings",
 
 // one question, two flags: a script may want dependencies without a server that
 // never exits. --no-install exits before start is read, so don't ask for it
+if (install === false && start === true) {
+  // both flags were spoken, and they contradict: dropping --start in
+  // silence made the help text ("--start ... will block") a lie for this
+  // one combination. said out loud, then resolved the only runnable way
+  console.error("--no-install wins over --start: without dependencies there is nothing to start");
+  start = false;
+}
 if (install === false) start ??= false;
 
 if (install === undefined || start === undefined) {
@@ -281,13 +299,33 @@ if (install === undefined || start === undefined) {
 await doneAsking();
 
 const target = join(process.cwd(), name);
-if (existsSync(target) && readdirSync(target).length > 0) {
-  console.error(`directory "${name}" already exists and is not empty`);
-  process.exit(1);
+if (existsSync(target)) {
+  // a FILE (or a junction cpSync cannot overwrite) at the target used to
+  // fall through to a raw ENOTDIR/EISDIR stack instead of this message
+  if (!statSync(target).isDirectory()) {
+    console.error(`"${name}" already exists and is not a directory`);
+    process.exit(1);
+  }
+  if (readdirSync(target).length > 0) {
+    console.error(
+      `directory "${name}" already exists and is not empty` +
+        `\n  (a previous scaffold that was interrupted leaves this state - delete the directory and rerun)`,
+    );
+    process.exit(1);
+  }
 }
 
 const source = fileURLToPath(new URL(`../templates/${template}`, import.meta.url));
-cpSync(source, target, { recursive: true });
+try {
+  cpSync(source, target, { recursive: true });
+} catch (error) {
+  // a junction or reparse point that passed the guards above still fails
+  // here: the message, not the stack
+  console.error(
+    `cannot scaffold into "${name}": ${error instanceof Error ? error.message.split("\n")[0] : error}`,
+  );
+  process.exit(1);
+}
 
 // npm strips dotfiles from published packages, so the templates ship them unprefixed
 renameSync(join(target, "gitignore"), join(target, ".gitignore"));
@@ -729,8 +767,10 @@ ${layouts[template]}
   included
 ${included}`);
 
-// 1.25 is what the templates' go.mod asks for: the `tool` directive pinning borgogen needs it
-const GO_MIN = [1, 25] as const;
+// what the templates' go.mod actually asks for: 0.22 moved every scaffold to
+// go 1.27.0, and a floor below it let go 1.25 pass this check green and then
+// fail hard at `go mod tidy` - the check exists to say it FIRST
+const GO_MIN = [1, 27] as const;
 const goCheck = (): { ok: true; version: string } | { ok: false; reason: string } => {
   let probe;
   try {

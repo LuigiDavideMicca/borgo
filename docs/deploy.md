@@ -124,10 +124,11 @@ nginx needs the upgrade headers for WebSockets, SSE left unbuffered, and the for
 # at http level, which is where sites-enabled is included from: `Connection:
 # upgrade` belongs on a request that asked to upgrade and on no other. A fixed
 # value sends it on every proxied request, which stops nginx from keeping the
-# upstream connection alive and hands borgo a hop-by-hop header to strip.
+# upstream connection alive and hands borgo a hop-by-hop header to strip. The
+# empty branch makes nginx omit the header entirely on ordinary requests.
 map $http_upgrade $connection_upgrade {
     default upgrade;
-    ''      close;
+    ''      '';
 }
 
 server {

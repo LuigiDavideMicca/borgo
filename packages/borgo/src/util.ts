@@ -1423,12 +1423,19 @@ export async function proxyRequest(req: Request, options: ProxyOptions): Promise
         }, deadlineMs)
       : undefined;
     try {
-      // decompress: false, or bun inflates go's response and resends identity
+      // decompress: false, or bun inflates go's response and resends identity.
+      // redirect manual, or bun FOLLOWS a go redirect server-side: a 302 to
+      // an external url came back to the browser as a 200 with the external
+      // body, and a 307 on POST re-sent the request body AND the browser's
+      // X-CSRF-Token to the target (measured) - redirect semantics broken,
+      // ssrf from the front server, token on someone else's wire. a proxy
+      // relays the 30x; following it is the browser's decision
       const upstream = await fetchImpl(target, {
         method: req.method,
         headers,
         ...(hasBody ? { body } : {}),
         decompress: false,
+        redirect: "manual",
         signal: abort?.signal,
       } as RequestInit);
       // go may reply to half a request; the limit decided first
@@ -1481,8 +1488,12 @@ export async function runBorgogen(): Promise<boolean> {
   if ((await proc.exited) !== 0) {
     const stderr = await new Response(proc.stderr).text();
     console.error(stderr.trimEnd());
+    // the go.mod hint only when the failure IS the missing tool: printed on
+    // a plain syntax error it sent the reader to go.mod for a bug in their
+    // own handler (observed)
+    const toolMissing = /no required module provides package|unknown tool|is not a tool/i.test(stderr);
     console.error(
-      `  ${c.red(g.err)} borgogen failed - api types are stale ${c.dim("(is `tool github.com/LuigiDavideMicca/borgo/cmd/borgogen` in go.mod?)")}`,
+      `  ${c.red(g.err)} borgogen failed - api types are stale${toolMissing ? ` ${c.dim("(is `tool github.com/LuigiDavideMicca/borgo/cmd/borgogen` in go.mod?)")}` : ""}`,
     );
     return false;
   }

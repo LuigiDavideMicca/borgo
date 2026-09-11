@@ -1689,6 +1689,34 @@ describe("refusals", () => {
     expect(out).toContain("invalid project name");
   });
 
+  // hunting round 2: `nul` died mid-scaffold with a raw ENOTSUP stack and
+  // left a directory nothing on windows can address; `con` scaffolded
+  // "successfully" into a trap; `app.` produced a directory win32 path apis
+  // cannot reach. refused by name, before anything is written
+  test("windows device names and trailing dots are refused, not scaffolded", () => {
+    for (const name of ["nul", "con", "aux", "com1", "lpt9", "nul.txt"]) {
+      const { code, out } = run([name]);
+      expect(`${name}: ${code}`).toBe(`${name}: 1`);
+      expect(out).toContain("invalid project name");
+      expect(existsSync(join(cwd, name))).toBe(false);
+    }
+    const dotted = run(["app."]);
+    expect(dotted.code).toBe(1);
+    expect(dotted.out).toContain("trailing dot");
+  });
+
+  // hunting round 2: the scaffolder's floor said 1.25 while every template's
+  // go.mod asks 1.27 - a green check followed by a hard `go mod tidy` failure
+  test("the go floor the check enforces is the one the templates ship", async () => {
+    const cliSource = await Bun.file(new URL("../src/cli.ts", import.meta.url)).text();
+    const goMod = await Bun.file(new URL("../templates/base/go.mod", import.meta.url)).text();
+    const floor = /const GO_MIN = \[(\d+), (\d+)\]/.exec(cliSource);
+    const asked = /^go (\d+)\.(\d+)/m.exec(goMod);
+    expect(floor).not.toBeNull();
+    expect(asked).not.toBeNull();
+    expect(`${floor![1]}.${floor![2]}`).toBe(`${asked![1]}.${asked![2]}`);
+  });
+
   test("a non-empty directory is never overwritten", () => {
     mkdirSync(join(cwd, "app"));
     writeFileSync(join(cwd, "app", "keep.txt"), "mine");
@@ -1906,7 +1934,7 @@ describe("installing and starting", () => {
     const steps = out.slice(out.indexOf("next steps"));
     expect(steps).toContain("cd app");
     expect(steps).toContain("bun install");
-    expect(steps).toMatch(/install go 1\.25\+/);
+    expect(steps).toMatch(/install go 1\.27\+/);
   });
 
   test("--start carries its own install rather than starting on an empty tree", () => {

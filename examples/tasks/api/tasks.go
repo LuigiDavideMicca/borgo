@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/LuigiDavideMicca/borgo"
@@ -73,7 +74,14 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 	go borgo.Push("live", "task-created", task.Title)
 	// the /news page caches its html under this tag; writing a task is the
 	// moment that copy stops being true
-	go borgo.RevalidateTag("news")
+	go func() {
+		// the go keyword must not swallow the one signal that the shared
+		// copy is now stale: a failed invalidation logged is a retry away,
+		// swallowed it is staleness that survives restarts
+		if err := borgo.RevalidateTag("news"); err != nil {
+			log.Printf("revalidate news: %v", err)
+		}
+	}()
 	respondTask(w, http.StatusCreated, task)
 }
 
@@ -101,7 +109,14 @@ func ClearTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events.Publish("task-deleted", "all")
-	go borgo.RevalidateTag("news")
+	go func() {
+		// the go keyword must not swallow the one signal that the shared
+		// copy is now stale: a failed invalidation logged is a retry away,
+		// swallowed it is staleness that survives restarts
+		if err := borgo.RevalidateTag("news"); err != nil {
+			log.Printf("revalidate news: %v", err)
+		}
+	}()
 	borgo.WriteJSON(w, http.StatusOK, Cleared{Cleared: result.RowsAffected})
 }
 
@@ -116,6 +131,13 @@ func DeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events.Publish("task-deleted", r.PathValue("id"))
-	go borgo.RevalidateTag("news")
+	go func() {
+		// the go keyword must not swallow the one signal that the shared
+		// copy is now stale: a failed invalidation logged is a retry away,
+		// swallowed it is staleness that survives restarts
+		if err := borgo.RevalidateTag("news"); err != nil {
+			log.Printf("revalidate news: %v", err)
+		}
+	}()
 	borgo.WriteJSON(w, http.StatusOK, Deleted{Deleted: true})
 }

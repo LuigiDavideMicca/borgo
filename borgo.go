@@ -654,7 +654,10 @@ func CheckEnv() error {
 	secret := os.Getenv("SESSION_SECRET")
 	switch {
 	case secret == "":
-		log.Print("borgo: SESSION_SECRET not set: session and auth routes will fail until it is")
+		// said at the first session USE instead (sessionSecret): an app
+		// with no sessions was warned at every boot about routes it does
+		// not have. the short-key case below stays a boot refusal - a weak
+		// key is a mistake, not an omission
 	case len(secret) < sessionSecretMinLen:
 		return fmt.Errorf(
 			"borgo: SESSION_SECRET is %d bytes; it must be at least %d (openssl rand -base64 48). "+

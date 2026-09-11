@@ -1505,3 +1505,36 @@ describe("hunting round 2: hidden ancestors, not just hidden names", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("hunting round 2: the pump survives an abort during backpressure", () => {
+  // zlib answers asynchronously, so a second write while the first is in
+  // flight returns false and parks the pump on a drain-vs-broken race.
+  // cancel() used to detach BOTH arms of that race before destroying the
+  // stream, and the pump never settled: 100/100 aborts mid-drain leaked
+  // the coroutine with its last chunk pinned. the fix settles `broken`
+  // inside cleanup, and this counter is how a leak becomes visible
+  test("cancelling during the drain wait always lets the pump finish", async () => {
+    const { gzipStream, activeGzipPumps } = await import("../src/compress");
+    const before = activeGzipPumps();
+    // one incompressible chunk far past zlib's 16KB writable high-water
+    // mark: the pump's first write() returns false and it enters the
+    // drain-vs-broken race, where it stays for the milliseconds zlib
+    // needs - which is where the cancel lands
+    const big = crypto.getRandomValues(new Uint8Array(16 * 1024 * 1024));
+    for (let i = 0; i < 8; i++) {
+      const source = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(big);
+          // never closed: the drain race is the only place the pump can be
+        },
+      });
+      const reader = gzipStream(source).getReader();
+      // no read: the cancel must arrive while zlib is still chewing
+      await new Promise((r) => setTimeout(r, 1));
+      await reader.cancel("client gone");
+    }
+    // give every woken pump its turns to unwind
+    for (let t = 0; t < 20; t++) await new Promise((r) => setTimeout(r, 5));
+    expect(activeGzipPumps()).toBe(before);
+  }, 30_000);
+});

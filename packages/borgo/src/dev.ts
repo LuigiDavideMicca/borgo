@@ -77,6 +77,27 @@ export async function dev() {
   let frontProc: Subprocess | null = null;
   let reload = false;
 
+  // asked by answering, not by binding: windows SO_REUSEADDR semantics let a
+  // second `borgo dev` bind an already-held port and print the full happy
+  // banner - two sessions, undefined which one the browser reached, and the
+  // only hint a misleading "stale api process" line (measured). a port that
+  // ANSWERS http is a session; refuse before starting half of one
+  for (const [port, name] of [
+    [frontPort, "front server"],
+    [apiPort, "api"],
+  ] as const) {
+    try {
+      await fetch(`http://localhost:${port}/`, { signal: AbortSignal.timeout(500) });
+    } catch {
+      continue; // nothing answered: the port is ours
+    }
+    console.error(
+      `  port ${port} already answers http - another dev session (or app) is the ${name} there.\n` +
+        `  stop it, or run with ${name === "api" ? "API_PORT" : "PORT"}=<free port>. \`bunx borgo doctor\` names the holder.`,
+    );
+    process.exit(1);
+  }
+
   // the front server may be mid-restart: keep knocking
   const notifyFront = async (path: string): Promise<Response | null> => {
     const deadline = Date.now() + 10_000;
@@ -113,7 +134,13 @@ export async function dev() {
   // the old file briefly after exit
   let liveGoHash = "";
   const startGo = async () => {
-    await runBorgogen();
+    // checked like the cli's build checks it: a borgogen-only failure with
+    // a clean go build restarted the api with STALE types - the drift the
+    // generator exists to make impossible. the api keeps serving; the types
+    // wait for the fix, and the line says which of the two is stale
+    if (!(await runBorgogen())) {
+      console.error(`  ${c.red(g.err)} borgogen failed - the api restarts, but the generated types are stale until the next good save`);
+    }
     const build = Bun.spawn(["go", "build", "-o", goNext, "."], {
       stdout: "inherit",
       stderr: "inherit",
@@ -125,7 +152,11 @@ export async function dev() {
     // a torn read at event time poisons the source-hash dedup; go builds are
     // deterministic, so the binary is the reliable dedup
     const nextHash = String(Bun.hash(readFileSync(goNext)));
-    if (nextHash === liveGoHash && goProc && goProc.exitCode === null) return;
+    if (nextHash === liveGoHash && goProc && goProc.exitCode === null) {
+      // silence after "rebuilding api" read as a hang: say why nothing follows
+      console.error(`  ${c.dim(`${g.dot} api binary unchanged - the running api keeps serving`)}`);
+      return;
+    }
     liveGoHash = nextHash;
     // dropping the reference before the kill marks this exit as ours
     const previous = goProc;
@@ -166,6 +197,12 @@ export async function dev() {
     proc.exited.then((code) => {
       if (goProc !== proc) return;
       goProc = null;
+      // the gesture this message instructs is an editor save - which writes
+      // identical bytes, which the content-hash dedup swallowed: the user
+      // saved, nothing rebuilt, nothing said, and the api stayed dead
+      // (measured). the stale-binary path above forgets for the same reason
+      dedup.forget();
+      liveGoHash = "";
       console.error(
         `  ${c.red(g.err)} the api exited on its own (${code}) - save a .go file to rebuild and restart it`,
       );
@@ -195,6 +232,18 @@ export async function dev() {
       },
     });
     frontProc = proc;
+    // symmetric with the api's own-exit notice: the front dying on its own
+    // was 28 seconds of silence under a "ready" banner (measured), healed
+    // only by the next edit. the dedup forgets for the same reason the api
+    // path does - the instructed gesture is a save of identical bytes
+    proc.exited.then((code) => {
+      if (frontProc !== proc) return;
+      frontProc = null;
+      dedup.forget();
+      console.error(
+        `  ${c.red(g.err)} the front server exited on its own (${code}) - save any page or style to restart it`,
+      );
+    });
     // the fs noise of the boot must land inside the busy window
     const deadline = Date.now() + 30_000;
     let exited = false;

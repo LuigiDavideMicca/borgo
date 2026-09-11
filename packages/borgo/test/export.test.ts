@@ -778,3 +778,11 @@ describe("an export ships what serveAsset would serve, and nothing else", () => 
     180_000,
   );
 });
+
+describe("hunting round 2: the exporter's params and paths", () => {
+  test("an empty param is refused by name, not discovered as a 404", async () => {
+    const { unsafeParamReason, fillPattern } = await import("../src/export");
+    expect(unsafeParamReason("")).toContain("empty");
+    expect(() => fillPattern("/posts/:id", { id: "" })).toThrow('param "id" is empty');
+  });
+});

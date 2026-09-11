@@ -107,11 +107,22 @@ func run(root string) (err error) {
 		pkg = loadAPI(cfg, root)
 	}
 	if len(pkg.Errors) > 0 {
-		msgs := make([]string, 0, len(pkg.Errors))
+		// the driver error (Pos "-") carries the compiler's whole block, and
+		// the per-file errors repeat its lines one by one: joined naively,
+		// every failure printed twice. lines are deduplicated in order, so
+		// each failure is said once whichever shape delivered it
+		seen := map[string]bool{}
+		var lines []string
 		for _, e := range pkg.Errors {
-			msgs = append(msgs, e.Error())
+			for _, line := range strings.Split(e.Error(), "\n") {
+				if line == "" || seen[line] {
+					continue
+				}
+				seen[line] = true
+				lines = append(lines, line)
+			}
 		}
-		fail("%s", strings.Join(msgs, "\n"))
+		fail("%s", strings.Join(lines, "\n"))
 	}
 	dropGeneratedFile(pkg)
 
@@ -295,7 +306,24 @@ func collectDirectives(pkg *packages.Package, decls map[*types.Func]*ast.FuncDec
 	}
 
 	var out []route
-	for fn, decl := range decls {
+	// map iteration order is random, and on a duplicate directive it decided
+	// which registration got named as "pos" and which as "prev" - the same
+	// failure spelled two ways across two runs. source order is the one a
+	// reader expects: the FIRST spelling in the tree wins the name
+	ordered := make([]*types.Func, 0, len(decls))
+	for fn := range decls {
+		ordered = append(ordered, fn)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		a := pkg.Fset.Position(decls[ordered[i]].Pos())
+		b := pkg.Fset.Position(decls[ordered[j]].Pos())
+		if a.Filename != b.Filename {
+			return a.Filename < b.Filename
+		}
+		return a.Offset < b.Offset
+	})
+	for _, fn := range ordered {
+		decl := decls[fn]
 		if decl.Doc == nil {
 			continue
 		}
@@ -1478,6 +1506,11 @@ func (g *tsGen) tsType(t types.Type, s site) tsRef {
 		switch {
 		case t.Info()&types.IsBoolean != 0:
 			return tsRef{ts: "boolean"}
+		// IsNumeric includes complex64/128, which encoding/json refuses at
+		// runtime: "number" was a confidently wrong type for a value that
+		// can never arrive - unknown is the honest answer, wrong never is
+		case t.Info()&types.IsComplex != 0:
+			return tsRef{ts: "unknown"}
 		case t.Info()&types.IsNumeric != 0:
 			return tsRef{ts: "number"}
 		case t.Info()&types.IsString != 0:

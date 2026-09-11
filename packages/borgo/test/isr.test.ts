@@ -1,5 +1,5 @@
-﻿import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -695,5 +695,94 @@ describe("persistence", () => {
     expect(isr.invalidatePath("/p")).toBe(1);
     await Bun.sleep(20);
     expect(readdirSync(dir).length).toBe(0);
+  });
+});
+
+describe("hunting round 2: an errored render is not everyone's page", () => {
+  // react completes a suspense-boundary throw as a 200 serving the fallback
+  // (with dev react, the error text in the bytes). the server marks that
+  // render; the guard refuses it here, by the mark
+  test("the render-errored mark makes a clean 200 unstorable", async () => {
+    const { unstorable, RENDER_ERRORED_HEADER } = await import("../src/isr");
+    const clean = new Headers({ "content-type": "text/html" });
+    expect(unstorable(200, clean, "<html><body>fine</body></html>")).toBeNull();
+    const marked = new Headers({
+      "content-type": "text/html",
+      [RENDER_ERRORED_HEADER]: "a suspense boundary threw during the shared render",
+    });
+    const refusal = unstorable(200, marked, "<html><body>fallback</body></html>");
+    expect(refusal).not.toBeNull();
+    expect(refusal!.reason).toContain("errored");
+    expect(refusal!.reason).toContain("fallback");
+  });
+});
+
+describe("hunting round 2: persistence integrity and tag spellings", () => {
+  const mkPersistDir = () => mkdtempSync(join(tmpdir(), "borgo-isr-persist-"));
+  const reqAt = (url: string) => new Request(`http://x${url}`);
+  const htmlPage = (html: string) =>
+    new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+
+  test("a torn html - valid meta beside truncated body - is swept, never served", async () => {
+    const dir = mkPersistDir();
+    const a = new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
+    const route = { pattern: "/p", module: { revalidate: "manual" } };
+    // store one page through the real path, then truncate its html on disk
+    await a.handle(reqAt("/p"), route, async () => htmlPage("<html><body>whole</body></html>"));
+    // the persist write is fire-and-forget; give it its turns
+    for (let t = 0; t < 20 && !readdirSync(dir).some((n) => n.endsWith(".html")); t++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const html = readdirSync(dir).find((n) => n.endsWith(".html"))!;
+    writeFileSync(join(dir, html), "<html><bo");
+    const b = new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
+    const revived = await b.handle(reqAt("/p"), route, async () => htmlPage("<html><body>fresh</body></html>"));
+    expect(revived).not.toBe("unstorable");
+    expect(await (revived as Response).text()).toContain("fresh");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a parseable meta of the wrong shape costs the entry, never the boot", () => {
+    const dir = mkPersistDir();
+    // a meta with tags:null - schema drift, or an external writer
+    writeFileSync(
+      join(dir, "deadbeef.json"),
+      JSON.stringify({ key: "/x", status: 200, headers: [], storedAt: 1, tags: null, buildId: "b1", bytes: 2 }),
+    );
+    writeFileSync(join(dir, "deadbeef.html"), "hi");
+    expect(() => new Isr({ log: () => {}, persist: { dir, buildId: "b1" } })).not.toThrow();
+    expect(readdirSync(dir)).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("an orphan html without its json twin is swept at boot", () => {
+    const dir = mkPersistDir();
+    writeFileSync(join(dir, "cafebabe.html"), "<html>orphan</html>");
+    new Isr({ log: () => {}, persist: { dir, buildId: "b1" } });
+    expect(readdirSync(dir)).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the noted set is bounded like the refused map, against the same attacker", () => {
+    const lines: string[] = [];
+    const i = new Isr({ log: (l) => lines.push(l) });
+    // reach the private notepad through the public surface it feeds
+    for (let n = 0; n < MAX_CACHED_PAGES + 40; n++) {
+      (i as unknown as { note: (k: string, l: string) => void }).note(`k${n}`, `line ${n}`);
+    }
+    const size = (i as unknown as { noted: Set<string> }).noted.size;
+    expect(size).toBeLessThanOrEqual(MAX_CACHED_PAGES);
+    expect(lines.length).toBe(MAX_CACHED_PAGES + 40);
+  });
+
+  test("a tag invalidates under the spelling its author wrote, trimmed and normalized", async () => {
+    const i = new Isr({ log: () => {} });
+    const route = { pattern: "/t", module: { revalidate: "manual", tags: [" news ", "café"] } };
+    await i.handle(reqAt("/t"), route, async () => htmlPage("<html><body>v1</body></html>"));
+    // the author's own spelling, whitespace included
+    expect(i.invalidateTag(" news ")).toBe(1);
+    await i.handle(reqAt("/t"), route, async () => htmlPage("<html><body>v2</body></html>"));
+    // NFD spelling (e + combining acute) of the NFC-declared tag
+    expect(i.invalidateTag("café")).toBe(1);
   });
 });

@@ -24,7 +24,7 @@ import {
 } from "./compress";
 import { registerCsrf, registerIslands } from "./internal";
 import { appEnvMetas, envRefusal } from "./env-app";
-import { CACHE_STATE_HEADER, Isr, REVALIDATE_TOPIC } from "./isr";
+import { CACHE_STATE_HEADER, Isr, RENDER_ERRORED_HEADER, REVALIDATE_TOPIC } from "./isr";
 import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
 import { canonicalPath, matchRoute, safeDecode, type Route } from "./router";
@@ -472,6 +472,9 @@ export async function serve({
     extraProps?: Record<string, unknown>,
     extraCookies: string[] = [],
     shared = false,
+    // set when react's streaming onError fires: the caller that stores
+    // shared copies must know the 200 it drained completed as a fallback
+    failed?: { errored: boolean },
   ) =>
     renderDocument(
       req,
@@ -481,6 +484,14 @@ export async function serve({
       {
         ...renderOptions,
         sharedRender: shared,
+        ...(failed
+          ? {
+              onError: (error: unknown) => {
+                failed.errored = true;
+                (renderOptions.onError ?? console.error)(error);
+              },
+            }
+          : {}),
         renderToStream: async (element, init) =>
           redactLocalPaths(
             (await renderToReadableStream(element, init)) as unknown as AsyncIterable<Uint8Array>,
@@ -641,9 +652,23 @@ export async function serve({
     }
 
     if (isr) {
-      const cached = await isr.handle(req, matched.route, (anon) =>
-        renderPage(anon, matched.route, matched.params, 200, undefined, [], true),
-      );
+      const cached = await isr.handle(req, matched.route, async (anon) => {
+        // the shared render is drained HERE so a suspense boundary that
+        // errored - which react completes as a 200 serving its fallback -
+        // can be marked before the guard asks its questions: the flag only
+        // exists once the stream has run, and the response the orchestrator
+        // stores must already carry it. identity body, so the re-wrap is
+        // byte-faithful; the header never leaves the process (an errored
+        // render is unstorable, and unstorable copies are never served)
+        const failed = { errored: false };
+        const res = await renderPage(anon, matched.route, matched.params, 200, undefined, [], true, failed);
+        const html = await res.text();
+        const headers = new Headers(res.headers);
+        if (failed.errored) {
+          headers.set(RENDER_ERRORED_HEADER, "a suspense boundary threw during the shared render");
+        }
+        return new Response(html, { status: res.status, headers });
+      });
       // unstorable: the page opted in but its render cannot be shared - the
       // visitor gets their OWN render below, tokens minted and guards
       // honoured, marked so curl can still see why it is never cached.

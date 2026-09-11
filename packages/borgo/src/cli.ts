@@ -194,7 +194,10 @@ switch (command) {
 
   case "export": {
     const { exportSite } = await import("./export");
-    process.exit(await exportSite());
+    // framed like dev and start: the exporter's own carefully worded
+    // refusals (a hostile prerender param, a throwing prerenderPaths) were
+    // reaching the terminal as raw stack dumps instead of their message
+    process.exit(await framed(exportSite));
   }
 
   case "doctor": {

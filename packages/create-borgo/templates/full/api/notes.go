@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -72,7 +73,14 @@ func CreateNote(w http.ResponseWriter, r *http.Request) {
 	go borgo.Push("live", "note-created", note.Title)
 	// pages/news.tsx caches its html under this tag; a write is the moment
 	// that copy stops being true
-	go borgo.RevalidateTag("notes")
+	go func() {
+		// the go keyword must not swallow the one signal that the shared
+		// copy is now stale: a failed invalidation logged is a retry away,
+		// swallowed it is staleness that survives restarts
+		if err := borgo.RevalidateTag("notes"); err != nil {
+			log.Printf("revalidate notes: %v", err)
+		}
+	}()
 	borgo.JSON(w, http.StatusCreated, NoteItem{Note: note})
 }
 
@@ -87,6 +95,13 @@ func DeleteNote(w http.ResponseWriter, r *http.Request) {
 	delete(notes, id)
 	notesMu.Unlock()
 	events.Publish("note-deleted", id)
-	go borgo.RevalidateTag("notes")
+	go func() {
+		// the go keyword must not swallow the one signal that the shared
+		// copy is now stale: a failed invalidation logged is a retry away,
+		// swallowed it is staleness that survives restarts
+		if err := borgo.RevalidateTag("notes"); err != nil {
+			log.Printf("revalidate notes: %v", err)
+		}
+	}()
 	borgo.WriteJSON(w, http.StatusOK, Deleted{Deleted: true})
 }

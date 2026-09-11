@@ -113,3 +113,22 @@ test("head updates on client navigation", async ({ page }) => {
   await page.click('nav a[href="/slow"]');
   await expect(page).toHaveTitle("Streaming · borgo tasks");
 });
+
+// hunting round 2: third-party code clobbering history.state (dropping the
+// __borgo scroll key) must degrade to a top-scroll, never a crash or a page
+// rendered for the wrong url
+test("a clobbered history.state degrades to top-scroll, not a crash", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+
+  await page.goto("/");
+  await page.click('a[href="/about"]');
+  await expect(page.locator("h1")).toHaveText("About");
+  // an analytics script replacing state wholesale, key gone
+  await page.evaluate(() => history.replaceState({ theirOwn: true }, ""));
+  await page.goBack();
+  // the right page renders for the url, whatever the state carried
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator("h1")).not.toHaveText("About");
+  expect(errors).toEqual([]);
+});

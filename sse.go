@@ -189,13 +189,18 @@ func SSE(w http.ResponseWriter, r *http.Request) (*SSEStream, error) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
+	// armed BEFORE the first byte goes out: the flush is the client's signal
+	// that the stream exists, and a caller acting on that signal (a test
+	// asking for the latch, a shutdown walking the hooks) must find the
+	// watch already in place - armed after, a preemption between flush and
+	// arm was a red die-roll under -race
+	stream := &SSEStream{w: w, f: f, r: r, rc: rc, state: &streamEnd{streamLatch: streamLatch{done: make(chan struct{})}}}
+	stream.watch(r)
 	// flushing the headers alone is not enough: Bun.serve holds a response's
 	// headers until the first body byte, so a quiet stream would leave the
 	// browser waiting on fetch() until its first event
 	io.WriteString(w, ":ok\n\n")
 	f.Flush()
-	stream := &SSEStream{w: w, f: f, r: r, rc: rc, state: &streamEnd{streamLatch: streamLatch{done: make(chan struct{})}}}
-	stream.watch(r)
 	return stream, nil
 }
 

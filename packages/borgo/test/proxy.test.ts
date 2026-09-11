@@ -916,3 +916,36 @@ describe("proxyRequest: event streams", () => {
     }
   });
 });
+
+describe("proxyRequest: redirects are relayed, never followed", () => {
+  // bun's fetch default is redirect:"follow", and the proxy inherited it:
+  // a go 302 to an external url came back to the browser as a 200 with the
+  // EXTERNAL body, and a 307 POST re-sent the request body and the
+  // browser's X-CSRF-Token to the target (measured). a proxy relays the
+  // 30x; following it is the browser's decision
+  test("the fetch is asked for manual redirects, in so many words", async () => {
+    let seenInit: RequestInit | undefined;
+    await proxyRequest(
+      req(),
+      opts({
+        fetchImpl: async (_target, init) => {
+          seenInit = init;
+          return new Response("ok", { status: 200 });
+        },
+      }),
+    );
+    expect((seenInit as { redirect?: string }).redirect).toBe("manual");
+  });
+
+  test("an upstream 302 reaches the caller as a 302, location intact", async () => {
+    const res = await proxyRequest(
+      req("POST", { body: "secret", headers: { "content-type": "text/plain" } }),
+      opts({
+        fetchImpl: async () =>
+          new Response(null, { status: 302, headers: { location: "https://elsewhere.example/next" } }),
+      }),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("https://elsewhere.example/next");
+  });
+});

@@ -985,6 +985,14 @@ export async function compileCss(dev = false): Promise<boolean> {
     return true;
   }
   if (existsSync("style.scss")) {
+    // both present without --tailwind: scss wins, and the dev log naming a
+    // style.css edit while recompiling style.scss let the user's css edit
+    // vanish without a word - said here, where the choice is made
+    if (existsSync("style.css")) {
+      console.warn(
+        `  ${c.terracotta(g.change)} both style.scss and style.css exist - style.scss wins without --tailwind, and style.css is ignored`,
+      );
+    }
     const sass = await import("sass-embedded");
     const css = await sass.compileAsync("style.scss", { style: dev ? "expanded" : "compressed" });
     await Bun.write(`${outDir}/style.css`, css.css);

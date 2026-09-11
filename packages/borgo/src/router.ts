@@ -85,6 +85,14 @@ export function canonicalPath(pathname: string): string {
     out += UNRESERVED.test(decoded) ? decoded : `%${hex.toUpperCase()}`;
     i += 2;
   }
+  // slash aliases are the router's own: matchRoute strips trailing slashes,
+  // so /news/ and /news// reach the same page - but each spelling was its
+  // own isr cache key, and worse, Revalidate("/news") dropped only the bare
+  // spelling while /news/ kept serving the pre-invalidation copy, under
+  // "manual" forever (measured). collapsed here with the percent aliases,
+  // one door for the whole alias family
+  out = out.replace(/\/{2,}/g, "/");
+  if (out.length > 1 && out.endsWith("/")) out = out.replace(/\/+$/, "");
   return out;
 }
 

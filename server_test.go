@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -660,9 +661,18 @@ func TestServeContextReturnsAndReleasesPort(t *testing.T) {
 	}
 	ln.Close()
 
-	// behaviour Serve had and ServeContext must keep
+	// hunting round 2 moved the warning from boot to first session USE: an
+	// app with no sessions was warned at every start about routes it does
+	// not have. the boot stays quiet; the first refusing session call says it
+	if strings.Contains(logs.String(), "SESSION_SECRET") {
+		t.Errorf("the boot warned about SESSION_SECRET, which first-use now owns: %q", logs.String())
+	}
+	noSecretWarned = sync.Once{}
+	if err := SetSession(httptest.NewRecorder(), "who", time.Minute); err == nil {
+		t.Error("SetSession without a secret must refuse")
+	}
 	if !strings.Contains(logs.String(), "SESSION_SECRET") {
-		t.Errorf("the session-secret warning did not fire: %q", logs.String())
+		t.Errorf("the first session use did not warn: %q", logs.String())
 	}
 }
 

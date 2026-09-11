@@ -1,4 +1,4 @@
-﻿import { readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
+import { readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { brotliCompressSync, constants, createGzip, gzipSync } from "node:zlib";
@@ -644,6 +644,13 @@ const acquireGzip = (): PooledGzip =>
 // tell a pool from a fresh allocation per response
 export const pooledGzipCount = (): number => gzipPool.length;
 
+// pumps in flight, observable because a leaked pump has no behaviour to
+// observe: the abort-during-backpressure leak was invisible until memory
+// pressure, and the test that pins its fix needs a number that must return
+// to zero
+let gzipPumps = 0;
+export const activeGzipPumps = (): number => gzipPumps;
+
 const releaseGzip = (gzip: PooledGzip): void => {
   if (gzip.destroyed || gzipPool.length >= GZIP_POOL_MAX) {
     gzip.destroy();
@@ -689,6 +696,13 @@ export function gzipStream(source: ReadableStream<Uint8Array>): ReadableStream<U
   const cleanup = (pool: boolean) => {
     if (released) return;
     released = true;
+    // settle `broken` FIRST: a pump awaiting the drain race has both of its
+    // arms detached by the lines below, and a cancel() arriving during zlib
+    // backpressure - the common state, zlib answers asynchronously - parked
+    // that pump forever, its last chunk pinned (measured: 100/100 aborts
+    // mid-drain leaked the coroutine). resolving is idempotent and the
+    // woken pump exits through its own cancelled/destroyed checks
+    onBroken();
     gzip.off("data", onData);
     gzip.off("error", onError);
     gzip.off("close", onBroken);
@@ -705,6 +719,7 @@ export function gzipStream(source: ReadableStream<Uint8Array>): ReadableStream<U
       gzip.on("data", onData);
       gzip.on("error", onError);
       gzip.once("close", onBroken);
+      gzipPumps++;
       void (async () => {
         try {
           for (;;) {
@@ -737,6 +752,8 @@ export function gzipStream(source: ReadableStream<Uint8Array>): ReadableStream<U
         } catch (error) {
           gzip.destroy(error instanceof Error ? error : new Error(String(error)));
           cleanup(false);
+        } finally {
+          gzipPumps--;
         }
       })();
     },

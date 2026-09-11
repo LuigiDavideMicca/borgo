@@ -71,9 +71,20 @@ const sessionSecretMinLen = 32
 // A secret too short is reported as absent, not as its own case: every guard
 // that refuses without a secret then covers the weak key too, including for
 // an embedder that never calls Serve.
+//
+// The missing-secret warning lives here, at the first session USE, not at
+// boot: an app with no sessions - the minimal template, a plain api - was
+// told at every start that routes it does not have would fail. An app that
+// does use them still learns on request one, once, and the request itself
+// fails closed beside the log line.
+var noSecretWarned sync.Once
+
 func sessionSecret() string {
 	secret := os.Getenv("SESSION_SECRET")
 	if len(secret) < sessionSecretMinLen {
+		noSecretWarned.Do(func() {
+			log.Print("borgo: SESSION_SECRET not set (or under 32 bytes): sessions and auth refuse until it is - openssl rand -base64 48")
+		})
 		return ""
 	}
 	return secret

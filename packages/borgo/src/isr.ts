@@ -44,8 +44,17 @@ export function readIsrPolicy(module: {
   if (!Array.isArray(tags) || tags.some((t) => typeof t !== "string" || t.trim() === "")) {
     return `tags must be an array of non-empty strings, got ${JSON.stringify(tags)}`;
   }
-  return { seconds, tags: tags.map((t: string) => t.trim()) };
+  // trimmed AND unicode-normalized, symmetrically with normalizeTag on the
+  // invalidation side: a page tagged " news " was stored under "news" and
+  // RevalidateTag(" news ") - the spelling its author sees in their own
+  // source - dropped 0, silently; NFD "café" against NFC "café" the same
+  return { seconds, tags: tags.map((t: string) => normalizeTag(t)) };
 }
+
+// the one spelling of a tag, on both sides of the bridge: what the page
+// declares and what Go sends must meet on equal bytes, whatever the editor's
+// whitespace or unicode normal form did to either
+export const normalizeTag = (tag: string): string => tag.trim().normalize("NFC");
 
 // the exporter must refuse a nonce - a file cannot change - but a live cache
 // can re-mint one per replay, and only then is the page storable: the stored
@@ -95,6 +104,15 @@ export function unstorable(
   html: string,
 ): Unstorable | null {
   if (status !== 200) return { reason: `status ${status}` };
+  // react completes a render whose suspense boundary threw as a 200: the
+  // fallback plus its client-retry script, status unchanged (with dev react,
+  // the error text in the bytes). the server marks that render, because a
+  // degraded document one transient hiccup produced must not become
+  // everyone's page - under "manual", forever (measured)
+  const errored = headers.get(RENDER_ERRORED_HEADER);
+  if (errored) {
+    return { reason: `the render errored (${errored}) and completed as its fallback` };
+  }
   // defence in depth: the shared render asks for identity, so a coded body
   // here means the render path changed under this cache - and coded bytes
   // are bytes the residue check below cannot honestly read. refused, loudly,
@@ -262,6 +280,11 @@ type RouteLike = { pattern: string; module: { revalidate?: unknown; tags?: unkno
 
 export const CACHE_STATE_HEADER = "X-Borgo-Cache";
 
+// set by the server on a shared render whose suspense onError fired; never
+// leaves the process - an errored render is unstorable, and unstorable
+// copies are not served
+export const RENDER_ERRORED_HEADER = "X-Borgo-Render-Errored";
+
 // one orchestrator per server, production only. handle() answers null for
 // "not mine" - wrong method, no opt-in, invalid opt-in (warned once by
 // name) - and the caller renders exactly as before, so a tree with no
@@ -328,6 +351,11 @@ export class Isr {
       tags: entry.tags,
       nonce: entry.nonce,
       buildId: this.persist.buildId,
+      // the meta vouches for the body's length: a crash or a full disk
+      // mid-write leaves a valid json beside a truncated html, and a
+      // truncated html is undetectable by parsing - it was served whole
+      // after a restart, under "manual" forever (measured)
+      bytes: entry.body.byteLength,
     };
     // fire and forget: a disk that stopped taking writes must not slow a
     // response down, and the cache keeps working from memory - said once
@@ -354,8 +382,10 @@ export class Isr {
       return; // first boot: nothing saved yet
     }
     const loaded: Array<{ key: string; entry: CachedPage }> = [];
+    const jsonBases = new Set<string>();
     for (const name of names) {
       if (!name.endsWith(".json")) continue;
+      jsonBases.add(name.slice(0, -5));
       const base = `${persist.dir}/${name.slice(0, -5)}`;
       try {
         const meta = JSON.parse(readFileSync(`${base}.json`, "utf8")) as {
@@ -366,10 +396,29 @@ export class Isr {
           tags: string[];
           nonce?: string;
           buildId: string;
+          bytes: number;
         };
         // a copy from another build renders another tree: swept, not served
         if (meta.buildId !== persist.buildId) throw new Error("stale build");
+        // a parseable meta of the wrong SHAPE must sweep like a torn one:
+        // an entry with tags that is not an array threw out of the
+        // constructor and crash-looped the boot - one bad cache file took
+        // the server down, against this sweep's own doctrine
+        if (
+          typeof meta.key !== "string" ||
+          !Array.isArray(meta.tags) ||
+          !Array.isArray(meta.headers) ||
+          typeof meta.storedAt !== "number" ||
+          typeof meta.status !== "number"
+        ) {
+          throw new Error("malformed meta");
+        }
         const body = new Uint8Array(readFileSync(`${base}.html`));
+        // the length the meta vouched for, or the html is torn: a valid
+        // json beside 12 bytes of html was served whole (measured)
+        if (typeof meta.bytes !== "number" || body.byteLength !== meta.bytes) {
+          throw new Error("torn html");
+        }
         loaded.push({
           key: meta.key,
           entry: {
@@ -393,13 +442,40 @@ export class Isr {
         } catch {}
       }
     }
+    // an html whose json twin is gone is never loaded and was never swept:
+    // pure disk leak, one orphan per crash, forever
+    for (const name of names) {
+      if (!name.endsWith(".html")) continue;
+      if (jsonBases.has(name.slice(0, -5))) continue;
+      try {
+        unlinkSync(`${persist.dir}/${name}`);
+      } catch {}
+    }
     // oldest first, so the lru order after a restart matches the one before it
     loaded.sort((a, b) => a.entry.storedAt - b.entry.storedAt);
-    for (const { key, entry } of loaded) this.cache.store(key, entry);
+    for (const { key, entry } of loaded) {
+      // belt beside the shape check: one entry the validation did not
+      // foresee must cost that entry, never the boot
+      try {
+        this.cache.store(key, entry);
+      } catch {
+        this.removeSaved(key);
+      }
+    }
   }
 
   private note(key: string, line: string): void {
     if (this.noted.has(key)) return;
+    // bounded like the refused map two fields up, against the same
+    // attacker: the note key carries the cache key, the cache key carries
+    // the query string, and 2000 unique queries against one unstorable
+    // page grew this set - and the log - by 2000 (measured). insertion
+    // order is eviction order; re-noting an evicted key is one extra log
+    // line, not unbounded memory
+    if (this.noted.size >= MAX_CACHED_PAGES) {
+      const oldest = this.noted.values().next().value;
+      if (oldest !== undefined) this.noted.delete(oldest);
+    }
     this.noted.add(key);
     this.log(line);
   }
@@ -573,7 +649,11 @@ export class Isr {
     return dropped;
   }
 
-  invalidateTag(tag: string): number {
+  invalidateTag(rawTag: string): number {
+    // the same spelling readIsrPolicy stored under: RevalidateTag(" news ")
+    // - the spelling the author sees in their own Go source - dropped 0,
+    // silently, while the pages sat tagged "news" (measured)
+    const tag = normalizeTag(rawTag);
     const dropped = this.cache.invalidateTag(tag);
     for (const [key, refusal] of [...this.refused]) {
       if (refusal.tags.includes(tag)) this.refused.delete(key);

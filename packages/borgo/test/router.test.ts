@@ -215,3 +215,24 @@ describe("canonicalPath", () => {
     expect(canonicalPath("/%C3%A9")).toBe("/%C3%A9");
   });
 });
+
+describe("canonicalPath: slash aliases", () => {
+  // the router strips trailing slashes when matching, so /news/ IS /news -
+  // but each spelling was its own isr cache key, and an invalidation of
+  // "/news" left /news/ serving the stale copy forever (measured)
+  test("trailing and doubled slashes collapse to the one spelling", () => {
+    expect(canonicalPath("/news/")).toBe("/news");
+    expect(canonicalPath("/news//")).toBe("/news");
+    expect(canonicalPath("//news")).toBe("/news");
+    expect(canonicalPath("/a//b///c/")).toBe("/a/b/c");
+  });
+
+  test("the root stays the root", () => {
+    expect(canonicalPath("/")).toBe("/");
+    expect(canonicalPath("//")).toBe("/");
+  });
+
+  test("percent and slash aliases collapse together", () => {
+    expect(canonicalPath("/ne%77s/")).toBe("/news");
+  });
+});

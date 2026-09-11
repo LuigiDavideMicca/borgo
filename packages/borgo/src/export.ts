@@ -62,6 +62,11 @@ const WINDOWS_ILLEGAL = /["*:<>?|\u0000-\u001f]/;
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
 export function unsafeParamReason(raw: string): string | null {
+  // an empty param collapses its segment out of the url: /posts/:id became
+  // /posts/, the export 404ed with a message naming nothing, and had the
+  // router matched trailing-slash it would have silently overwritten a
+  // sibling page's index.html
+  if (raw === "") return "is empty - the segment would collapse out of the url";
   if (/[\\/]/.test(raw)) return "contains a path separator";
   // a dot segment would climb out of dist/site
   if (raw === "." || raw === "..") return `is the dot segment "${raw}"`;
@@ -328,13 +333,21 @@ export async function exportSite(): Promise<number> {
     const api = makeApiClient(`http://localhost:${apiPort}`);
 
     const pages: Array<{ path: string; route: Route }> = [];
+    // a prerenderPaths returning the same params twice rendered the same
+    // file twice and the summary counted a page that does not exist
+    const seenPaths = new Set<string>();
     for (const { route, dynamic } of plans) {
       if (!dynamic) {
         pages.push({ path: route.pattern, route });
         continue;
       }
       const sets = await route.module.prerenderPaths!({ api, apiUrl });
-      for (const params of sets) pages.push({ path: fillPattern(route.pattern, params), route });
+      for (const params of sets) {
+        const path = fillPattern(route.pattern, params);
+        if (seenPaths.has(path)) continue;
+        seenPaths.add(path);
+        pages.push({ path, route });
+      }
     }
 
     // the real front server renders: an export is byte-identical to ssr
