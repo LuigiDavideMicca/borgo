@@ -474,6 +474,13 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 		return fmt.Errorf("borgo: parent process %d has already exited; not starting", parentPID)
 	}
 	warnParentMismatch(parentPID, os.Getppid())
+	front, err := frontEnabled()
+	if err != nil {
+		return err
+	}
+	if front {
+		return serveFront(ctx, onShutdown, port, grace, parentPID)
+	}
 	// bound here, not in ListenAndServe: a port in use is a refusal like the
 	// others, with the registry untouched and no banner printed
 	ln, err := net.Listen("tcp", srv.Addr)
@@ -503,6 +510,99 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 		log.Print("borgo: parent process exited; shutting down")
 		onShutdown()
 		shutdown(srv, grace)
+	}
+	return nil
+}
+
+// serveFront is serveContext's body in front mode (front.go): the public
+// port answers /api in-process and forwards the rest to the render service;
+// a second, loopback-only listener on apiPort serves the same routes to the
+// render service's loaders, behind the boot key. Both are refused before the
+// registry is mounted, like the single listener above.
+func serveFront(ctx context.Context, onShutdown func(), apiPort string, grace time.Duration, parentPID int) error {
+	publicPort, err := envPublicPort()
+	if err != nil {
+		return err
+	}
+	key, err := internalKey()
+	if err != nil {
+		return err
+	}
+	renderer, err := renderURL()
+	if err != nil {
+		return err
+	}
+	renderTimeout, err := envDuration("BORGO_RENDER_TIMEOUT", defaultRenderTimeout)
+	if err != nil {
+		return err
+	}
+	// the check bun ran before proxying /api comes across with the route:
+	// a switch that made the app less safe would not be a switch
+	csrf, err := csrfEnforced()
+	if err != nil {
+		return err
+	}
+	public, err := newServer(publicPort, nil)
+	if err != nil {
+		return err
+	}
+	internal, err := newServer(apiPort, nil)
+	if err != nil {
+		return err
+	}
+	// loopback only, by address and not by convention: the old topology
+	// bound the api on every interface and called it internal
+	internal.Addr = "127.0.0.1:" + apiPort
+	publicLn, err := net.Listen("tcp", public.Addr)
+	if err != nil {
+		return err
+	}
+	internalLn, err := net.Listen("tcp", internal.Addr)
+	if err != nil {
+		publicLn.Close()
+		return err
+	}
+
+	mux, patterns := mountRoutes()
+	api := Middleware(mux)
+	public.Handler = newFrontHandler(api, csrf, renderer, key, renderTimeout)
+	internal.Handler = requireInternalKey(key, api)
+	defer armStreamShutdown(public)()
+	defer armStreamShutdown(internal)()
+	printFrontStartup(patterns, publicPort, internal.Addr, renderer)
+
+	parentExited, stopWatchingParent := watchParent(parentPID)
+	defer stopWatchingParent()
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- public.Serve(publicLn) }()
+	go func() { errCh <- internal.Serve(internalLn) }()
+	both := func() {
+		var wg sync.WaitGroup
+		for _, srv := range []*http.Server{public, internal} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				shutdown(srv, grace)
+			}()
+		}
+		wg.Wait()
+	}
+	select {
+	case err := <-errCh:
+		// one listener down is the run down: half a front answers half
+		// the requests, which reads as an app with a bug rather than one
+		// that stopped
+		onShutdown()
+		both()
+		return err
+	case <-ctx.Done():
+		onShutdown()
+		both()
+	case <-parentExited:
+		log.Print("borgo: parent process exited; shutting down")
+		onShutdown()
+		both()
 	}
 	return nil
 }
@@ -691,6 +791,31 @@ func printStartup(patterns []string, port string) {
 		return
 	}
 	fmt.Printf("\n  %s%s%s api %s%s :%s%s\n", terra, home, reset, dim, dot, port, reset)
+	for _, p := range patterns {
+		parts := strings.SplitN(p, " ", 2)
+		fmt.Printf("  %s%-7s%s %s\n", sage, parts[0], reset, parts[1])
+	}
+}
+
+// printFrontStartup is printStartup for front mode: the public port first,
+// then where the two halves meet, so an operator reading the banner sees
+// which address is theirs and which is the cable.
+func printFrontStartup(patterns []string, publicPort, internalAddr string, renderer *url.URL) {
+	var dim, sage, terra, reset string
+	if colorEnabled() {
+		dim, sage, terra, reset = "\x1b[2m", "\x1b[38;5;108m", "\x1b[38;5;173m", "\x1b[0m"
+	}
+	home, ok, dot := "⌂", "✓", "·"
+	if !consoleUnicode() {
+		home, ok, dot = "^", "+", "-"
+	}
+	if os.Getenv("BORGO_RELOAD") != "" {
+		fmt.Printf("  %s%s%s front restarted on :%s\n", sage, ok, reset, publicPort)
+		return
+	}
+	fmt.Printf("\n  %s%s%s borgo %s%s :%s%s\n", terra, home, reset, dim, dot, publicPort, reset)
+	fmt.Printf("  %srender %s %s%s\n", dim, dot, renderer.String(), reset)
+	fmt.Printf("  %sapi    %s %s (internal)%s\n", dim, dot, internalAddr, reset)
 	for _, p := range patterns {
 		parts := strings.SplitN(p, " ", 2)
 		fmt.Printf("  %s%-7s%s %s\n", sage, parts[0], reset, parts[1])

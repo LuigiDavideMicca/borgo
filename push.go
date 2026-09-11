@@ -115,6 +115,12 @@ func pushWith[T any](s pushSettings, topic, event string, data T) error {
 	if key != "" {
 		req.Header.Set("X-Borgo-Key", key)
 	}
+	// in front mode the render service accepts nothing without this boot's
+	// key, its publish endpoint included; the push key above still decides
+	// whether the publish itself is authorized
+	if internal := os.Getenv("BORGO_INTERNAL_KEY"); internal != "" {
+		req.Header.Set(internalKeyHeader, internal)
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -136,6 +142,11 @@ func pushWith[T any](s pushSettings, topic, event string, data T) error {
 func pushBase() (base, from string, err error) {
 	if v := os.Getenv("FRONT_URL"); v != "" {
 		return v, "FRONT_URL", nil
+	}
+	// front mode: PORT is this process's own public port, whose /__borgo/
+	// names answer 404; the publish endpoint is the render service's
+	if v := os.Getenv("BORGO_RENDER_URL"); v != "" {
+		return v, "BORGO_RENDER_URL", nil
 	}
 	port := os.Getenv("PORT")
 	if port == "" {

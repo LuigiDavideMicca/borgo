@@ -175,23 +175,35 @@ func SetSession(w http.ResponseWriter, v any, maxAge time.Duration) error {
 // expired session.
 func GetSession[T any](r *http.Request) (T, bool) {
 	var zero T
-	payload, ok := sessionPayload(r)
+	data, ok := sessionData(r)
 	if !ok {
 		return zero, false
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(payload)
-	if err != nil {
-		return zero, false
-	}
-	var envelope sessionEnvelope
-	if json.Unmarshal(raw, &envelope) != nil || time.Now().Unix() > envelope.Exp {
-		return zero, false
-	}
 	var v T
-	if json.Unmarshal(envelope.Data, &v) != nil {
+	if json.Unmarshal(data, &v) != nil {
 		return zero, false
 	}
 	return v, true
+}
+
+// sessionData is GetSession before the decode into T: the json the app
+// stored, from a cookie whose signature verified and whose expiry has not
+// passed. The front hands it to the render service as it is, so the app's
+// loaders read the same bytes GetSession would.
+func sessionData(r *http.Request) (json.RawMessage, bool) {
+	payload, ok := sessionPayload(r)
+	if !ok {
+		return nil, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, false
+	}
+	var envelope sessionEnvelope
+	if json.Unmarshal(raw, &envelope) != nil || time.Now().Unix() > envelope.Exp {
+		return nil, false
+	}
+	return envelope.Data, true
 }
 
 // A request can carry several cookies of the same name (a sibling subdomain

@@ -215,7 +215,8 @@ describe("connection-refused retries", () => {
     const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
     expect(src).toContain("const apiRetries = dev ? 15 : API_RETRIES;");
     // the same value reaches the typed client and the proxy
-    expect(src).toContain("makeApiClient(api, cookie ? { cookie } : {}, onSetCookie, apiRetries)");
+    // (the defaults carry the boot key in render mode; the retry count is the point here)
+    expect(src).toContain("makeApiClient(api, cookie ? { ...apiDefaults, cookie } : apiDefaults, onSetCookie, apiRetries)");
     expect(src).toContain("retries: apiRetries,");
   });
 });

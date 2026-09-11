@@ -47,6 +47,8 @@ import {
   renderPage as renderDocument,
   requestFullyRead,
   resolveSwitches,
+  INTERNAL_KEY_HEADER,
+  internalKeyRejects,
   runAction,
   runPropsRequest,
   topicRejection,
@@ -388,9 +390,19 @@ export async function serve({
   // this document names, so a rebuild needs a restart
   const shell = prepareShell(await Bun.file("index.html").text(), dev, assetNames);
 
-  const port = Number(process.env.PORT || 3000);
-  const api = process.env.API_URL || `http://localhost:${process.env.API_PORT || 3501}`;
+  // render mode: the public port is the go front's, this process binds
+  // loopback and the api is the front's own loopback listener - written as
+  // 127.0.0.1, not localhost, because a resolver that prefers ::1 would be
+  // refused by a listener bound to the v4 address
+  const render = switches.render;
+  const port = render ? switches.renderPort : Number(process.env.PORT || 3000);
+  const hostname = render ? "127.0.0.1" : undefined;
+  const api =
+    process.env.API_URL ||
+    `http://${render ? "127.0.0.1" : "localhost"}:${process.env.API_PORT || 3501}`;
   const apiUrl = `${api}/api`;
+  // what every call to the api carries besides the browser's cookies
+  const apiDefaults: Record<string, string> = render ? { [INTERNAL_KEY_HEADER]: switches.internalKey } : {};
 
   // dev restarts the api on every .go edit, so a refused connection is routine
   // there; in production it means the api is down, and holding every request
@@ -410,7 +422,7 @@ export async function serve({
   // and actions; set-cookie headers coming back are forwarded to the browser
   const apiFor = (req: Request, onSetCookie?: (cookies: string[]) => void) => {
     const cookie = req.headers.get("cookie");
-    return makeApiClient(api, cookie ? { cookie } : {}, onSetCookie, apiRetries);
+    return makeApiClient(api, cookie ? { ...apiDefaults, cookie } : apiDefaults, onSetCookie, apiRetries);
   };
 
   const runLoader = (
@@ -696,7 +708,7 @@ export async function serve({
   const probeApi = () => {
     const now = Date.now();
     if (apiProbe && now - apiProbe.at < 1_000) return apiProbe.state;
-    const state = fetch(`${api}/healthz`, { signal: AbortSignal.timeout(1_500) })
+    const state = fetch(`${api}/healthz`, { headers: apiDefaults, signal: AbortSignal.timeout(1_500) })
       .then((res) => (res.ok ? "reachable" : "down"))
       .catch(() => "down");
     apiProbe = { at: now, state };
@@ -782,6 +794,7 @@ export async function serve({
 
   const server = await bindRetry(() => Bun.serve<SocketData, never>({
     port,
+    ...(hostname ? { hostname } : {}),
     // bun's ceiling is out of the way and borgo counts instead: every body read
     // in this process goes through a counter (`runAction`, `proxyRequest`, the
     // `/__borgo/publish` read below), and body-limit.test.ts fails the build
@@ -861,6 +874,12 @@ export async function serve({
     async fetch(req) {
       const t0 = performance.now();
       const url = new URL(req.url);
+      // render mode: before the path is even looked at. a request without
+      // this boot's key did not come through the front, and a loopback
+      // listener is reachable by every process on the box
+      if (render && internalKeyRejects(req, switches.internalKey)) {
+        return new Response("forbidden", { status: 403 });
+      }
       // one spelling per path, before anything routes or caches on it: a
       // percent-alias of an unreserved character (/ne%77s for /news) was a
       // distinct isr cache key, and a flood of spellings stored a render
@@ -1078,6 +1097,12 @@ export async function serve({
     console.log(`  ${colored}${" ".repeat(width - pattern.length)}  ${c.dim(file)}`);
   }
   console.log(`\n  ${c.sage(g.ok)} ready in ${c.bold(fmtMs(ready))}`);
+  if (render) {
+    // the public address is the go front's to print; this one is the cable
+    console.log(`  ${c.terracotta(g.arrow)} render  ${c.blue(`http://127.0.0.1:${port}`)} ${c.dim("loopback, behind the go front")}`);
+    console.log(`  ${c.terracotta(g.arrow)} api     ${c.blue(api)} ${c.dim("the front's internal listener")}\n`);
+    return;
+  }
   console.log(`  ${c.terracotta(g.arrow)} app  ${c.blue(`http://localhost:${port}`)}`);
   console.log(`  ${c.terracotta(g.arrow)} api  ${c.blue(api)} ${c.dim("go, proxied at /api")}\n`);
 }

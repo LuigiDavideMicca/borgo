@@ -537,7 +537,29 @@ export type Switches = {
   maxBody: number;
   // a /ws handshake with no Origin is a non-browser client; off by default
   wsAllowNoOrigin: boolean;
+  // BORGO_RENDER=1: this process is the render service behind the go front
+  // (front.go): bound to loopback, answering only requests that carry the
+  // key the front minted for this boot, and reaching the api on the front's
+  // own loopback listener with the same key
+  render: boolean;
+  internalKey: string;
+  renderPort: number;
 };
+
+// the header both processes put the boot key in, and the one the front
+// uses to hand over a session it has already verified
+export const INTERNAL_KEY_HEADER = "X-Borgo-Internal";
+export const SESSION_HEADER = "X-Borgo-Session";
+export const INTERNAL_KEY_MIN_LEN = 32;
+export const RENDER_PORT_DEFAULT = 3600;
+
+// whether a request reaching the render service is the front's: the key is
+// compared in constant time and a request without one is a stranger on the
+// box, not a browser - the public port never forwards a client's own value
+export function internalKeyRejects(req: Request, key: string): boolean {
+  const presented = req.headers.get(INTERNAL_KEY_HEADER);
+  return presented === null || !keysEqual(presented, key);
+}
 
 // every switch resolved above serve-entry's try: a refusal thrown inside
 // serve() is caught and answered from the fallback server's bound port, with
@@ -558,6 +580,25 @@ export function resolveSwitches(
     apiTimeout: envInt("BORGO_API_TIMEOUT", env.BORGO_API_TIMEOUT, `${API_TIMEOUT_MS}ms`) ?? API_TIMEOUT_MS,
     maxBody: envInt("BORGO_MAX_BODY", env.BORGO_MAX_BODY, `${MAX_BODY_BYTES} bytes`) ?? MAX_BODY_BYTES,
     wsAllowNoOrigin: envBool("BORGO_WS_ALLOW_NO_ORIGIN", env.BORGO_WS_ALLOW_NO_ORIGIN, "refused") ?? false,
+    ...renderSwitches(env),
+  };
+}
+
+// the render half of the switches: a render service without a usable key is
+// a loopback listener anyone on the box can drive, so it refuses to boot
+function renderSwitches(env: Record<string, string | undefined>) {
+  const render = envBool("BORGO_RENDER", env.BORGO_RENDER, "a public front server") ?? false;
+  const internalKey = env.BORGO_INTERNAL_KEY ?? "";
+  if (render && internalKey.length < INTERNAL_KEY_MIN_LEN) {
+    throw new Error(
+      `borgo: BORGO_INTERNAL_KEY must be set to at least ${INTERNAL_KEY_MIN_LEN} bytes in render mode ` +
+        `(the go front mints one per boot; by hand: openssl rand -base64 48)`,
+    );
+  }
+  return {
+    render,
+    internalKey,
+    renderPort: envInt("BORGO_RENDER_PORT", env.BORGO_RENDER_PORT, String(RENDER_PORT_DEFAULT)) ?? RENDER_PORT_DEFAULT,
   };
 }
 

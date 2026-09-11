@@ -29,7 +29,10 @@ if (import.meta.main) {
     // a broken build keeps the port: serve the error, the next rebuild reloads
     console.error(error);
     const { overlayHtml } = await import("./overlay");
-    const port = Number(process.env.PORT || 3000);
+    // the same address serve() would have bound: in render mode that is the
+    // loopback render port, and the public one belongs to the go front
+    const port = switches.render ? switches.renderPort : Number(process.env.PORT || 3000);
+    const hostname = switches.render ? "127.0.0.1" : undefined;
     const stamp = Date.now();
     const sockets = new Set<import("bun").ServerWebSocket<undefined>>();
     let server: import("bun").Server<undefined>;
@@ -37,6 +40,7 @@ if (import.meta.main) {
     try {
       server = Bun.serve<undefined, never>({
         port,
+        ...(hostname ? { hostname } : {}),
         websocket: {
           open(ws) {
             sockets.add(ws);
