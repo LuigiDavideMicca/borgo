@@ -125,7 +125,11 @@ process.on("exit", () => {
 type Snippet = { file: string; source: string; fenceLine: number };
 const snippets: Snippet[] = [];
 
-rmSync(scratch, { recursive: true, force: true });
+// retried like the cleanup on exit, and for the same holder - measured the
+// same day: EBUSY on docsnippets while an editor's language server had it
+// open. Not swallowed here: running on stale snippets would pass a check
+// that did not look at the current docs
+rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 mkdirSync(scratch, { recursive: true });
 
 for (const source of sources) {
@@ -182,7 +186,7 @@ if (snippets.length) {
 // all. a block that is a fragment (no package-level declaration to hang the
 // imports off) marks itself no-check, like its typescript siblings
 const goSnippets: Snippet[] = [];
-rmSync(goScratch, { recursive: true, force: true });
+rmSync(goScratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 mkdirSync(goScratch, { recursive: true });
 
 // go imports are file-scoped, so every snippet file carries the block; the
