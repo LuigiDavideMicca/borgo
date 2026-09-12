@@ -157,15 +157,16 @@ describe("makeApiClient", () => {
   });
 });
 
-// ONE NUMBER FOR BOTH HOPS TO THE SAME PROCESS.
+// THE NUMBER, NOW THERE IS ONE HOP.
 //
-// This client and the /api proxy dial the go api the front server was started
-// beside. The proxy takes 3 in production and its comment says why - a refused
-// connection there means the api is DOWN, and holding requests open while they
-// are retried only piles connections up. This side hard-coded 15, so 16
-// attempts at 250ms apart: a call that should have failed at once hung about
-// four seconds, per loader, on every request - longer than a container
-// readiness probe's own deadline, and invisible in it.
+// This client dials the go api the render service was started beside. A
+// refused connection in production means the api is DOWN, and holding
+// requests open while they are retried only piles connections up. This side
+// hard-coded 15, so 16 attempts at 250ms apart: a call that should have
+// failed at once hung about four seconds, per loader, on every request -
+// longer than a container readiness probe's own deadline, and invisible in
+// it. (The /api proxy that took the same number is gone: the go front
+// answers /api in its own process.)
 describe("connection-refused retries", () => {
   const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
 
@@ -211,12 +212,13 @@ describe("connection-refused retries", () => {
     expect(attempts).toBe(1);
   });
 
-  test("the front server hands both hops the same number", () => {
+  // there is one hop left: the typed client the loaders and actions call.
+  // The proxy that used to take the same number is gone with the topology -
+  // the go front answers /api in its own process
+  test("the render service hands its one hop that number", () => {
     const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
     expect(src).toContain("const apiRetries = dev ? 15 : API_RETRIES;");
-    // the same value reaches the typed client and the proxy
-    // (the defaults carry the boot key in render mode; the retry count is the point here)
     expect(src).toContain("makeApiClient(api, cookie ? { ...apiDefaults, cookie } : apiDefaults, onSetCookie, apiRetries)");
-    expect(src).toContain("retries: apiRetries,");
+    expect(src).not.toContain("proxyRequest");
   });
 });

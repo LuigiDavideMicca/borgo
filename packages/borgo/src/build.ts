@@ -1,4 +1,4 @@
-﻿import { Glob } from "bun";
+import { Glob } from "bun";
 import {
   existsSync,
   mkdirSync,
@@ -15,7 +15,7 @@ import { NO_BUILD_OUTPUTS, precompressAssets, type BuildOutputs } from "./compre
 import { APP_ENV_FILE, appEnvMetas, clientEnvDefine, clientEnvRefusal, envClientShim } from "./env-app";
 import { stampWorkerFile } from "./pwa";
 import { filePathToPattern } from "./router";
-import { metricsEnabled, type AssetNames } from "./util";
+import { type AssetNames } from "./util";
 
 const outDir = "public/assets";
 const genDir = ".borgo";
@@ -97,11 +97,11 @@ const METRICS_PATH: [string, string] = ["/metrics", "the metrics endpoint (BORGO
 
 export type DeadRoute = { pattern: string; file: string; owner: string };
 
-export function reservedRoutes(
-  pages: Array<{ pattern: string; file: string }>,
-  env: NodeJS.ProcessEnv = process.env,
-): DeadRoute[] {
-  const paths = metricsEnabled(env) ? [...RESERVED_PATHS, METRICS_PATH] : RESERVED_PATHS;
+export function reservedRoutes(pages: Array<{ pattern: string; file: string }>): DeadRoute[] {
+  // /metrics belongs to the go front whether or not its counters are on: a
+  // page there is unreachable either way, and the warning must not depend on
+  // an environment this build may not be the one deployed with
+  const paths = [...RESERVED_PATHS, METRICS_PATH];
   const dead: DeadRoute[] = [];
   for (const { pattern, file } of pages) {
     const exact = paths.find(([path]) => path === pattern);
@@ -114,11 +114,8 @@ export function reservedRoutes(
 
 // printed wherever a route table is about to be believed: `borgo start` on a
 // pre-built tree never reaches generateManifest
-export function warnDeadRoutes(
-  pages: Array<{ pattern: string; file: string }>,
-  env: NodeJS.ProcessEnv = process.env,
-): DeadRoute[] {
-  const dead = reservedRoutes(pages, env);
+export function warnDeadRoutes(pages: Array<{ pattern: string; file: string }>): DeadRoute[] {
+  const dead = reservedRoutes(pages);
   for (const route of dead) {
     console.warn(
       `  ${c.red(g.err)} pages/${route.file} routes ${route.pattern}, which never reaches the router ` +

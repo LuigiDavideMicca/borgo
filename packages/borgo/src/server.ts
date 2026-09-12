@@ -25,27 +25,18 @@ import {
 import { registerCsrf, registerIslands } from "./internal";
 import { appEnvMetas, envRefusal } from "./env-app";
 import { CACHE_STATE_HEADER, Isr, RENDER_ERRORED_HEADER, REVALIDATE_TOPIC, isrPolicyTable } from "./isr";
-import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
 import { canonicalPath, matchRoute, safeDecode, type Route } from "./router";
 import {
-  apiCsrfRejects,
   bodyTooLarge,
-  createKeepWarm,
   csrfRejects,
   decodeChanged,
   headResponse,
   isForwarded,
-  isUpstream,
-  keepWarmSeconds,
   limitRequestBody,
   prepareShell,
-  proxyRequest,
   pushAuthorized,
-  readTimeout,
-  readTimeoutNotice,
   renderPage as renderDocument,
-  requestFullyRead,
   resolveSwitches,
   INTERNAL_KEY_HEADER,
   internalKeyRejects,
@@ -409,12 +400,10 @@ export async function serve({
 
   // dev restarts the api on every .go edit, so a refused connection is routine
   // there; in production it means the api is down, and holding every request
-  // piles connections up. ONE NUMBER for both hops: makeApiClient's own 15 meant
-  // a loader spent four seconds on a call the proxy beside it had given up on.
-  // BORGO_API_TIMEOUT is in ms, 0 disables it
+  // piles connections up. This client's own 15 meant a loader spent four
+  // seconds on a call that should have failed at once, on every request
   const apiRetries = dev ? 15 : API_RETRIES;
-  const apiTimeout = switches.apiTimeout;
-  // both the proxy and form actions buffer. BORGO_MAX_BODY (bytes) raises it,
+  // form actions buffer. BORGO_MAX_BODY (bytes) raises it,
   // 0 removes it. NOT handed to bun: `maxRequestBodySize: 0` means "no body at
   // all", and a declared body over the socket buffer had its connection dropped
   // with no response, where a 413 borgo writes itself was received in every
@@ -574,33 +563,11 @@ export async function serve({
   };
   const propsOptions: PropsOptions = { runLoader, sendJson };
 
-  // metrics wants the matched pattern as its label, from the one match a request already does
-  type Label = { route: string };
-
-  async function handle(req: Request, url: URL, label: Label): Promise<Response> {
-    if (url.pathname.startsWith("/api/")) {
-      label.route = "/api/*";
-      // before the body is read: a refused request must cost go nothing
-      if (apiCsrfRejects(req, { enforced: csrfEnforced })) {
-        // borgo's own answer, left unmarked so the security headers land on it below
-        return new Response("invalid csrf token", {
-          status: 403,
-          headers: { "Content-Type": "text/plain; charset=utf-8" },
-        });
-      }
-      return proxyRequest(req, {
-        target: api + url.pathname + url.search,
-        deadlineMs: apiTimeout,
-        retries: apiRetries,
-        maxBody,
-        // the one hop borgo can vouch for, appended to X-Forwarded-For
-        clientIp: server.requestIP(req)?.address,
-        // the body is entirely in hand by then, so the socket is the server's to
-        // keep warm and the upstream gets as long as it needs
-        onBodyRead: () => keepWarm.hold(req),
-      });
-    }
-
+  // the api is the go front's, in its own process: what reaches this one is
+  // a page, a page's props, an action, an asset it still owns, or the dev
+  // channel. /api arriving here at all would be the front forwarding what it
+  // answers itself
+  async function handle(req: Request, url: URL): Promise<Response> {
     // decoded form, so files with spaces or unicode resolve and traversal is
     // checked on what will be opened; on windows also ntfs alternate streams
     // (file.css::$DATA) and reserved characters, which alias a file under names
@@ -639,7 +606,6 @@ export async function serve({
 
     if (req.method === "POST") {
       const target = matchRoute(url.pathname, routes);
-      if (target) label.route = target.route.pattern;
       const answered = await runAction(req, target, actionOptions);
       if (answered) return answered;
     }
@@ -650,7 +616,6 @@ export async function serve({
     }
 
     const matched = matchRoute(url.pathname, routes);
-    if (matched) label.route = matched.route.pattern;
     const wantsProps = url.searchParams.get("__borgo") === "props";
 
     if (!matched) {
@@ -721,33 +686,10 @@ export async function serve({
     return renderPage(req, matched.route, matched.params, 200);
   }
 
-  // /healthz always answers, /metrics appears with BORGO_METRICS=1; both stay
-  // out of the request log, the metrics and any compression
+  // the go front asks this to report the render service as reachable; it
+  // stays out of the request log, as it always did
   const bootTime = Date.now();
-  const metrics = switches.metrics ? createMetrics(bootTime) : null;
-
-  // /healthz answers anyone: a flood of probes must not become a flood against
-  // the api, so the promise itself is shared for a second, or a concurrent
-  // burst would all miss the cache together
-  let apiProbe: { at: number; state: Promise<string> } | null = null;
-  const probeApi = () => {
-    const now = Date.now();
-    if (apiProbe && now - apiProbe.at < 1_000) return apiProbe.state;
-    const state = fetch(`${api}/healthz`, { headers: apiDefaults, signal: AbortSignal.timeout(1_500) })
-      .then((res) => (res.ok ? "reachable" : "down"))
-      .catch(() => "down");
-    apiProbe = { at: now, state };
-    return state;
-  };
-
-  async function healthz(): Promise<Response> {
-    const apiState = await probeApi();
-    return Response.json({
-      status: apiState === "reachable" ? "ok" : "degraded",
-      uptime: (Date.now() - bootTime) / 1000,
-      api: apiState,
-    });
-  }
+  const healthz = () => Response.json({ status: "ok", uptime: (Date.now() - bootTime) / 1000 });
 
   function logRequest(req: Request, path: string, status: number, ms: number) {
     if (path.startsWith("/assets/") || path === "/favicon.ico") return;
@@ -807,29 +749,20 @@ export async function serve({
     }
   };
 
-  // BEFORE Bun.serve: bun is listening the instant it returns, and a request
-  // in the gap would reach a `keepWarm` in its temporal dead zone and answer
-  // 500; `server` is reached through closures, which run only for a request.
-  // keepWarmSeconds returns 0, and this goes inert, when there is no deadline
-  // or one too tight for bun's 4s wheel to re-arm
-  const keepWarm = createKeepWarm(() => server, keepWarmSeconds(process.env));
-  // before the banner: it is about a value the operator set and borgo did not honour verbatim
-  const timeoutNotice = readTimeoutNotice(process.env);
-  if (timeoutNotice) console.error(`  ${c.red(g.err)} ${timeoutNotice}`);
-
   const server = await bindRetry(() => Bun.serve<SocketData, never>({
     port,
     ...(hostname ? { hostname } : {}),
-    // bun's ceiling is out of the way and borgo counts instead: every body read
-    // in this process goes through a counter (`runAction`, `proxyRequest`, the
+    // bun's ceiling is out of the way and borgo counts instead: every body
+    // read in this process goes through a counter (`runAction` and the
     // `/__borgo/publish` read below), and body-limit.test.ts fails the build
-    // if a fourth appears without one. raising this is safe only while that holds
+    // if a third appears without one. raising this is safe only while that holds
     maxRequestBodySize: Number.MAX_SAFE_INTEGER,
-    // how long bun waits for a *request* to arrive, nothing else: an in-flight
-    // response is kept warm by re-arming, never by disarming (readTimeout in
-    // util.ts). BORGO_FRONT_READ_TIMEOUT is in seconds, 0 disables it, and is
-    // the front server's alone: go reads every other timeout name as a duration
-    idleTimeout: readTimeout(process.env),
+    // no deadline: the only client of this process is the go front on
+    // loopback, which has its own - a header deadline on the render and the
+    // public server's read and write timeouts on the browser. The knob this
+    // replaces covered the response write too, so a render that streamed
+    // longer than it had to be re-armed by hand (createKeepWarm, deleted)
+    idleTimeout: 0,
     // bun's fallback error page embeds a base64 payload that decodes to the
     // absolute path of the file, and `development` is on by default since
     // `borgo start` in a plain shell leaves NODE_ENV unset. this is the net
@@ -913,15 +846,6 @@ export async function serve({
       if (canonical !== url.pathname) {
         return new Response(null, { status: 308, headers: { location: canonical + url.search } });
       }
-      // a request with no body is entirely in hand (bun calls fetch once headers
-      // are in), so from here on whatever the response does is the server working.
-      // held before any handler runs: a handler slower than the deadline is one
-      // of the things protected. HELD, never disarmed: `server.timeout(req, 0)`
-      // left the connection with no deadline for life, and a finite ceiling was
-      // inherited by the next unfinished request on the same socket (a dribble
-      // after one complete GET survived to 256.4s against bun's own 12.0s).
-      // readTimeout in util.ts owns the argument
-      if (requestFullyRead(req)) keepWarm.hold(req);
       // heads render for real, only the body is dropped and cancelled, or the
       // ssr/gzip pipeline keeps rendering into a stream nobody reads
       const dropBody = (res: Response) => headResponse(req.method, res);
@@ -1057,21 +981,10 @@ export async function serve({
       if (render && url.pathname === ROUTES_PATH) {
         return Response.json({ boot: bootStamp, routes: policyTable });
       }
-      if (url.pathname === "/healthz") return secure(dropBody(await healthz()));
-      if (metrics && url.pathname === "/metrics") {
-        return secure(
-          dropBody(
-            new Response(metrics.render(), {
-              headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
-            }),
-          ),
-        );
-      }
-
-      const label: Label = { route: "*" };
+      if (url.pathname === "/healthz") return secure(dropBody(healthz()));
       let response: Response;
       try {
-        response = await handle(req, url, label);
+        response = await handle(req, url);
       } catch (error) {
         // the client is already gone: building the 500 document (loader, api
         // round trip, render) is work for nobody, and a client that declares a
@@ -1100,15 +1013,11 @@ export async function serve({
       // authorship, not path: a path test for /api would also exempt every answer
       // borgo wrote on it (the 403 above, the 502, the 504), which went out bare.
       // asked before dropBody, which builds a new response for a HEAD
-      const fromApi = isUpstream(response);
       response = dropBody(response);
-      if (metrics && !url.pathname.startsWith("/assets/") && url.pathname !== "/favicon.ico") {
-        metrics.observe(label.route, response.status, (performance.now() - t0) / 1000);
-      }
       if (dev) logRequest(req, url.pathname, response.status, performance.now() - t0);
       // the front reloads the policy table when this changes
       if (render) response.headers.set(BOOT_HEADER, String(bootStamp));
-      return fromApi ? response : secure(response);
+      return secure(response);
     },
   }));
 

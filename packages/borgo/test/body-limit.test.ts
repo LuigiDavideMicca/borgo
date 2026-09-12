@@ -8,11 +8,9 @@ import {
   bodyTooLarge,
   framedLength,
   limitRequestBody,
-  proxyRequest,
   readBodyWithin,
   resolveSwitches,
   runAction,
-  shouldBufferBody,
   type ActionOptions,
   type RouteMatch,
 } from "../src/util";
@@ -145,7 +143,6 @@ const speak = (path: string, cap: number, shape: Shape): Promise<Sent> =>
   });
 
 const form = (cap: number, shape: Shape) => speak("/form", cap, shape);
-const api = (cap: number, shape: Shape) => speak("/api/x", cap, shape);
 
 // ------------------------------------------------------------- the two paths
 
@@ -214,16 +211,6 @@ beforeAll(() => {
         return new Response(await res.text(), { status: res.status, headers });
       };
       try {
-        if (url.pathname.startsWith("/api/")) {
-          const res = await proxyRequest(req, {
-            target: `http://127.0.0.1:${upstream.port}${url.pathname}`,
-            deadlineMs: 0,
-            retries: 0,
-            maxBody: cap,
-            onError: () => {},
-          });
-          return await say(res, res.headers.get("x-read") ?? "-");
-        }
         if (url.pathname === "/big") {
           // a large RESPONSE under a tiny request limit: the two directions
           // are not the same limit and must not become one
@@ -264,12 +251,12 @@ const record = (name: string, path: string, r: Sent) =>
     `${name.padEnd(30)} ${path.padEnd(5)} ${String(r.status ?? (r.silent ? "SILENT" : "?")).padEnd(7)} read=${(r.read ?? "-").padEnd(10)} ${JSON.stringify(r.body.slice(0, 44))}`,
   );
 
+// one path now: the form action, whose body this process reads. What /api
+// asserted here belongs to the go front (front_test.go)
 const both = async (name: string, cap: number, shape: Shape) => {
   const a = await form(cap, shape);
-  const b = await api(cap, shape);
   record(name, "form", a);
-  record(name, "/api", b);
-  return { form: a, api: b };
+  return { form: a };
 };
 
 describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
@@ -279,14 +266,10 @@ describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
       const declared = await both("under, declared", CAP, { declare: 32, send: 32 });
       expect(declared.form.status).toBe(200);
       expect(declared.form.read).toBe("30"); // "t=" + 30 filler
-      expect(declared.api.status).toBe(200);
-      expect(declared.api.read).toBe("32");
 
       const chunked = await both("under, chunked", CAP, { declare: null, send: 32 });
       expect(chunked.form.status).toBe(200);
       expect(chunked.form.read).toBe("30");
-      expect(chunked.api.status).toBe(200);
-      expect(chunked.api.read).toBe("32");
     },
     SLOW,
   );
@@ -297,14 +280,10 @@ describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
       const declared = await both("exact, declared", CAP, { declare: CAP, send: CAP });
       expect(declared.form.status).toBe(200);
       expect(declared.form.read).toBe(String(CAP - 2));
-      expect(declared.api.status).toBe(200);
-      expect(declared.api.read).toBe(String(CAP));
 
       const chunked = await both("exact, chunked", CAP, { declare: null, send: CAP });
       expect(chunked.form.status).toBe(200);
       expect(chunked.form.read).toBe(String(CAP - 2));
-      expect(chunked.api.status).toBe(200);
-      expect(chunked.api.read).toBe(String(CAP));
     },
     SLOW,
   );
@@ -315,18 +294,13 @@ describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
       const declared = await both("one over, declared", CAP, { declare: CAP + 1, send: CAP + 1 });
       expect(declared.form.status).toBe(413);
       expect(declared.form.body).toContain("request body too large");
-      expect(declared.api.status).toBe(413);
-      expect(declared.api.body).toContain("request body too large");
 
       // THE CASE THE OLD LIMIT NEVER SAW: one byte over, framed by nothing bun
       // could count in advance
       const chunked = await both("one over, chunked", CAP, { declare: null, send: CAP + 1 });
       expect(chunked.form.status).toBe(413);
       expect(chunked.form.body).toContain("request body too large");
-      expect(chunked.api.status).toBe(413);
-      expect(chunked.api.body).toContain("request body too large");
       // and go never saw it
-      expect(chunked.api.read).toBe("-");
     },
     SLOW,
   );
@@ -340,16 +314,12 @@ describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
       expect(declared.form.silent).toBe(false);
       expect(declared.form.status).toBe(413);
       expect(declared.form.body).toContain("request body too large");
-      expect(declared.api.silent).toBe(false);
-      expect(declared.api.status).toBe(413);
 
       const one = await both("1 MiB, chunked, 1 chunk", CAP, { declare: null, send: MB });
       expect(one.form.status).toBe(413);
-      expect(one.api.status).toBe(413);
 
       const many = await both("1 MiB, chunked, 1000 chunks", CAP, { declare: null, send: MB, pieces: 1000 });
       expect(many.form.status).toBe(413);
-      expect(many.api.status).toBe(413);
     },
     SLOW,
   );
@@ -362,19 +332,16 @@ describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
       // that is not coming
       const long = await both("chunked halted, over cap", CAP, { declare: null, send: 4096, halt: true });
       expect(long.form.status).toBe(413);
-      expect(long.api.status).toBe(413);
 
       // and it decides even when the client then leaves
       const gone = await both("chunked hangup, over cap", CAP, { declare: null, send: 4096, hangup: true });
       expect(gone.form.status).not.toBe(200);
-      expect(gone.api.status).not.toBe(200);
 
       // under the limit and unfinished: the body never ends, so it must never
       // reach an action as if it had - and the read must not be sitting on a
       // buffer it has already accepted
       const short = await both("chunked halted, under cap", CAP, { declare: null, send: 40, hangup: true });
       expect(short.form.status).not.toBe(200);
-      expect(short.api.status).not.toBe(200);
     },
     SLOW,
   );
@@ -386,12 +353,10 @@ describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
       // refusal must not have waited for bytes that were never coming
       const r = await both("CL lies high (200/100)", CAP, { declare: 200, send: 200, halt: true });
       expect(r.form.status).toBe(413);
-      expect(r.api.status).toBe(413);
 
       // and the same lie from a client that then leaves is still never served
       const gone = await both("CL lies high, hangup", CAP, { declare: 200, send: 200, hangup: true });
       expect(gone.form.status).not.toBe(200);
-      expect(gone.api.status).not.toBe(200);
     },
     SLOW,
   );
@@ -408,11 +373,6 @@ describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
       record("CL lies low (64/256)", "form", a);
       expect(a.status).toBe(200);
       expect(Number(a.read)).toBe(CAP - 2);
-
-      const b = await api(CAP, { declare: CAP, send: 256 });
-      record("CL lies low (64/256)", "/api", b);
-      expect(b.status).toBe(200);
-      expect(Number(b.read)).toBe(CAP);
     },
     SLOW,
   );
@@ -422,11 +382,9 @@ describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
     async () => {
       const empty = await both("empty body, declared 0", CAP, { declare: 0, send: 0 });
       expect(empty.form.status).toBe(200);
-      expect(empty.api.status).toBe(200);
 
       const chunked = await both("empty body, chunked", CAP, { declare: null, send: 0 });
       expect(chunked.form.status).toBe(200);
-      expect(chunked.api.status).toBe(200);
     },
     SLOW,
   );
@@ -442,11 +400,6 @@ describe("BORGO_MAX_BODY: every framing, on a real socket", () => {
       record("cap=0, 1 MiB declared", "form", declared);
       expect(declared.status).toBe(200);
       expect(declared.read).toBe(String(MB - 2));
-
-      const chunked = await api(0, { declare: null, send: MB, pieces: 64 });
-      record("cap=0, 1 MiB chunked", "/api", chunked);
-      expect(chunked.status).toBe(200);
-      expect(chunked.read).toBe(String(MB));
 
       const small = await form(0, { declare: 10, send: 10 });
       record("cap=0, 10 B declared", "form", small);
@@ -647,99 +600,6 @@ setTimeout(() => process.exit(0), 150_000);
 
 // --------------------------------------------------- what must NOT be limited
 
-describe("BORGO_MAX_BODY: what the limit does not reach", () => {
-  test("an event stream answering a bounded request is not bounded with it", async () => {
-    // the response side is a different direction and a different clock: an SSE
-    // or ndjson answer to a request whose BODY was within the limit must not
-    // acquire a limit of its own. Driven through the injected fetch, and with
-    // a stream that enqueues without awaiting, because on this bun a
-    // ReadableStream whose producer awaits at all is never drainable - it
-    // stalls a plain `new Response(stream).text()` and a bare `getReader()`
-    // loop alike, with no borgo in the picture. The chunk count is what
-    // matters here: 64 of them, through a 64 byte request limit.
-    const events = new ReadableStream<Uint8Array>({
-      start(c) {
-        const enc = new TextEncoder();
-        for (let i = 0; i < 64; i++) c.enqueue(enc.encode(`data: ${i}\n\n`.padEnd(1024, " ")));
-        c.close();
-      },
-    });
-    const res = await proxyRequest(
-      new Request("http://app.test/api/feed", {
-        method: "POST",
-        headers: { "content-length": "4" },
-        body: "ping",
-      }),
-      {
-        target: "http://upstream.test/api/feed",
-        deadlineMs: 0,
-        retries: 0,
-        maxBody: CAP,
-        fetchImpl: async () => new Response(events, { headers: { "Content-Type": "text/event-stream" } }),
-      },
-    );
-    expect(res.status).toBe(200);
-    // 64 KiB of response through a 64 byte request limit
-    expect((await res.text()).length).toBeGreaterThan(60_000);
-  });
-
-  test(
-    "a 1 MiB response comes back whole through a 64 byte request limit, over a real socket",
-    async () => {
-      const res = await fetch(`http://127.0.0.1:${front.port}/big`, {
-        method: "POST",
-        headers: { "X-Test-Cap": String(CAP) },
-      });
-      expect(res.status).toBe(200);
-      expect((await res.text()).length).toBe(1024 * 1024);
-    },
-    SLOW,
-  );
-
-  test("a GET carrying a forged Content-Length is not refused on it", async () => {
-    // GET and HEAD have no body to count, and the header is the client's
-    const res = await proxyRequest(
-      new Request("http://app.test/api/x", {
-        method: "GET",
-        headers: { "content-length": String(10 * 1024 * 1024) },
-      }),
-      {
-        target: "http://upstream.test/api/x",
-        deadlineMs: 0,
-        retries: 0,
-        maxBody: CAP,
-        fetchImpl: async () => new Response("ok"),
-      },
-    );
-    expect(res.status).toBe(200);
-  });
-
-  test("a post to a page with no action never reads a body at all", async () => {
-    let pulled = 0;
-    const body = new ReadableStream<Uint8Array>({
-      pull(c) {
-        pulled++;
-        c.enqueue(new Uint8Array(4096));
-      },
-    });
-    const req = new Request("http://app.test/nope", {
-      method: "POST",
-      body,
-      // @ts-expect-error bun accepts duplex on a streamed request body
-      duplex: "half",
-    });
-    // bun pulls once while building the Request, on a later tick; the baseline
-    // is taken after that, so what is measured is what runAction did and
-    // nothing else
-    await Bun.sleep(25);
-    const baseline = pulled;
-    // no route, so runAction hands it back as "not mine" - and must not have
-    // bounded, buffered, or otherwise touched a body on the way
-    expect(await runAction(req, null, actionOptions(CAP))).toBe(null);
-    expect(pulled).toBe(baseline);
-  });
-});
-
 // ---------------------------------------------------------------- the pieces
 
 describe("the pieces the limit is built from", () => {
@@ -753,12 +613,6 @@ describe("the pieces the limit is built from", () => {
     // bun answers that pair 400 itself (measured), so this is the guard for
     // every other caller of these exported functions
     expect(framedLength(new Headers({ "content-length": "4", "transfer-encoding": "chunked" }))).toBe(null);
-  });
-
-  test("shouldBufferBody will not size a body its framing cannot size", () => {
-    expect(shouldBufferBody("POST", "512")).toBe(true);
-    expect(shouldBufferBody("POST", "512", "chunked")).toBe(false);
-    expect(shouldBufferBody("POST", "512", "gzip, chunked")).toBe(false);
   });
 
   test("limitRequestBody hands back the same request when there is nothing to bound", async () => {

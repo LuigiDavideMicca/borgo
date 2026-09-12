@@ -1,4 +1,4 @@
-﻿import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   existsSync,
   mkdirSync,
@@ -759,7 +759,6 @@ describe("a page named like a layout is a page", () => {
 // a page generated for one of them can never render - while the startup route
 // table prints it as though it works
 describe("reservedRoutes", () => {
-  const metricsOn = { BORGO_METRICS: "1" };
 
   test("names the paths the server takes first", () => {
     const dead = reservedRoutes(
@@ -771,7 +770,6 @@ describe("reservedRoutes", () => {
         { pattern: "/metrics", file: "metrics.tsx" },
         { pattern: "/__borgo/dev", file: "__borgo/dev.tsx" },
       ],
-      metricsOn,
     );
     expect(dead.map((d) => d.pattern)).toEqual([
       "/api/users",
@@ -785,17 +783,17 @@ describe("reservedRoutes", () => {
     expect(dead[0].file).toBe("api/users.tsx");
   });
 
-  // the server only claims /metrics with BORGO_METRICS=1 (server.ts asks
-  // metricsEnabled). Listing it unconditionally called a page that renders
-  // perfectly well "dead code" on every build of every app that never turned
-  // metrics on - a red line, on stderr, for nothing.
-  test("/metrics is only reserved when the server actually claims it", () => {
+  // It used to be reserved only with BORGO_METRICS=1, because the old front
+  // server forwarded /metrics to the page router when the counters were off,
+  // and calling a page that rendered perfectly well "dead code" was a red
+  // line on stderr for nothing. The go front answers /metrics itself - the
+  // counters when they are on, a 404 when they are not, never a page - so
+  // the name is taken whatever the environment of THIS build says, which is
+  // not the environment of the deployment anyway.
+  test("/metrics is reserved: the front answers it, counters or no counters", () => {
     const pages = [{ pattern: "/metrics", file: "metrics.tsx" }];
-    expect(reservedRoutes(pages, {})).toEqual([]);
-    expect(reservedRoutes(pages, { BORGO_METRICS: "0" })).toEqual([]);
-    expect(reservedRoutes(pages, metricsOn).map((d) => d.pattern)).toEqual(["/metrics"]);
-    // the unconditional ones do not move
-    expect(reservedRoutes([{ pattern: "/healthz", file: "h.tsx" }], {}).map((d) => d.pattern)).toEqual([
+    expect(reservedRoutes(pages).map((d) => d.pattern)).toEqual(["/metrics"]);
+    expect(reservedRoutes([{ pattern: "/healthz", file: "h.tsx" }]).map((d) => d.pattern)).toEqual([
       "/healthz",
     ]);
   });
@@ -811,7 +809,7 @@ describe("reservedRoutes", () => {
       const dead = warnDeadRoutes([
         { pattern: "/healthz", file: "healthz.tsx" },
         { pattern: "/about", file: "about.tsx" },
-      ], {});
+      ]);
       expect(dead.map((d) => d.pattern)).toEqual(["/healthz"]);
       expect(said).toHaveLength(1);
       expect(said[0]).toContain("pages/healthz.tsx");

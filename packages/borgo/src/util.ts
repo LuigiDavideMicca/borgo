@@ -235,22 +235,6 @@ export async function csrfRejects(req: Request, { enforced }: CsrfOptions): Prom
   return !given || !keysEqual(given, expected);
 }
 
-// the same token for /api/*, echoed in a header: a form cannot set one and a
-// cross-site fetch that does is preflighted without CORS approval. the
-// attacker is same-site cross-origin (a sibling subdomain), whom SameSite=Lax
-// does not stop and who can also toss a duplicate cookie, hence presence
-// arms the check and an unreadable token refuses. no body is ever read
-export function apiCsrfRejects(req: Request, { enforced }: CsrfOptions): boolean {
-  if (!enforced) return false;
-  if (!unsafeMethod(req.method)) return false;
-  const cookies = req.headers.get("cookie");
-  if (!hasCookie(cookies, CSRF_COOKIE)) return false;
-  const expected = csrfCookieValue(cookies);
-  if (!expected) return true;
-  const given = req.headers.get(CSRF_HEADER) ?? "";
-  return !given || !keysEqual(given, expected);
-}
-
 // every variable parsed here reads 0 as "no limit", so a fraction is refused
 // rather than floored: `=0.5` must not switch a limit off. "" is unset.
 export function envInt(name: string, v: string | undefined, unsetMeans: string): number | undefined {
@@ -279,169 +263,6 @@ export const encodeChanged = (files: readonly string[]): string => files.join("\
 
 export const decodeChanged = (value: string | undefined): string[] =>
   value ? value.split("\n").filter(Boolean) : [];
-
-// the inbound read deadline: a slowloris bound on a request still arriving.
-// bun's idleTimeout is the one knob and covers the response write too, so a
-// response that has started and then goes quiet (sse, ndjson, long poll) is
-// kept warm by createKeepWarm instead of lifting or raising the knob. both of
-// those were measured and refused: timeout(req, 0) is never restored when the
-// client sends no next request (one 40-byte GET per fd, forever), and a
-// raised ceiling is inherited by the next unfinished request on the same
-// connection (255s ceiling at T=8: a dribble after one GET /healthz lived to
-// 256.4s). what bun does, all measured on 1.3.14, not reasoned:
-//   - socket activity re-arms idleTimeout; only a started-then-silent
-//     response ever needed help, and silence before the first byte is not
-//     cut at all (T=30, upstream stalled 38s, still answered)
-//   - the dead zone belongs to the number being armed: an arming of 4 or
-//     less is a no-op and the connection dies at the next 4s wheel tick,
-//     5 or more takes, whatever idleTimeout the server was built with
-//   - server.timeout(req, n) lands only while the exchange is live; after
-//     it nothing can be restored
-//   - an incomplete request on a fresh connection is bound at 12.0s at
-//     every idleTimeout; on a reused connection it is the knob's
-//   - server.requestIP(req) goes null the moment the exchange is over;
-//     req.signal never fires on a clean finish
-// cost: a response that stops writing is held as long as the stream is open,
-// since telling a live subscriber from a silent client means truncating
-// feeds. a form action's render is not kept warm (runAction reads the body,
-// not the proxy). Content-Type as a discriminator truncates every other
-// long-lived response, so it is not one. no value of the knob may switch the
-// keep-warm off or narrow its margin. bun caps idleTimeout at 255.
-export const READ_TIMEOUT_SECONDS = 30;
-export const READ_TIMEOUT_MAX = 255;
-// the smallest arming bun acts on. not a floor on the knob: 1 through 4 are
-// honoured for the slowloris bound, and a response not covered by the
-// keep-warm is cut below 5
-export const WHEEL_MIN_ARMED_SECONDS = 5;
-
-// BORGO_FRONT_READ_TIMEOUT, whole seconds, default 30, 0 = no deadline. the
-// name is FRONT because BORGO_READ_TIMEOUT and BORGO_IDLE_TIMEOUT are go's,
-// parsed with time.ParseDuration in the same env block (=45 panics go, =45s
-// is silently ignored here); no alias, envNamesDoNotCollide guards it.
-// a fraction rounds down but never to 0: `=0.5` must tighten, not disable.
-// nothing else is moved, 1 through 4 are honoured as written
-const wholeSeconds = (raw: string | undefined): number | null => {
-  const n = Number(raw);
-  if (raw === undefined || raw === "" || !Number.isFinite(n) || n <= 0 || Number.isInteger(n)) return null;
-  return Math.min(Math.max(1, Math.floor(n)), READ_TIMEOUT_MAX);
-};
-
-export function readTimeout(env: Record<string, string | undefined>): number {
-  const rounded = wholeSeconds(env.BORGO_FRONT_READ_TIMEOUT);
-  if (rounded !== null) return rounded;
-  // the one variable that falls back instead of refusing: the fallback is a
-  // deadline that applies, and this is read below serve-entry's try, where a
-  // throw would be answered from the fallback server's port. the name is a
-  // literal because envNamesDoNotCollide greps this file for `envInt("NAME"`
-  let asked: number | undefined;
-  try {
-    asked = envInt("BORGO_FRONT_READ_TIMEOUT", env.BORGO_FRONT_READ_TIMEOUT, `${READ_TIMEOUT_SECONDS}s`);
-  } catch {
-    return READ_TIMEOUT_SECONDS;
-  }
-  return Math.min(asked ?? READ_TIMEOUT_SECONDS, READ_TIMEOUT_MAX);
-}
-
-// returned rather than printed: readTimeout runs on every request path
-export function readTimeoutNotice(env: Record<string, string | undefined>): string | null {
-  const raw = env.BORGO_FRONT_READ_TIMEOUT;
-  const rounded = wholeSeconds(raw);
-  if (rounded === null) return null;
-  return (
-    `BORGO_FRONT_READ_TIMEOUT=${raw} read as ${rounded}s ` +
-    `(the read deadline is whole seconds; rounding down to 0 would have been ` +
-    `the documented "no deadline at all" - the opposite of what was asked for)`
-  );
-}
-
-export const KEEP_WARM_INTERVAL_MS = 2_000;
-
-// what the keep-warm re-arms to. not the operator's number: that one bounds a
-// client still sending, this one a server quiet while answering a request
-// already in hand, and min(readTimeout, 12) gave T=5 a 5s margin against a
-// 4s wheel (truncated 2/2 under loop stalls). 12 is bun's own bound on an
-// incomplete request on a fresh connection, so the leftover never grants an
-// attacker more than a second socket would. arming 12 keeps a 30s silent
-// stream alive at idleTimeout 1 through 5 alike.
-// the truncations once filed under "starved event loop" were the wheel's
-// phase below WHEEL_MIN_ARMED_SECONDS, fixed by arming at hold (a64b712);
-// starvation never reproduced in-process and stays a separate, open item.
-// how any truncation presents: a 200 cut short that EventSource silently
-// reconnects from, so count bytes, not statuses
-export const KEEP_WARM_SECONDS = 12;
-
-export function keepWarmSeconds(env: Record<string, string | undefined>): number {
-  // 0 = deadline off, nothing to keep warm against. every other value gets
-  // the constant; theTwoClocksAreNotTheSameNumber guards the decoupling
-  return readTimeout(env) === 0 ? 0 : KEEP_WARM_SECONDS;
-}
-
-// the slice of Bun.Server a test can fake
-export type DeadlineHost = {
-  timeout(req: Request, seconds: number): void;
-  requestIP(req: Request): unknown;
-};
-
-// re-arms held requests every sweep, evicting those whose requestIP went
-// null; a request that ends before its first sweep is never touched. how it
-// fails: requestIP no longer going null = the set grows forever and every
-// connection is re-armed forever; sweeps further apart than the wheel
-// tolerates = a truncated 200; hold reached by a request still arriving = a
-// slowloris kept warm. a response that never ends is held on purpose.
-// below WHEEL_MIN_ARMED_SECONDS the first sweep (2s) can come after the
-// wheel's 4s tick, whose phase is the process's, not the request's (closed at
-// 4000ms minus the phase, zero arms), so hold arms at once there; at 5 and
-// above the leftover is two ticks and a fast GET keeps bun's exact idle
-// (8.01s at T=8). do not arm on every hold: a fast GET would idle 12s at
-// every T
-export function createKeepWarm(
-  // a thunk: built before Bun.serve returns. also keeps server.timeout named
-  // in one file, which util.test.ts checks
-  getHost: () => DeadlineHost,
-  seconds: number,
-  intervalMs: number = KEEP_WARM_INTERVAL_MS,
-  // what a write leaves behind, from the env serve() builds idleTimeout from
-  idleSeconds: number = readTimeout(process.env),
-): { hold(req: Request): void; held(): number; stop(): void } {
-  if (seconds <= 0) return { hold: () => {}, held: () => 0, stop: () => {} };
-  const armOnHold = idleSeconds < WHEEL_MIN_ARMED_SECONDS;
-  const inFlight = new Set<Request>();
-  const timer = setInterval(() => {
-    if (!inFlight.size) return;
-    const host = getHost();
-    for (const req of inFlight) {
-      if (host.requestIP(req) === null) inFlight.delete(req);
-      else host.timeout(req, seconds);
-    }
-  }, intervalMs);
-  // the sweep must not be a reason for the process to stay up
-  timer.unref?.();
-  return {
-    hold: (req) => {
-      inFlight.add(req);
-      if (armOnHold && getHost().requestIP(req) !== null) getHost().timeout(req, seconds);
-    },
-    held: () => inFlight.size,
-    stop: () => clearInterval(timer),
-  };
-}
-
-// body === null is not enough: bun discards GET/HEAD bodies, so a GET with
-// Content-Length: 100 and one byte sent arrives body-less while the client
-// still holds 99. the headers can only withhold the exemption, never grant
-// it, so reading them is safe; anything not plainly "no body" (empty,
-// signed, "100, 100", any Transfer-Encoding) counts as still arriving
-export function requestFullyRead(req: Request): boolean {
-  if (req.body !== null) return false;
-  if (req.headers.get("transfer-encoding") !== null) return false;
-  const declared = req.headers.get("content-length");
-  return declared === null || /^0+$/.test(declared.trim());
-}
-
-// BORGO_METRICS, default off. the pre-0.21 name METRICS is not aliased
-export function metricsEnabled(env: Record<string, string | undefined>): boolean {
-  return envBool("BORGO_METRICS", env.BORGO_METRICS, "off") ?? false;
-}
 
 // BORGO_DEV, unset = production; only dev.ts is meant to set it. value, not
 // presence: `=0` must not turn dev on, and dev decides the csrf default and
@@ -521,9 +342,7 @@ export function sessionSecure(env: Record<string, string | undefined>): boolean 
 export const csrfEnabled = (dev: boolean, env: Record<string, string | undefined>): boolean =>
   envBool("BORGO_CSRF", env.BORGO_CSRF, dev ? "off in dev" : "on") ?? !dev;
 
-// BORGO_API_TIMEOUT (ms, wait for go's response headers) and BORGO_MAX_BODY
-// (bytes), both 0 = no limit; the reads in server.ts argue the numbers
-export const API_TIMEOUT_MS = 30_000;
+// BORGO_MAX_BODY (bytes), 0 = no limit; the read in server.ts argues the number
 export const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
 export type Switches = {
@@ -531,9 +350,7 @@ export type Switches = {
   security: Security | null;
   csrfEnforced: boolean;
   csrfCookieAttrs: string;
-  metrics: boolean;
   reloading: boolean;
-  apiTimeout: number;
   maxBody: number;
   // a /ws handshake with no Origin is a non-browser client; off by default
   wsAllowNoOrigin: boolean;
@@ -583,9 +400,7 @@ export function resolveSwitches(
     security: createSecurity(dev, { headers: env.BORGO_SECURITY_HEADERS, csp: env.BORGO_CSP }),
     csrfEnforced: csrfEnabled(dev, env),
     csrfCookieAttrs: `Path=/; SameSite=Lax${sessionSecure(env) ? "; Secure" : ""}`,
-    metrics: metricsEnabled(env),
     reloading: reloadBanner(env),
-    apiTimeout: envInt("BORGO_API_TIMEOUT", env.BORGO_API_TIMEOUT, `${API_TIMEOUT_MS}ms`) ?? API_TIMEOUT_MS,
     maxBody: envInt("BORGO_MAX_BODY", env.BORGO_MAX_BODY, `${MAX_BODY_BYTES} bytes`) ?? MAX_BODY_BYTES,
     wsAllowNoOrigin: envBool("BORGO_WS_ALLOW_NO_ORIGIN", env.BORGO_WS_ALLOW_NO_ORIGIN, "refused") ?? false,
     ...renderSwitches(env),
@@ -709,15 +524,6 @@ export const topicRejection = (topic: string): string | null =>
       `on the wire (/ws?topics=a,b) and cannot appear inside one - rename the topic`
     : null;
 
-// the security-header exemption is by authorship, not by path: borgo's own
-// 403/502/504 on /api must carry the headers, go's answers must not. unmarked
-// is the safe direction
-const upstreamResponses = new WeakSet<Response>();
-
-export const markUpstream = <T extends Response>(res: T): T => (upstreamResponses.add(res), res);
-
-export const isUpstream = (res: Response): boolean => upstreamResponses.has(res);
-
 // a websocket handshake carries cookies with no preflight, so Origin is the
 // only guard: scheme and host, not host alone (http://app.test must not join
 // https://app.test), and no Origin is a refusal. X-Forwarded-Proto is trusted
@@ -745,47 +551,12 @@ export function wsOriginAllowed(req: {
 
 export const goBinName = () => "api" + (process.platform === "win32" ? ".exe" : "");
 
-// rfc 9110 §7.6.1, hop-by-hop. forwarded verbatim: `Connection: X-Api-Key`
-// strips a header go trusts, Upgrade invites a 101 on a pooled socket bun
-// reuses, Transfer-Encoding disagrees with the framing bun writes itself.
-// ~0.9us per 16-header request
-export const HOP_BY_HOP = [
-  "connection",
-  "keep-alive",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "proxy-connection",
-] as const;
-
-// tchar, rfc 9110 §5.6.2: Headers.delete throws on an empty or quoted token,
-// from outside proxyRequest's try, which would buy a full ssr 500 with one
-// malformed header. judged one at a time, so a junk token cannot shield a
-// real one
-const TCHAR = /^[!#$%&'*+.^_`|~\w-]+$/;
-
-// content-length is kept: bun recomputes it for a buffered body, and the
-// streamed path carries the length bun's server already framed with
-export function forwardableHeaders(headers: Headers): Headers {
-  const out = new Headers(headers);
-  // read Connection before deleting it
-  const connection = out.get("connection");
-  if (connection) {
-    for (const token of connection.split(",")) {
-      const name = token.trim();
-      if (TCHAR.test(name)) out.delete(name);
-    }
-  }
-  for (const name of HOP_BY_HOP) out.delete(name);
-  return out;
-}
-
-// bodies up to this are buffered so a refused connection (api mid-restart)
-// can be retried; larger or chunked pass through once
-export const PROXY_RETRY_MAX_BODY = 10 * 1024 * 1024;
+// a refused connection never reached the api, so the typed client may
+// retry it - the one thing the deleted proxy and that client shared
+export const isConnRefused = (err: unknown) => {
+  const e = err as { code?: string; message?: string };
+  return e?.code === "ConnectionRefused" || e?.code === "ECONNREFUSED" || /unable to connect|refused/i.test(e?.message ?? "");
+};
 
 // rfc 9112 §6.3: a repeated Content-Length reaches Headers as "5, 5" and
 // must agree. not Number(): it takes "", "0x10", "1e3" and " 5 "
@@ -799,19 +570,6 @@ function parseContentLength(value: string): number | null {
     length = n;
   }
   return length;
-}
-
-export function shouldBufferBody(
-  method: string,
-  contentLength: string | null,
-  transferEncoding: string | null = null,
-): boolean {
-  if (method === "GET" || method === "HEAD") return false;
-  // rfc 9112 §6.3: Transfer-Encoding wins, whatever length rides along
-  if (transferEncoding !== null) return false;
-  if (contentLength === null) return false;
-  const length = parseContentLength(contentLength);
-  return length !== null && length <= PROXY_RETRY_MAX_BODY;
 }
 
 // the size a body is framed by, null when nothing frames it. bun answers the
@@ -1393,195 +1151,6 @@ export async function runPropsRequest(
     return withCookies(props, apiCookies);
   }
   return withCookies(sendJson(req, { props }, noStore), apiCookies);
-}
-
-// what the proxy asks of fetch; the global satisfies it and so does a stub
-export type ProxyFetch = (target: string, init: RequestInit) => Promise<Response>;
-
-export type ProxyOptions = {
-  // absolute upstream url, query included
-  target: string;
-  // how long to wait for response *headers*; 0 disables the deadline
-  deadlineMs: number;
-  // connection-refused retries (the api restarting), 0 to never retry
-  retries: number;
-  // bytes, 0 for no limit. required for the same reason it is on ActionOptions
-  maxBody: number;
-  retryDelayMs?: number;
-  // appended to X-Forwarded-For; undefined = no peer to vouch for, no chain
-  clientIp?: string;
-  // fires at the last byte of the body, buffered or streamed, never on a
-  // declaration: from here the socket is the server's to keep warm
-  onBodyRead?: () => void;
-  // injectable for tests
-  fetchImpl?: ProxyFetch;
-  sleep?: (ms: number) => Promise<void>;
-  onError?: (value: unknown) => void;
-};
-
-export const isConnRefused = (err: unknown) => {
-  const e = err as { code?: string; message?: string };
-  return e?.code === "ConnectionRefused" || e?.code === "ECONNREFUSED" || /unable to connect|refused/i.test(e?.message ?? "");
-};
-
-// the /api hop. a refused connection never reached go, so a retry is safe
-// even for a mutation; small bodies are buffered for it, large or unsized
-// ones stream through without retry
-export async function proxyRequest(req: Request, options: ProxyOptions): Promise<Response> {
-  const {
-    target,
-    deadlineMs,
-    retries,
-    maxBody,
-    retryDelayMs = 250,
-    clientIp,
-    onBodyRead,
-    fetchImpl = fetch,
-    sleep = Bun.sleep,
-    onError = console.error,
-  } = options;
-
-  const hasBody = req.method !== "GET" && req.method !== "HEAD";
-  const buffered = shouldBufferBody(
-    req.method,
-    req.headers.get("content-length"),
-    req.headers.get("transfer-encoding"),
-  );
-  // refused on the declaration, unread; a forged length can only withhold
-  if (hasBody && maxBody > 0) {
-    const declared = framedLength(req.headers);
-    if (declared !== null && declared > maxBody) {
-      void req.body?.cancel().catch(() => {});
-      return bodyTooLarge(maxBody);
-    }
-  }
-  // a streamed body cut mid-flight must answer 413, not the 502 a broken
-  // upstream write looks like
-  let overLimit = false;
-  // may throw when the client hangs up mid-upload; the caller answers 499
-  let body: ArrayBuffer | ReadableStream<Uint8Array> | undefined;
-  if (!hasBody) {
-    body = undefined;
-  } else if (buffered) {
-    // bounded by the declaration checked above
-    body = await req.arrayBuffer();
-    onBodyRead?.();
-  } else if (req.body) {
-    // a streamed body is in hand at its last byte, read off the stream, not
-    // declared: without onBodyRead here an sse reply to a chunked POST was
-    // cut at the read deadline. the same pass-through counts, since bun's cap
-    // never sees a piped body; on the cut flush does not run and onBodyRead
-    // stays unfired, the socket is still the client's
-    let read = 0;
-    body = req.body.pipeThrough(
-      new TransformStream<Uint8Array, Uint8Array>({
-        transform(chunk, controller) {
-          read += chunk.byteLength;
-          if (maxBody > 0 && read > maxBody) {
-            overLimit = true;
-            controller.error(new Error(`borgo: request body over BORGO_MAX_BODY=${maxBody}`));
-            return;
-          }
-          controller.enqueue(chunk);
-        },
-        flush: () => onBodyRead?.(),
-      }),
-    );
-  } else {
-    body = undefined;
-  }
-  // built once, outside the retry loop
-  const headers = forwardableHeaders(req.headers);
-  // a GET/HEAD is forwarded body-less, and go's net/http blocks in
-  // finishRequest draining a Content-Length that never arrives: one header
-  // wedges one upstream connection (forever at BORGO_API_TIMEOUT=0)
-  if (!hasBody) headers.delete("content-length");
-  // Host addresses borgo, not go, and r.Host is what http.Redirect and a
-  // password-reset link build from; bun writes the target's authority instead
-  const inboundHost = headers.get("host");
-  headers.delete("host");
-  // set, never defaulted: a client-supplied X-Forwarded-Host is the Host
-  // primitive one header over, and borgo's own nginx never sets this one
-  if (inboundHost) headers.set("x-forwarded-host", inboundHost);
-  else headers.delete("x-forwarded-host");
-  // the real peer appended, as nginx's $proxy_add_x_forwarded_for does: the
-  // last entry is the one hop borgo can vouch for, and with no peer the
-  // chain does not travel
-  if (clientIp) {
-    const chain = headers.get("x-forwarded-for");
-    headers.set("x-forwarded-for", chain ? `${chain}, ${clientIp}` : clientIp);
-  } else {
-    headers.delete("x-forwarded-for");
-  }
-  // a body-less delete/post is as safe to retry as a get
-  const retriable = !hasBody || buffered || body == null;
-
-  for (let attempt = 0; ; attempt++) {
-    // headers only; dropped once they arrive so a stream runs as long as it wants
-    const abort = deadlineMs > 0 ? new AbortController() : null;
-    let timedOut = false;
-    const deadline = abort
-      ? setTimeout(() => {
-          timedOut = true;
-          abort.abort();
-        }, deadlineMs)
-      : undefined;
-    try {
-      // decompress: false, or bun inflates go's response and resends identity.
-      // redirect manual, or bun FOLLOWS a go redirect server-side: a 302 to
-      // an external url came back to the browser as a 200 with the external
-      // body, and a 307 on POST re-sent the request body AND the browser's
-      // X-CSRF-Token to the target (measured) - redirect semantics broken,
-      // ssrf from the front server, token on someone else's wire. a proxy
-      // relays the 30x; following it is the browser's decision
-      const upstream = await fetchImpl(target, {
-        method: req.method,
-        headers,
-        ...(hasBody ? { body } : {}),
-        decompress: false,
-        redirect: "manual",
-        signal: abort?.signal,
-      } as RequestInit);
-      // go may reply to half a request; the limit decided first
-      if (overLimit) {
-        void upstream.body?.cancel().catch(() => {});
-        return bodyTooLarge(maxBody);
-      }
-      // fetch still resolves after the abort, with a body ending at zero
-      // bytes: a 200 the browser cannot tell from an empty answer
-      if (timedOut) {
-        void upstream.body?.cancel().catch(() => {});
-        return new Response("api timeout", { status: 504 });
-      }
-      // no tunnel to hand over: a relayed 101 desynchronises the socket.
-      // app sockets belong on /ws
-      if (upstream.status === 101) {
-        void upstream.body?.cancel().catch(() => {});
-        onError(`${new URL(target).pathname} answered 101; /api cannot tunnel an upgrade`);
-        return new Response("api upgrade not supported", { status: 502 });
-      }
-      // untouched, body included: do not wrap the body to push headers out
-      // early (Bun.serve withholds them until the first byte; borgo.SSE opens
-      // with a comment for that) - cancelling a native body read through a JS
-      // ReadableStream segfaults bun 1.3.14. the one /api response without
-      // borgo's security headers; the 504s and 502s here are borgo's own
-      return markUpstream(upstream);
-    } catch (err) {
-      // first: the cut body is what made fetch reject, and it is borgo's
-      // refusal, not an api outage
-      if (overLimit) return bodyTooLarge(maxBody);
-      if (timedOut) return new Response("api timeout", { status: 504 });
-      if (retriable && attempt < retries && isConnRefused(err)) {
-        await sleep(retryDelayMs);
-        continue;
-      }
-      // an api path fails as an api, not with the rendered 500 page
-      onError(err);
-      return new Response("api unreachable", { status: 502 });
-    } finally {
-      clearTimeout(deadline);
-    }
-  }
 }
 
 // regenerates .borgo/api-types.d.ts via go.mod's `tool` directive; build and
