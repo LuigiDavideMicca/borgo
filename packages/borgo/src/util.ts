@@ -550,6 +550,14 @@ export type Switches = {
 // uses to hand over a session it has already verified
 export const INTERNAL_KEY_HEADER = "X-Borgo-Internal";
 export const SESSION_HEADER = "X-Borgo-Session";
+// the go front's page cache asks for a shared render with this header: the
+// request arrives anonymised, the render mints no csrf token, and the
+// response is drained here so the errored-render mark can travel as a header
+export const SHARED_RENDER_HEADER = "X-Borgo-Shared";
+// on every response in render mode: the go front reloads the page policy
+// table when the stamp changes, i.e. when this process was restarted
+export const BOOT_HEADER = "X-Borgo-Boot";
+export const ROUTES_PATH = "/__borgo/routes";
 export const INTERNAL_KEY_MIN_LEN = 32;
 export const RENDER_PORT_DEFAULT = 3600;
 

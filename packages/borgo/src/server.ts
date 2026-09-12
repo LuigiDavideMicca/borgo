@@ -24,7 +24,7 @@ import {
 } from "./compress";
 import { registerCsrf, registerIslands } from "./internal";
 import { appEnvMetas, envRefusal } from "./env-app";
-import { CACHE_STATE_HEADER, Isr, RENDER_ERRORED_HEADER, REVALIDATE_TOPIC } from "./isr";
+import { CACHE_STATE_HEADER, Isr, RENDER_ERRORED_HEADER, REVALIDATE_TOPIC, isrPolicyTable } from "./isr";
 import { createMetrics } from "./metrics";
 import { overlayHtml } from "./overlay";
 import { canonicalPath, matchRoute, safeDecode, type Route } from "./router";
@@ -49,6 +49,9 @@ import {
   resolveSwitches,
   INTERNAL_KEY_HEADER,
   internalKeyRejects,
+  SHARED_RENDER_HEADER,
+  BOOT_HEADER,
+  ROUTES_PATH,
   runAction,
   runPropsRequest,
   topicRejection,
@@ -522,7 +525,13 @@ export async function serve({
   // this exists. the build id keying the persisted copies is the hashed
   // output inventory: a new build writes new names, and every copy the old
   // one rendered is swept at boot rather than served against a new tree
-  const isr = dev
+  // and not in render mode: the go front owns the page cache there, asks for
+  // shared renders with SHARED_RENDER_HEADER (handle below) and reads the
+  // policies from ROUTES_PATH - declared once, invalid opt-ins named once
+  const policyTable = render
+    ? isrPolicyTable(routes, (line) => console.error(`  ${c.red(g.err)} ${line}`))
+    : [];
+  const isr = dev || render
     ? null
     : new Isr({
         persist: {
@@ -661,6 +670,22 @@ export async function serve({
 
     if (wantsProps) {
       return runPropsRequest(req, matched.route, matched.params, propsOptions);
+    }
+
+    // the go front's cache asking for the copy it may share: the request
+    // arrived anonymised, the render mints no csrf token, and the stream is
+    // drained here so a suspense boundary that errored - which react
+    // completes as a 200 serving its fallback - is marked before the front
+    // asks its storability questions. the same render isr.handle asks for below
+    if (render && req.headers.get(SHARED_RENDER_HEADER) === "1") {
+      const failed = { errored: false };
+      const res = await renderPage(req, matched.route, matched.params, 200, undefined, [], true, failed);
+      const html = await res.text();
+      const headers = new Headers(res.headers);
+      if (failed.errored) {
+        headers.set(RENDER_ERRORED_HEADER, "a suspense boundary threw during the shared render");
+      }
+      return new Response(html, { status: res.status, headers });
     }
 
     if (isr) {
@@ -1027,6 +1052,11 @@ export async function serve({
         }
         return secure(new Response("not found", { status: 404 }));
       }
+      // what the go front's page cache needs to know once per boot of this
+      // process: which pages may be shared, for how long, under which tags
+      if (render && url.pathname === ROUTES_PATH) {
+        return Response.json({ boot: bootStamp, routes: policyTable });
+      }
       if (url.pathname === "/healthz") return secure(dropBody(await healthz()));
       if (metrics && url.pathname === "/metrics") {
         return secure(
@@ -1076,6 +1106,8 @@ export async function serve({
         metrics.observe(label.route, response.status, (performance.now() - t0) / 1000);
       }
       if (dev) logRequest(req, url.pathname, response.status, performance.now() - t0);
+      // the front reloads the policy table when this changes
+      if (render) response.headers.set(BOOT_HEADER, String(bootStamp));
       return fromApi ? response : secure(response);
     },
   }));

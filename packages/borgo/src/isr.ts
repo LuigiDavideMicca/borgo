@@ -56,6 +56,28 @@ export function readIsrPolicy(module: {
 // whitespace or unicode normal form did to either
 export const normalizeTag = (tag: string): string => tag.trim().normalize("NFC");
 
+// what the render service declares to the go front, which owns the page
+// cache in the new topology: every route's policy, read once. an invalid
+// opt-in is reported by name here as it would have been by policyFor, and
+// travels as "not cacheable" - the typo must not be hidden by a cache it
+// never entered
+export type IsrPolicyEntry = { pattern: string; seconds: number | "manual" | null; tags: string[] };
+
+export function isrPolicyTable(
+  routes: ReadonlyArray<RouteLike>,
+  warn: (line: string) => void = (line) => console.error(line),
+): IsrPolicyEntry[] {
+  return routes.map((route) => {
+    const read = readIsrPolicy(route.module);
+    if (typeof read === "string") {
+      warn(`${route.pattern}: ${read} - served fresh, never cached`);
+      return { pattern: route.pattern, seconds: null, tags: [] };
+    }
+    if (read === null) return { pattern: route.pattern, seconds: null, tags: [] };
+    return { pattern: route.pattern, seconds: read.seconds, tags: read.tags };
+  });
+}
+
 // the exporter must refuse a nonce - a file cannot change - but a live cache
 // can re-mint one per replay, and only then is the page storable: the stored
 // copy keeps its render's nonce as the substitution key, and every replay

@@ -67,6 +67,11 @@ const revalidateTopic = "$borgo/revalidate"
 // In dev there is no cache and the call is a no-op that still answers 204,
 // so application code behaves the same in both modes.
 func Revalidate(path string) error {
+	// front mode: the cache is in this process
+	if i := localIsr(); i != nil && path != "" {
+		i.invalidatePath(path)
+		return nil
+	}
 	if path == "" {
 		return fmt.Errorf("borgo.Revalidate: an empty path names no page")
 	}
@@ -77,6 +82,10 @@ func Revalidate(path string) error {
 // export - one call from the handler that wrote the posts, and every page
 // depending on them re-renders on its next request.
 func RevalidateTag(tag string) error {
+	if i := localIsr(); i != nil && strings.TrimSpace(tag) != "" {
+		i.invalidateTag(tag)
+		return nil
+	}
 	if tag == "" {
 		return fmt.Errorf("borgo.RevalidateTag: an empty tag names no pages")
 	}

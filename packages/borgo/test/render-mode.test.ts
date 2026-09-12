@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isrPolicyTable } from "../src/isr";
 import {
   INTERNAL_KEY_HEADER,
   INTERNAL_KEY_MIN_LEN,
@@ -65,9 +66,48 @@ describe("render mode is wired where it must be", () => {
     expect(server).toContain("...(hostname ? { hostname } : {}),");
   });
 
+  test("a shared render is answered before bun's own cache, which is off in render mode", () => {
+    const shared = server.indexOf('req.headers.get(SHARED_RENDER_HEADER) === "1"');
+    const isr = server.indexOf("if (isr) {");
+    expect(shared).toBeGreaterThan(-1);
+    expect(isr).toBeGreaterThan(shared);
+    expect(server).toContain("const isr = dev || render");
+    // the errored-render mark travels as a header only because the stream
+    // was drained first: the front judges a finished document
+    expect(server.slice(shared, isr)).toContain("const html = await res.text();");
+    expect(server.slice(shared, isr)).toContain("RENDER_ERRORED_HEADER");
+  });
+
   test("the key compare is constant time", () => {
     const fn = util.slice(util.indexOf("export function internalKeyRejects"));
     expect(fn.slice(0, fn.indexOf("}"))).toContain("keysEqual(presented, key)");
+  });
+});
+
+// what the render service declares to the go front's page cache
+describe("isrPolicyTable", () => {
+  test("every route, its policy or null, invalid opt-ins named once and not cached", () => {
+    const warned: string[] = [];
+    const table = isrPolicyTable(
+      [
+        { pattern: "/", module: {} },
+        { pattern: "/news", module: { revalidate: 300, tags: [" news ", "posts"] } },
+        { pattern: "/docs", module: { revalidate: "manual" } },
+        { pattern: "/bad", module: { revalidate: -1 } },
+        { pattern: "/worse", module: { revalidate: 10, tags: ["", "x"] } },
+      ],
+      (line) => warned.push(line),
+    );
+    expect(table).toEqual([
+      { pattern: "/", seconds: null, tags: [] },
+      { pattern: "/news", seconds: 300, tags: ["news", "posts"] },
+      { pattern: "/docs", seconds: "manual", tags: [] },
+      { pattern: "/bad", seconds: null, tags: [] },
+      { pattern: "/worse", seconds: null, tags: [] },
+    ]);
+    expect(warned).toHaveLength(2);
+    expect(warned[0]).toContain("/bad");
+    expect(warned[1]).toContain("/worse");
   });
 });
 

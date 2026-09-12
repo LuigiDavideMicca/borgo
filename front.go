@@ -243,14 +243,18 @@ type frontOptions struct {
 	trusted []*net.IPNet
 	// public/ as indexed at boot; nil forwards every file request
 	assets *assetIndex
+	// the page cache; nil in dev, where pages are never shared
+	isr *isr
 }
 
 // front is the public handler: the api and the files in-process, the rest
 // forwarded.
 type front struct {
-	api    http.Handler
-	assets *assetIndex
-	proxy  *httputil.ReverseProxy
+	api      http.Handler
+	assets   *assetIndex
+	isr      *isr
+	policies *policySource
+	proxy    *httputil.ReverseProxy
 }
 
 // inProcess names what the go binary answers itself on the public port.
@@ -285,6 +289,18 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if f.assets != nil && f.assets.tryServe(w, r) {
 		return
 	}
+	// a page that declared itself shareable: answered from the cache when
+	// it can be; bypass means this visitor gets their own render, marked
+	if f.isr != nil {
+		if policy, ok := f.policies.lookup(cleaned); ok && policy != nil {
+			switch f.isr.handle(w, r, policy) {
+			case isrServed:
+				return
+			case isrBypass:
+				r = markBypass(r)
+			}
+		}
+	}
 	f.proxy.ServeHTTP(w, r)
 }
 
@@ -309,6 +325,17 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 	// the render service compresses nothing the browser did not ask for, and
 	// nothing here must decompress what it did
 	transport.DisableCompression = true
+
+	// the cache has its own conversations with the render service, on the
+	// same transport: the policy table once per boot, shared renders on demand
+	var policies *policySource
+	if opts.isr != nil {
+		rc := newRenderClient(renderer, key, transport, func(in *http.Request, out http.Header) {
+			forwardFacts(in, out, opts.trusted)
+		})
+		policies = &policySource{fetch: rc.policies}
+		opts.isr.render = rc.shared
+	}
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -335,6 +362,7 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 			// only this process may state: Set replaces, so the delete is
 			// the statement, not the mechanism
 			pr.Out.Header.Del(sessionHeader)
+			pr.Out.Header.Del(sharedRenderHeader)
 			pr.Out.Header.Set(internalKeyHeader, key)
 			if data, ok := sessionData(pr.In); ok {
 				pr.Out.Header.Set(sessionHeader, base64.RawURLEncoding.EncodeToString(data))
@@ -346,6 +374,15 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 		ModifyResponse: func(res *http.Response) error {
 			res.Header.Del(internalKeyHeader)
 			res.Header.Del(sessionHeader)
+			// the stamp says which boot of the render service answered: a new
+			// one may declare new pages, and the policy table is asked again
+			if policies != nil {
+				policies.sawBoot(res.Header.Get(bootHeader))
+			}
+			res.Header.Del(bootHeader)
+			if res.Request != nil && isBypass(res.Request) {
+				res.Header.Set(cacheStateHeader, "bypass")
+			}
 			return nil
 		},
 		Transport: transport,
@@ -354,7 +391,7 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 		FlushInterval: -1,
 		ErrorHandler:  renderUnavailable,
 	}
-	var h http.Handler = &front{api: api, assets: opts.assets, proxy: proxy}
+	var h http.Handler = &front{api: api, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy}
 	// on the whole public port, including the proxy's own refusals: by
 	// authorship, not by path
 	return opts.security.middleware(h)
@@ -391,4 +428,29 @@ func publicTimeouts(srv *http.Server) {
 	if os.Getenv("BORGO_WRITE_TIMEOUT") == "" {
 		srv.WriteTimeout = defaultPublicTimeout
 	}
+}
+
+// forwardFacts states about the client what the proxy states on a forwarded
+// request, for the shared renders the cache asks for: the same trust rule,
+// so a loader building an absolute url builds the public one either way.
+func forwardFacts(in *http.Request, out http.Header, trusted []*net.IPNet) {
+	peer, _, err := net.SplitHostPort(in.RemoteAddr)
+	if err != nil {
+		peer = in.RemoteAddr
+	}
+	believed := peerTrusted(in.RemoteAddr, trusted)
+	chain := peer
+	if prior := in.Header.Get("X-Forwarded-For"); believed && prior != "" {
+		chain = prior + ", " + peer
+	}
+	out.Set("X-Forwarded-For", chain)
+	out.Set("X-Forwarded-Host", in.Host)
+	proto := "http"
+	if in.TLS != nil {
+		proto = "https"
+	}
+	if prior := in.Header.Get("X-Forwarded-Proto"); believed && prior != "" {
+		proto = prior
+	}
+	out.Set("X-Forwarded-Proto", proto)
 }

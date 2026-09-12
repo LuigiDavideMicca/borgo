@@ -625,10 +625,10 @@ func (ix *assetIndex) send(w http.ResponseWriter, r *http.Request, variant asset
 	http.ServeContent(w, r, name, live.ModTime(), f)
 }
 
-// loadAssetIndex is what serveFront calls: the inventory the build wrote,
-// the walk, and one line saying what was taken into memory.
-func loadAssetIndex(dev bool) *assetIndex {
-	ix := newAssetIndex(publicDir, readBuildOutputs(inventoryFile), dev)
+// newAssetIndexLogged is what serveFront calls: the walk, and one line
+// saying what was taken into memory.
+func newAssetIndexLogged(outputs buildOutputs, dev bool) *assetIndex {
+	ix := newAssetIndex(publicDir, outputs, dev)
 	if dev {
 		return ix
 	}

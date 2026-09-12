@@ -579,12 +579,22 @@ func serveFront(ctx context.Context, onShutdown func(), apiPort string, grace ti
 	mux, patterns := mountRoutes()
 	api := Middleware(mux)
 	dev, _ := strconv.ParseBool(os.Getenv("BORGO_DEV"))
+	outputs := readBuildOutputs(inventoryFile)
+	// the page cache, production only like the asset index: dev rebuilds
+	// under stable names and a cached page would fight the reload
+	var pages *isr
+	if !dev {
+		pages = newIsr(nil, isrPersistFromEnv(outputs), func(line string) { log.Print("borgo: " + line) })
+	}
+	setFrontIsr(pages)
+	defer setFrontIsr(nil)
 	public.Handler = newFrontHandler(api, frontOptions{
 		csrf:     csrf,
 		security: security,
 		maxBody:  maxBody,
 		trusted:  trusted,
-		assets:   loadAssetIndex(dev),
+		assets:   newAssetIndexLogged(outputs, dev),
+		isr:      pages,
 	}, renderer, key, renderTimeout)
 	internal.Handler = requireInternalKey(key, api)
 	defer armStreamShutdown(public)()
