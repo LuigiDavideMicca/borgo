@@ -144,10 +144,14 @@ describe("the orchestrators wire the topology", () => {
     expect(dev).toContain("headers: renderHeaders,");
   });
 
-  test("borgo export: go is always the front, and readiness is asked of the public port", () => {
-    expect(exp).toContain("...goFrontEnv(topology),");
-    expect(exp).toContain("const probe = `http://localhost:${frontPort}/healthz`;");
-    expect(exp).toContain("makeApiClient(`http://localhost:${apiPort}`, apiHeaders)");
+  // an export has no front: the pages come from the render service itself,
+  // and a go binary is built only when a loader needs the api - an app of
+  // pages alone has no go module, and the suite caught that export dying
+  test("borgo export: the pages come from the render service, go only when a loader needs it", () => {
+    expect(exp).toContain("if (needApi) {");
+    expect(exp).toContain("fetch(`${renderBase}${path}`, { headers: renderHeaders })");
+    expect(exp).toContain("const probe = `http://localhost:${apiPort}/`;");
+    expect(exp).not.toContain("goFrontEnv");
     // the flag is gone: nothing in the three commands asks whether to do this
     for (const src of [cli, dev, exp]) expect(src).not.toContain("BORGO_FRONT");
   });

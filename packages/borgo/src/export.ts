@@ -8,7 +8,7 @@ import { banner, c, fmtMs, g } from "./colors";
 import { inHiddenDirectory, isHiddenAsset } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD } from "./index";
 import type { Route } from "./router";
-import { frontTopology, goBinName, goFrontEnv, INTERNAL_KEY_HEADER, renderEnv, runBorgogen } from "./util";
+import { frontTopology, goBinName, INTERNAL_KEY_HEADER, renderEnv, runBorgogen } from "./util";
 
 type ExportModule = Route["module"];
 
@@ -283,10 +283,12 @@ export async function exportSite(): Promise<number> {
     return 1;
   }
 
-  // three ports - go answers frontPort, the render service this process
-  // becomes listens on its own, the api on the internal one - and the pages
-  // are fetched through go, so an export is what a visitor would have been
-  // served
+  // no front here: an export has no clients, and a file carries the render,
+  // not the response - the headers, the cache and the static handler a
+  // visitor would have met add nothing to the bytes. This process is the
+  // render service and the pages are fetched from it; a go binary is built
+  // and started only when a loader needs the api, as a plain api, so an app
+  // of pages alone still exports with no go module in sight
   const [apiPort, frontPort, renderPort] = await freePorts(3);
   process.env.API_PORT = String(apiPort);
   process.env.PORT = String(frontPort);
@@ -296,7 +298,10 @@ export async function exportSite(): Promise<number> {
   process.env.BORGO_RELOAD = "1"; // quiet startup lines from the servers
   const topology = frontTopology(process.env);
   Object.assign(process.env, renderEnv(topology));
-  const apiHeaders: Record<string, string> = { [INTERNAL_KEY_HEADER]: topology.key };
+  // what every page fetch below carries: this process answers nothing
+  // without the key its own render mode was given
+  const renderBase = `http://127.0.0.1:${topology.renderPort}`;
+  const renderHeaders: Record<string, string> = { [INTERNAL_KEY_HEADER]: topology.key };
 
   let apiProc: import("bun").Subprocess | null = null;
   // named before the build: a build that dies partway still leaves the file
@@ -309,9 +314,7 @@ export async function exportSite(): Promise<number> {
   const outDir = "dist/site";
   const stageDir = `dist/.site-staged-${process.pid}`;
   try {
-    // the binary is needed whether or not a loader calls it: it is what
-    // answers the port the pages are fetched from
-    {
+    if (needApi) {
       // dist/ may be running under borgo start, and windows locks executing binaries
       apiBin = `.borgo/export-${goBinName()}`;
       const goBuild = Bun.spawn(["go", "build", "-o", apiBin, "."], { stdout: "inherit", stderr: "inherit" });
@@ -323,16 +326,16 @@ export async function exportSite(): Promise<number> {
       apiProc = Bun.spawn([apiBin], {
         stdout: "ignore",
         stderr: "inherit",
+        // no BORGO_RENDER_URL: a plain api on apiPort, which is what the
+        // loaders of the pages being exported call
         env: {
           ...process.env,
           API_PORT: String(apiPort),
           PORT: String(frontPort),
-          ...goFrontEnv(topology),
+          BORGO_RENDER_URL: "",
         },
       });
-      // the internal listener answers nothing without the key, so readiness
-      // is asked of the public port the front holds
-      const probe = `http://localhost:${frontPort}/healthz`;
+      const probe = `http://localhost:${apiPort}/`;
       const deadline = Date.now() + 30_000;
       for (;;) {
         try {
@@ -340,7 +343,7 @@ export async function exportSite(): Promise<number> {
           break;
         } catch {}
         if (Date.now() > deadline) {
-          console.error(`  ${c.red(g.err)} api never answered on :${frontPort}`);
+          console.error(`  ${c.red(g.err)} api never answered on :${apiPort}`);
           return 1;
         }
         await Bun.sleep(100);
@@ -348,7 +351,7 @@ export async function exportSite(): Promise<number> {
     }
 
     const apiUrl = `http://localhost:${apiPort}/api`;
-    const api = makeApiClient(`http://localhost:${apiPort}`, apiHeaders);
+    const api = makeApiClient(`http://localhost:${apiPort}`);
 
     const pages: Array<{ path: string; route: Route }> = [];
     // a prerenderPaths returning the same params twice rendered the same
@@ -390,7 +393,7 @@ export async function exportSite(): Promise<number> {
       const zeroJs = route.module.hydrate === false && !route.islands;
       const target = join(stageDir, outputPath(path));
       try {
-        const res = await fetch(`http://localhost:${frontPort}${path}`);
+        const res = await fetch(`${renderBase}${path}`, { headers: renderHeaders });
         if (!res.ok) throw new Error(`responded ${res.status}`);
         const html = await res.text();
         const residue = requestResidue(html);
@@ -411,7 +414,7 @@ export async function exportSite(): Promise<number> {
     let wrote404 = false;
     if (export404) {
       try {
-        const res = await fetch(`http://localhost:${frontPort}/__borgo-export-404-probe`);
+        const res = await fetch(`${renderBase}/__borgo-export-404-probe`, { headers: renderHeaders });
         if (res.status !== 404) throw new Error(`responded ${res.status}`);
         const html = await res.text();
         const residue = requestResidue(html);
