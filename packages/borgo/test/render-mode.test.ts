@@ -69,16 +69,17 @@ describe("render mode is wired where it must be", () => {
     expect(server).toContain("...(hostname ? { hostname } : {}),");
   });
 
-  test("a shared render is answered before bun's own cache, which is off in render mode", () => {
+  // there is no cache in this process any more: the front asks for the copy
+  // it may share, and this side renders it and drains it, so the
+  // errored-render mark can travel as a header on a finished document
+  test("a shared render is drained here, and no cache is left to answer from", () => {
     const shared = server.indexOf('req.headers.get(SHARED_RENDER_HEADER) === "1"');
-    const isr = server.indexOf("if (isr) {");
     expect(shared).toBeGreaterThan(-1);
-    expect(isr).toBeGreaterThan(shared);
-    expect(server).toContain("const isr = dev || render");
-    // the errored-render mark travels as a header only because the stream
-    // was drained first: the front judges a finished document
-    expect(server.slice(shared, isr)).toContain("const html = await res.text();");
-    expect(server.slice(shared, isr)).toContain("RENDER_ERRORED_HEADER");
+    const branch = server.slice(shared, shared + 900);
+    expect(branch).toContain("const html = await res.text();");
+    expect(branch).toContain("RENDER_ERRORED_HEADER");
+    expect(server).not.toContain("new Isr(");
+    expect(server).not.toContain("isr.handle(");
   });
 
   test("the key compare is constant time", () => {

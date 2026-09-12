@@ -24,7 +24,7 @@ import {
 } from "./compress";
 import { registerCsrf, registerIslands } from "./internal";
 import { appEnvMetas, envRefusal } from "./env-app";
-import { CACHE_STATE_HEADER, Isr, RENDER_ERRORED_HEADER, REVALIDATE_TOPIC, isrPolicyTable } from "./isr";
+import { RENDER_ERRORED_HEADER, REVALIDATE_TOPIC, isrPolicyTable } from "./isr";
 import { overlayHtml } from "./overlay";
 import { canonicalPath, matchRoute, safeDecode, type Route } from "./router";
 import {
@@ -514,23 +514,10 @@ export async function serve({
   // this exists. the build id keying the persisted copies is the hashed
   // output inventory: a new build writes new names, and every copy the old
   // one rendered is swept at boot rather than served against a new tree
-  // and not in render mode: the go front owns the page cache there, asks for
-  // shared renders with SHARED_RENDER_HEADER (handle below) and reads the
-  // policies from ROUTES_PATH - declared once, invalid opt-ins named once
-  const policyTable = render
-    ? isrPolicyTable(routes, (line) => console.error(`  ${c.red(g.err)} ${line}`))
-    : [];
-  const isr = dev || render
-    ? null
-    : new Isr({
-        persist: {
-          dir: process.env.BORGO_CACHE_DIR || join(".borgo", "cache", "html"),
-          buildId: new Bun.CryptoHasher("sha256")
-            .update(JSON.stringify([...readBuildOutputs().sizes.entries()].sort()))
-            .digest("hex")
-            .slice(0, 16),
-        },
-      });
+  // the page policies the front reads once per boot of this process: which
+  // pages it may share, for how long, under which tags. An invalid opt-in is
+  // named here, once, in the process that imports the page module
+  const policyTable = isrPolicyTable(routes, (line) => console.error(`  ${c.red(g.err)} ${line}`));
 
   // hashed build outputs cache forever, compressible types are served from the
   // .gz/.br siblings `borgo build` emitted; dev has no siblings and serves
@@ -641,7 +628,7 @@ export async function serve({
     // arrived anonymised, the render mints no csrf token, and the stream is
     // drained here so a suspense boundary that errored - which react
     // completes as a 200 serving its fallback - is marked before the front
-    // asks its storability questions. the same render isr.handle asks for below
+    // asks its storability questions
     if (render && req.headers.get(SHARED_RENDER_HEADER) === "1") {
       const failed = { errored: false };
       const res = await renderPage(req, matched.route, matched.params, 200, undefined, [], true, failed);
@@ -653,36 +640,6 @@ export async function serve({
       return new Response(html, { status: res.status, headers });
     }
 
-    if (isr) {
-      const cached = await isr.handle(req, matched.route, async (anon) => {
-        // the shared render is drained HERE so a suspense boundary that
-        // errored - which react completes as a 200 serving its fallback -
-        // can be marked before the guard asks its questions: the flag only
-        // exists once the stream has run, and the response the orchestrator
-        // stores must already carry it. identity body, so the re-wrap is
-        // byte-faithful; the header never leaves the process (an errored
-        // render is unstorable, and unstorable copies are never served)
-        const failed = { errored: false };
-        const res = await renderPage(anon, matched.route, matched.params, 200, undefined, [], true, failed);
-        const html = await res.text();
-        const headers = new Headers(res.headers);
-        if (failed.errored) {
-          headers.set(RENDER_ERRORED_HEADER, "a suspense boundary threw during the shared render");
-        }
-        return new Response(html, { status: res.status, headers });
-      });
-      // unstorable: the page opted in but its render cannot be shared - the
-      // visitor gets their OWN render below, tokens minted and guards
-      // honoured, marked so curl can still see why it is never cached.
-      // serving the anonymised copy here was a form broken for everyone and
-      // a logged-in visitor bounced by their page's own guard
-      if (cached === "unstorable") {
-        const own = await renderPage(req, matched.route, matched.params, 200);
-        own.headers.set(CACHE_STATE_HEADER, "bypass");
-        return own;
-      }
-      if (cached) return cached;
-    }
     return renderPage(req, matched.route, matched.params, 200);
   }
 
@@ -927,20 +884,14 @@ export async function serve({
         // here: an invalidation is the server's business, never fanned out to
         // websocket clients - a browser must not be able to watch which pages
         // the operator drops, nor subscribe to a topic that was never a topic
+        // the page cache is the go front's, and borgo.Revalidate is a local
+        // call there: a push on this topic can only be a binary of another
+        // version talking to this one, and answering 204 would acknowledge an
+        // invalidation nobody here can act on
         if (msg.topic === REVALIDATE_TOPIC) {
-          if (msg.event !== "path" && msg.event !== "tag") {
-            return secure(badRequest(`revalidate event must be "path" or "tag", got ${JSON.stringify(msg.event)}`));
-          }
-          if (typeof msg.data !== "string" || msg.data === "") {
-            return secure(badRequest("revalidate needs a non-empty path or tag"));
-          }
-          if (isr) {
-            if (msg.event === "path") isr.invalidatePath(msg.data);
-            else isr.invalidateTag(msg.data);
-          }
-          // dev has no cache to drop; 204 either way, so app code behaves the
-          // same in both modes
-          return secure(new Response(null, { status: 204 }));
+          const why = `${REVALIDATE_TOPIC} is not published any more: the page cache lives in the go front, where borgo.Revalidate is a local call`;
+          console.error(`  ${c.red(g.err)} /__borgo/publish refused: ${why}`);
+          return secure(badRequest(why));
         }
 
         // a topic no subscriber can ever name is a message dropped with a 204 on it
