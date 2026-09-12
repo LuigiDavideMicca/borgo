@@ -994,3 +994,23 @@ func TestIsrDoesNoSlowWorkUnderItsLock(t *testing.T) {
 		t.Error("the invalidation never returned once the writer was released")
 	}
 }
+
+// The replay negotiates the coding, so the replay has to say it varies on
+// it. It carried only the Vary the render had stored, which is fine only as
+// long as every render stores one. Found by the verifier of phase 1.
+func TestIsrReplayDeclaresTheCodingItNegotiates(t *testing.T) {
+	render, _ := countingRenderer(func(r *http.Request) (int, http.Header, string) {
+		h := http.Header{}
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		return 200, h, "<html>" + strings.Repeat("a render with no vary of its own ", 20) + "</html>"
+	})
+	i := newIsr(render, nil, func(string) {})
+	policy := &isrPolicy{seconds: 60}
+	serve(t, i, policy, "/p")
+	for _, accept := range []string{"gzip", ""} {
+		w, _ := serve(t, i, policy, "/p", "Accept-Encoding", accept)
+		if got := w.Header().Values("Vary"); len(got) != 1 || !strings.EqualFold(got[0], "Accept-Encoding") {
+			t.Errorf("Accept-Encoding %q: the replay says Vary %q", accept, got)
+		}
+	}
+}

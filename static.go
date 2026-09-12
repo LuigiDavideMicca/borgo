@@ -37,11 +37,14 @@ const (
 	publicDir     = "public"
 	inventoryFile = ".borgo/build-output.json"
 	immutable     = "public, max-age=31536000, immutable"
-	// what the boot reads into memory, in total: the hashed outputs of a
-	// build are a few megabytes; an app that puts a video in public/assets
-	// with a hashed name is served from disk past this
-	memoryBudget = 64 << 20
 )
+
+// what the boot reads into memory, in total: the hashed outputs of a build
+// are a few megabytes; an app that puts a video in public/assets with a
+// hashed name is served from disk past this. A variable only so a test can
+// hold the budget to a few bytes instead of writing 64 MiB of fixtures - the
+// check had no test at all before (found by the verifier of phase 1)
+var memoryBudget int64 = 64 << 20
 
 // types worth compressing; images, fonts and media are already compressed
 var compressibleExt = map[string]bool{
@@ -237,6 +240,12 @@ type assetVariant struct {
 	// the bytes, when the build vouched for them and the budget allowed;
 	// nil means the file is opened per request
 	data []byte
+	// the mtime those bytes had when they were read. Length alone vouched
+	// for the memory copy, so a same-length in-place replacement kept being
+	// served from the boot bytes while the ETag - size and mtime, read live -
+	// advertised the new file: clients revalidated, got a new tag, and still
+	// received the old body (found by the verifier of phase 1)
+	mtime time.Time
 }
 
 type assetInfo struct {
@@ -318,16 +327,27 @@ func newAssetIndex(root string, outputs buildOutputs, dev bool) *assetIndex {
 		if err != nil || int64(len(data)) != v.recorded {
 			return
 		}
+		st, err := os.Stat(v.path)
+		if err != nil || st.Size() != v.recorded {
+			return
+		}
 		v.data = data
+		v.mtime = st.ModTime()
 		budget -= v.recorded
 	}
 	base := filepath.ToSlash(root)
-	for u, f := range files {
+	// in the walk's order, not map order: the budget is first come first
+	// served, and ranging over the map meant WHICH outputs were held in
+	// memory changed between two boots of the same build - two identical
+	// hosts measuring different p99s for no reason either could see (noted by
+	// the verifier of phase 1). WalkDir visits in lexical order, so names is
+	// already sorted; a sort here was tried and changed nothing, which the
+	// mutation that deleted it proved
+	for _, u := range names {
 		if strings.HasSuffix(u, ".br") || strings.HasSuffix(u, ".gz") {
 			// a sibling is reached through its identity, never indexed on its own
 			continue
 		}
-		_ = f
 		info := &assetInfo{compressible: isCompressiblePath(u), contentType: assetType(u)}
 		info.identity = assetVariant{path: u}
 		info.identity.recorded, info.identity.pinnedOK = outputs.recordedSize(u)
@@ -612,7 +632,7 @@ func (ix *assetIndex) serveLive(w http.ResponseWriter, r *http.Request, file str
 // rather than new bytes spliced onto an old prefix; a bare Range is a 206.
 func (ix *assetIndex) send(w http.ResponseWriter, r *http.Request, variant assetVariant, live os.FileInfo) {
 	name := path.Base(variant.path)
-	if variant.data != nil && int64(len(variant.data)) == live.Size() {
+	if variant.data != nil && int64(len(variant.data)) == live.Size() && variant.mtime.Equal(live.ModTime()) {
 		http.ServeContent(w, r, name, live.ModTime(), bytes.NewReader(variant.data))
 		return
 	}

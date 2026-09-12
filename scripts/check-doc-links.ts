@@ -105,7 +105,21 @@ process.on("exit", () => {
     if (kept.length) console.error(`\nkept for inspection: ${kept.join(" ")}`);
     return;
   }
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs) {
+    // retried, and never allowed to fail the check. On windows a file held
+    // open by something else - an editor's go language server loads
+    // docsnippets/*.go the moment they appear - refuses deletion for a
+    // moment, and a throw here exited 1 after "docs ok" had printed: a green
+    // check reported red, twice in two days, with nothing to reproduce it
+    // on a quiet machine. node retries EBUSY, EPERM and ENOTEMPTY itself.
+    // A directory that still cannot go is named, because the reason this
+    // cleanup exists is that a leftover breaks gofmt for the next person
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch (error) {
+      console.error(`\ncould not remove ${dir} (${(error as Error).message}) - delete it before running gofmt`);
+    }
+  }
 });
 
 type Snippet = { file: string; source: string; fenceLine: number };

@@ -328,7 +328,15 @@ func envDuration(name string, def time.Duration) (time.Duration, error) {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil || d < 0 {
-		return def, fmt.Errorf(`borgo: %s: invalid duration %q (want e.g. "5s"; "0" disables)`, name, v)
+		// "0 disables" is true of every deadline and false of the one grace:
+		// a shutdown grace of 0 is not "no grace", it is "wait for the last
+		// request however long it takes". The refusal said the opposite of
+		// what the value does (found by the verifier of phase 1)
+		zero := `"0" disables`
+		if name == "BORGO_SHUTDOWN_TIMEOUT" {
+			zero = `"0" waits for every open request, however long`
+		}
+		return def, fmt.Errorf(`borgo: %s: invalid duration %q (want e.g. "5s"; %s)`, name, v, zero)
 	}
 	return d, nil
 }

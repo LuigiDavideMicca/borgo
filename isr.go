@@ -836,6 +836,17 @@ func (i *isr) respond(w http.ResponseWriter, r *http.Request, entry *cachedPage,
 	if wantsGzip && (entry.nonce != "" || entry.gz != nil) {
 		h.Set("Content-Encoding", "gzip")
 	}
+	// this writer negotiates, so it says so itself. A replay with a gzip
+	// representation carried only whatever Vary the render had stored, and
+	// survived only because the render service puts one on every page and
+	// unstorable forbids any other: any page path that answered without it
+	// shipped a gzip body a shared cache would hand to a client that cannot
+	// read it (found by the verifier of phase 1). The same guard gzip.go and
+	// static.go apply, for the same reason. Set whether or not THIS client
+	// took the gzip, because the response varies by what it asked
+	if entry.nonce != "" || entry.gz != nil {
+		varyAcceptEncoding(h)
+	}
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(entry.status)
 	if r.Method != http.MethodHead {

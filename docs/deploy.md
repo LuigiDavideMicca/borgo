@@ -345,7 +345,7 @@ Three more exist for the build, not the runtime: `BORGO_TAILWIND=1` is what `bor
 
 ## Shutdown and zero-downtime redeploys
 
-`borgo.Serve` traps `SIGINT` and `SIGTERM`. On either, it stops accepting new connections, lets in-flight requests finish, and ends every open SSE stream immediately through a shutdown hook — a long-lived stream does not hold the process hostage for the whole grace period. Anything still open when `BORGO_SHUTDOWN_TIMEOUT` expires is cut, so the process always exits and your supervisor never hangs.
+`borgo.Serve` traps `SIGINT` and `SIGTERM`. On either, it stops accepting new connections, lets in-flight requests finish, and ends every open event stream immediately through a shutdown hook — `borgo.SSE`'s own and any the front proxies from the render service alike — so a long-lived stream does not hold the process hostage for the whole grace period. Anything still open when `BORGO_SHUTDOWN_TIMEOUT` expires is cut. `0` is the one value that does not cut: it waits for the last ordinary request however long it takes, which is why the streams are ended regardless of it.
 
 The front server exits with the API it supervises, and both exit if their launcher dies — a force-killed deploy script cannot leave a process holding port 3000.
 

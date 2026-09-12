@@ -414,6 +414,15 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 		ModifyResponse: func(res *http.Response) error {
 			res.Header.Del(internalKeyHeader)
 			res.Header.Del(sessionHeader)
+			// a proxied event stream ends with the server, like borgo.SSE's
+			// own: Shutdown waits for every active request, and this one is a
+			// ReverseProxy copy loop no latch reached, so with
+			// BORGO_SHUTDOWN_TIMEOUT=0 the process never exited and with the
+			// default it held the whole grace (found by the verifier of
+			// phase 1). A document is not a stream and is left to finish
+			if isEventStream(res.Header.Get("Content-Type")) && res.Request != nil {
+				res.Body = endOnShutdown(res.Body, shutdownSignal(res.Request))
+			}
 			// an upgrade is the one response the wrapper around the public
 			// port never sees: ReverseProxy hijacks the connection and writes
 			// this response to the socket itself, headers and all. So the
@@ -435,8 +444,11 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 			return nil
 		},
 		Transport: transport,
-		// every byte reaches the client as it arrives: a streaming ssr page
-		// and an event stream both depend on it
+		// every write reaches the client as it is made. ReverseProxy already
+		// does that for a chunked response and an event stream, whatever
+		// this says; what -1 decides is a response that declares its length
+		// and writes it in parts, which at 0 would sit in a buffer until it
+		// filled or ended
 		FlushInterval: -1,
 		ErrorHandler:  renderUnavailable,
 	}
