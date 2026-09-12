@@ -3,7 +3,16 @@ import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import { c, g } from "./colors";
 import { parentGone, readParent, watchParent } from "./parent-watch";
-import { encodeChanged, goBinName, runBorgogen, UNKNOWN_CHANGE } from "./util";
+import {
+  encodeChanged,
+  frontTopology,
+  goBinName,
+  goFrontEnv,
+  INTERNAL_KEY_HEADER,
+  renderEnv,
+  runBorgogen,
+  UNKNOWN_CHANGE,
+} from "./util";
 
 const serverEntry = fileURLToPath(new URL("serve-entry.ts", import.meta.url));
 
@@ -152,6 +161,13 @@ export async function dev() {
   const goNext = `.borgo/next-${goBinName()}`;
   const frontPort = process.env.PORT || "3000";
   const apiPort = process.env.API_PORT || "3501";
+  // BORGO_FRONT=1: go answers frontPort, the front server process is the
+  // render service on its own loopback port, and both hold this boot's key
+  const topology = frontTopology(process.env);
+  // where the front server process actually listens, key included: the
+  // orchestrator's own pokes (css, reload, readiness) go there directly
+  const renderBase = topology ? `http://127.0.0.1:${topology.renderPort}` : `http://localhost:${frontPort}`;
+  const renderHeaders: Record<string, string> = topology ? { [INTERNAL_KEY_HEADER]: topology.key } : {};
   let goProc: Subprocess | null = null;
   let frontProc: Subprocess | null = null;
   let reload = false;
@@ -202,6 +218,7 @@ export async function dev() {
   for (const [port, name] of [
     [frontPort, "front server"],
     [apiPort, "api"],
+    ...(topology ? [[String(topology.renderPort), "render service"] as const] : []),
   ] as const) {
     try {
       await fetch(`http://localhost:${port}/`, { signal: AbortSignal.timeout(500) });
@@ -220,8 +237,9 @@ export async function dev() {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       try {
-        return await fetch(`http://localhost:${frontPort}/__borgo/dev/${path}`, {
+        return await fetch(`${renderBase}/__borgo/dev/${path}`, {
           method: "POST",
+          headers: renderHeaders,
           signal: AbortSignal.timeout(2_000),
         });
       } catch {}
@@ -304,6 +322,10 @@ export async function dev() {
       stderr: "inherit",
       env: {
         ...process.env,
+        ...(topology ? goFrontEnv(topology) : {}),
+        // this is borgo dev: as the front, go lets the browser's fast-refresh
+        // channel through and keeps csrf off, like the front server always did
+        BORGO_DEV: "1",
         ...(reload ? { BORGO_RELOAD: "1" } : {}),
         // the api watches this pid: a force-killed session leaves no stale process
         BORGO_PARENT_PID: String(process.pid),
@@ -342,6 +364,7 @@ export async function dev() {
         // stream holds a slot for its whole life; overridable on purpose
         BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
         ...process.env,
+        ...(topology ? renderEnv(topology) : {}),
         BORGO_DEV: "1",
         ...(reload ? { BORGO_RELOAD: "1" } : {}),
         ...(changed?.length ? { BORGO_CHANGED: encodeChanged(changed) } : {}),
@@ -367,7 +390,7 @@ export async function dev() {
     proc.exited.then(() => (exited = true));
     while (Date.now() < deadline && !exited) {
       try {
-        await fetch(`http://localhost:${frontPort}/__borgo/dev`, { signal: AbortSignal.timeout(1_000) });
+        await fetch(`${renderBase}/__borgo/dev`, { headers: renderHeaders, signal: AbortSignal.timeout(1_000) });
         break;
       } catch {}
       await Bun.sleep(100);

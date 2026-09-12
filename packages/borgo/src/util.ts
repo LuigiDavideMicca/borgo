@@ -592,6 +592,63 @@ export function resolveSwitches(
   };
 }
 
+// BORGO_FRONT=1 for the orchestrator - borgo dev, start and export: the go
+// binary answers the public port and the bun process it starts is the
+// render service behind it. One boot key, minted here unless the operator
+// set one; the two halves receive their addresses from the same object, so
+// they cannot disagree. Removed with the old topology (phase 1, step 6).
+export type FrontTopology = {
+  publicPort: number;
+  apiPort: number;
+  renderPort: number;
+  key: string;
+};
+
+export function frontTopology(env: Record<string, string | undefined>): FrontTopology | null {
+  if (!(envBool("BORGO_FRONT", env.BORGO_FRONT, "off") ?? false)) return null;
+  let key = env.BORGO_INTERNAL_KEY ?? "";
+  if (key.length < INTERNAL_KEY_MIN_LEN) {
+    // said, not silent: an operator who set a short key and later tries it
+    // by hand against the internal listener would be refused with no hint why
+    if (key) {
+      console.error(
+        `  BORGO_INTERNAL_KEY is shorter than ${INTERNAL_KEY_MIN_LEN} bytes and is not used: a key minted for this boot replaces it`,
+      );
+    }
+    key = mintInternalKey();
+  }
+  return {
+    publicPort: envInt("PORT", env.PORT, "3000") ?? 3000,
+    apiPort: envInt("API_PORT", env.API_PORT, "3501") ?? 3501,
+    renderPort: envInt("BORGO_RENDER_PORT", env.BORGO_RENDER_PORT, String(RENDER_PORT_DEFAULT)) ?? RENDER_PORT_DEFAULT,
+    key,
+  };
+}
+
+// 32 random bytes as hex: the floor the go side holds the key to, doubled
+export function mintInternalKey(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// what the go binary needs to be the front
+export const goFrontEnv = (t: FrontTopology): Record<string, string> => ({
+  BORGO_FRONT: "1",
+  PORT: String(t.publicPort),
+  API_PORT: String(t.apiPort),
+  BORGO_INTERNAL_KEY: t.key,
+  BORGO_RENDER_URL: `http://127.0.0.1:${t.renderPort}`,
+});
+
+// what this process, or the one it spawns, needs to be the render service
+export const renderEnv = (t: FrontTopology): Record<string, string> => ({
+  BORGO_RENDER: "1",
+  BORGO_RENDER_PORT: String(t.renderPort),
+  BORGO_INTERNAL_KEY: t.key,
+  API_PORT: String(t.apiPort),
+});
+
 // the render half of the switches: a render service without a usable key is
 // a loopback listener anyone on the box can drive, so it refuses to boot
 function renderSwitches(env: Record<string, string | undefined>) {
