@@ -51,11 +51,10 @@ const (
 	// bounded: the key includes the query string, and an attacker who can
 	// vary a query must not grow the cache without limit. lru, because
 	// refusing new entries would let the same attacker pin the cache full
-	maxCachedPages   = 512
-	defaultCacheDir  = ".borgo/cache/html"
-	csrfFieldName    = "__borgo_csrf"
-	cacheDirEnv      = "BORGO_CACHE_DIR"
-	sharedRenderWait = 30 * time.Second
+	maxCachedPages  = 512
+	defaultCacheDir = ".borgo/cache/html"
+	csrfFieldName   = "__borgo_csrf"
+	cacheDirEnv     = "BORGO_CACHE_DIR"
 )
 
 // --- policies ---------------------------------------------------------------
@@ -448,6 +447,35 @@ type flightMeta struct {
 type isrRefusal struct {
 	at   time.Time
 	tags []string
+	// set when the refusal is about the render service rather than about the
+	// page: a transport failure or a deadline, which says nothing about
+	// whether the page is shareable. It expires on its own clock, short, and
+	// it expires even under "manual" - a page is not condemned forever
+	// because the render service was restarting
+	cool time.Duration
+}
+
+// renderFailureCool is how long a page is left alone after its shared
+// render failed to arrive at all. Long enough that a restarting render
+// service is not re-asked by every request, short enough that the page is
+// cacheable again a moment after it comes back.
+const renderFailureCool = 5 * time.Second
+
+// trimRefused keeps the refusal memory bounded like the cache, dropping the
+// OLDEST rather than whatever range hands over first - map order could evict
+// the refusal recorded one line earlier, and the page would then be
+// re-rendered and re-refused on the next request instead of bypassing (found
+// by the verifier of this phase). Called with the lock held.
+func (i *isr) trimRefused() {
+	for len(i.refused) > maxCachedPages {
+		oldest, at := "", time.Time{}
+		for k, ref := range i.refused {
+			if at.IsZero() || ref.at.Before(at) {
+				oldest, at = k, ref.at
+			}
+		}
+		delete(i.refused, oldest)
+	}
 }
 
 // sharedRenderer asks the render service for the copy it may share: the
@@ -469,11 +497,16 @@ type isr struct {
 	noted    map[string]bool
 	notedAge []string
 	refused  map[string]isrRefusal
-	log      func(string)
-	now      func() time.Time
-	persist  *isrPersist
-	mint     func() string
-	render   sharedRenderer
+	// queued under the lock, done after it: file removals and log lines.
+	// Both used to happen inline, where a slow disk or a stalled stderr
+	// held the mutex every page request takes
+	sweep   []string
+	pending []string
+	log     func(string)
+	now     func() time.Time
+	persist *isrPersist
+	mint    func() string
+	render  sharedRenderer
 }
 
 func newIsr(render sharedRenderer, persist *isrPersist, logf func(string)) *isr {
@@ -488,7 +521,7 @@ func newIsr(render sharedRenderer, persist *isrPersist, logf func(string)) *isr 
 		mint:     mintNonce,
 		render:   render,
 	}
-	i.cache = newPageCache(i.removeSaved)
+	i.cache = newPageCache(i.forgetSaved)
 	if persist != nil {
 		i.loadSaved()
 	}
@@ -502,7 +535,12 @@ func mintNonce() string {
 }
 
 // note says a thing once per key, bounded like the cache and against the
-// same attacker: the key carries the query string.
+// same attacker: the key carries the query string. Called with i.mu held, so
+// it only QUEUES the line - writing it here meant that a stderr which
+// stopped draining (a blocking container log driver, a supervisor that piped
+// and stopped reading) held the mutex every page request takes, and the
+// whole page surface stopped with it (found by the verifier of this phase).
+// drain() writes it after the unlock.
 func (i *isr) note(key, line string) {
 	if i.noted[key] {
 		return
@@ -513,7 +551,25 @@ func (i *isr) note(key, line string) {
 	}
 	i.noted[key] = true
 	i.notedAge = append(i.notedAge, key)
-	i.log(line)
+	i.pending = append(i.pending, line)
+}
+
+// forget drops a key's memo from both halves of the record: the map AND the
+// ring. Leaving the key in the ring let the ring fill with entries the map
+// no longer had, which shrinks the real dedup window and can evict a
+// different live key's memo early, re-saying a line meant to be said once
+// (found by the verifier of this phase). Called with the lock held.
+func (i *isr) forget(key string) {
+	if !i.noted[key] {
+		return
+	}
+	delete(i.noted, key)
+	for at, k := range i.notedAge {
+		if k == key {
+			i.notedAge = append(i.notedAge[:at], i.notedAge[at+1:]...)
+			break
+		}
+	}
 }
 
 type isrOutcome int
@@ -549,12 +605,20 @@ func (i *isr) handle(w http.ResponseWriter, r *http.Request, policy *isrPolicy) 
 
 	i.mu.Lock()
 	if ref, ok := i.refused[key]; ok {
-		if policy.manual || now.Sub(ref.at) < time.Duration(policy.seconds*float64(time.Second)) {
+		held := policy.manual || now.Sub(ref.at) < time.Duration(policy.seconds*float64(time.Second))
+		if ref.cool > 0 {
+			// the render service's failure, not the page's: its own short
+			// clock, and it runs out under "manual" too
+			held = now.Sub(ref.at) < ref.cool
+		}
+		if held {
 			i.mu.Unlock()
 			return isrBypass
 		}
 		delete(i.refused, key)
 	}
+	// nothing under this lock writes a file or a line: the eviction that
+	// does happens in regenerate's goroutine, which drains itself
 	entry := i.cache.get(key)
 	if entry != nil && fresh(entry, policy, now) {
 		i.mu.Unlock()
@@ -583,7 +647,14 @@ func (i *isr) handle(w http.ResponseWriter, r *http.Request, policy *isrPolicy) 
 // background (stale) nobody waits for the result; a regeneration that fails
 // leaves the last good copy serving, said once.
 func (i *isr) regenerate(key string, r *http.Request, policy *isrPolicy, background bool) *flightMeta {
-	if running := i.inflight[key]; running != nil {
+	// joined only while it may still answer for the data as it is now. A
+	// doomed flight read the data BEFORE the invalidation that doomed it, so
+	// a request arriving after Revalidate returned must not be handed it:
+	// that request would be answered from data the operator already said was
+	// gone, with the invalidation reporting success (found by the verifier of
+	// this phase). The flight's own waiters are a different case and keep it -
+	// their request was already in flight when the drop landed.
+	if running := i.inflight[key]; running != nil && !running.doomed {
 		return running
 	}
 	// registered before the render starts: an invalidation arriving while
@@ -593,11 +664,40 @@ func (i *isr) regenerate(key string, r *http.Request, policy *isrPolicy, backgro
 	i.inflight[key] = meta
 	anon := anonymised(r)
 	go func() {
+		// registered first so it runs LAST: after the unlock, and after the
+		// defer below closes done. It writes files and log lines, and doing
+		// that under the mutex stopped every page request; doing it before
+		// done closes would hold this flight's waiters behind a stalled
+		// stderr instead, which is the same stall one layer in
+		defer i.drain()
 		defer func() {
 			i.mu.Lock()
-			delete(i.inflight, key)
+			// only if this flight is still the registered one: a doomed
+			// flight is replaced by a fresh one while it runs, and deleting
+			// the key blindly would unregister its successor and let a
+			// third request start a second concurrent render of it
+			if i.inflight[key] == meta {
+				delete(i.inflight, key)
+			}
 			i.mu.Unlock()
 			close(meta.done)
+		}()
+		// net/http gives every request goroutine a recover; this one does
+		// work on behalf of a request and had opted out of that, so a panic
+		// in a render - or in anything it calls - took the whole front down,
+		// api included, with every request in flight and the api the 503
+		// page promises is still up (found by the verifier of this phase).
+		// The flight fails instead and its waiters bypass to their own
+		// render. Registered after the cleanup above, so it runs before it:
+		// the error has to be written while done is still open, or a waiter
+		// reads a field this is writing
+		defer func() {
+			if p := recover(); p != nil {
+				i.mu.Lock()
+				meta.err = fmt.Errorf("the render panicked: %v", p)
+				i.mu.Unlock()
+				i.log(keyLabel(key) + ": the render panicked and was contained (" + fmt.Sprint(p) + ")")
+			}
 		}()
 		status, header, html, err := i.render(anon)
 		i.mu.Lock()
@@ -606,6 +706,19 @@ func (i *isr) regenerate(key string, r *http.Request, policy *isrPolicy, backgro
 			meta.err = err
 			if background {
 				i.note("regen:"+key, keyLabel(key)+": regeneration failed, serving the last good copy ("+err.Error()+")")
+				return
+			}
+			// a cold page whose shared render failed: without a memory of it
+			// every single request paid for a shared render that failed the
+			// same way and then for its own render through the bypass, twice
+			// the work per visitor for as long as the failure lasted (found
+			// by the verifier of this phase, measuring a render that stalled
+			// past the deadline). Short, and not the policy's window: this
+			// says the render service is unwell, not that the page is
+			// unshareable, so it must clear itself
+			if !meta.doomed {
+				i.refused[key] = isrRefusal{at: i.now(), tags: policy.tags, cool: renderFailureCool}
+				i.trimRefused()
 			}
 			return
 		}
@@ -617,12 +730,7 @@ func (i *isr) regenerate(key string, r *http.Request, policy *isrPolicy, backgro
 				return
 			}
 			i.refused[key] = isrRefusal{at: i.now(), tags: policy.tags}
-			for len(i.refused) > maxCachedPages {
-				for k := range i.refused {
-					delete(i.refused, k)
-					break
-				}
-			}
+			i.trimRefused()
 			i.cache.remove(key, true)
 			return
 		}
@@ -654,7 +762,7 @@ func (i *isr) regenerate(key string, r *http.Request, policy *isrPolicy, backgro
 			i.cache.store(key, entry)
 			i.saveEntry(key, entry)
 		}
-		delete(i.noted, "regen:"+key)
+		i.forget("regen:" + key)
 	}()
 	return meta
 }
@@ -737,6 +845,7 @@ func (i *isr) respond(w http.ResponseWriter, r *http.Request, entry *cachedPage,
 
 func (i *isr) invalidatePath(path string) int {
 	i.mu.Lock()
+	defer i.drain()
 	defer i.mu.Unlock()
 	dropped := i.cache.invalidatePath(path)
 	// a refusal is state about the data too: the operator saying "this
@@ -751,13 +860,14 @@ func (i *isr) invalidatePath(path string) int {
 			meta.doomed = true
 		}
 	}
-	i.log("revalidate " + path + ": " + strconv.Itoa(dropped) + " cached " + plural(dropped, "copy", "copies") + " dropped")
+	i.pending = append(i.pending, "revalidate "+path+": "+strconv.Itoa(dropped)+" cached "+plural(dropped, "copy", "copies")+" dropped")
 	return dropped
 }
 
 func (i *isr) invalidateTag(rawTag string) int {
 	tag := normalizeTag(rawTag)
 	i.mu.Lock()
+	defer i.drain()
 	defer i.mu.Unlock()
 	dropped := i.cache.invalidateTag(tag)
 	for key, ref := range i.refused {
@@ -770,7 +880,7 @@ func (i *isr) invalidateTag(rawTag string) int {
 			meta.doomed = true
 		}
 	}
-	i.log("revalidate tag " + tag + ": " + strconv.Itoa(dropped) + " cached " + plural(dropped, "copy", "copies") + " dropped")
+	i.pending = append(i.pending, "revalidate tag "+tag+": "+strconv.Itoa(dropped)+" cached "+plural(dropped, "copy", "copies")+" dropped")
 	return dropped
 }
 
@@ -803,6 +913,22 @@ type savedMeta struct {
 	// the meta vouches for the body's length: a crash mid-write leaves a
 	// valid json beside a truncated html, undetectable by parsing
 	Bytes int `json:"bytes"`
+	// and for its content. The pair is written as two renames, so a crash
+	// between them leaves one file from this save beside one from the last;
+	// equal lengths pass the check above and load a body with the wrong
+	// meta - wrong headers, wrong storedAt and, worst, the wrong Nonce, so
+	// every replay substitutes a nonce that is not in the body and the
+	// browser refuses every script on the page until the entry ages out
+	// (found by the verifier of this phase). A digit that changed, or a
+	// timestamp of equal width, is enough to reach it
+	Sum string `json:"sum"`
+}
+
+// bodySum is what the meta vouches with: a short content hash, not a
+// cryptographic commitment - the attacker it defends against is a crash
+func bodySum(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 func (i *isr) fileFor(key string) string {
@@ -821,12 +947,19 @@ func (i *isr) saveEntry(key string, entry *cachedPage) {
 	gen := i.lastGen
 	i.saveGen[key] = gen
 	base := i.fileFor(key)
-	meta := savedMeta{Key: key, Status: entry.status, Headers: append([][2]string{}, entry.headers...), StoredAt: entry.storedAt.UnixMilli(), Tags: append([]string{}, entry.tags...), Nonce: entry.nonce, BuildID: i.persist.buildID, Bytes: len(entry.body)}
+	meta := savedMeta{Key: key, Status: entry.status, Headers: append([][2]string{}, entry.headers...), StoredAt: entry.storedAt.UnixMilli(), Tags: append([]string{}, entry.tags...), Nonce: entry.nonce, BuildID: i.persist.buildID, Bytes: len(entry.body), Sum: bodySum(entry.body)}
 	body := entry.body
 	go func() {
 		// unique temp names per save: two saves of one key ms apart must not
 		// share a scratch file either
-		tmp := fmt.Sprintf("%s.%d.tmp", base, gen)
+		// the generation makes it unique inside this process; the random suffix
+		// makes it unique across processes. Two boots over one BORGO_CACHE_DIR -
+		// a blue/green deploy on a shared volume, two replicas on one mount, a
+		// restart overlapping the old process - both wrote <key>.1.tmp for their
+		// first save of a page, so one could interleave its body with the
+		// other's meta (found by the verifier of this phase, who read it and
+		// could not reproduce it; narrow is not the same as closed)
+		tmp := fmt.Sprintf("%s.%d.%s.tmp", base, gen, mintNonce()[:8])
 		raw, err := json.Marshal(meta)
 		if err == nil {
 			err = os.MkdirAll(i.persist.dir, 0o755)
@@ -862,20 +995,43 @@ func (i *isr) saveEntry(key string, entry *cachedPage) {
 			i.mu.Lock()
 			i.note("persist", "isr cache not persisted ("+err.Error()+") - serving from memory only")
 			i.mu.Unlock()
+			// this goroutine is the last one holding that line: nobody else
+			// will unlock after it
+			i.drain()
 		}
 	}()
 }
 
-// removeSaved runs under the lock, from the cache's drop: the key's
-// generation is gone, so a save in flight finds none and lands nowhere
-func (i *isr) removeSaved(key string) {
+// forgetSaved is the cache's eviction hook, and it does no io: it is called
+// with i.mu held, from a page request's own eviction and from
+// Revalidate/RevalidateTag, and two file removals per dropped key meant that
+// RevalidateTag on a tag held by 400 pages performed 800 synchronous
+// deletions while every page request blocked on the same mutex (found by the
+// verifier of this phase). The keys are queued and swept after the unlock.
+func (i *isr) forgetSaved(key string) {
 	if i.persist == nil {
 		return
 	}
 	delete(i.saveGen, key)
-	base := i.fileFor(key)
-	os.Remove(base + ".html")
-	os.Remove(base + ".json")
+	i.sweep = append(i.sweep, key)
+}
+
+// drain does the work that was queued while the lock was held: the file
+// removals and the log lines. Called after every unlock that may have
+// queued something, never with the lock held.
+func (i *isr) drain() {
+	i.mu.Lock()
+	sweep, lines := i.sweep, i.pending
+	i.sweep, i.pending = nil, nil
+	i.mu.Unlock()
+	for _, key := range sweep {
+		base := i.fileFor(key)
+		os.Remove(base + ".html")
+		os.Remove(base + ".json")
+	}
+	for _, line := range lines {
+		i.log(line)
+	}
 }
 
 // loadSaved restores what the last run of this build wrote: wrong build,
@@ -934,7 +1090,7 @@ func (i *isr) readSaved(base string) (*cachedPage, string, bool) {
 		return nil, "", false
 	}
 	body, err := os.ReadFile(base + ".html")
-	if err != nil || len(body) != meta.Bytes {
+	if err != nil || len(body) != meta.Bytes || meta.Sum == "" || bodySum(body) != meta.Sum {
 		return nil, "", false
 	}
 	entry := &cachedPage{body: body, nonce: meta.Nonce, status: meta.Status, headers: meta.Headers, storedAt: time.UnixMilli(meta.StoredAt), tags: meta.Tags}

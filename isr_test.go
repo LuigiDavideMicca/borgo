@@ -1,11 +1,14 @@
 package borgo
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,6 +51,20 @@ func waitForPairs(t *testing.T, dir string, want int) {
 	}
 	entries, _ := os.ReadDir(dir)
 	t.Fatalf("the persist directory holds %d files after 2s, want %d", len(entries), want)
+}
+
+// waitFor is for the concurrency tests: they build a burst against a render
+// that is provably still running, and a sleep would either be flaky or slow.
+func waitFor(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 func serve(t *testing.T, i *isr, policy *isrPolicy, path string, headers ...string) (*httptest.ResponseRecorder, isrOutcome) {
@@ -570,5 +587,410 @@ func TestAnonymisedDropsEveryPersonalHeader(t *testing.T) {
 	// render happens after this one refuses
 	if req.Header.Get("Cookie") != "borgo_session=abc" {
 		t.Error("anonymised mutated the visitor's own request")
+	}
+}
+
+// a render the test holds open, so a burst can be built up against a flight
+// that is provably still running
+func heldRenderer(body string) (sharedRenderer, *int32, chan struct{}) {
+	var n int32
+	release := make(chan struct{})
+	return func(r *http.Request) (int, http.Header, string, error) {
+		atomic.AddInt32(&n, 1)
+		<-release
+		h := http.Header{}
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		h.Set("Vary", "Accept-Encoding")
+		return 200, h, body, nil
+	}, &n, release
+}
+
+// serveAsync runs a burst against one key and returns when every request has
+// answered. Concurrency is the point: the sequential version of this test
+// passes with the single-flight guard deleted.
+func serveBurst(t *testing.T, i *isr, policy *isrPolicy, path string, n int) []*httptest.ResponseRecorder {
+	t.Helper()
+	out := make([]*httptest.ResponseRecorder, n)
+	var wg sync.WaitGroup
+	for k := 0; k < n; k++ {
+		wg.Add(1)
+		go func(k int) {
+			defer wg.Done()
+			w, _ := serve(t, i, policy, path)
+			out[k] = w
+		}(k)
+	}
+	wg.Wait()
+	return out
+}
+
+// The claim: however many requests arrive for a cold key at once, exactly one
+// render happens and everybody gets it. The verifier of this phase deleted
+// the guard that holds it and nothing in the suite failed - the test that
+// looked like its cover was two SEQUENTIAL requests, which proves the cache
+// hit and not the flight.
+func TestIsrRendersOnceForABurstOnAColdKey(t *testing.T) {
+	render, n, release := heldRenderer("<html>one render</html>")
+	i := newIsr(render, nil, func(string) {})
+	policy := &isrPolicy{seconds: 60}
+
+	// every request is in before the render may finish, so they cannot be
+	// answered one after another from a warm cache
+	done := make(chan []*httptest.ResponseRecorder, 1)
+	go func() { done <- serveBurst(t, i, policy, "/news", 50) }()
+	waitFor(t, func() bool { return atomic.LoadInt32(n) == 1 }, "the first render to start")
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	answers := <-done
+
+	if got := atomic.LoadInt32(n); got != 1 {
+		t.Errorf("%d renders for one cold key under a burst of 50", got)
+	}
+	misses := 0
+	for _, w := range answers {
+		if w.Body.String() != "<html>one render</html>" {
+			t.Fatalf("a request in the burst got %q", w.Body.String())
+		}
+		if w.Header().Get(cacheStateHeader) == "miss" {
+			misses++
+		}
+	}
+	// every waiter is answered from the flight it joined, so they all read
+	// "miss": the copy was not in the cache when they asked
+	if misses != 50 {
+		t.Errorf("%d of 50 answered miss", misses)
+	}
+}
+
+// two keys are two pages: the flight is per key, not a global lock
+func TestIsrFlightsAreOnePerKey(t *testing.T) {
+	render, n, release := heldRenderer("<html>page</html>")
+	i := newIsr(render, nil, func(string) {})
+	policy := &isrPolicy{seconds: 60}
+	var wg sync.WaitGroup
+	for _, p := range []string{"/a", "/b", "/a", "/b"} {
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			serve(t, i, policy, p)
+		}(p)
+	}
+	waitFor(t, func() bool { return atomic.LoadInt32(n) == 2 }, "both keys to start rendering")
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if got := atomic.LoadInt32(n); got != 2 {
+		t.Errorf("%d renders for two keys under four requests", got)
+	}
+}
+
+// The claim: past the window the stale copy is served immediately while ONE
+// background render replaces it, however wide the burst. Also unguarded
+// before this test.
+func TestIsrStartsOneBackgroundRenderForAStaleBurst(t *testing.T) {
+	var n int32
+	release := make(chan struct{})
+	var hold atomic.Bool
+	render := sharedRenderer(func(r *http.Request) (int, http.Header, string, error) {
+		count := atomic.AddInt32(&n, 1)
+		if hold.Load() {
+			<-release
+		}
+		h := http.Header{}
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		h.Set("Vary", "Accept-Encoding")
+		return 200, h, fmt.Sprintf("<html>render %d</html>", count), nil
+	})
+	now := time.Now()
+	i := newIsr(render, nil, func(string) {})
+	i.now = func() time.Time { return now }
+	policy := &isrPolicy{seconds: 1}
+
+	// one copy, then past its window
+	serve(t, i, policy, "/news")
+	if got := atomic.LoadInt32(&n); got != 1 {
+		t.Fatalf("the first request rendered %d times", got)
+	}
+	now = now.Add(2 * time.Second)
+	hold.Store(true)
+
+	answers := serveBurst(t, i, policy, "/news", 50)
+	for _, w := range answers {
+		if state := w.Header().Get(cacheStateHeader); state != "stale" {
+			t.Fatalf("a request in the stale burst read %q", state)
+		}
+		if w.Body.String() != "<html>render 1</html>" {
+			t.Fatalf("a stale request was served %q, not the copy it had", w.Body.String())
+		}
+	}
+	// the burst is answered from the copy; exactly one regeneration is
+	// running behind it, still held
+	if got := atomic.LoadInt32(&n); got != 2 {
+		t.Errorf("%d renders behind a stale burst of 50, want exactly one", got-1)
+	}
+	close(release)
+	hold.Store(false)
+	// and when it lands it replaces the copy, so the next request reads the
+	// render the burst paid for rather than the one it was served
+	waitFor(t, func() bool {
+		w, _ := serve(t, i, policy, "/news")
+		return w.Body.String() == "<html>render 2</html>"
+	}, "the background render to replace the copy")
+}
+
+// The claim the doom flag exists for: an invalidation that lands while a
+// render is in flight wins. It did for the flight's own waiters, and did NOT
+// for a request that arrived AFTER the invalidation returned - that request
+// was handed the doomed flight and answered from data the operator had
+// already dropped, while Revalidate reported success. Found by the verifier
+// of this phase.
+func TestIsrARequestAfterAnInvalidationIsNotAnsweredByTheDoomedFlight(t *testing.T) {
+	var n int32
+	release := make(chan struct{})
+	render := sharedRenderer(func(r *http.Request) (int, http.Header, string, error) {
+		count := atomic.AddInt32(&n, 1)
+		if count == 1 {
+			<-release
+		}
+		h := http.Header{}
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		h.Set("Vary", "Accept-Encoding")
+		return 200, h, fmt.Sprintf("<html>read %d</html>", count), nil
+	})
+	i := newIsr(render, nil, func(string) {})
+	policy := &isrPolicy{manual: true, tags: []string{"news"}}
+
+	// A starts the only flight and blocks inside the render
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w, _ := serve(t, i, policy, "/news")
+		first <- w
+	}()
+	waitFor(t, func() bool { return atomic.LoadInt32(&n) == 1 }, "the first render to start")
+
+	// the data changes and the operator says so; the call returns
+	i.invalidateTag("news")
+
+	// B asks now, after the invalidation: it must not be handed the copy the
+	// doomed flight read from the old data
+	second := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w, _ := serve(t, i, policy, "/news")
+		second <- w
+	}()
+	waitFor(t, func() bool { return atomic.LoadInt32(&n) == 2 }, "a fresh render for the request after the invalidation")
+	close(release)
+
+	if body := (<-second).Body.String(); body != "<html>read 2</html>" {
+		t.Errorf("the request after the invalidation was served %q", body)
+	}
+	// A's own request was already in flight when the drop landed, so it
+	// keeps its answer - that is the race boundary, not a bug
+	if body := (<-first).Body.String(); body != "<html>read 1</html>" {
+		t.Errorf("the flight's own waiter got %q", body)
+	}
+	// and nothing read before the invalidation is in the cache
+	waitFor(t, func() bool { return i.cache.size() == 1 }, "the fresh copy to be stored")
+	w, _ := serve(t, i, policy, "/news")
+	if body := w.Body.String(); body != "<html>read 2</html>" {
+		t.Errorf("the stored copy is %q", body)
+	}
+}
+
+// The 512-entry bound and the tag index under eviction: also free to delete
+// before this test, and a leak here is unbounded memory under traffic that
+// varies the query string.
+func TestIsrEvictionKeepsTheTagIndexHonest(t *testing.T) {
+	render, _ := countingRenderer(plainPage("<html>page</html>"))
+	i := newIsr(render, nil, func(string) {})
+	policy := &isrPolicy{seconds: 3600, tags: []string{"all"}}
+	for k := 0; k < maxCachedPages+88; k++ {
+		serve(t, i, policy, fmt.Sprintf("/p?k=%d", k))
+	}
+	if size := i.cache.size(); size != maxCachedPages {
+		t.Errorf("the cache holds %d copies, want the %d bound", size, maxCachedPages)
+	}
+	// every tag entry must name a page that is still there, or an
+	// invalidation walks keys that are gone and reports a wrong count
+	for tag, keys := range i.cache.byTag {
+		for key := range keys {
+			if i.cache.get(key) == nil {
+				t.Fatalf("tag %q still points at the evicted %q", tag, keyLabel(key))
+			}
+		}
+	}
+	if dropped := i.invalidateTag("all"); dropped != maxCachedPages {
+		t.Errorf("the tag dropped %d copies, want %d", dropped, maxCachedPages)
+	}
+	if len(i.cache.byTag) != 0 {
+		t.Errorf("the tag index kept %d tags after dropping everything", len(i.cache.byTag))
+	}
+	if size := i.cache.size(); size != 0 {
+		t.Errorf("%d copies survived the tag invalidation", size)
+	}
+}
+
+// A panic in a render used to take the process: this goroutine works on
+// behalf of a request but is not the request's own, so net/http's recover
+// never covered it. The front would die with its api, and the api is the
+// half the 503 page promises is still up. Found by the verifier of this
+// phase, whose probe for it had to be skipped because it killed the test
+// binary.
+func TestIsrContainsAPanicInTheRender(t *testing.T) {
+	var lines []string
+	render := sharedRenderer(func(r *http.Request) (int, http.Header, string, error) {
+		panic("a loader did something unforgivable")
+	})
+	i := newIsr(render, nil, func(line string) { lines = append(lines, line) })
+
+	// the process is still here, which is the whole assertion; the visitor
+	// gets their own render through the bypass
+	w, out := serve(t, i, &isrPolicy{seconds: 60}, "/news")
+	if out != isrBypass {
+		t.Errorf("a panicking render answered %v, want the visitor their own render", out)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("the bypass wrote a body: %q", w.Body.String())
+	}
+	if i.cache.size() != 0 {
+		t.Error("a panicking render stored something")
+	}
+	// and it is said, once, with the page named
+	if len(lines) != 1 || !strings.Contains(lines[0], "/news") || !strings.Contains(lines[0], "panicked") {
+		t.Errorf("the log says %q", lines)
+	}
+	// the flight is unregistered, so the next request tries again rather
+	// than joining a goroutine that is gone
+	if len(i.inflight) != 0 {
+		t.Errorf("%d flights left registered after the panic", len(i.inflight))
+	}
+	if _, out := serve(t, i, &isrPolicy{seconds: 60}, "/news"); out != isrBypass {
+		t.Errorf("the second request answered %v", out)
+	}
+}
+
+// A shared render that does not arrive says nothing about whether the page is
+// shareable - the render service may be restarting - but without a memory of
+// it every request paid twice: once for a shared render that failed the same
+// way, once for its own render through the bypass. Found by the verifier of
+// this phase. The memory is short and, unlike a storability refusal, it
+// expires under "manual" too, so a page is not condemned by a bad minute.
+func TestIsrDoesNotReAskARenderServiceThatJustFailed(t *testing.T) {
+	var attempts int32
+	var fail atomic.Bool
+	fail.Store(true)
+	render := sharedRenderer(func(r *http.Request) (int, http.Header, string, error) {
+		atomic.AddInt32(&attempts, 1)
+		if fail.Load() {
+			return 0, nil, "", errors.New("the render service is not answering")
+		}
+		h := http.Header{}
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		h.Set("Vary", "Accept-Encoding")
+		return 200, h, "<html>back</html>", nil
+	})
+	now := time.Now()
+	i := newIsr(render, nil, func(string) {})
+	i.now = func() time.Time { return now }
+	// "manual" is the case that used to be condemned forever by a refusal
+	policy := &isrPolicy{manual: true}
+
+	if _, out := serve(t, i, policy, "/news"); out != isrBypass {
+		t.Fatal("a failed shared render did not bypass")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("%d attempts for the first request", got)
+	}
+	// the next requests are bypassed without asking again
+	for k := 0; k < 5; k++ {
+		if _, out := serve(t, i, policy, "/news"); out != isrBypass {
+			t.Fatalf("request %d: %v", k+2, out)
+		}
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("%d shared renders for six requests against a failing render service", got)
+	}
+
+	// and the page is cacheable again once the cool-off passes: this is a
+	// refusal about the render service, not about the page
+	fail.Store(false)
+	now = now.Add(renderFailureCool + time.Second)
+	w, out := serve(t, i, policy, "/news")
+	if out != isrServed || w.Header().Get(cacheStateHeader) != "miss" || w.Body.String() != "<html>back</html>" {
+		t.Errorf("after the cool-off: %v %q %q", out, w.Header().Get(cacheStateHeader), w.Body.String())
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Errorf("%d attempts in total", got)
+	}
+}
+
+// The mutex this cache takes is taken by every page request and by both
+// invalidation APIs, so nothing slow may happen while it is held. It used to
+// hold it for the log line and for two file removals per dropped key: a
+// stderr that stopped draining (a blocking container log driver, a
+// supervisor that piped and stopped reading) stopped the whole page surface,
+// and RevalidateTag on a tag held by hundreds of pages performed hundreds of
+// synchronous deletions with every request waiting. Found by the verifier of
+// this phase.
+//
+// What is guaranteed is that a stalled writer blocks nothing but itself. The
+// caller that produced a line still waits for its own line, as every logging
+// call in go does; no other page request and no other invalidation is held
+// behind it.
+func TestIsrDoesNoSlowWorkUnderItsLock(t *testing.T) {
+	blocked := make(chan struct{})
+	logged := make(chan string, 8)
+	render, _ := countingRenderer(func(r *http.Request) (int, http.Header, string) {
+		_, h, b := plainPage("<html/>")(r)
+		h.Add("Set-Cookie", "seen=1") // unstorable, so a line is said
+		return 200, h, b
+	})
+	i := newIsr(render, nil, func(line string) {
+		logged <- line
+		<-blocked
+	})
+	policy := &isrPolicy{seconds: 60}
+
+	// the first request refuses the page and says so: a writer is now stuck
+	// inside the log function, holding whatever it holds
+	go serve(t, i, policy, "/x")
+	select {
+	case <-logged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refusal was never said")
+	}
+
+	// and with it stuck, pages are still served: this is the property. Each
+	// of these says its own line and ends up stuck in the writer too, but
+	// only after it has answered, which is the part that matters
+	for _, path := range []string{"/other", "/another"} {
+		done := make(chan isrOutcome, 1)
+		go func(p string) {
+			_, out := serve(t, i, policy, p)
+			done <- out
+		}(path)
+		select {
+		case out := <-done:
+			if out != isrBypass {
+				t.Errorf("%s answered %v", path, out)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s was never answered: a stalled log line held the mutex every page request takes", path)
+		}
+	}
+
+	// an invalidation waits for its own line and for nothing else
+	dropped := make(chan int, 1)
+	go func() { dropped <- i.invalidatePath("/x") }()
+	select {
+	case <-dropped:
+		t.Error("the invalidation returned without writing its line")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(blocked)
+	select {
+	case <-dropped:
+	case <-time.After(5 * time.Second):
+		t.Error("the invalidation never returned once the writer was released")
 	}
 }

@@ -140,12 +140,24 @@ type renderClient struct {
 	client   *http.Client
 	table    *http.Client
 	forward  func(in *http.Request, out http.Header)
+	// told the boot stamp of every answer, so a restart of the render
+	// service reloads the policy table whatever path the traffic took
+	onBoot func(stamp string)
 }
 
 const policyFetchWait = 2 * time.Second
 
-func newRenderClient(renderer *url.URL, key string, transport http.RoundTripper, forward func(*http.Request, http.Header)) *renderClient {
-	client := &http.Client{Transport: transport, Timeout: sharedRenderWait}
+// wait is BORGO_RENDER_TIMEOUT, the same number the proxy hop honours: a
+// shared render is a render, and an operator who shortened the deadline for
+// a page meant it for the cacheable ones too. It was hardcoded at 30s here
+// while the proxy read the variable, so a 5s deadline did not apply to a
+// cold cacheable page and a page that could not render inside 30s was
+// rendered twice per request - once here, once through the bypass - for up
+// to 60s, which is the public write timeout (found by the verifier of this
+// phase). Unlike the hop's, this one bounds the whole request: there is no
+// streaming to protect, the body is read to the end before it can be stored.
+func newRenderClient(renderer *url.URL, key string, transport http.RoundTripper, forward func(*http.Request, http.Header), wait time.Duration) *renderClient {
+	client := &http.Client{Transport: transport, Timeout: wait}
 	// a 3xx from the render service is the render's answer, never a place
 	// to go: a guard's redirect to /login must reach unstorable and bypass,
 	// where a followed redirect fetched /login as a shared render - no csrf
@@ -207,6 +219,16 @@ func (c *renderClient) shared(anon *http.Request) (int, http.Header, string, err
 		return 0, nil, "", err
 	}
 	defer res.Body.Close()
+	// the stamp says which boot of the render service answered. It used to be
+	// read only in the proxy's ModifyResponse, so a render service restarted
+	// under a live front was never noticed by the policy table as long as
+	// every request was answered from the cache or from a shared render:
+	// new pages never became cacheable, a page that dropped revalidate kept
+	// being shared, and changed tags dropped the wrong set, forever (found by
+	// the verifier of this phase)
+	if c.onBoot != nil {
+		c.onBoot(res.Header.Get(bootHeader))
+	}
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return 0, nil, "", err

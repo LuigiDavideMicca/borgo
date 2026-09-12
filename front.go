@@ -362,9 +362,13 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 	// same transport: the policy table once per boot, shared renders on demand
 	rc := newRenderClient(renderer, key, transport, func(in *http.Request, out http.Header) {
 		forwardFacts(in, out, opts.trusted)
-	})
+	}, timeout)
 	// the policy table also names pages for the counters, cache or no cache
 	policies := &policySource{fetch: rc.policies}
+	// and it is told the boot stamp of every shared render too, not only of
+	// what the proxy carried: a render service restarted under a live front
+	// answers cached traffic without the proxy ever seeing a response
+	rc.onBoot = policies.sawBoot
 	if opts.isr != nil {
 		opts.isr.render = rc.shared
 	}

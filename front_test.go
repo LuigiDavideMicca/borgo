@@ -3,12 +3,14 @@ package borgo
 import (
 	"bufio"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -707,5 +709,120 @@ func TestTheHandshakeCarriesTheSecurityHeadersToo(t *testing.T) {
 	// noise a client has to parse
 	if csp := res.Header.Get("Content-Security-Policy"); csp != "" {
 		t.Errorf("the handshake carries a csp: %q", csp)
+	}
+}
+
+// BORGO_RENDER_TIMEOUT is the operator's deadline for a render, and a shared
+// render is a render. The cache's own client had it hardcoded at 30s while
+// the proxy read the variable: the transport's header wait was shared, so a
+// render that never answered WAS cut - but one that answered its headers and
+// then stalled ran to 30 seconds, on a request the visitor was waiting for.
+// Found by the verifier of this phase.
+func TestTheSharedRenderHonoursTheOperatorsDeadline(t *testing.T) {
+	var cut chan struct{}
+	var shared, own int32
+	renderer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == routesPath {
+			w.Header().Set(bootHeader, "1")
+			json.NewEncoder(w).Encode(map[string]any{"boot": 1, "routes": []map[string]any{
+				{"pattern": "/slow", "seconds": 60, "tags": []string{}},
+			}})
+			return
+		}
+		// headers at once, then a stall: the transport's header deadline
+		// cannot see this, so only the client's whole-request deadline can
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(200)
+		io.WriteString(w, "<html>")
+		http.NewResponseController(w).Flush()
+		if r.Header.Get(sharedRenderHeader) == "1" {
+			atomic.AddInt32(&shared, 1)
+			// the shared render waits to be cut, and says when it was
+			select {
+			case <-r.Context().Done():
+				close(cut)
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
+		atomic.AddInt32(&own, 1)
+		time.Sleep(300 * time.Millisecond)
+		io.WriteString(w, "streamed</html>")
+	}))
+	defer renderer.Close()
+	cut = make(chan struct{})
+	u, _ := url.Parse(renderer.URL)
+	pages := newIsr(nil, nil, func(string) {})
+	front := newFrontHandler(apiUnderTest(), frontOptions{trusted: trustAll, isr: pages}, u, testInternalKey, 200*time.Millisecond)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "http://app.example/slow", nil)
+	req.Host = "app.example"
+	front.ServeHTTP(w, req)
+
+	// the shared render was abandoned at the operator's deadline, not at 30s
+	select {
+	case <-cut:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the shared render was not cut at the deadline the front was given")
+	}
+	// and the visitor still gets their page: their own render streams for
+	// longer than the deadline, which is what a header-only deadline on the
+	// hop exists to allow
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "streamed") {
+		t.Errorf("the visitor got %d %q", w.Code, w.Body.String())
+	}
+	if w.Header().Get(cacheStateHeader) != "bypass" {
+		t.Errorf("the visitor's answer is marked %q", w.Header().Get(cacheStateHeader))
+	}
+	if atomic.LoadInt32(&shared) != 1 || atomic.LoadInt32(&own) != 1 {
+		t.Errorf("shared=%d own=%d", shared, own)
+	}
+}
+
+// The policy table is reloaded when the render service's boot stamp changes.
+// That stamp was only read from responses the PROXY carried, so a render
+// service restarted under a live front was never noticed as long as traffic
+// was answered from the cache or from a shared render: new pages never
+// became cacheable and changed tags dropped the wrong set, forever. Found by
+// the verifier of this phase.
+func TestASharedRenderNoticesTheRenderServiceRestarting(t *testing.T) {
+	svc := &fakeRenderService{boot: 1}
+	renderer := httptest.NewServer(svc.handler())
+	defer renderer.Close()
+	u, _ := url.Parse(renderer.URL)
+	pages := newIsr(nil, nil, func(string) {})
+	front := newFrontHandler(apiUnderTest(), frontOptions{trusted: trustAll, isr: pages}, u, testInternalKey, time.Second)
+	get := func(p string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "http://app.example"+p, nil)
+		req.Host = "app.example"
+		w := httptest.NewRecorder()
+		front.ServeHTTP(w, req)
+		return w
+	}
+
+	// a cacheable page, answered by a shared render: the proxy carries nothing
+	if state := get("/news").Header().Get(cacheStateHeader); state != "miss" {
+		t.Fatalf("the first request: %q", state)
+	}
+	if tables := atomic.LoadInt32(&svc.tables); tables != 1 {
+		t.Fatalf("%d policy tables read at boot", tables)
+	}
+
+	// the render service restarts, and the only traffic is a shared render
+	atomic.StoreInt64(&svc.boot, 2)
+	pages.invalidatePath("/news")
+	get("/news")
+
+	// the stamp it answered with is a new boot, so the table is asked again -
+	// on the NEXT request, since the lookup happens before the render that
+	// carried the stamp. What matters is that it is asked at all
+	get("/news")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && atomic.LoadInt32(&svc.tables) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if tables := atomic.LoadInt32(&svc.tables); tables != 2 {
+		t.Errorf("the policy table was read %d times: a restart under a live front went unnoticed", tables)
 	}
 }
