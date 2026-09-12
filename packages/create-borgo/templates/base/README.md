@@ -31,7 +31,7 @@ If you are developing against a local borgo checkout, uncomment the `replace` di
 - `bun run export` — prerender the statically exportable pages into `dist/site/`
 - `bun run doctor` — diagnose the environment (bun and go versions, the bun shim on `PATH`, node, docker, the two ports and who holds them, disk space, the generated types, your dependencies, write access) with a fix beside each failing check
 
-The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the blessed deploy configs) and `pwa init` (manifest and service worker) — run them with `bunx borgo <cmd>`. The [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) covers reverse proxy samples, systemd, and split-service setups.
+The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the blessed deploy configs) and `pwa init` (manifest and service worker) — run them with `bunx borgo <cmd>`. The [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) covers reverse proxy samples, systemd and compose.
 
 ## Deploy
 
@@ -41,14 +41,14 @@ The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the 
 
 - `pages/` — React pages; the file name is the route. This template ships five: `index.tsx` → `/`, `about.tsx` → `/about`, `live.tsx` → `/live`, `now.tsx` → `/now`, and `hello/[name].tsx` → `/hello/:name`, where `[name]` matches one path segment and arrives as `params.name`. A page may export a `loader` (props fetched on the server before rendering — `hello/[name].tsx` calls the Go route from one), `head` (title and metas), `action` (form posts — `hello/[name].tsx` handles its own form's post beside its loader), and `hydrate` (`false` or `"visible"`) to ship less JavaScript. `now.tsx` exports `revalidate = 60`: in production it is rendered once, cached, and shared with every visitor for a minute at a time. `index.tsx` exports neither a loader nor an action, so `bun run export` writes `/`, `/about` and `/live` and skips `/hello/:name` and `/now`, which need `borgo start`. A file whose name starts with `_` is never routed: `_layout.tsx` wraps its directory, `_404.tsx` and `_500.tsx` are the error pages, and anything else with that prefix is simply not served.
 - `islands/Counter.tsx` — an island: a component that hydrates on its own inside a page that ships no bundle of its own. `pages/about.tsx` sets `hydrate = false` and drops `<Island name="Counter" />` into the markup, so that page loads only the counter's JavaScript and nothing else. Any default-exported component in `islands/` can be used the same way, by its file name.
-- `api/` — Go API routes; annotate a handler with `//borgo:route GET /api/path` (or register manually in `init()` with `borgo.Handle`). `hello.go` responds with `borgo.JSON`, and that call is what types the route: `borgogen` reads the Go type and writes `.borgo/api-types.d.ts`, so the `api` client in a loader knows the response shape. `events.go` opens a `borgo.NewSSEHub()` and a goroutine publishes into it, which is what `/live` subscribes to — server-sent events, proxied to the browser without buffering.
+- `api/` — Go API routes; annotate a handler with `//borgo:route GET /api/path` (or register manually in `init()` with `borgo.Handle`). `hello.go` responds with `borgo.JSON`, and that call is what types the route: `borgogen` reads the Go type and writes `.borgo/api-types.d.ts`, so the `api` client in a loader knows the response shape. `events.go` opens a `borgo.NewSSEHub()` and a goroutine publishes into it, which is what `/live` subscribes to — server-sent events, written straight to the browser by the process that answered the port.
 - `env.ts` — the app's typed environment: variables declared once, validated before the server binds, typed at every read. The template ships one client variable (`BORGO_PUBLIC_APP_NAME`, shown in the home footer); server variables go in a `server` block beside it and never reach the browser.
 - `main.go` — imports `api` and calls `borgo.Serve()`.
 - `index.html` — HTML shell. `style.scss` — global styles. `public/` — served as-is, which is where `logo.svg` comes from.
 
 Not in this template, but one page away in the docs: two-way WebSocket topics (`subscribe` in the browser, `borgo.Push(topic, event, data)` in Go, with the payload type flowing from one to the other) and users — signed-cookie sessions, password hashing and the `borgo.Auth` login/logout/register helpers are built in. `--template full` has both wired up; the [auth guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/auth-and-sessions.md) and the [realtime guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/realtime.md) explain them.
 
-Ports: front server on `PORT` (default 3000), Go API on `API_PORT` (default 3501).
+Ports: the go binary answers `PORT` (default 3000), the only public one. Its api also listens on `API_PORT` (default 3501) and the bun render service on `BORGO_RENDER_PORT` (default 3600), both on loopback.
 
 ---
 

@@ -50,37 +50,11 @@ volumes:
 
 The two ways `SESSION_SECRET` can be wrong fail in opposite directions, and only one of them is loud. **Missing** is the quietest failure on this page: the Go server boots, `/healthz` is green, and only session routes fail — closed, never open, so nothing forges against the absent key. **Set but shorter than 32 bytes** is the reverse: `borgo.Serve` refuses to start at all, so the container restart-loops with the reason on stdout. See [cookies and sessions](security.md#cookies-and-sessions).
 
-## Docker, two services
+## Two containers? Not yet
 
-Prefer separate containers? Run the API alone and the front server with `--front-only`, pointing `API_URL` at the api service:
+The two halves cannot be split across containers or hosts in 0.30. The render service binds loopback and answers only requests carrying the boot key the front minted, which is the property that lets it skip verifying anything for itself; reaching it from another container would mean a key on the wire, a listener on a routable address, and a deployment shape that has been neither designed nor tested. `borgo start --front-only`, which used to run the Bun front against a remote API, refuses with that explanation rather than starting a renderer nothing can reach.
 
-```yaml
-services:
-  api:
-    build: .
-    command: ["./dist/api"]
-    environment:
-      API_PORT: "3501"
-    volumes:
-      - data:/data
-    restart: unless-stopped
-
-  front:
-    build: .
-    command: ["bun", "run", "start", "--front-only"]
-    environment:
-      API_URL: http://api:3501
-    ports:
-      - "3000:3000"
-    depends_on:
-      - api
-    restart: unless-stopped
-
-volumes:
-  data:
-```
-
-`borgo.Push` needs the reverse direction across containers: set `FRONT_URL=http://front:3000` on the api service and the same `BORGO_PUSH_KEY` on both — plus `BORGO_PUSH_INSECURE=1`, because that URL is cleartext to another host and borgo refuses to put the key on it otherwise. On a compose network that refusal is the wrong answer, and saying so is how you tell borgo the network is yours. See [the key and cleartext](#the-key-and-cleartext) below.
+So one container runs both, as the generated `Dockerfile` and compose file do. Scale by running more of them behind your reverse proxy, each with its own public port; nothing in a borgo process is shared between instances anyway — the SSE hub, the topic relay and an in-memory session store are per-process, which the [realtime](realtime.md#honest-limits) page states as a limit in its own right.
 
 ## Cold start, measured — and the serverless question
 
@@ -91,11 +65,11 @@ borgo targets no serverless platform, and [why](why.md#why-self-hosted-only-no-s
 | `/healthz` (both halves supervised and answering) | 330 ms |
 | `/` (a real server-rendered page) | 343 ms |
 
-Measured on Docker Desktop (WSL2) on a development laptop. Most of that is Docker, not borgo: the container's own timestamped log shows the Go API answering ~40 ms after the entrypoint runs and the front server printing `ready in 12ms` about 100 ms in — the rest is container creation, which a Linux host does faster than Docker Desktop. The runtime image is 353 MB: `oven/bun:slim` plus production `node_modules`, the app sources the SSR server needs, and the static Go binary.
+Measured on Docker Desktop (WSL2) on a development laptop. Most of that is Docker, not borgo: the container's own timestamped log shows the Go binary answering ~40 ms after the entrypoint runs and the render service printing `ready in 12ms` about 100 ms in — the rest is container creation, which a Linux host does faster than Docker Desktop. The runtime image is 353 MB: `oven/bun:slim` plus production `node_modules`, the app sources the SSR server needs, and the static Go binary.
 
 A third of a second matters for one deployment shape this page otherwise doesn't cover: scale-to-zero *container* platforms (Fly machines, Cloud Run and their kind), where the first visitor after an idle period pays the boot. borgo makes that visitor wait roughly a blink, and inside the container nothing platform-specific is needed — it is the same image this page builds. Two honest caveats before you do it: everything in-memory (the SSE hub, the WebSocket relay, the `full` template's session store) evaporates with the instance and is never shared across instances, and an event stream held open is exactly the connection such platforms bill or cut. If that shape fits your app anyway, the number above says the platform's cold-start economics are not the obstacle.
 
-What stays refused is function-per-request — bundling the front server into a FaaS runtime, one invocation per render. It is not a matter of boot time: the SSE hub, the topic relay, the asset index and the supervised shutdown all assume a process that outlives the request, and on a per-invocation platform each becomes either a lie or a managed service borgo would have to document and test six ways. That adapter matrix is the weight this framework exists to not carry — the [full argument, with its bill](why.md#why-self-hosted-only-no-serverless-targets), stands in one place rather than being re-fought per platform.
+What stays refused is function-per-request — bundling the server into a FaaS runtime, one invocation per render. It is not a matter of boot time: the SSE hub, the topic relay, the page cache, the asset index and the supervised shutdown all assume a process that outlives the request, and on a per-invocation platform each becomes either a lie or a managed service borgo would have to document and test six ways. That adapter matrix is the weight this framework exists to not carry — the [full argument, with its bill](why.md#why-self-hosted-only-no-serverless-targets), stands in one place rather than being re-fought per platform.
 
 ## Reverse proxy
 
@@ -334,37 +308,38 @@ These are borgo's own variables. Your application's variables get the same disci
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PORT` | `3000` | front server port |
-| `API_PORT` | `3501` | go api port; a value that is not 0-65535 is refused before the server binds |
-| `API_URL` | `http://localhost:$API_PORT` | where the front server reaches the api (split deployments) |
-| `FRONT_URL` | `http://localhost:$PORT` | where `borgo.Push` reaches the front server |
-| `BORGO_PUSH_KEY` | unset | shared secret for `borgo.Push` across hosts — on the front server it *replaces* the loopback check, so set it on both halves or neither. Go refuses to send it over cleartext to another host unless `BORGO_PUSH_INSECURE` says so |
+| `PORT` | `3000` | the public port, bound by the go binary — the only port a browser reaches |
+| `API_PORT` | `3501` | the api's internal listener, on `127.0.0.1` alone, for loaders and form actions; a value that is not 0-65535 is refused before the server binds |
+| `API_URL` | `http://localhost:$API_PORT` | where the render service reaches the api |
+| `BORGO_RENDER_URL` | set by `borgo start` | the render service the front forwards pages to. Setting it is what makes the binary a front; unset, it is an api alone on its single listener |
+| `BORGO_RENDER_PORT` | `3600` | the loopback port the render service binds. `borgo start` resolves it once and configures both halves from that |
+| `BORGO_INTERNAL_KEY` | minted per boot | the key that authorises the front's requests to the render service, 32 bytes minimum. Normally never set by hand: the CLI mints one per boot for both halves. A render service without a usable one refuses to boot |
+| `BORGO_TRUSTED_PROXIES` | unset | CIDRs or addresses whose `X-Forwarded-For` and `X-Forwarded-Proto` are believed. Behind nginx or Caddy, set it — a TLS terminator whose `X-Forwarded-Proto` is not trusted has every websocket origin compared against `http` |
+| `FRONT_URL` | `http://localhost:$PORT` | where `borgo.Push` reaches the topic relay, which lives in the render service. Under `borgo start` the front already knows that address and this is unnecessary |
+| `BORGO_PUSH_KEY` | unset | shared secret for `borgo.Push` across hosts — on the render service it *replaces* the loopback check, so set it on both halves or neither. Go refuses to send it over cleartext to another host unless `BORGO_PUSH_INSECURE` says so |
 | `BORGO_PUSH_INSECURE` | unset | `1`/`true` lets `BORGO_PUSH_KEY` travel over `http://` to a host that is not this one. For a private network you control — a compose network, a VPC. A value it cannot parse is refused, not read as "no" |
 | `SESSION_SECRET` | unset | HMAC key for signed-cookie sessions, **32 bytes minimum**. Unset warns and boots anyway — session routes then fail per request, closed in both directions. Set but shorter than 32 is fatal at startup: `borgo.Serve` refuses to bind |
 | `SESSION_SECURE` | unset | `1`/`true` adds `Secure` to the session and csrf cookies; `0`/`false` and unset do not. A value that is neither is refused at startup by both halves, rather than read as "not secure" |
-| `BORGO_CSRF` | unset | `0` disables both csrf checks (form actions, and unsafe requests to proxied `/api/*` routes), `1` forces them in dev |
-| `BORGO_METRICS` | unset | `1` exposes `/metrics` (Prometheus text) on the front server |
-| `BORGO_CACHE_DIR` | `.borgo/cache/html` | front server: where [cached pages](pages-and-routing.md#cached-pages) persist across restarts. Swept at boot when the build changed |
+| `BORGO_CSRF` | unset | `0` disables both csrf checks (form actions on the render service, unsafe `/api/*` requests on the front), `1` forces them in dev |
+| `BORGO_METRICS` | unset | `1` exposes `/metrics` (Prometheus text) on the public port |
+| `BORGO_CACHE_DIR` | `.borgo/cache/html` | where [cached pages](pages-and-routing.md#cached-pages) persist across restarts. The front owns the cache; swept at boot when the build changed |
 | `BORGO_SECURITY_HEADERS` | unset | `0` drops the security headers *and* the CSP — see [security](security.md#changing-the-policy) |
 | `BORGO_CSP` | unset | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request |
-| `BORGO_MAX_BODY` | `33554432` (32 MB) | front server: most it will read of a request body, in bytes, counted as it arrives; `0` means no limit |
-| `BORGO_API_TIMEOUT` | `30000` (30 s) | front server: milliseconds to wait for the api's response headers before answering `504`; `0` disables |
+| `BORGO_MAX_BODY` | `33554432` (32 MB) | most either half will read of a request body, in bytes, counted as it arrives; `0` means no limit |
+| `BORGO_RENDER_TIMEOUT` | `30s` | how long the front waits for the render service's response headers before answering `504`. The body is then unbounded, so streaming renders and websockets are not cut |
 | `BORGO_WS_ALLOW_NO_ORIGIN` | unset | `1`/`true` admits websocket clients that send no `Origin` header. Browsers always send one, so this is for non-browser clients — and it re-admits **every** originless caller with them, which is the whole hole it opens |
-| `BUN_CONFIG_MAX_HTTP_REQUESTS` | `16384` under `borgo dev` and `borgo start`; `256` (bun's default) otherwise | front server: how many proxied requests may be in flight at once. Each event stream holds one for its whole life, so bun's default ceilings concurrent SSE subscribers at ~255. `borgo dev` sets it, every config borgo generates that *launches* the app sets it (Dockerfile, compose, systemd — not the caddy/nginx proxy configs, which set no environment), and `borgo start` re-execs itself to set it when nothing else did. Read at process start — exporting it afterwards has no effect, which is why the re-exec exists |
-| `BORGO_READ_HEADER_TIMEOUT` | `5s` | go server: cap on reading request headers (slow-header clients) |
-| `BORGO_FRONT_READ_TIMEOUT` | `30` | front server: inbound socket read deadline in whole seconds, capped at `255`, `0` disables. A positive value under one second becomes `1`, announced at boot; a value it cannot parse is silently replaced by `30`. It does not govern how long a response may take — see the note under this table for why the name says `FRONT` |
-| `BORGO_IDLE_TIMEOUT` | `2m` | go server: idle keep-alive reclaim (duration string) |
-| `BORGO_READ_TIMEOUT` | `0` (off) | go server: whole-request read deadline (duration string) — leave off unless you have no streams |
-| `BORGO_WRITE_TIMEOUT` | `0` (off) | go server: whole-response write deadline — `borgo.SSE` streams exempt themselves |
-| `BORGO_SHUTDOWN_TIMEOUT` | `10s` | go server: grace period for in-flight requests on shutdown; `0` waits indefinitely |
-| `BORGO_HASH_SLOTS` | `max(1, GOMAXPROCS/2)` | go server: password hashes that may run at once. One costs ~140 ms of cpu, so the cap is what keeps a login flood from starving every other route. A value that is not a positive integer is refused at startup rather than ignored |
+| `BUN_CONFIG_MAX_HTTP_REQUESTS` | `16384` under `borgo dev` and `borgo start`; `256` (bun's default) otherwise | render service: how many outbound calls it may have in flight, which in practice means loader and action calls to the api. Event streams and websockets are the front's own inbound sockets and do not draw on it. `borgo dev` sets it, every config borgo generates that *launches* the app sets it (Dockerfile, compose, systemd — not the caddy/nginx proxy configs, which set no environment), and `borgo start` re-execs itself to set it when nothing else did. Read at process start — exporting it afterwards has no effect, which is why the re-exec exists |
+| `BORGO_READ_HEADER_TIMEOUT` | `5s` | cap on reading request headers (slow-header clients), on the public port and the internal one |
+| `BORGO_IDLE_TIMEOUT` | `2m` | idle keep-alive reclaim (duration string) |
+| `BORGO_READ_TIMEOUT` | `0` (off) | whole-request read deadline (duration string) — this is the internet-facing one now |
+| `BORGO_WRITE_TIMEOUT` | `0` (off) | whole-response write deadline — `borgo.SSE` and a streaming render exempt themselves |
+| `BORGO_SHUTDOWN_TIMEOUT` | `10s` | grace period for in-flight requests on shutdown; `0` waits indefinitely |
+| `BORGO_HASH_SLOTS` | `max(1, GOMAXPROCS/2)` | password hashes that may run at once. One costs ~140 ms of cpu, so the cap is what keeps a login flood from starving every other route. A value that is not a positive integer is refused at startup rather than ignored |
 | `NO_COLOR` | unset | disable ANSI colors in logs |
 
-The Go timeouts are duration strings (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot; the front server's three — `BORGO_MAX_BODY` in bytes, `BORGO_API_TIMEOUT` in milliseconds, `BORGO_FRONT_READ_TIMEOUT` in seconds — are plain numbers. The booleans — `SESSION_SECURE`, `BORGO_CSRF`, `BORGO_METRICS`, `BORGO_SECURITY_HEADERS`, `BORGO_WS_ALLOW_NO_ORIGIN` — share one grammar on both halves: `1`/`true` and `0`/`false` in Go's `strconv.ParseBool` spellings (`t`/`f`/`True` included); anything else is refused at boot naming the variable, and a control character such as the `` a Windows-authored `.env` carries is shown in the refusal rather than swallowed. The first two numbers now fail loudly too, and that changed in 0.21: a typo used to be replaced by the default, which is the wrong direction here, because `0` in both of them means *no limit*. `BORGO_API_TIMEOUT=0.5` did not shorten the timeout — rounding down reached `0` and removed it. A value that cannot be read is refused before a port is bound, naming the variable. `DB_PATH` in the samples above is the app's own variable, not the framework's.
+Every timeout is a Go duration string now (`5s`, `2m`; `0` disables one) and a malformed value fails loudly at boot, naming the variable. `BORGO_MAX_BODY` is the one plain number, in bytes, and it is refused the same way rather than replaced by the default — that changed in 0.21, and the direction matters because `0` means *no limit*. The booleans — `SESSION_SECURE`, `BORGO_CSRF`, `BORGO_METRICS`, `BORGO_SECURITY_HEADERS`, `BORGO_WS_ALLOW_NO_ORIGIN` — share one grammar on both halves: `1`/`true` and `0`/`false` in Go's `strconv.ParseBool` spellings (`t`/`f`/`True` included); anything else is refused at boot naming the variable, and a control character such as the `\r` a Windows-authored `.env` carries is shown in the refusal rather than swallowed. `DB_PATH` in the samples above is the app's own variable, not the framework's.
 
-> **Why `BORGO_FRONT_READ_TIMEOUT` spells out `FRONT`.** `borgo start` hands both children one environment, so a variable both halves read cannot mean one thing. That knob was `BORGO_IDLE_TIMEOUT` once, and Go still reads that name as a duration: `=2m` gave Go two minutes and left the front server silently on 30 seconds, while `=120` gave the front server two minutes and stopped the Go binary from starting. Renaming it to `BORGO_READ_TIMEOUT` reproduced the defect exactly, since the Go server reads that name too, same grammar, same refusal. A rename moves a collision; `FRONT` is what closes it, and a test now fails the build if either half is ever pointed back at the other's variable. Neither old name is honoured as an alias.
->
-> Note also that raising the front server's deadline is *not* how you keep event streams alive: it is lifted per request the moment nothing is left for a client to dribble at us — at the top of `fetch()` for a request with no body at all (every GET and HEAD), and in the proxy the instant a buffered request body has been read in full. A response that outlives the deadline is unaffected either way.
+> **Where `BORGO_FRONT_READ_TIMEOUT` and `BORGO_API_TIMEOUT` went.** Both belonged to the Bun front server, which stopped answering the public port in 0.30. The first is `BORGO_READ_TIMEOUT`, in Go's grammar; the second has no successor, because `/api/*` no longer crosses a process boundary. Neither old name is honoured as an alias, and the collision that made the first one spell out `FRONT` — one environment reaching two halves that parsed the same name differently — cannot happen now that one half reads every deadline.
 
 Three more exist for the build, not the runtime: `BORGO_TAILWIND=1` is what `borgo build --tailwind` sets for its child processes (use the flag, not the variable — see [styling](dev-experience.md#styling)); `BORGO_STATIC=1` is what `borgo export` sets for the build it drives, and it is substituted into the client bundle rather than read at runtime, which is what compiles the props-fetching navigation path out of an exported site; and `BORGO_PARENT_PID` is how the CLI tells the Go api whose death to exit with (`BORGO_SUPERVISOR_PID` is the same trick pointing the other way, set on the copy of itself `borgo start` re-execs). `BORGO_RELOAD` and `BORGO_CHANGED` are internal to the dev loop — the latter carries the whole set of changed files, newline-separated.
 

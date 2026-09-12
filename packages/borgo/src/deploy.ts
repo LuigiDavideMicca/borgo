@@ -56,7 +56,9 @@ export const GLOBAL_FLAGS = ["--tailwind", "--debug"] as const;
 export const COMMAND_FLAGS: Record<string, readonly string[]> = {
   dev: [],
   build: [],
-  // the split deployment: run the front server, point API_URL at an api elsewhere
+  // still recognised so cli.ts can refuse it by name and say what replaced
+  // it: as an unknown option the message would be "unknown option", which
+  // tells someone upgrading from 0.2x nothing about the topology change
   start: ["--front-only"],
   export: [],
   doctor: [],
@@ -243,10 +245,12 @@ export function systemdUnit({ name, port, apiPort }: DeployContext): string {
     "ExecStart=/usr/local/bin/bun run start",
     "Environment=NODE_ENV=production",
     `Environment=PORT=${port}`,
+    "# the api's listener, loopback-only: the render service beside it calls",
+    "# this for every loader. Set it to keep it off a port something else wants",
     `Environment=API_PORT=${apiPort}`,
     ...session,
-    "# bun's outbound fetch pool defaults to 256, which ceilings concurrent",
-    "# proxied requests - event streams above all - see docs/realtime.md",
+    "# bun's outbound fetch pool defaults to 256 and is fixed at boot: it",
+    "# ceilings how many loader calls the render service can have in flight",
     "Environment=BUN_CONFIG_MAX_HTTP_REQUESTS=16384",
     "Restart=on-failure",
     "User=www-data",
@@ -286,15 +290,18 @@ export function composeYml({ port, secret }: DeployContext): string {
     "      NODE_ENV: production",
     `      PORT: "${port}"`,
     ...session,
-    "      # bun's outbound fetch pool defaults to 256, which ceilings",
-    "      # concurrent event streams - see docs/realtime.md",
+    "      # bun's outbound fetch pool defaults to 256 and is fixed at boot:",
+    "      # it ceilings how many loader calls the render service can have in",
+    "      # flight. The api and the render service listen on loopback only,",
+    "      # so the one port above is the whole public surface",
     '      BUN_CONFIG_MAX_HTTP_REQUESTS: "16384"',
     "    restart: unless-stopped",
-    // /healthz answers 200 with the api down - the state is in the body, so
-    // a status-code probe never fires. docker marks unhealthy, never restarts
+    // /healthz answers 200 with the render service down - the state is in the
+    // body, so a status-code probe never fires. docker marks unhealthy, never restarts
     "    healthcheck:",
-    "      # /healthz answers 200 even when the api is down - the state is in",
-    "      # the body. bun is the runtime image's own binary, so no curl needed.",
+    "      # /healthz answers 200 even when the render service is down - the",
+    "      # state is in the body. bun is the runtime image's own binary, so no",
+    "      # curl needed.",
     `      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:${port}/healthz').then(r=>r.text()).then(t=>process.exit(t.includes('\\"status\\":\\"ok\\"')?0:1)).catch(()=>process.exit(1))"]`,
     "      interval: 30s",
     "      timeout: 5s",

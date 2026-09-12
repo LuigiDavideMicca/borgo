@@ -8,7 +8,7 @@ CI compiles the examples on these pages against the real framework types — eve
 | --- | --- |
 | [Getting started](getting-started.md) | build a small app end to end: a page, a Go route, a loader, a form action, an island |
 | [Why borgo works this way](why.md) | seven design questions — Go, Bun, codegen, file routing, typed APIs, RSC, self-hosting — and what each choice costs |
-| [Architecture](architecture.md) | the two processes and the watchdog between them, what happens at boot, a request through both servers, what the build produces and refuses, code generation, the dev loop |
+| [Architecture](architecture.md) | which process answers the port and why, the watchdog between the two, what happens at boot, a request through both, what the build produces and refuses, code generation, the dev loop |
 | [Pages and routing](pages-and-routing.md) | pages and loaders, layouts, `<head>` management, streaming SSR, form actions, cached pages, error pages |
 | [The typed bridge](typed-bridge.md) | Go API routes, borgogen, typed request bodies, type overrides, honest limits |
 | [Client navigation and hydration](client-navigation.md) | client-side transitions, prefetching, scroll restoration, code splitting, hydration modes, islands |
@@ -22,6 +22,7 @@ CI compiles the examples on these pages against the real framework types — eve
 | [Performance](performance.md) | the mechanisms: work moved out of the request path, revalidation, compression, backpressure — and what borgo does not optimize |
 | [FAQ and troubleshooting](faq-and-troubleshooting.md) | the questions people ask, and symptoms with their one-line fixes |
 | [API reference](api-reference.md) | every public Go and TypeScript export, environment variable, CLI flag and file convention, each with a stability marker |
+| [Upgrading to 0.30](migration-0.30.md) | the topology change, what it leaves alone, and the five places it can break a deployment |
 | [API stability](api-stability.md) | what `1.x` will promise: one version across four artifacts, what counts as breaking, what is not covered, the deprecation policy |
 
 ## Where to start
@@ -34,6 +35,6 @@ CI compiles the examples on these pages against the real framework types — eve
 4. [Auth and sessions](auth-and-sessions.md) and [realtime](realtime.md) — when the app needs them
 5. [Dev experience](dev-experience.md) — worth ten minutes once, so the dev loop never surprises you
 
-**Running an app in production** — [deploy](deploy.md) is self-contained: pick a layout (single container, two services, systemd), put a reverse proxy in front, wire `/healthz`, and keep the [environment reference](deploy.md#environment-reference) at hand. [Static export](deploy.md#static-export) is there too, for the pages that need no server. Read [security](security.md) once before the first deploy — it ends with a checklist.
+**Running an app in production** — [deploy](deploy.md) is self-contained: pick a layout (single container, systemd), put a reverse proxy in front, wire `/healthz`, and keep the [environment reference](deploy.md#environment-reference) at hand. [Static export](deploy.md#static-export) is there too, for the pages that need no server. Read [security](security.md) once before the first deploy — it ends with a checklist.
 
 **Reviewing borgo for your team** — [security](security.md) states the default posture and, just as importantly, what borgo deliberately does not do; the [typed bridge](typed-bridge.md) and [what this is not](../README.md#what-this-is-not) cover the honest limits of the rest.

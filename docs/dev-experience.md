@@ -136,7 +136,7 @@ Flags:
 | Flag | Applies to | Meaning |
 | --- | --- | --- |
 | `--tailwind` | any command (parsed globally); it matters to `dev`, `build`, `start` and `export`, the four that compile CSS | compile CSS with Tailwind instead of SCSS |
-| `--front-only` | `start` | run the front server alone, for split deployments where the API lives elsewhere (point `API_URL` at it) |
+| `--front-only` | `start` | retired in 0.30: the go binary is the front now, so this is refused with an explanation rather than starting a renderer nothing can reach |
 | `--force` | `deploy init`, `pwa init` | overwrite an existing generated file |
 | `-h`, `--help`, `-v`, `--version` | — | print the banner and exit 0 |
 

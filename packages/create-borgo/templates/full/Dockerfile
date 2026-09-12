@@ -1,5 +1,5 @@
 # multi-stage build: go + bun in the builder, a small bun runtime image.
-# the front server renders pages from source, so the runtime keeps pages/
+# the render service renders pages from source, so the runtime keeps pages/
 # and production node_modules; go ships as one static binary in dist/.
 FROM golang:1.27 AS build
 COPY --from=oven/bun:1.4 /usr/local/bin/bun /usr/local/bin/bun
@@ -23,13 +23,14 @@ RUN mkdir /out \
 FROM oven/bun:1.4-slim
 WORKDIR /app
 ENV NODE_ENV=production
-# bun's outbound fetch pool defaults to 256 requests, and the front server
-# holds one for the life of every proxied request - an event stream included.
+# bun's outbound fetch pool defaults to 256 requests, and the render
+# service holds one for the life of every api call a loader makes.
 # it must be set in the environment: bun reads it when the process starts
 ENV BUN_CONFIG_MAX_HTTP_REQUESTS=16384
 RUN mkdir /data && chown bun:bun /data
 USER bun
 COPY --from=build --chown=bun:bun /out /app
 EXPOSE 3000
-# borgo start supervises both processes: the go api and the bun front server
+# borgo start supervises both processes: it renders, and the go binary it
+# spawns answers the port exposed above
 CMD ["bun", "run", "start"]

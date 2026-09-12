@@ -4,44 +4,45 @@ How borgo actually works, end to end: the two processes and why there are two, w
 
 ## Two processes
 
-A running borgo app is a Bun process and a Go process.
+A running borgo app is a Go process and a Bun process. The Go binary answers the public port; the Bun process renders the pages it asks for.
 
 ```
    browser
       |
-      | http, port 3000 (PORT)
+      | http, port 3000 (PORT) - the only public port
       v
- +-----------------------------------------------------------+
- |  bun front server            packages/borgo/src/server.ts  |
+ +------------------------------------------------------------+
+ |  go server                    borgo.Serve(), front.go      |
  |                                                            |
- |  ssr documents (react-dom/server)   static files (public/) |
- |  loaders and form actions           websocket topic relay  |
- |  /healthz  /metrics                 gzip, csp, csrf        |
- +-----------------------------------------------------------+
-      |
-      | http, port 3501 (API_PORT), loopback
-      v
- +-----------------------------------------------------------+
- |  go api server                       borgo.Serve()         |
+ |  your api/*.go handlers       static files (public/)       |
+ |  sessions, sse                the shared page cache        |
+ |  /healthz  /metrics           gzip, csp, csrf, body limit  |
+ +------------------------------------------------------------+
+    |                                                ^
+    | a page: BORGO_RENDER_PORT (3600),              | a loader's api call:
+    | loopback, X-Borgo-Internal                     | API_PORT (3501),
+    v                                                | loopback
+ +------------------------------------------------------------+
+ |  bun render service           packages/borgo/src/server.ts |
  |                                                            |
- |  net/http ServeMux, method patterns  sessions, sse         |
- |  your api/*.go handlers              gzip, panic recovery  |
- +-----------------------------------------------------------+
+ |  ssr documents                loaders, form actions        |
+ |  (react-dom/server)           websocket topic relay        |
+ +------------------------------------------------------------+
 ```
 
-The split is not decorative. React server rendering needs a JavaScript runtime that can execute your page components, so something has to be JavaScript. Everything else — your database work, your business logic, the code that runs on every request forever — does not, and Go is a better place for it. Rather than pretend one language can be good at both, borgo runs each in the process suited to it and gives them one front door: the browser only ever talks to port 3000, and the front server proxies `/api/*` onward.
+The split is not decorative. React server rendering needs a JavaScript runtime that can execute your page components, so something has to be JavaScript. Everything else — your database work, your business logic, the code that runs on every request forever — does not, and Go is a better place for it. Rather than pretend one language can be good at both, borgo runs each in the process suited to it and gives them one front door. The Go binary is that door: it answers `/api/*` in the same process that holds your handlers — no hop at all — serves what the build wrote into `public/`, keeps the cache of shared pages, and asks the Bun process for the one thing that needs a JavaScript runtime, a document.
 
-There is only one hop, and it is over loopback. The front server does not sit in front of Go for policy reasons — it does not authenticate, rewrite or interpret API responses. It forwards the request, strips the headers that belong to the browser-to-Bun connection, and hands the response back untouched, gzip and all.
+A page costs one hop, over loopback; an API call costs none. The render service binds `127.0.0.1` alone, and every request forwarded to it carries `X-Borgo-Internal`, a key minted for this boot and compared in constant time at the top of its handler — a loopback listener is reachable by every process on the box, and this one must answer none of them. It is also never asked to decide anything: Go verifies the session cookie and forwards the result as a fact in `X-Borgo-Session`, so a loader reads who is asking without the render service ever holding the signing key or re-verifying a cookie.
 
-In production the two servers are supervised as one command. `borgo start` spawns `dist/api` as a child and runs the front server itself, so `docker run` and a systemd unit both have exactly one thing to start and one thing to stop. If the API exits on its own, the front server exits with the API's code so a supervisor restarts the pair. `borgo start --front-only` skips the child entirely, for a split deployment where the Go server runs on another host and `API_URL` points at it.
+In production the two processes are supervised as one command, and the roles are not the obvious way round: `borgo start` *is* the Bun process, and it spawns `dist/api` as a child that takes the public port while its parent renders behind it. `docker run` and a systemd unit still have exactly one thing to start and one thing to stop. If the Go process exits on its own, the parent exits with its code so a supervisor restarts the pair. A deployment split across two hosts is not wired yet: `--front-only`, which used to run the Bun front alone against a remote API, is refused with that explanation, because what it would start now is a renderer nothing can reach.
 
-"Itself" has a caveat. Bun fixes the size of its outbound fetch pool when the process starts and no code can raise it afterwards, so if `BUN_CONFIG_MAX_HTTP_REQUESTS` is not already in the environment, `borgo start` re-execs itself once with it set to `16384` and that child becomes the one holding both the front server and the API. The outer process stays as a thin supervisor: it forwards `SIGINT` and `SIGTERM` and exits with the child's code, so a service manager still sees one pid to signal and one exit status to trust, and the child polls `BORGO_SUPERVISOR_PID` so a hard kill of the supervisor cannot orphan it. Every deployment borgo writes — the Dockerfiles, the systemd unit, the compose file — sets the variable, so the re-exec only happens to a hand-launched server, which is exactly the one that was silently capped at ~255 concurrent event streams. See [realtime](realtime.md#honest-limits).
+"Itself" has a caveat. Bun fixes the size of its outbound fetch pool when the process starts and no code can raise it afterwards, so if `BUN_CONFIG_MAX_HTTP_REQUESTS` is not already in the environment, `borgo start` re-execs itself once with it set to `16384` and that child becomes the one that renders and spawns the Go binary. The outer process stays as a thin supervisor: it forwards `SIGINT` and `SIGTERM` and exits with the child's code, so a service manager still sees one pid to signal and one exit status to trust, and the child polls `BORGO_SUPERVISOR_PID` so a hard kill of the supervisor cannot orphan it. Every deployment borgo writes — the Dockerfiles, the systemd unit, the compose file — sets the variable, so the re-exec only happens to a hand-launched server. What the ceiling bounds is how many loader calls this process can have in flight against the Go server: event streams and the topic relay are the front's own sockets now, inbound, and are not drawn from this pool.
 
-In dev there are three processes: the `borgo dev` watcher, the Go binary it builds, and a separate Bun process running the front server — separate so a code change can be applied by restarting it without losing the watcher. More on that below.
+In dev there are three processes: the `borgo dev` watcher, the Go binary it builds, and a separate Bun process running the render service — separate so a code change can be applied by restarting it without losing the watcher. More on that below.
 
 ### The watchdog
 
-Each half watches the other, because a pair supervised as one command must die as one. The Bun side is simple: `borgo start` spawns `dist/api` with `BORGO_PARENT_PID` set to its own pid, and if the API exits on its own the front exits with its code; the re-exec'd child polls `BORGO_SUPERVISOR_PID` every 2 seconds. The Go side lives in `watchdog_*.go` and is the part with platform branches:
+Each half watches the other, because a pair supervised as one command must die as one. The Bun side is simple: `borgo start` spawns `dist/api` with `BORGO_PARENT_PID` set to its own pid, and if the Go process exits on its own the parent exits with its code; the re-exec'd child polls `BORGO_SUPERVISOR_PID` every 2 seconds. The Go side lives in `watchdog_*.go` and is the part with platform branches:
 
 - **A probe at boot.** Before binding, `borgo.Serve` checks whether the pid in `BORGO_PARENT_PID` is already gone and refuses to start if it is, with an error — otherwise an API launched under a dead supervisor would mount, serve nobody, and report a clean exit. `kill(pid, 0)` alone is not the probe: it succeeds on a zombie, so the check also asks the kernel whether the pid is a corpse.
 - **A 250 ms poll after that.** For the direct parent the evidence is reparenting — `getppid()` changing — which survives the freed pid being reused. For a pid that is not the parent (a hand-set variable; borgo prints one line at boot when that is the case) the poll falls back to the probe.
@@ -51,7 +52,9 @@ When the parent is gone the server runs the same graceful shutdown a `SIGTERM` w
 
 ## What happens at boot
 
-`serve()` in `packages/borgo/src/server.ts` runs a fixed sequence before it binds a port. Everything here is work that would otherwise happen on every request.
+Both halves have one. The front's is short: read the inventory the build left in `.borgo/build-output.json`, walk `public/` once, hold the outputs the build vouched for in memory under a 64 MiB budget, read the environment, bind the public port and a loopback listener for the API. It has no route table of its own — the pages it may cache are the render service's answer to `/__borgo/routes`, asked once per boot of that process.
+
+The long sequence is the render service's. `serve()` in `packages/borgo/src/server.ts` runs it before it binds a port, and everything in it is work that would otherwise happen on every request.
 
 **1. Build or verify the assets.** In production the boot serves what `borgo build` left on disk only when it can establish that a finished production build is there; anything else is rebuilt, and the reason is printed. Four things have to hold. `.borgo/routes.gen.tsx` exists. Every name the build recorded is on disk as a file, of the length recorded — not merely present, because an entry truncated to nothing answers 204 with no body and nothing hydrates, silently. `.borgo/build-mode` says `production` in so many words: absent, empty or unreadable is not a licence to serve, since a half-copied `.borgo` is exactly how a tree reaches that state and the cost of guessing wrong is a development bundle on a production port. And `.borgo/build-incomplete` is gone — it is written before the first generated file and removed after the last byte of a successful build, so a build that died in the middle cannot be mistaken for one that finished. Under `borgo dev` the assets are built every time.
 
@@ -61,36 +64,63 @@ When the parent is gone the server runs the same graceful shutdown a `SIGTERM` w
 
 **4. Prepare the shell.** `index.html` is read once and cut into the pieces a render concatenates: everything before `<!--app-->`, that prefix split again at `</head>` (with and without its `<title>`), the tail split at `<!--props-->`, and two prebuilt zero-JS tails for pages that opt out of hydration. Injecting a page's `<head>` is then a three-string join instead of a rewrite of the whole shell.
 
-**5. Resolve the environment.** Port, API base URL, proxy timeout and retry counts, maximum request body, the security header and CSP policy, whether CSRF is enforced. Each is read once here, not per request. The full list is in the [environment reference](deploy.md#environment-reference).
+**5. Resolve the environment.** The render port and the boot key, the API base URL, the maximum body an action may read, the security header and CSP policy, whether CSRF is enforced on form actions. Each is read once here, not per request; the body limit and the CSRF check on `/api` are the front's, read once there. The full list is in the [environment reference](deploy.md#environment-reference).
 
-**6. Index the static files.** In production one walk of `public/` records every file's size, mtime, content type, cache-control, whether it has `.br`/`.gz` siblings and an ETag for each variant. A static request then answers from a `Map` lookup with no `stat` call. Dev skips this: it rewrites assets in place under stable names, where a cached ETag would pin the browser to yesterday's bundle.
+**6. Index the static files.** The front serves `public/` and rarely leaves anything for this process, so the index here is the fallback: in production one walk records every file's size, mtime, content type, cache-control, whether it has `.br`/`.gz` siblings and an ETag for each variant. What still reaches it is the path the front deliberately declines — a file whose name carries no extension, which is almost always a page — so the lookup has to be there when a route misses. Dev skips this on both sides: it rewrites assets in place under stable names, where a cached ETag would pin the browser to yesterday's bundle.
 
-**7. Bind.** `Bun.serve` with a 30-second socket read deadline (`idleTimeout`, overridable with `BORGO_FRONT_READ_TIMEOUT` in seconds, capped at bun's maximum of 255; `0` disables it), and a WebSocket handler for both the app topic relay and the dev channel. That deadline is not a response-side setting — the same number bounds how long bun waits for an inbound request's headers and body — so a long-lived response needs something other than the knob. The deadline is never lifted and never raised. Instead, for a request that provably has nothing left to send, borgo **keeps the socket warm**: a shared two-second sweep re-arms a short deadline for as long as the exchange is still in flight, and stops the moment bun is done with it. The two moments a request qualifies are the top of `fetch()` when it carries no body and declared none — every GET and HEAD — and in the proxy the instant its body has been read in full, streamed or buffered. A stream reached by a GET qualifies at the first; one reached by a POST qualifies at the second, once its body is in. Streams survive; a POST that declares a `Content-Length` and then dribbles one byte does not. A request that finishes before its first sweep is never touched at all, so ordinary traffic behaves exactly as it does on a stock `Bun.serve`.
+**7. Bind.** `Bun.serve` on `127.0.0.1` and the render port, with a WebSocket handler for both the app topic relay and the dev channel, and no socket deadline at all. That is not a relaxation: bun's `idleTimeout` bounds the response write as well as the inbound read, so on the public port it used to cut a document that streamed longer than it had, and borgo had to keep re-arming it by hand for every request that provably had nothing left to send. The deadlines that matter moved to where the browser actually is — the front's read, read-header and write timeouts, and a header deadline on the render hop — and the only client of this listener is the front, on loopback, which has its own.
 
 The route table is then printed and the server is live. Nothing about the table can change afterwards: adding a page means a restart, which in dev is what the watcher does for you.
 
 ## The path of a request
 
-Every request enters one `fetch` handler. The order below is the order in the source, and it matters — the first match wins.
+A request meets two dispatchers, and in both the order below is the order in the source: the first match wins.
+
+The front's, on the public port:
 
 ```
   request
     |
+    +-- /__borgo/* ......... a name the two processes use: 404 to the browser
+    +-- /healthz ........... status of both halves
+    +-- /metrics ........... prometheus text, only with BORGO_METRICS=1
+    +-- /api/* ............. your go handlers, in this process
+    |
+    +-- GET|HEAD + a file under public/ ... from memory, or opened per request
+    +-- a page that exports revalidate .... the shared cache, when it may
+    +-- everything else ................... forwarded to the render service
+```
+
+And the render service's, behind it:
+
+```
+  request  (loopback; without this boot's key, 403 before the path is read)
+    |
     +-- /ws ................ websocket upgrade, Origin checked, topics joined
     +-- POST /__borgo/publish  go -> browser push (loopback, or BORGO_PUSH_KEY)
     +-- /__borgo/dev* ...... dev only: the fast-refresh channel
-    +-- /healthz ........... status of both halves
-    +-- /metrics ........... prometheus text, only with BORGO_METRICS=1
+    +-- /__borgo/routes .... which pages may be shared, and under which tags
+    +-- /healthz ........... this process alone, for the front's probe
     |
-    +-- /api/* ............. proxied to the go server
-    +-- GET|HEAD + a file in public/ ..... static asset
+    +-- GET|HEAD + a file in public/ ..... the late probe, for an odd name
     +-- POST + a page with an action ..... form action
     +-- GET|HEAD + ?__borgo=props ........ loader data as json
     +-- GET|HEAD + a page ................ rendered document
     +-- otherwise ......................... 404 (or the _404 page), 405
 ```
 
-Four of those are worth following in full.
+Five of those paths are worth following in full, starting with the one that is new.
+
+### The render hop
+
+What the front does not answer itself it forwards to the render service, and what travels with the request is the design:
+
+- **`X-Borgo-Internal`**, the key for this boot: minted by the parent process, handed to both halves in the environment, compared in constant time at the top of the render service's handler and again on everything that calls back this way. Without it the answer is 403, before the path is even looked at.
+- **`X-Borgo-Session`**, the session the front already verified, as the stored JSON. The render service has never held the signing key; a loader reads a fact, not a credential. A client presenting either of these header names is a client forging something only this process may state, so both are deleted before the key is set.
+- **`Host` as the browser stated it**, because the render service builds absolute URLs and compares WebSocket origins against it. `X-Forwarded-For` and `X-Forwarded-Proto` are kept only from a peer in `BORGO_TRUSTED_PROXIES` and otherwise rebuilt from the connection alone: from anyone else they are the client's own claims, and a TLS-terminating proxy whose `X-Forwarded-Proto` got crushed to `http` would have every WebSocket handshake refused as cross-origin.
+- **`X-Borgo-Boot`**, on the way back: the render service stamps every response with the moment it booted, so a restart makes the front re-read the page policies rather than cache against a table that no longer exists. That header and the internal names beside it are stripped before the response reaches the browser.
+
+The deadline on the hop (`BORGO_RENDER_TIMEOUT`) covers the wait for response *headers* only and is then dropped, so a streaming document and a WebSocket run as long as they want. When the render service cannot be reached the front answers 503, and 504 when it did not answer in time, each with `Retry-After` — never a rendered error page, which would need the half that is down.
 
 ### A rendered document
 
@@ -110,27 +140,24 @@ A `HEAD` renders for real — the status and headers must be what a `GET` would 
 
 ### `/api/*`
 
-The proxy is the thinnest layer in the framework. It rewrites nothing about the payload:
+There is no proxy left on this path. The `ServeMux` that holds your handlers is in the process that answered the port, so the request reaches `api/*.go` with nothing between but the front's own middleware: the body limit (`BORGO_MAX_BODY`, 32 MB), the CSRF check on unsafe methods, and the request counters. Nothing is serialized, nothing is buffered to make a retry possible, and there is no second deadline to tune.
 
-- Hop-by-hop headers (`Connection` and everything it names, `Upgrade`, `Transfer-Encoding`, the `Proxy-*` family) are stripped, because they govern the browser-to-Bun connection, not this one.
-- `Host` is dropped and moved to `X-Forwarded-Host` if nothing set one already, so Go's `r.Host` is the API borgo actually dialed rather than whatever the client typed.
-- Bodies of at most 10 MB with a stated `Content-Length` are buffered so the request can be retried; larger or chunked bodies stream through once, without retry.
-- The response is passed back with `decompress: false` — Go's gzip reaches the browser as Go wrote it, never inflated and recompressed.
-- The deadline (`BORGO_API_TIMEOUT`, 30s) covers the wait for response *headers* only, then is dropped, so an SSE stream runs as long as it wants.
-- A refused connection is retried three times in production, fifteen in dev, where the API restarts on every `.go` edit.
+The security headers changed direction here, and it is worth knowing which way. They used to stop at the proxy: whatever Go wrote on an `/api` response was what shipped. Now they are applied by authorship rather than by path — the wrapper sits on the whole public port — so an `/api` response picks up `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options`, and only where your handler left that header empty. The CSP is the exception it always was: it goes on `text/html` and `image/svg+xml` alone, so a JSON answer never carries one. The body is still untouched, gzip and all.
 
-Failures answer as an API would: `502` when Go is unreachable, `504` on the deadline. Never the rendered 500 page — an API path must not answer HTML. The `/api/*` response is also the one response borgo does not add its own security headers to; Go's headers pass through as they are.
+Loaders pay a hop in the other direction — the render service's typed client calls the Go server on `API_PORT`, a listener bound to `127.0.0.1` alone. That one is a real round trip; see the limit at the end of this page.
 
-On the Go side two middlewares sit between `ServeMux` and your handler, and both are deliberately pedantic about header spelling, because a cache or a client is allowed to be:
+Two more middlewares sit between `ServeMux` and your handler, and both are deliberately pedantic about header spelling, because a cache or a client is allowed to be:
 
 - **gzip.** Responses of at least 1024 bytes are compressed when the client accepts it; smaller ones, event streams, pre-encoded responses and `HEAD` bodies pass through. `Accept-Encoding` is read as one folded list across repeated field lines and coding names compare case-insensitively, so `GZIP` compresses and `gzip, gzip;q=0` is a refusal. `Vary: Accept-Encoding` is set whether or not the response ends up compressed, and the writer is wrapped for every request so a panic means the same thing to a gzip client and an identity one.
 - **cache.** `borgo.Cache` writes `public, max-age=…`, but a response that carries `Set-Cookie` is rewritten to `private` on the way out, in whichever order the handler called the two. The guard finds the cookie under any spelling of the key — `w.Header()["set-cookie"]` reaches the wire in `net/http` without canonicalisation — and rewrites `Cache-Control` across every field line a handler left, in the order the writer emits them, so a shared cache can never store a personalised body.
 
 ### A static asset
 
-`GET /assets/client-a1b2c3d4.js` is decoded, checked for traversal and separator tricks (on Windows also for the NTFS alternate-stream and reserved characters that alias a file under a name the path checks never saw), and looked up in the boot-time index. A hit answers with the ETag, `Last-Modified`, `Content-Length` and — when the client accepts it — the `.br` or `.gz` sibling written at build time, with `Cache-Control: public, max-age=31536000, immutable` for content-hashed files. `If-None-Match` gets a `304` with no file read at all.
+`GET /assets/client-a1b2c3d4.js` is answered by the front, in Go. The path is decoded, checked for traversal and separator tricks (on Windows also for the NTFS alternate-stream and reserved characters that alias a file under a name the path checks never saw), and looked up in the boot-time index. A name the build vouched for is served from memory — measured, and the reason this moved: the same 31 kB file read from disk per request queued badly under 64 connections where memory answered four times as fast. Anything else under `public/` is opened per request. A hit answers with the ETag, `Last-Modified`, `Content-Length` and — when the client accepts it — the `.br` or `.gz` sibling written at build time. `If-None-Match` gets a `304` with no file read at all.
 
-Two classes of file under `public/` are never served, on either the indexed road or the live fallback: a file whose own name starts with a dot (`.DS_Store`, `.gitkeep`, an `.env` somebody dropped, an editor's `.swp`), and anything under a directory whose name starts with a dot (`public/.git/config`, `public/.svn/entries`). The one exception is `.well-known` as the *first* segment, exact and lower-case, because RFC 8615 puts ACME renewals and `security.txt` there and nowhere else. `borgo export` applies the same rule before copying `public/`.
+`Cache-Control: public, max-age=31536000, immutable` needs three facts at once, none of which is the shape of the name: the build recorded this exact path, the length on disk matches what it recorded, and so does the length of the identity behind the representation being sent. A partial deploy that left a stale `.gz` beside a fresh file must not pin either for a year.
+
+A path whose last segment carries no extension is not served here at all: it is almost always a page, so it goes to the router, and the render service keeps a late probe for the rare plain file that collides with no route. Two classes of file under `public/` are never served, on either side and on either the indexed road or the live fallback: a file whose own name starts with a dot (`.DS_Store`, `.gitkeep`, an `.env` somebody dropped, an editor's `.swp`), and anything under a directory whose name starts with a dot (`public/.git/config`, `public/.svn/entries`). The one exception is `.well-known` as the *first* segment, exact and lower-case, because RFC 8615 puts ACME renewals and `security.txt` there and nowhere else. `borgo export` applies the same rule before copying `public/`.
 
 Assets are checked *before* page routes, so a file in `public/` shadows a page of the same path for `GET` and `HEAD`. It does not shadow a `POST`: a page action must not be hijacked by a static file.
 
@@ -272,24 +299,24 @@ Both outputs are written only after every check has passed, so a failed run neve
 
 ## The dev loop
 
-`borgo dev` is the same machinery with three switches flipped: React is built in development mode, precompression and the asset index are skipped, and the front server opens a WebSocket channel to the browser.
+`borgo dev` is the same machinery with three switches flipped: React is built in development mode, precompression and the asset indexes are skipped, and the render service opens a WebSocket channel to the browser — which reaches it through the front, the one internal name the front forwards instead of refusing.
 
 ```
   borgo dev  (the watcher)
      |
-     |-- go build -o .borgo/next-api .   -> swap -> spawn -> poll until it answers
+     |-- go build -o .borgo/next-api .  -> swap -> spawn -> the front, :3000
      |                                                          |
-     |-- bun serve-entry.ts (BORGO_DEV=1) -----------------------+-> front server :3000
-     |                                                                |
-     |   fs.watch(".", recursive)                                     |  ws /__borgo/dev
-     |     *.go     -> borgogen, rebuild, restart api, reload         v
-     |     *.css    -> recompile, hot-swap the <link>              browser
-     |     *.ts(x)  -> restart the front server, fast refresh
+     |-- bun serve-entry.ts (BORGO_DEV=1) -> the render service, :3600
+     |                                                          |
+     |   fs.watch(".", recursive)                               |  ws /__borgo/dev,
+     |     *.go     -> borgogen, rebuild, restart api, reload    |  through the front
+     |     *.css    -> recompile, hot-swap the <link>            v
+     |     *.ts(x)  -> restart the render service, fast refresh  browser
 ```
 
-The interesting part is what "restart the front server" means for the browser. A `.tsx` edit kills and respawns the front Bun process with `BORGO_CHANGED` set to the file. That process rebuilds the assets, and while building it records which output chunk each page landed in. When the browser's socket reconnects, the server greets it with that map, and the browser re-imports only the chunk for the page it is on, runs `performReactRefresh`, refetches props through the same `?__borgo=props` endpoint a navigation uses, and re-renders. Component state survives. A layout, the shell or a `.go` file cannot be applied that way and take a full reload instead.
+The interesting part is what "restart the render service" means for the browser. A `.tsx` edit kills and respawns the render Bun process with `BORGO_CHANGED` set to the file. That process rebuilds the assets, and while building it records which output chunk each page landed in. When the browser's socket reconnects, the server greets it with that map, and the browser re-imports only the chunk for the page it is on, runs `performReactRefresh`, refetches props through the same `?__borgo=props` endpoint a navigation uses, and re-renders. Component state survives. A layout, the shell or a `.go` file cannot be applied that way and take a full reload instead.
 
-Restarting the whole process for every edit sounds heavy and is not: the module graph is clean every time, so there is no stale-module class of bug at all, and the cost is the asset rebuild, which is a `Bun.build` of your app. A boot that throws does not take the port down — the process falls back to a tiny server that answers every request with the error overlay and keeps the dev channel alive, so the next successful rebuild reloads the browser instead of leaving you with a dead port.
+Restarting the whole process for every edit sounds heavy and is not: the module graph is clean every time, so there is no stale-module class of bug at all, and the cost is the asset rebuild, which is a `Bun.build` of your app. A boot that throws does not take the site down — the public port is the Go process's and stays bound, and the render service falls back to a tiny server that answers every request with the error overlay and keeps the dev channel alive, so the next successful rebuild reloads the browser instead of leaving you looking at a 503.
 
 Go edits go through a scratch binary: the build writes `.borgo/next-api` while the old API keeps serving, the output is hashed to skip no-op rebuilds, and only then is the old process killed and the file swapped. The browser is reloaded after the new API answers, not before. [Dev experience](dev-experience.md#fast-refresh) covers the contract from the other side.
 
@@ -299,12 +326,12 @@ Go edits go through a scratch binary: the build writes `.borgo/next-api` while t
 
 **Everything is resolved at boot, including the route table.** Adding, renaming or deleting a page requires a restart. There is no watch mode in production, by design.
 
-**One process per server.** `Bun.serve` is bound without port reuse, so you cannot run several front servers behind one port. Scale horizontally with several instances behind your reverse proxy, each with its own port.
+**One process per port.** Neither listener is bound with port reuse, so you cannot run two borgo apps behind one port. Scale horizontally with several instances behind your reverse proxy, each with its own port.
 
-**The API hop is a real HTTP round trip.** JSON is serialized in Go and parsed in Bun for every loader call, over loopback. It is fast, but it is not a function call, and a page whose loader makes six sequential API calls pays for six. Use `Promise.all`.
+**A loader's API call is a real HTTP round trip.** JSON is serialized in Go and parsed in Bun for every loader call, over loopback. It is fast, but it is not a function call, and a page whose loader makes six sequential calls pays for six. Use `Promise.all`. A browser's own `/api` call pays none of this: it never leaves the Go process.
 
-**The front server is a proxy, not a gateway.** It does not cache, transform, rate-limit or authenticate `/api/*`. Anything of that kind belongs in Go, or in the reverse proxy in front of borgo.
+**The front is your API's own process, not a gateway.** It does not cache, transform or rate-limit `/api/*`; what it adds is the body limit, the CSRF check and the counters. Anything else of that kind belongs in your handlers, or in the reverse proxy in front of borgo. Pages are the only thing it proxies, and only to the render service beside it.
 
 **Islands ship with the entry, not as separate chunks.** Island components are registered eagerly in `islands.gen.ts`, so `client="visible"` defers the hydration work, not the download. See [islands](client-navigation.md#islands).
 
-**Two processes mean two things to supervise.** `borgo start` hides that behind one command and one exit code, but a `docker stop` still has to reach both, and a split deployment (`--front-only`) puts the burden back on you. [Deploy](deploy.md) covers the layouts that work.
+**Two processes mean two things to supervise.** `borgo start` hides that behind one command and one exit code, but a `docker stop` still has to reach both, and splitting them across two hosts is not supported: the render service must be on loopback from the front. [Deploy](deploy.md) covers the layouts that work.

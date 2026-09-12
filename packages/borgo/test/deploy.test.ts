@@ -380,6 +380,8 @@ describe("argument refusals", () => {
         expect(unknownArg(command, [])).toBeNull();
         expect(unknownArg(command, ["--tailwind"])).toBeNull();
       }
+      // recognised, not honoured: cli.ts refuses it naming what replaced it,
+      // which is what someone upgrading from 0.2x needs to read
       expect(unknownArg("start", ["--front-only"])).toBeNull();
       expect(unknownArg("start", ["--front-only", "--tailwind"])).toBeNull();
     });

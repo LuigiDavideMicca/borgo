@@ -1,0 +1,57 @@
+# Upgrading to 0.30
+
+What this covers: the one structural change 0.30 makes, what it does to an app's code (almost nothing), and the five places it can break a deployment. If you run `borgo start` in a container and touch none of borgo's own environment variables, the upgrade is a version bump and this page is a five-minute read you can skip to the [checklist](#checklist).
+
+The version number jumps 0.22 → 0.30 rather than 0.23 to make the break visible. It is a topology change, not a rename.
+
+## What changed
+
+Through 0.2x the Bun process answered the public port and forwarded `/api/*` to the Go binary behind it. In 0.30 that is inverted: **the Go binary answers the public port, and the Bun process is a render service behind it, on loopback.**
+
+```
+  0.2x   browser -> bun :3000 -> go :3501
+  0.30   browser -> go :3000 -> bun :3600 (loopback)
+                       `-> /api/* answered in this same process
+```
+
+`borgo start` still starts everything with one command and still exits with one code. What moved is which process the browser talks to, and therefore who owns the request path: `/api/*`, static files, the shared page cache, `/healthz`, `/metrics`, the security headers, the CSRF check on unsafe API requests and the body limit are all Go's now. Pages are the one thing forwarded, and the front hands the render service a session it has already verified rather than asking it to verify anything.
+
+Why: an API call no longer crosses a process boundary, and a static file is answered from memory by the process that owns the socket. The reasoning and the measurements are in [architecture](architecture.md#two-processes) and [performance](performance.md).
+
+## What does not change
+
+Nothing in your app's code. Pages, loaders, actions, layouts, islands, `env.ts`, `api/*.go` handlers, `//borgo:route`, the typed client, `borgo.SSE`, `borgo.Push`, `borgo.Revalidate`, sessions and CSRF tokens all behave as they did, and the generated types are the same. There is no new import and no new export to declare.
+
+`borgo dev`, `borgo build` and `borgo export` take the same arguments and produce the same output. The `.borgo/` layout is unchanged.
+
+## The five things that can break a deployment
+
+**1. `--front-only` is refused.** It ran the Bun front alone against an API on another host. The Bun process is now a renderer that binds loopback, so running it alone would start something nothing can reach. It exits 1 with that explanation. A two-host split is not supported in 0.30 — see the [deploy](deploy.md) page.
+
+**2. A two-container layout no longer works.** Same reason: the render service answers only requests carrying the key the front minted for this boot, over loopback. Run both halves in one container, and scale by running more of them behind your reverse proxy. If you generated a compose file from the 0.2x docs with an `api` service and a `front` service, replace it with a single service, or regenerate it with `borgo deploy init compose`.
+
+**3. `API_PORT` is loopback-only.** The Go API binds `127.0.0.1` for it. Anything that dialed the API directly — a sidecar, a cron container, a health check pointed at `:3501` — has to go through the public port instead, where `/api/*` is the same mux. The public port is the whole public surface now, which is the point.
+
+**4. Two environment variables are gone.** They belonged to the Bun front server:
+
+| 0.2x | 0.30 |
+| --- | --- |
+| `BORGO_FRONT_READ_TIMEOUT` (seconds) | `BORGO_READ_TIMEOUT` (Go duration, e.g. `30s`) |
+| `BORGO_API_TIMEOUT` (ms, waiting for the API) | nothing — `/api` does not cross a process. For the wait on a *render*, `BORGO_RENDER_TIMEOUT` (duration, default `30s`) |
+
+Neither old name is honoured as an alias, so a stale value is inert rather than half-applied. Three variables are new and normally set for you by `borgo start`: `BORGO_RENDER_URL` (naming a render service is what makes the binary a front), `BORGO_RENDER_PORT` (default `3600`, loopback) and `BORGO_INTERNAL_KEY` (minted per boot). Set `BORGO_TRUSTED_PROXIES` if borgo sits behind a TLS-terminating proxy — otherwise its `X-Forwarded-Proto` is not believed, and every WebSocket handshake is compared against `http` and refused. The full list is the [environment reference](deploy.md#environment-reference).
+
+**5. Two smaller behaviour changes, both visible from outside.** An `/api/*` response now carries `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options` where your handler left them empty: the headers are applied by authorship rather than by path, and the whole public port is borgo's authorship. The CSP is unaffected — it still goes on HTML and SVG alone. And `/metrics` now labels API requests by the route pattern the mux matched rather than lumping them under `/api/*`, so a dashboard that grouped on that label needs its query adjusted.
+
+## A new port to know about
+
+`BORGO_RENDER_PORT`, `3600` by default, on `127.0.0.1`. If something else on the box already holds it, set the variable — `borgo start` resolves the whole topology in one place and configures both halves from it, so they cannot disagree. It needs no firewall rule, and it must not get one: a listener reachable from outside the box is exactly what the boot key exists to make useless.
+
+## Checklist
+
+1. Bump `borgo-framework` and the Go module together — they are one version, as ever.
+2. `borgo build`, then `borgo start`: the banner prints the public port and, under it, the render service and the internal api it resolved.
+3. Grep your deployment for `--front-only`, `BORGO_API_TIMEOUT`, `BORGO_FRONT_READ_TIMEOUT` and any direct use of `API_PORT` from outside the app.
+4. If you wrote your own compose or systemd file from the 0.2x docs, regenerate it (`borgo deploy init compose`, `borgo deploy init systemd`) and diff.
+5. Behind a reverse proxy, set `BORGO_TRUSTED_PROXIES`.
+6. `curl -si localhost:3000/healthz` reports both halves; a `503` with `Retry-After` on a page means the render service is not up, and the body says so.

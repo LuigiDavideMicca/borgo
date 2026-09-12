@@ -33,7 +33,7 @@ If you are developing against a local borgo checkout, uncomment the `replace` di
 - `bun run export` — prerender the statically exportable pages into `dist/site/`
 - `bun run doctor` — diagnose the environment (bun and go versions, the bun shim on `PATH`, node, docker, the two ports and who holds them, disk space, the generated types, your dependencies, write access) with a fix beside each failing check
 
-The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the blessed deploy configs) and `pwa init` (manifest and service worker) — run them with `bunx borgo <cmd>`. The [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) covers reverse proxy samples, systemd, and split-service setups.
+The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the blessed deploy configs) and `pwa init` (manifest and service worker) — run them with `bunx borgo <cmd>`. The [deploy guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/deploy.md) covers reverse proxy samples, systemd and compose.
 
 ## Deploy
 
@@ -54,7 +54,7 @@ The users and notes stores are in memory, so there is no volume here yet; swap t
 
 The user and note stores are maps in memory, so everything disappears on restart — swap the two stores in `api/users.go` and `api/notes.go` for a real database and no page changes. The [auth guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/auth-and-sessions.md) explains what the framework guarantees and what stays yours.
 
-Ports: front server on `PORT` (default 3000), Go API on `API_PORT` (default 3501).
+Ports: the go binary answers `PORT` (default 3000), the only public one. Its api also listens on `API_PORT` (default 3501) and the bun render service on `BORGO_RENDER_PORT` (default 3600), both on loopback.
 
 ---
 

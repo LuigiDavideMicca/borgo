@@ -27,7 +27,7 @@ const badArg = unknownArg(command, process.argv.slice(3));
 if (badArg) {
   console.log(`\n  ${banner(command)}\n`);
   console.log(`  ${c.red(g.err)} ${badArg}`);
-  console.log(`  usage: borgo ${command}${command === "start" ? " [--front-only]" : ""} [--tailwind]\n`);
+  console.log(`  usage: borgo ${command} [--tailwind]\n`);
   process.exit(1);
 }
 
@@ -140,8 +140,23 @@ switch (command) {
     const topology = frontTopology(process.env);
     Object.assign(process.env, renderEnv(topology));
 
-    // --front-only: the api runs elsewhere (API_URL)
-    if (!process.argv.includes("--front-only")) {
+    // --front-only meant "the front server is here, the api is elsewhere".
+    // The go binary is the front now, and this process is the render service
+    // behind it on loopback - so skipping the child leaves a renderer with no
+    // front, listening where nothing outside this machine can reach it. A
+    // split deployment needs the go host to name a render service it can
+    // reach, which is a deploy shape phase 1 has not wired yet: refused here
+    // rather than started as something that cannot serve a request
+    if (process.argv.includes("--front-only")) {
+      console.error(
+        `  ${c.red(g.err)} --front-only is not available in this topology\n` +
+          `  the go binary answers the public port and this process renders behind it;\n` +
+          `  running only the renderer would bind loopback with no front in front of it.\n` +
+          `  a split deployment is not wired yet - run \`borgo start\` on one host for now`,
+      );
+      process.exit(1);
+    }
+    {
       const bin = `dist/${goBinName()}`;
       if (!existsSync(bin)) {
         console.error(`  ${c.red(g.err)} ${bin} not found - run \`borgo build\` first`);
