@@ -462,6 +462,17 @@ export const renderEnv = (t: FrontTopology): Record<string, string> => ({
   API_PORT: String(t.apiPort),
 });
 
+// what a go child is handed by a process that has already become the render
+// service: that process's environment, minus the render half's own switches.
+// borgo start and borgo export assign renderEnv to process.env and then
+// spread process.env into the go binary, so every go child was carrying
+// BORGO_RENDER=1. Go reads neither name today, which is exactly when a name
+// reaching the wrong process is cheapest to take away
+export function withoutRenderEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const { BORGO_RENDER: _render, BORGO_RENDER_PORT: _renderPort, ...rest } = env;
+  return rest;
+}
+
 // the render half of the switches: a render service without a usable key is
 // a loopback listener anyone on the box can drive, so it refuses to boot
 function renderSwitches(env: Record<string, string | undefined>) {

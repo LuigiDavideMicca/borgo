@@ -8,7 +8,7 @@ import { banner, c, fmtMs, g } from "./colors";
 import { inHiddenDirectory, isHiddenAsset } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD } from "./index";
 import type { Route } from "./router";
-import { frontTopology, goBinName, INTERNAL_KEY_HEADER, renderEnv, runBorgogen } from "./util";
+import { frontTopology, goBinName, INTERNAL_KEY_HEADER, renderEnv, runBorgogen, withoutRenderEnv } from "./util";
 
 type ExportModule = Route["module"];
 
@@ -289,6 +289,12 @@ export async function exportSite(): Promise<number> {
   // render service and the pages are fetched from it; a go binary is built
   // and started only when a loader needs the api, as a plain api, so an app
   // of pages alone still exports with no go module in sight
+  // three ports, and the third is bound by nobody on purpose. PORT is where
+  // borgo.Push lands when nothing else names a destination, and a loader
+  // that pushes during an export would otherwise publish to the shell's PORT
+  // or to :3000 - a dev server that may be running beside this, with a
+  // browser attached. A free port nothing listens on makes that push fail
+  // here instead of reaching a real page
   const [apiPort, frontPort, renderPort] = await freePorts(3);
   process.env.API_PORT = String(apiPort);
   process.env.PORT = String(frontPort);
@@ -329,7 +335,7 @@ export async function exportSite(): Promise<number> {
         // no BORGO_RENDER_URL: a plain api on apiPort, which is what the
         // loaders of the pages being exported call
         env: {
-          ...process.env,
+          ...withoutRenderEnv(process.env),
           API_PORT: String(apiPort),
           PORT: String(frontPort),
           BORGO_RENDER_URL: "",

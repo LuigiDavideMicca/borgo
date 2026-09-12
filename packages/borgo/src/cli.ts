@@ -136,7 +136,7 @@ switch (command) {
 
     // the go binary answers the public port, this process is its render
     // service, and the boot key travels from here to both halves
-    const { frontTopology, goFrontEnv, renderEnv } = await import("./util");
+    const { frontTopology, goFrontEnv, renderEnv, withoutRenderEnv } = await import("./util");
     const topology = frontTopology(process.env);
     Object.assign(process.env, renderEnv(topology));
 
@@ -168,7 +168,7 @@ switch (command) {
         stdout: "inherit",
         stderr: "inherit",
         env: {
-          ...process.env,
+          ...withoutRenderEnv(process.env),
           ...goFrontEnv(topology),
           BORGO_PARENT_PID: String(process.pid),
         },

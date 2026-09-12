@@ -354,8 +354,16 @@ export async function dev() {
 
   // a restart for a clean module graph; the browser hot-applies on reconnect
   const startFront = async (changed?: string[]) => {
-    frontProc?.kill();
-    await frontProc?.exited;
+    // detached BEFORE the kill, as the api's restart does: the exit handler
+    // below asks "am I still the render service?", and while frontProc still
+    // pointed at the process being replaced the answer was yes - so every
+    // hot restart printed "exited on its own (143)" for a kill this very line
+    // had just sent, training the reader to ignore the one message that
+    // means the render service really died
+    const previous = frontProc;
+    frontProc = null;
+    previous?.kill();
+    await previous?.exited;
     // not "bun": killing a PATH shim leaves the real server on the port
     const proc = Bun.spawn([process.execPath, serverEntry], {
       stdout: "inherit",
