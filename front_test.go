@@ -201,6 +201,12 @@ func TestFrontForwardsAVerifiedSessionAsAFact(t *testing.T) {
 	if string(raw) != `{"role":"admin","userId":7}` {
 		t.Errorf("session payload %s", raw)
 	}
+	// the wire form, byte for byte: unpadded base64url. session-context.test.ts
+	// decodes this same literal on the render side, so the two halves are
+	// pinned to one encoding rather than each to its own
+	if got := seen.Get(sessionHeader); got != "eyJyb2xlIjoiYWRtaW4iLCJ1c2VySWQiOjd9" {
+		t.Errorf("session header on the wire %q", got)
+	}
 
 	// tampered: no fact travels, and the cookie is not the render service's
 	// to judge

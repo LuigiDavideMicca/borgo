@@ -367,6 +367,28 @@ export type Switches = {
 // uses to hand over a session it has already verified
 export const INTERNAL_KEY_HEADER = "X-Borgo-Internal";
 export const SESSION_HEADER = "X-Borgo-Session";
+
+// The session a loader or an action sees. Read ONLY in render mode: there the
+// boot key was checked at the top of fetch, so the header was written by the
+// go front, which deletes any client's own spelling before setting it. A
+// render service started without a front - serve() called by an embedder or
+// a test - receives the same header straight from whoever sent the request,
+// and reading it there would be believing a session somebody typed. The
+// failure direction is always "no session", never "somebody's session":
+// absent, not render mode, not base64url, not a json object - all null.
+export function sessionFrom(req: Request, render: boolean): import("./router").Session | null {
+  if (!render) return null;
+  const raw = req.headers.get(SESSION_HEADER);
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as import("./router").Session)
+      : null;
+  } catch {
+    return null;
+  }
+}
 // the go front's page cache asks for a shared render with this header: the
 // request arrives anonymised, the render mints no csrf token, and the
 // response is drained here so the errored-render mark can travel as a header
@@ -987,6 +1009,9 @@ export type ActionOptions = {
   maxBody: number;
   // the api client bound to this request's cookies, collecting set-cookie
   apiFor: (req: Request, onSetCookie?: (cookies: string[]) => void) => ActionContext["api"];
+  // the verified session for this request (sessionFrom). Optional because
+  // absent reads as "nobody", which is the safe default
+  sessionFor?: (req: Request) => ActionContext["session"];
   runLoader: RunLoaderFn;
   renderPage: RenderPageFn;
   sendJson: SendJsonFn;
@@ -1012,6 +1037,7 @@ export async function runAction(
     csrfRejects: rejectsCsrf,
     maxBody,
     apiFor,
+    sessionFor = () => null,
     runLoader,
     renderPage,
     sendJson,
@@ -1052,6 +1078,7 @@ export async function runAction(
         params: target.params,
         api: apiFor(req, (c) => apiCookies.push(...c)),
         apiUrl,
+        session: sessionFor(req),
       });
       if (result instanceof Response) {
         const location = result.headers.get("Location");

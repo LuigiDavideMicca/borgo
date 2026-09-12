@@ -43,6 +43,7 @@ import {
   SHARED_RENDER_HEADER,
   BOOT_HEADER,
   ROUTES_PATH,
+  sessionFrom,
   runAction,
   runPropsRequest,
   topicRejection,
@@ -424,7 +425,13 @@ export async function serve({
     onSetCookie?: (cookies: string[]) => void,
   ) =>
     route.module.loader
-      ? route.module.loader({ request: req, params, api: apiFor(req, onSetCookie), apiUrl })
+      ? route.module.loader({
+          request: req,
+          params,
+          api: apiFor(req, onSetCookie),
+          apiUrl,
+          session: sessionFrom(req, render),
+        })
       : Promise.resolve({});
 
   // defaults and env switches are documented on createSecurity; resolveSwitches
@@ -543,6 +550,7 @@ export async function serve({
     csrfRejects: (req) => csrfRejects(req, { enforced: csrfEnforced }),
     maxBody,
     apiFor,
+    sessionFor: (req) => sessionFrom(req, render),
     runLoader,
     renderPage,
     sendJson,

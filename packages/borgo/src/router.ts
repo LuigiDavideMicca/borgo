@@ -5,17 +5,30 @@ import type { ApiClient } from "./api";
 // (e.g. http://localhost:3501/api) for anything the client doesn't cover.
 // the incoming request's cookies are forwarded on every api call, so go
 // handlers see the browser's session during ssr.
+// the session the go front verified for this request, or null. An app types
+// it by augmenting the interface:
+//
+//   declare module "borgo-framework" { interface Session { userId: number } }
+//
+// It is a fact go established, not a credential: the render service never
+// holds SESSION_SECRET and never reads the cookie to decide who is asking.
+export interface Session {
+  [key: string]: unknown;
+}
+
 export type LoaderContext = {
   request: Request;
   params: Record<string, string>;
   api: ApiClient;
   apiUrl: string;
+  session: Session | null;
 };
 export type ActionContext = {
   request: Request;
   params: Record<string, string>;
   api: ApiClient;
   apiUrl: string;
+  session: Session | null;
 };
 
 export type Head = { title?: string; meta?: Array<Record<string, string>> };
