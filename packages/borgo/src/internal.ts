@@ -68,3 +68,6 @@ export function registerIslands(
 export function islandRegistry() {
   return registry;
 }
+
+// what the generated .borgo/go.ts calls for each //borgo:export function
+export { callExport } from "./go-call";

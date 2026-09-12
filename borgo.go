@@ -638,7 +638,9 @@ func serveFront(ctx context.Context, onShutdown func(), renderer *url.URL, apiPo
 	}, renderer, key, renderTimeout)
 	// the loaders' way in: the app's middleware guards it as it guards the
 	// public port, or a loader would reach an api path the browser cannot
-	internal.Handler = requireInternalKey(key, withAppMiddleware(app, api))
+	// and the //borgo:export functions, which answer only here, behind the
+	// key and ahead of the app's middleware: export.go says why
+	internal.Handler = requireInternalKey(key, withExports(withAppMiddleware(app, api)))
 	defer armStreamShutdown(public)()
 	defer armStreamShutdown(internal)()
 	printFrontStartup(patterns, publicPort, internal.Addr, renderer)

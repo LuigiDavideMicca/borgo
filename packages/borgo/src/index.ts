@@ -14,6 +14,8 @@ export type {
   Route,
 } from "./router";
 export { ApiError } from "./api";
+// what a //borgo:export call throws when the Go function returned an error
+export { GoError } from "./go-call";
 export type { ApiClient, ApiOptions, ApiRequest, ApiResponse, ApiRouteKey } from "./api";
 export { browserEnv, defineEnv } from "./env";
 export type { Env, EnvSchema, EnvSpec, EnvType } from "./env";

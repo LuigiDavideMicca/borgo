@@ -282,7 +282,7 @@ func TestTheInternalListenerAndAnApiAloneAreGuardedToo(t *testing.T) {
 	}
 	code := strings.ReplaceAll(string(src), "\r\n", "\n")
 	for _, want := range []string{
-		"internal.Handler = requireInternalKey(key, withAppMiddleware(app, api))",
+		"internal.Handler = requireInternalKey(key, withExports(withAppMiddleware(app, api)))",
 		"withAppMiddleware(registeredMiddleware(), Middleware(mux))",
 		"app:      app,",
 	} {

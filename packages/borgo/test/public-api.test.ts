@@ -27,6 +27,9 @@ const ROOT_VALUES = [
   "CSRF_FIELD",
   "CSRF_HEADER",
   "CsrfField",
+  // 0.30: what a //borgo:export call throws when the Go function returned an
+  // error - public because an app catches it by class, in its own code
+  "GoError",
   "Island",
   "apiFetch",
   "csrfCookieValue",
@@ -41,6 +44,8 @@ const ROOT_VALUES = [
 ].sort();
 
 const INTERNAL_VALUES = [
+  // 0.30: the call the generated .borgo/go.ts makes for each //borgo:export
+  "callExport",
   "csrfRuntime",
   "islandRegistry",
   "registerCsrf",

@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"go/format"
+	"golang.org/x/tools/go/packages"
 	"io"
 	"os"
 	"os/exec"
@@ -391,6 +393,13 @@ func TestGenerateErrors(t *testing.T) {
 		{"middleware with the wrong signature", "badmiddleware", "must be a function func(http.Handler) http.Handler"},
 		{"matcher without a middleware", "matcheronly", "protects nothing"},
 		{"matcher that is not a []string", "badmatcher", "must be a package-level var of type []string"},
+		// //borgo:export: a signature that does not cross the wire is a build
+		// error here, not a runtime error in a loader
+		{"export without a context", "exportnoctx", "must take a context.Context first"},
+		{"variadic export", "exportvariadic", "is variadic"},
+		{"export taking a channel", "exportchan", "parameter 1 is a channel"},
+		{"export without an error result", "exportresults", "must return (T, error) or error"},
+		{"unexported export", "exportunexported", "which is not exported"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -420,6 +429,62 @@ func TestMiddlewareIsMounted(t *testing.T) {
 				t.Errorf("borgo.gen.go missing %q\n%s", c.want, gen)
 			}
 		})
+	}
+}
+
+// //borgo:export becomes a typed adapter in borgo.gen.go and a typed stub in
+// .borgo/go.ts. The adapter is checked by loading the package again with it
+// in place: a generated adapter that does not compile would otherwise only
+// be found by the app's own go build.
+func TestExportsAreGenerated(t *testing.T) {
+	root := filepath.Join("testdata", "exports")
+	if err := run(root); err != nil {
+		t.Fatal(err)
+	}
+	gen := read(t, filepath.Join(root, "api", "borgo.gen.go"))
+	for _, want := range []string{
+		`borgoctx "context"`,
+		`borgojson "encoding/json"`,
+		`time "time"`,
+		`borgo.Export("Membership", func(borgoCtx borgoctx.Context, borgoArgs []borgojson.RawMessage) (any, error) {`,
+		`return nil, borgo.ExportArity("Membership", 2, len(borgoArgs))`,
+		"var borgoA0 int64",
+		"return Membership(borgoCtx, borgoA0, borgoA1)",
+		"return nil, Forget(borgoCtx, borgoA0)",
+		"var borgoA0 time.Time",
+	} {
+		if !strings.Contains(gen, want) {
+			t.Errorf("borgo.gen.go missing %q\n%s", want, gen)
+		}
+	}
+	goTS := read(t, filepath.Join(root, ".borgo", "go.ts"))
+	for _, want := range []string{
+		`import { callExport } from "borgo-framework/internal";`,
+		`import type { Member } from "./api-types";`,
+		`membership: (userID: number, slug: string) => callExport<Member | null>("Membership", [userID, slug]),`,
+		`forget: (userID: number) => callExport<null>("Forget", [userID]),`,
+		`seen: (at: string) => callExport<boolean>("Seen", [at]),`,
+	} {
+		if !strings.Contains(goTS, want) {
+			t.Errorf("go.ts missing %q\n%s", want, goTS)
+		}
+	}
+	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
+	if !strings.Contains(types, "export interface Member") {
+		t.Errorf("api-types.d.ts does not define the Member go.ts imports\n%s", types)
+	}
+
+	// already in gofmt's form: a generated file an app's gofmt rewrites is a
+	// diff in every app that has an export, and a red `gofmt -l .` in this repo
+	if formatted, err := format.Source([]byte(gen)); err != nil || string(formatted) != gen {
+		t.Errorf("borgo.gen.go is not gofmt-clean (%v)\n%s", err, gen)
+	}
+
+	// the adapter compiles: load the package with the generated file in it
+	cfg := &packages.Config{Dir: root, Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports | packages.NeedModule}
+	pkg := loadAPI(cfg, root)
+	for _, e := range pkg.Errors {
+		t.Errorf("the generated mounting does not compile: %v", e)
 	}
 }
 
