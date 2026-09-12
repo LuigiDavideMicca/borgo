@@ -131,6 +131,7 @@ func run(root string) (err error) {
 	directives := collectDirectives(pkg, decls, routes)
 	warnLooseRouteComments(pkg, decls)
 	warnExcludedRouteFiles(root, pkg)
+	mw := collectMiddleware(pkg)
 	routes = append(routes, directives...)
 
 	sort.Slice(routes, func(i, j int) bool {
@@ -204,7 +205,7 @@ func run(root string) (err error) {
 
 	// the disk is untouched until here: any check above fails the run without
 	// leaving one output regenerated, or deleted, and the other one stale
-	writeMounting(root, pkg.Name, directives, pkg.Types.Scope())
+	writeMounting(root, pkg.Name, directives, pkg.Types.Scope(), mw)
 
 	if mkErr := os.MkdirAll(filepath.Join(root, ".borgo"), 0o755); mkErr != nil {
 		fail("%v", mkErr)
@@ -425,8 +426,55 @@ func warnExcludedRouteFiles(root string, pkg *packages.Package) {
 
 // writeMounting generates api/borgo.gen.go registering every directive
 // handler, or removes it when no directives exist.
-func writeMounting(root, pkgName string, directives []route, scope *types.Scope) {
-	if len(directives) == 0 {
+// middlewareDecl is what api/middleware.go declared: a Middleware function
+// and, optionally, the Matcher naming the paths it covers.
+type middlewareDecl struct {
+	present bool
+	matcher bool
+}
+
+var middlewareSig = "func(http.Handler) http.Handler"
+
+// collectMiddleware finds the app's middleware by its name. Every mistake is
+// a failed run naming the file and line rather than a warning: a middleware
+// that is silently not mounted is an authorization that silently does not
+// happen, and the build that ships it is green.
+func collectMiddleware(pkg *packages.Package) middlewareDecl {
+	scope := pkg.Types.Scope()
+	var decl middlewareDecl
+	if obj := scope.Lookup("Middleware"); obj != nil {
+		fn, ok := obj.(*types.Func)
+		if !ok || !isMiddlewareSig(fn) {
+			fail("%s: Middleware in package %s must be a function %s: borgo mounts the declaration with this name as the app's middleware, so a helper that is something else needs another name", pkg.Fset.Position(obj.Pos()), pkg.Name, middlewareSig)
+		}
+		decl.present = true
+	}
+	if obj := scope.Lookup("Matcher"); obj != nil {
+		pos := pkg.Fset.Position(obj.Pos())
+		v, ok := obj.(*types.Var)
+		if !ok || v.Type().String() != "[]string" {
+			fail("%s: Matcher in package %s must be a package-level var of type []string, the paths the middleware covers", pos, pkg.Name)
+		}
+		if !decl.present {
+			fail("%s: Matcher is declared but package %s has no Middleware: a matcher with nothing to run protects nothing", pos, pkg.Name)
+		}
+		decl.matcher = true
+	}
+	return decl
+}
+
+func isMiddlewareSig(fn *types.Func) bool {
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Recv() != nil || sig.TypeParams().Len() != 0 ||
+		sig.Params().Len() != 1 || sig.Results().Len() != 1 {
+		return false
+	}
+	return sig.Params().At(0).Type().String() == "net/http.Handler" &&
+		sig.Results().At(0).Type().String() == "net/http.Handler"
+}
+
+func writeMounting(root, pkgName string, directives []route, scope *types.Scope, mw middlewareDecl) {
+	if len(directives) == 0 && !mw.present {
 		os.Remove(filepath.Join(root, genGoFile))
 		return
 	}
@@ -443,6 +491,13 @@ func writeMounting(root, pkgName string, directives []route, scope *types.Scope)
 	out.WriteString(importDecl + "\n\nfunc init() {\n")
 	for _, r := range sorted {
 		fmt.Fprintf(&out, "\t%s.Handle(%q, %s)\n", qualifier, r.pattern, r.handler.Name())
+	}
+	if mw.present {
+		matcher := "nil"
+		if mw.matcher {
+			matcher = "Matcher"
+		}
+		fmt.Fprintf(&out, "\t%s.UseMiddleware(Middleware, %s)\n", qualifier, matcher)
 	}
 	out.WriteString("}\n")
 	writeIfChanged(filepath.Join(root, genGoFile), out.String())

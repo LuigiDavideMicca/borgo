@@ -245,6 +245,8 @@ type frontOptions struct {
 	metrics *metrics
 	// the request line, printed in dev only
 	dev bool
+	// api/middleware.go; nil when the app has none
+	app *appMiddleware
 }
 
 // front is the public handler: the api and the files in-process, the rest
@@ -258,6 +260,8 @@ type front struct {
 	health   http.Handler
 	metrics  http.Handler
 	dev      bool
+	// serveGuarded behind the app's middleware
+	guarded http.Handler
 }
 
 // inProcess names what the api mux answers on the public port; /healthz
@@ -300,6 +304,21 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.metrics.ServeHTTP(w, r)
 		return
 	}
+	// one spelling per page, before anything routes, caches or counts on it.
+	// The render service applies the same rule (canonicalPath in router.ts),
+	// and it applying it ALONE is what let one request for an alias turn the
+	// cache off for the real page: see canonical.go. /api is exempt. And it
+	// comes before the app's middleware, whose matcher must see one spelling
+	if !inProcess(cleaned) && redirectToCanonical(w, r, canonicalPath(r.URL.EscapedPath())) {
+		return
+	}
+	f.guarded.ServeHTTP(w, r)
+}
+
+// serveGuarded is everything the app's middleware stands in front of: the
+// api, public files, the page cache and the render service, in that order.
+func (f *front) serveGuarded(w http.ResponseWriter, r *http.Request) {
+	cleaned := path.Clean(r.URL.Path)
 	if inProcess(cleaned) {
 		f.api.ServeHTTP(w, r)
 		// the mux wrote the pattern it matched onto the request; a miss
@@ -309,13 +328,6 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			setRouteLabel(r, "/api/*")
 		}
-		return
-	}
-	// one spelling per page, before anything routes, caches or counts on it.
-	// The render service applies the same rule (canonicalPath in router.ts),
-	// and it applying it ALONE is what let one request for an alias turn the
-	// cache off for the real page: see canonical.go
-	if redirectToCanonical(w, r, canonicalPath(r.URL.EscapedPath())) {
 		return
 	}
 	if f.assets != nil && f.assets.tryServe(w, r) {
@@ -452,7 +464,11 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 		FlushInterval: -1,
 		ErrorHandler:  renderUnavailable,
 	}
-	var h http.Handler = &front{api: api, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev}
+	f := &front{api: api, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev}
+	// api/middleware.go in front of everything the front does not answer
+	// itself; middleware.go says why each position is where it is
+	f.guarded = withAppMiddleware(opts.app, http.HandlerFunc(f.serveGuarded))
+	var h http.Handler = f
 	// on the whole public port, including the proxy's own refusals: by
 	// authorship, not by path. The counters sit outside the headers, so a
 	// refusal the headers wrapper writes is counted too

@@ -385,12 +385,39 @@ func TestGenerateErrors(t *testing.T) {
 		{"directive on method", "method", "package-level"},
 		{"directive on generic function", "genericfn", "type parameters"},
 		{"missing api dir", "none", "no api/ directory"},
+		// api/middleware.go: every mistake stops the run, because a middleware
+		// that is silently not mounted is an authorization that silently
+		// does not happen
+		{"middleware with the wrong signature", "badmiddleware", "must be a function func(http.Handler) http.Handler"},
+		{"matcher without a middleware", "matcheronly", "protects nothing"},
+		{"matcher that is not a []string", "badmatcher", "must be a package-level var of type []string"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			err := run(filepath.Join("testdata", c.dir))
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("want error containing %q, got %v", c.want, err)
+			}
+		})
+	}
+}
+
+// api/middleware.go is found by its name and mounted beside the routes, with
+// its Matcher when it has one - and mounted even when nothing else would have
+// written borgo.gen.go, since an app may register every route by hand
+func TestMiddlewareIsMounted(t *testing.T) {
+	for _, c := range []struct{ dir, want string }{
+		{"middleware", `borgo.UseMiddleware(Middleware, Matcher)`},
+		{"middlewareonly", `borgo.UseMiddleware(Middleware, nil)`},
+	} {
+		t.Run(c.dir, func(t *testing.T) {
+			root := filepath.Join("testdata", c.dir)
+			if err := run(root); err != nil {
+				t.Fatal(err)
+			}
+			gen := read(t, filepath.Join(root, "api", "borgo.gen.go"))
+			if !strings.Contains(gen, c.want) {
+				t.Errorf("borgo.gen.go missing %q\n%s", c.want, gen)
 			}
 		})
 	}

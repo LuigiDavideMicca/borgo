@@ -519,7 +519,8 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 	if err != nil {
 		return err
 	}
-	srv.Handler = security.middleware(limitBody(maxBody, Middleware(mux)))
+	// api/middleware.go guards an api alone exactly as it guards the front
+	srv.Handler = security.middleware(limitBody(maxBody, withAppMiddleware(registeredMiddleware(), Middleware(mux))))
 	// armed before anything can connect, dropped however this run ends
 	defer armStreamShutdown(srv)()
 	printStartup(patterns, port)
@@ -604,6 +605,8 @@ func serveFront(ctx context.Context, onShutdown func(), renderer *url.URL, apiPo
 
 	mux, patterns := mountRoutes()
 	api := Middleware(mux)
+	// read after mountRoutes latched the registry: nothing can register now
+	app := registeredMiddleware()
 	dev, _ := strconv.ParseBool(os.Getenv("BORGO_DEV"))
 	outputs := readBuildOutputs(inventoryFile)
 	// the page cache, production only like the asset index: dev rebuilds
@@ -631,8 +634,11 @@ func serveFront(ctx context.Context, onShutdown func(), renderer *url.URL, apiPo
 		isr:      pages,
 		metrics:  counters,
 		dev:      dev,
+		app:      app,
 	}, renderer, key, renderTimeout)
-	internal.Handler = requireInternalKey(key, api)
+	// the loaders' way in: the app's middleware guards it as it guards the
+	// public port, or a loader would reach an api path the browser cannot
+	internal.Handler = requireInternalKey(key, withAppMiddleware(app, api))
 	defer armStreamShutdown(public)()
 	defer armStreamShutdown(internal)()
 	printFrontStartup(patterns, publicPort, internal.Addr, renderer)
