@@ -16,12 +16,22 @@ export interface Session {
   [key: string]: unknown;
 }
 
+// what api/middleware.go handed over with borgo.Forward: the decision the
+// go middleware already took - a role, a workspace - so a loader does not
+// take it again. Empty when nothing was forwarded. Typed like Session:
+//
+//   declare module "borgo-framework" { interface Locals { role: string } }
+export interface Locals {
+  [key: string]: unknown;
+}
+
 export type LoaderContext = {
   request: Request;
   params: Record<string, string>;
   api: ApiClient;
   apiUrl: string;
   session: Session | null;
+  locals: Locals;
 };
 export type ActionContext = {
   request: Request;
@@ -29,6 +39,7 @@ export type ActionContext = {
   api: ApiClient;
   apiUrl: string;
   session: Session | null;
+  locals: Locals;
 };
 
 export type Head = { title?: string; meta?: Array<Record<string, string>> };

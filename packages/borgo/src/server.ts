@@ -44,6 +44,7 @@ import {
   BOOT_HEADER,
   ROUTES_PATH,
   sessionFrom,
+  localsFrom,
   runAction,
   runPropsRequest,
   topicRejection,
@@ -431,6 +432,7 @@ export async function serve({
           api: apiFor(req, onSetCookie),
           apiUrl,
           session: sessionFrom(req, render),
+          locals: localsFrom(req, render),
         })
       : Promise.resolve({});
 
@@ -551,6 +553,7 @@ export async function serve({
     maxBody,
     apiFor,
     sessionFor: (req) => sessionFrom(req, render),
+    localsFor: (req) => localsFrom(req, render),
     runLoader,
     renderPage,
     sendJson,

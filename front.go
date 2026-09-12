@@ -350,6 +350,11 @@ func (f *front) serveGuarded(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// what the app's middleware forwarded, encoded before the hop: locals.go
+	r, ok := withEncodedLocals(w, r)
+	if !ok {
+		return
+	}
 	f.proxy.ServeHTTP(w, r)
 }
 
@@ -420,12 +425,19 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 			if data, ok := sessionData(pr.In); ok {
 				pr.Out.Header.Set(sessionHeader, base64.RawURLEncoding.EncodeToString(data))
 			}
+			// the same for the middleware's forwarded values: a client's own
+			// spelling is a forged decision, deleted before ours is set
+			pr.Out.Header.Del(localsHeader)
+			if encoded := encodedLocals(pr.In); encoded != "" {
+				pr.Out.Header.Set(localsHeader, encoded)
+			}
 		},
 		// the render service sets neither; if it ever did, the names stay
 		// between the two processes
 		ModifyResponse: func(res *http.Response) error {
 			res.Header.Del(internalKeyHeader)
 			res.Header.Del(sessionHeader)
+			res.Header.Del(localsHeader)
 			// a proxied event stream ends with the server, like borgo.SSE's
 			// own: Shutdown waits for every active request, and this one is a
 			// ReverseProxy copy loop no latch reached, so with

@@ -367,6 +367,26 @@ export type Switches = {
 // uses to hand over a session it has already verified
 export const INTERNAL_KEY_HEADER = "X-Borgo-Internal";
 export const SESSION_HEADER = "X-Borgo-Session";
+export const LOCALS_HEADER = "X-Borgo-Locals";
+
+// What api/middleware.go forwarded with borgo.Forward, under the same rule as
+// the session and for the same reason: believed only in render mode, where
+// the go front wrote the header after deleting any client's own. Anything
+// else - no front, no header, not base64url, not a json object - is nothing
+// forwarded, never a partial or a forged decision.
+export function localsFrom(req: Request, render: boolean): import("./router").Locals {
+  if (!render) return {};
+  const raw = req.headers.get(LOCALS_HEADER);
+  if (!raw) return {};
+  try {
+    const value: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as import("./router").Locals)
+      : {};
+  } catch {
+    return {};
+  }
+}
 
 // The session a loader or an action sees. Read ONLY in render mode: there the
 // boot key was checked at the top of fetch, so the header was written by the
@@ -1012,6 +1032,8 @@ export type ActionOptions = {
   // the verified session for this request (sessionFrom). Optional because
   // absent reads as "nobody", which is the safe default
   sessionFor?: (req: Request) => ActionContext["session"];
+  // what the go middleware forwarded (localsFrom); absent is nothing forwarded
+  localsFor?: (req: Request) => ActionContext["locals"];
   runLoader: RunLoaderFn;
   renderPage: RenderPageFn;
   sendJson: SendJsonFn;
@@ -1038,6 +1060,7 @@ export async function runAction(
     maxBody,
     apiFor,
     sessionFor = () => null,
+    localsFor = () => ({}),
     runLoader,
     renderPage,
     sendJson,
@@ -1079,6 +1102,7 @@ export async function runAction(
         api: apiFor(req, (c) => apiCookies.push(...c)),
         apiUrl,
         session: sessionFor(req),
+        locals: localsFor(req),
       });
       if (result instanceof Response) {
         const location = result.headers.get("Location");

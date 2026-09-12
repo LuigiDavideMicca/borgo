@@ -787,6 +787,8 @@ func anonymised(r *http.Request) *http.Request {
 		// property and not the hole (the verifier of this phase mutated
 		// away that call site and no test noticed)
 		sessionHeader,
+		// and the middleware's forwarded values, which are about somebody too
+		localsHeader,
 		// what a render could answer differently for the next visitor.
 		// A page that negotiates on these and says so in Vary is refused
 		// outright by unstorable; one that does not say so gets the

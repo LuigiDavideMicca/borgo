@@ -7,6 +7,7 @@ export type {
   HydrateMode,
   LayoutModule,
   LoaderContext,
+  Locals,
   Session,
   PageModule,
   PrerenderContext,
