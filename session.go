@@ -189,7 +189,8 @@ func GetSession[T any](r *http.Request) (T, bool) {
 // sessionData is GetSession before the decode into T: the json the app
 // stored, from a cookie whose signature verified and whose expiry has not
 // passed. The front hands it to the render service as it is, so the app's
-// loaders read the same bytes GetSession would.
+// loaders read the same bytes GetSession would - without the render service
+// ever holding the key that made them trustworthy.
 func sessionData(r *http.Request) (json.RawMessage, bool) {
 	payload, ok := sessionPayload(r)
 	if !ok {

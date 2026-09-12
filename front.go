@@ -40,8 +40,11 @@ const (
 	// public port strips it on the way in, so a client cannot present one
 	internalKeyHeader = "X-Borgo-Internal"
 	// the verified session's payload, base64url of the json the app stored:
-	// the render service receives a fact go established, never the cookie
-	// to re-verify - bun has never held SESSION_SECRET and still does not
+	// the render service receives a fact go established rather than a cookie
+	// to verify, because bun has never held SESSION_SECRET and still does
+	// not. It does still see the browser's Cookie header - a loader's api
+	// client forwards it to the internal listener, where this side verifies
+	// it - so the claim is about the KEY, not about the credential
 	sessionHeader = "X-Borgo-Session"
 	// the hmac keys the session with 32 bytes; the key that guards the
 	// listener carrying that session is held to the same floor
@@ -308,6 +311,13 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// one spelling per page, before anything routes, caches or counts on it.
+	// The render service applies the same rule (canonicalPath in router.ts),
+	// and it applying it ALONE is what let one request for an alias turn the
+	// cache off for the real page: see canonical.go
+	if redirectToCanonical(w, r, canonicalPath(r.URL.EscapedPath())) {
+		return
+	}
 	if f.assets != nil && f.assets.tryServe(w, r) {
 		return
 	}
@@ -330,11 +340,6 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.proxy.ServeHTTP(w, r)
 }
-
-// forwardedHeaders are what a proxy in front states about the client; from
-// anyone else they are the client's own claims and are dropped before the
-// reverse proxy rebuilds them from the connection.
-var forwardedHeaders = [...]string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"}
 
 // newFrontHandler builds the public handler. api is the mounted route mux,
 // already wrapped by Middleware; renderer is where everything else goes.
@@ -401,11 +406,19 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 			}
 		},
 		// the render service sets neither; if it ever did, the names stay
-		// between the two processes. The security headers need no hand here:
-		// the middleware wrapping the whole public port sees these writes too
+		// between the two processes
 		ModifyResponse: func(res *http.Response) error {
 			res.Header.Del(internalKeyHeader)
 			res.Header.Del(sessionHeader)
+			// an upgrade is the one response the wrapper around the public
+			// port never sees: ReverseProxy hijacks the connection and writes
+			// this response to the socket itself, headers and all. So the
+			// headers go on here, where they are still a map. Everything else
+			// is committed through securedWriter, which is where they belong
+			// - by authorship, on the whole port, with no exceptions left
+			if res.StatusCode == http.StatusSwitchingProtocols {
+				opts.security.apply(res.Header)
+			}
 			// the stamp says which boot of the render service answered: a new
 			// one may declare new pages, and the policy table is asked again
 			if policies != nil {
@@ -466,6 +479,14 @@ func publicTimeouts(srv *http.Server) {
 // forwardFacts states about the client what the proxy states on a forwarded
 // request, for the shared renders the cache asks for: the same trust rule,
 // so a loader building an absolute url builds the public one either way.
+// forwardFacts states what this hop knows about the client. X-Forwarded-For,
+// X-Forwarded-Host, X-Forwarded-Proto and Forwarded do NOT have to be
+// stripped here first: httputil.ReverseProxy deletes those four from the
+// outbound request before it calls Rewrite, which is why this function only
+// sets. A borgo-owned list of the same four used to sit beside this one,
+// reading like the guard while the standard library did the work - deleted,
+// because a guard somebody may "keep working" without knowing where it lives
+// is worse than no guard at all (the verifier of phase 1 found it dead).
 func forwardFacts(in *http.Request, out http.Header, trusted []*net.IPNet) {
 	peer, _, err := net.SplitHostPort(in.RemoteAddr)
 	if err != nil {

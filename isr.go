@@ -203,6 +203,13 @@ func unstorable(status int, h http.Header, html string) string {
 	if len(h.Values("Set-Cookie")) > 0 {
 		return "the response sets a cookie, and a shared copy would hand it to everyone"
 	}
+	// the render telling us the copy is not universal. Accept-Encoding is the
+	// one axis this cache negotiates itself, per replay, so it is not a
+	// refusal; anything else - a language, a client hint, an api version -
+	// names a header this copy depended on and the next visitor may not send
+	if vary := varyBeyondEncoding(h); vary != "" {
+		return "the response varies on " + vary + ", which a shared copy cannot honour"
+	}
 	var residue []string
 	if csrfFieldRe.MatchString(html) {
 		residue = append(residue, "a <CsrfField /> token")
@@ -212,6 +219,24 @@ func unstorable(status int, h http.Header, html string) string {
 	}
 	if len(residue) > 0 {
 		return "the page carries " + strings.Join(residue, " and ") + " - per-request, like the exporter refuses"
+	}
+	return ""
+}
+
+// varyBeyondEncoding names the first axis a response declares that this
+// cache cannot negotiate itself, or "" when it declares none. Read as one
+// folded list across repeated field lines, case-insensitively, like every
+// other header grammar here: a cache is allowed to be pedantic and a
+// framework has to be. "*" means "never shared" and is named as itself.
+func varyBeyondEncoding(h http.Header) string {
+	for _, line := range h.Values("Vary") {
+		for _, field := range strings.Split(line, ",") {
+			field = strings.TrimSpace(field)
+			if field == "" || strings.EqualFold(field, "Accept-Encoding") {
+				continue
+			}
+			return field
+		}
 	}
 	return ""
 }
@@ -332,7 +357,57 @@ func (c *pageCache) size() int { return c.order.Len() }
 // pathMatchesKey: exact, a query variant, or under a trailing star, in both
 // the raw and the decoded spelling - decoding both sides can only drop MORE,
 // which is the safe direction for an invalidation.
+// keyHostSep separates the host from the path inside a key. A NUL can
+// reach neither half - net/http refuses it in a header value and a url
+// cannot carry it - so no host and no query can spell a separator and
+// collide with another site's copy.
+const keyHostSep = "\x00"
+
+// cacheKey is the identity of a shared copy: host, cleaned path, query.
+func cacheKey(r *http.Request) string {
+	key := cacheHost(r.Host) + keyHostSep + path.Clean(r.URL.Path)
+	if r.URL.RawQuery != "" {
+		key += "?" + r.URL.RawQuery
+	}
+	return key
+}
+
+// cacheHost is one spelling per host: case folded (dns is), the default
+// port dropped (a browser omits it, a proxy may not), and the separator
+// and path characters removed rather than trusted - a Host is a client's
+// string, and an absolute-form request target can put anything in it.
+func cacheHost(host string) string {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSuffix(host, ":80"), ":443"))
+	return strings.Map(func(r rune) rune {
+		if r == 0 || r == '/' || r == '?' || r == '#' {
+			return -1
+		}
+		return r
+	}, host)
+}
+
+// keyPath is the path half of a key: what Revalidate names, and what a log
+// line should show.
+func keyPath(key string) string {
+	if _, p, ok := strings.Cut(key, keyHostSep); ok {
+		return p
+	}
+	return key
+}
+
+// keyLabel renders a key for a human: "//app.example/news?page=2".
+func keyLabel(key string) string {
+	if host, p, ok := strings.Cut(key, keyHostSep); ok {
+		return "//" + host + p
+	}
+	return key
+}
+
+// pathMatchesKey answers whether a Revalidate path names this key. The host
+// is not part of the question: the operator is saying the data changed, and
+// the data is not one vhost's.
 func pathMatchesKey(path, key string) bool {
+	key = keyPath(key)
 	matches := func(p, k string) bool {
 		if strings.HasSuffix(p, "/*") {
 			base := strings.TrimSuffix(p, "/*")
@@ -457,13 +532,19 @@ func (i *isr) handle(w http.ResponseWriter, r *http.Request, policy *isrPolicy) 
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return isrNotMine
 	}
-	// the cleaned path, the spelling the policy was looked up under and the
-	// one the render service normalises to: an alias with dot segments must
-	// not hold a copy of its own that Revalidate never names
-	key := path.Clean(r.URL.Path)
-	if r.URL.RawQuery != "" {
-		key += "?" + r.URL.RawQuery
-	}
+	// the host, then the cleaned path: the spelling the policy was looked up
+	// under and the one the render service normalises to, so an alias with dot
+	// segments cannot hold a copy of its own that Revalidate never names.
+	//
+	// The host is in the key because it is in the answer. The render service
+	// receives the host the browser stated - it builds absolute urls from it,
+	// and a loader may put it in a canonical link, an og:url or a mail link -
+	// so a copy stored without it is a copy of somebody else's site. One
+	// request carrying Host: evil.example stored the render that every later
+	// visitor of the real host was then served (found by the verifier of this
+	// phase; the bun cache this replaced keyed on the host and the port of
+	// that property was what dropped it).
+	key := cacheKey(r)
 	now := i.now()
 
 	i.mu.Lock()
@@ -524,12 +605,12 @@ func (i *isr) regenerate(key string, r *http.Request, policy *isrPolicy, backgro
 		if err != nil {
 			meta.err = err
 			if background {
-				i.note("regen:"+key, key+": regeneration failed, serving the last good copy ("+err.Error()+")")
+				i.note("regen:"+key, keyLabel(key)+": regeneration failed, serving the last good copy ("+err.Error()+")")
 			}
 			return
 		}
 		if reason := unstorable(status, header, html); reason != "" {
-			i.note("store:"+key, key+": declares revalidate but "+reason+" - served fresh, never cached")
+			i.note("store:"+key, keyLabel(key)+": declares revalidate but "+reason+" - served fresh, never cached")
 			meta.err = errUnstorable
 			// a doomed refusal marks nothing: the data changed under it
 			if meta.doomed {
@@ -579,15 +660,31 @@ func (i *isr) regenerate(key string, r *http.Request, policy *isrPolicy, backgro
 }
 
 // anonymised: the copy is rendered as nobody - no cookies, no
-// authorization, plain GET, identity coding - so the shared property holds
-// by construction instead of by trust in every loader.
+// authorization, no session fact, plain GET, identity coding, and none of
+// the negotiation a render could personalise on - so the shared property
+// holds by construction instead of by trust in every loader.
 func anonymised(r *http.Request) *http.Request {
 	anon := r.Clone(context.Background())
 	anon.Method = http.MethodGet
 	anon.Body = http.NoBody
 	anon.ContentLength = 0
 	anon.Header = r.Header.Clone()
-	for _, name := range []string{"Cookie", "Authorization", "Accept-Encoding", "Content-Length", "Content-Type"} {
+	for _, name := range []string{
+		"Cookie", "Authorization", "Content-Length", "Content-Type",
+		// the coding this cache negotiates per replay, not per render
+		"Accept-Encoding",
+		// a fact only the front may state, and the front states it about
+		// somebody: a shared render is about nobody. Deleted here rather
+		// than at the one call site, so a second caller inherits the
+		// property and not the hole (the verifier of this phase mutated
+		// away that call site and no test noticed)
+		sessionHeader,
+		// what a render could answer differently for the next visitor.
+		// A page that negotiates on these and says so in Vary is refused
+		// outright by unstorable; one that does not say so gets the
+		// neutral render, which is the same answer for everyone
+		"Accept-Language", "Accept-Charset",
+	} {
 		anon.Header.Del(name)
 	}
 	return anon

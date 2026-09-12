@@ -31,6 +31,25 @@ func plainPage(body string) func(*http.Request) (int, http.Header, string) {
 	}
 }
 
+// saveEntry is fire and forget - a disk that stopped taking writes must not
+// slow a response down - so a test that looks at the directory has to wait
+// for the writer, and a test that RETURNS without waiting races t.TempDir s
+// cleanup: "RemoveAll cleanup: directory not empty", red about 40% of the
+// time on windows for TestIsrSweepsATornPair (found by the verifier of this
+// phase, whose mutation signal it polluted).
+func waitForPairs(t *testing.T, dir string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if entries, _ := os.ReadDir(dir); len(entries) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	entries, _ := os.ReadDir(dir)
+	t.Fatalf("the persist directory holds %d files after 2s, want %d", len(entries), want)
+}
+
 func serve(t *testing.T, i *isr, policy *isrPolicy, path string, headers ...string) (*httptest.ResponseRecorder, isrOutcome) {
 	t.Helper()
 	req := httptest.NewRequest("GET", path, nil)
@@ -240,14 +259,7 @@ func TestIsrPersistsAcrossARestartOfTheSameBuild(t *testing.T) {
 	i := newIsr(render, persist, func(string) {})
 	policy := &isrPolicy{manual: true}
 	serve(t, i, policy, "/kept")
-	// fire and forget: give the writer a moment
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if entries, _ := os.ReadDir(dir); len(entries) == 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForPairs(t, dir, 2)
 
 	again := newIsr(render, persist, func(string) {})
 	w, _ := serve(t, again, policy, "/kept")
@@ -432,13 +444,7 @@ func TestIsrSweepsATornPair(t *testing.T) {
 	render, n := countingRenderer(plainPage("<html>whole page</html>"))
 	i := newIsr(render, persist, func(string) {})
 	serve(t, i, &isrPolicy{manual: true}, "/t")
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if entries, _ := os.ReadDir(dir); len(entries) == 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForPairs(t, dir, 2)
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".html") {
@@ -456,6 +462,9 @@ func TestIsrSweepsATornPair(t *testing.T) {
 	if w.Body.String() != "<html>whole page</html>" || atomic.LoadInt32(n) != 2 {
 		t.Errorf("re-rendered whole: %q renders=%d", w.Body.String(), *n)
 	}
+	// the re-render persists a whole pair, and waiting for it is also what
+	// keeps this test from returning while the writer still holds the dir
+	waitForPairs(t, dir, 2)
 }
 
 // an invalidation wins over a save still in flight: the pair never lands
@@ -477,5 +486,89 @@ func TestIsrAnInvalidatedCopyDoesNotComeBackFromDisk(t *testing.T) {
 	again := newIsr(render, persist, func(string) {})
 	if again.cache.size() != 0 {
 		t.Error("an invalidated copy came back on restart")
+	}
+}
+
+// A response that declares it varies on something is a render saying "this
+// copy is not universal". The one axis this cache negotiates itself is the
+// coding, per replay; anything else names a header the next visitor may not
+// send, and storing the copy would answer their request with somebody
+// else's negotiation. The direction is always "no caching", never "shared
+// what was negotiated for one client".
+func TestUnstorableRefusesAVaryItCannotHonour(t *testing.T) {
+	page := "<html>hello</html>"
+	cases := []struct {
+		name   string
+		vary   []string
+		stored bool
+	}{
+		{"no vary at all", nil, true},
+		{"the coding this cache negotiates per replay", []string{"Accept-Encoding"}, true},
+		{"folded case, which a client is allowed", []string{"accept-encoding"}, true},
+		{"a language", []string{"Accept-Language"}, false},
+		{"beside the coding, on one line", []string{"Accept-Encoding, Accept-Language"}, false},
+		{"beside the coding, on two field lines", []string{"Accept-Encoding", "Cookie"}, false},
+		{"a client hint", []string{"Sec-CH-Prefers-Color-Scheme"}, false},
+		{"never shared", []string{"*"}, false},
+		{"an empty field is not an axis", []string{"Accept-Encoding, "}, true},
+	}
+	for _, c := range cases {
+		h := http.Header{}
+		for _, v := range c.vary {
+			h.Add("Vary", v)
+		}
+		reason := unstorable(200, h, page)
+		if c.stored && reason != "" {
+			t.Errorf("%s: refused with %q", c.name, reason)
+		}
+		if !c.stored && reason == "" {
+			t.Errorf("%s: stored, and a shared copy cannot honour it", c.name)
+		}
+	}
+}
+
+// anonymised is where the shared property is built rather than trusted, so
+// every header a render could answer differently for the next visitor has to
+// die here. The session fact was deleted at the one call site instead, which
+// the verifier of this phase mutated away with no test noticing: a second
+// caller would have inherited the hole rather than the guard.
+func TestAnonymisedDropsEveryPersonalHeader(t *testing.T) {
+	req := httptest.NewRequest("POST", "http://app.example/news", strings.NewReader("body"))
+	for name, value := range map[string]string{
+		"Cookie":          "borgo_session=abc",
+		"Authorization":   "Bearer t",
+		sessionHeader:     "eyJ1c2VyIjoiYSJ9",
+		"Accept-Language": "it-IT",
+		"Accept-Charset":  "iso-8859-1",
+		"Accept-Encoding": "br",
+		"Content-Type":    "application/x-www-form-urlencoded",
+		"User-Agent":      "borgo-test",
+		"Accept":          "text/html",
+	} {
+		req.Header.Set(name, value)
+	}
+
+	anon := anonymised(req)
+
+	for _, name := range []string{
+		"Cookie", "Authorization", sessionHeader, "Accept-Language", "Accept-Charset",
+		"Accept-Encoding", "Content-Type", "Content-Length",
+	} {
+		if got := anon.Header.Get(name); got != "" {
+			t.Errorf("%s survived as %q: the copy is not rendered as nobody", name, got)
+		}
+	}
+	// what is not personal stays: a render that cannot see the agent at all
+	// is a different render, and this function's job is narrow
+	if anon.Header.Get("User-Agent") != "borgo-test" || anon.Header.Get("Accept") != "text/html" {
+		t.Error("anonymised took a header that was not personal")
+	}
+	if anon.Method != "GET" || anon.ContentLength != 0 {
+		t.Errorf("method %q length %d: a shared render is a plain GET", anon.Method, anon.ContentLength)
+	}
+	// the request it was cloned from must be untouched: the visitor's own
+	// render happens after this one refuses
+	if req.Header.Get("Cookie") != "borgo_session=abc" {
+		t.Error("anonymised mutated the visitor's own request")
 	}
 }

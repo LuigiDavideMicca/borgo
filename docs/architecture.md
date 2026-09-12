@@ -86,6 +86,7 @@ The front's, on the public port:
     +-- /metrics ........... prometheus text, only with BORGO_METRICS=1
     +-- /api/* ............. your go handlers, in this process
     |
+    +-- an alias of a path ................ 308 to its one spelling
     +-- GET|HEAD + a file under public/ ... from memory, or opened per request
     +-- a page that exports revalidate .... the shared cache, when it may
     +-- everything else ................... forwarded to the render service
@@ -110,6 +111,12 @@ And the render service's, behind it:
 ```
 
 Five of those paths are worth following in full, starting with the one that is new.
+
+### One spelling per page
+
+Before anything routes, caches or counts on a path, the front reduces it to one spelling and answers a `308` if the request named another: percent-encodings of unreserved characters decode (`/ne%77s` **is** `/news`, rfc 3986), a kept escape gets uppercase hex, `%2F` stays `%2F` because decoding it would change how many segments there are, runs of slashes collapse, a trailing slash goes, and dot segments resolve. The redirect is permanent and method-preserving, so a form action posted to an alias arrives at the page as a POST. `/api/*` is exempt: an api client's path is its own business, and `ServeMux` has its own rules for it.
+
+This is `canonicalPath` in `router.ts`, mirrored in `canonical.go`, with a table of the same rows on both sides pinning them to each other. Both halves have to agree about it, and the front applying it *late* was a defect with teeth: the cache keyed on the cleaned path while the request went on as written, so one visit to `/news/` came back as the render service's own 308 — and a 308 is unstorable, so the refusal was recorded under the canonical key. One free request turned the cache off for the real page: for a whole revalidate window, and forever for a `manual` one.
 
 ### The render hop
 
@@ -143,6 +150,8 @@ A `HEAD` renders for real — the status and headers must be what a `GET` would 
 There is no proxy left on this path. The `ServeMux` that holds your handlers is in the process that answered the port, so the request reaches `api/*.go` with nothing between but the front's own middleware: the body limit (`BORGO_MAX_BODY`, 32 MB), the CSRF check on unsafe methods, and the request counters. Nothing is serialized, nothing is buffered to make a retry possible, and there is no second deadline to tune.
 
 The security headers changed direction here, and it is worth knowing which way. They used to stop at the proxy: whatever Go wrote on an `/api` response was what shipped. Now they are applied by authorship rather than by path — the wrapper sits on the whole public port — so an `/api` response picks up `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options`, and only where your handler left that header empty. The CSP is the exception it always was: it goes on `text/html` and `image/svg+xml` alone, so a JSON answer never carries one. The body is still untouched, gzip and all.
+
+"The whole public port" includes the one response that escapes the wrapper. `httputil.ReverseProxy` hijacks the connection for an upgrade and writes the `101` to the socket itself, so a handshake never passes through the writer that adds the headers; they are set in `ModifyResponse` instead, where the response is still a map. The CSP stays off it, because a `101` has no content type and a policy on a socket is noise the client has to parse.
 
 Loaders pay a hop in the other direction — the render service's typed client calls the Go server on `API_PORT`, a listener bound to `127.0.0.1` alone. That one is a real round trip; see the limit at the end of this page.
 

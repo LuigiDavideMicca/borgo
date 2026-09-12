@@ -181,9 +181,11 @@ func (c *renderClient) policies() (string, []policyEntry, error) {
 	return parsePolicyTable(raw)
 }
 
-// shared renders one page as nobody. The request is the anonymised one;
-// the forwarded facts are the same the proxy would state, so a loader that
-// builds an absolute url builds the public one.
+// shared renders one page as nobody. The request arrives anonymised - no
+// cookie, no authorization, no session fact, no negotiation, which is the
+// one place that property is built (anonymised, isr.go) - and the forwarded
+// facts are the same the proxy would state, so a loader that builds an
+// absolute url builds the public one.
 func (c *renderClient) shared(anon *http.Request) (int, http.Header, string, error) {
 	target := *c.renderer
 	target.Path = anon.URL.Path
@@ -198,7 +200,6 @@ func (c *renderClient) shared(anon *http.Request) (int, http.Header, string, err
 	}
 	req.Host = anon.Host
 	c.forward(anon, req.Header)
-	req.Header.Del(sessionHeader)
 	req.Header.Set(internalKeyHeader, c.key)
 	req.Header.Set(sharedRenderHeader, "1")
 	res, err := c.client.Do(req)

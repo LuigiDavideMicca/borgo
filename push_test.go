@@ -753,3 +753,47 @@ func TestRevalidateRefusesEmptyNames(t *testing.T) {
 		t.Fatalf("RevalidateTag(\"\") = %v, want a named refusal", err)
 	}
 }
+
+// FRONT_URL meant the public front server through 0.22 and the publish
+// endpoint lived there. It names the render service now, and the public port
+// answers 404 to every internal name - so a deployment upgraded with its old
+// value in place had a borgo.Push that failed forever with nothing naming the
+// cause: the url parsed, the host was loopback, no key travelled, and the
+// boot said nothing. Found by the verifier of phase 1.
+func TestAStaleFrontUrlStopsTheBoot(t *testing.T) {
+	cases := []struct {
+		name       string
+		front      string
+		port       string
+		renderMode bool
+		refused    bool
+	}{
+		{"the public port by number", "http://localhost:3000", "3000", true, true},
+		{"the public port by default", "http://localhost:3000", "", true, true},
+		{"a moved public port", "http://127.0.0.1:8080", "8080", true, true},
+		{"port 80 written as the scheme's default", "http://localhost", "80", true, true},
+		{"the render service, which is right", "http://127.0.0.1:3600", "3000", true, false},
+		{"another port entirely", "http://localhost:9999", "3000", true, false},
+		{"another machine's front, not ours to judge", "http://elsewhere:3000", "3000", true, false},
+		{"api-only: there is no render service to prefer", "http://localhost:3000", "3000", false, false},
+	}
+	for _, c := range cases {
+		t.Setenv("FRONT_URL", c.front)
+		t.Setenv("PORT", c.port)
+		if c.renderMode {
+			t.Setenv("BORGO_RENDER_URL", "http://127.0.0.1:3600")
+		} else {
+			t.Setenv("BORGO_RENDER_URL", "")
+		}
+		err := checkPushEnv()
+		if c.refused && err == nil {
+			t.Errorf("%s: booted with a FRONT_URL whose pushes can only 404", c.name)
+		}
+		if !c.refused && err != nil {
+			t.Errorf("%s: refused the boot: %v", c.name, err)
+		}
+		if c.refused && err != nil && !strings.Contains(err.Error(), "FRONT_URL") {
+			t.Errorf("%s: the refusal does not name the variable: %v", c.name, err)
+		}
+	}
+}

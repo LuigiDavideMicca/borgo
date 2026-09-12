@@ -491,7 +491,27 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 	}
 
 	mux, patterns := mountRoutes()
-	srv.Handler = Middleware(mux)
+	// the same public port protections the front applies, minus the one that
+	// would break this shape. An api alone is still on a public port, and
+	// what guarded it through 0.22 was the bun front server that is no
+	// longer in front of it: without this, the same /api handler was bounded
+	// and headered on port 3000 in front mode and bare here, and the thing
+	// that flipped it was an environment variable nobody reads as a security
+	// setting (found by the verifier of phase 1).
+	//
+	// Not the csrf check: nothing mints a csrf cookie in a deployment with
+	// no pages, because minting it is a page render, so enforcing it here
+	// would refuse every unsafe request rather than protect one. That is a
+	// real asymmetry and it is written here rather than closed.
+	security, err := securityFromEnv()
+	if err != nil {
+		return err
+	}
+	maxBody, err := envMaxBody()
+	if err != nil {
+		return err
+	}
+	srv.Handler = security.middleware(limitBody(maxBody, Middleware(mux)))
 	// armed before anything can connect, dropped however this run ends
 	defer armStreamShutdown(srv)()
 	printStartup(patterns, port)
@@ -732,6 +752,32 @@ func checkPushEnv() error {
 		}
 		log.Printf("borgo: every borgo.Push will fail: %v", err)
 		return nil
+	}
+	// FRONT_URL meant the public front server through 0.22, and the publish
+	// endpoint lived there. It is the render service now, and the public port
+	// answers 404 to every internal name - so a deployment upgraded with its
+	// old FRONT_URL still in place has a borgo.Push that fails forever, with
+	// nothing naming the cause (found by the verifier of phase 1). Refused
+	// here while somebody is still reading the output
+	if from == "FRONT_URL" && os.Getenv("BORGO_RENDER_URL") != "" {
+		public := os.Getenv("PORT")
+		if public == "" {
+			public = "3000"
+		}
+		named := endpoint.Port()
+		if named == "" {
+			named = "80"
+			if endpoint.Scheme == "https" {
+				named = "443"
+			}
+		}
+		if named == public {
+			if loopbackHost(endpoint.Hostname()) {
+				return fmt.Errorf(
+					"borgo: FRONT_URL is %s, which is this process own public port: since 0.30 borgo.Push goes to the render service, and the public port answers 404 to every internal name. Unset FRONT_URL - borgo start configures the render service itself - or point it at the render service (BORGO_RENDER_PORT, 3600 by default)",
+					endpoint.Host)
+			}
+		}
 	}
 	if os.Getenv("BORGO_PUSH_KEY") == "" {
 		return nil

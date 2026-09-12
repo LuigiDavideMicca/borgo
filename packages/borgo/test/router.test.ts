@@ -216,6 +216,52 @@ describe("canonicalPath", () => {
   });
 });
 
+// The go front applies this rule too, since 0.30: it owns the public port
+// and the page cache, and it applying it only HERE is what let one request
+// for an alias turn the cache off for the real page (canonical.go, and the
+// verifier that found it). These rows are TestCanonicalPathMirrorsTheRender
+// Service in canonical_test.go, entry for entry: two halves that disagree
+// about the canonical spelling would forward a path one considers canonical
+// and the other answers 308 to.
+describe("canonicalPath is mirrored in the go front", () => {
+  const table: Array<[string, string]> = [
+    ["/ne%77s", "/news"],
+    ["/%6eews", "/news"],
+    ["/n%65%77s", "/news"],
+    ["/%2D%2E%5F%7E", "/-._~"],
+    ["/news", "/news"],
+    ["/", "/"],
+    ["/tasks/42", "/tasks/42"],
+    ["/a%2Fb", "/a%2Fb"],
+    ["/a%2fb", "/a%2Fb"],
+    ["/q%3Fx", "/q%3Fx"],
+    ["/s%20p", "/s%20p"],
+    ["/x%GGy", "/x%GGy"],
+    ["/x%2", "/x%2"],
+    ["/100%", "/100%"],
+    ["/café", "/café"],
+    ["/%C3%A9", "/%C3%A9"],
+    ["/news/", "/news"],
+    ["/news//", "/news"],
+    ["//news", "/news"],
+    ["/a//b///c/", "/a/b/c"],
+  ];
+  test("every row the go table asserts", () => {
+    for (const [input, want] of table) {
+      expect(canonicalPath(input)).toBe(want);
+    }
+  });
+
+  // dot segments are the front s own addition, deliberately not mirrored
+  // back: it resolves them before this process sees them, and a request
+  // that reaches here with one is not a browser s. Pinned so the asymmetry
+  // is a decision rather than a drift
+  test("dot segments are left to the front", () => {
+    expect(canonicalPath("/x/../news")).toBe("/x/../news");
+    expect(canonicalPath("/news/.")).toBe("/news/.");
+  });
+});
+
 describe("canonicalPath: slash aliases", () => {
   // the router strips trailing slashes when matching, so /news/ IS /news -
   // but each spelling was its own isr cache key, and an invalidation of

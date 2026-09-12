@@ -43,6 +43,20 @@ Neither old name is honoured as an alias, so a stale value is inert rather than 
 
 **5. Two smaller behaviour changes, both visible from outside.** An `/api/*` response now carries `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options` where your handler left them empty: the headers are applied by authorship rather than by path, and the whole public port is borgo's authorship. The CSP is unaffected — it still goes on HTML and SVG alone. And `/metrics` now labels API requests by the route pattern the mux matched rather than lumping them under `/api/*`, so a dashboard that grouped on that label needs its query adjusted.
 
+## Four smaller changes, from verifying the above
+
+The phase was reviewed by an adversarial pass whose findings are fixed in the same release. Four of them are visible from outside:
+
+**A cached page is keyed on the host, not the path alone.** Two domains served by one borgo process now hold a copy each, where 0.2x's cache would have shared one. This closes a hole rather than adding a feature: one request carrying a chosen `Host` stored the render that every later visitor of the real host was served, and a loader that puts the request host in a canonical link or an `og:url` handed that out. If you deliberately served two hostnames one set of copies, you now pay for two renders.
+
+**A page that declares `Vary` on anything but `Accept-Encoding` is no longer cached.** A `Vary` is the render saying its copy is not universal, and the cache cannot honour one. The page is served fresh per request with a line in the log, like every other storability refusal.
+
+**An alias of a path is answered with a `308` by the front.** `/news/`, `/news//`, `/ne%77s` and `/x/../news` all redirect to `/news`, permanently and without changing the method. The render service has behaved this way since 0.21, so the visible outcome is the same for a page; what is new is that asset paths get the same treatment, so a doubled slash in an `/assets/...` URL now redirects instead of serving the file. Nothing the build emits looks like that. `/api/*` is exempt.
+
+**A `FRONT_URL` that names your public port now refuses the boot.** In 0.2x it was correct and meant "the front server is here". Carried into 0.30 it points `borgo.Push` at a port that answers `404` to every internal name, and the failure was silent. Unset it under `borgo start`, which configures the render service itself.
+
+One more that is not visible, and is a change in the other direction: an api-only deployment (`BORGO_RENDER_URL` unset, an app embedding borgo with no pages) now applies the request body limit and the security headers that the front applies, because what used to guard that port was the Bun front server that is no longer in front of it. It does **not** apply the CSRF check, and deliberately: nothing mints a CSRF cookie in a deployment with no page renders, so enforcing it would refuse every unsafe request rather than protect one.
+
 ## A new port to know about
 
 `BORGO_RENDER_PORT`, `3600` by default, on `127.0.0.1`. If something else on the box already holds it, set the variable — `borgo start` resolves the whole topology in one place and configures both halves from it, so they cannot disagree. It needs no firewall rule, and it must not get one: a listener reachable from outside the box is exactly what the boot key exists to make useless.
@@ -51,7 +65,7 @@ Neither old name is honoured as an alias, so a stale value is inert rather than 
 
 1. Bump `borgo-framework` and the Go module together — they are one version, as ever.
 2. `borgo build`, then `borgo start`: the banner prints the public port and, under it, the render service and the internal api it resolved.
-3. Grep your deployment for `--front-only`, `BORGO_API_TIMEOUT`, `BORGO_FRONT_READ_TIMEOUT` and any direct use of `API_PORT` from outside the app.
+3. Grep your deployment for `--front-only`, `BORGO_API_TIMEOUT`, `BORGO_FRONT_READ_TIMEOUT`, `FRONT_URL` and any direct use of `API_PORT` from outside the app. The `FRONT_URL` one refuses the boot rather than failing quietly, so you will hear about it.
 4. If you wrote your own compose or systemd file from the 0.2x docs, regenerate it (`borgo deploy init compose`, `borgo deploy init systemd`) and diff.
 5. Behind a reverse proxy, set `BORGO_TRUSTED_PROXIES`.
 6. `curl -si localhost:3000/healthz` reports both halves; a `503` with `Retry-After` on a page means the render service is not up, and the body says so.

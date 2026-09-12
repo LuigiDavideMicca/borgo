@@ -1,6 +1,7 @@
 package borgo
 
 import (
+	"bufio"
 	"encoding/base64"
 	"io"
 	"net"
@@ -604,5 +605,107 @@ func TestPushDefaultsToTheRenderServiceInFrontMode(t *testing.T) {
 	base, from, _ = pushBase()
 	if base != "https://front.example" || from != "FRONT_URL" {
 		t.Errorf("FRONT_URL did not win: %q from %q", base, from)
+	}
+}
+
+// A peer address that is not an IP is a peer this process cannot place, and
+// the only safe answer is "not trusted": what trust buys is believing the
+// client facts in X-Forwarded-*, and believing them from an address we
+// cannot compare against a CIDR is believing anyone. A unix socket and a
+// Windows named pipe both arrive here as a RemoteAddr that does not parse.
+// The verifier of this phase inverted this branch and no test noticed.
+func TestPeerTrustedFailsClosedOnAnAddressItCannotPlace(t *testing.T) {
+	_, all, _ := net.ParseCIDR("0.0.0.0/0")
+	_, v6, _ := net.ParseCIDR("::/0")
+	widest := []*net.IPNet{all, v6}
+
+	unplaceable := []string{
+		"",                // no peer at all
+		"@",               // a linux abstract socket
+		"/tmp/borgo.sock", // a unix socket
+		`\.\pipe\borgo`,   // a windows named pipe
+		"not-an-ip:443",   // a name where an address belongs
+		"localhost:3000",  // resolvable, but not an address
+		"[::1",            // a malformed v6 literal
+		"192.168.1.999:1", // out of range
+	}
+	for _, addr := range unplaceable {
+		if peerTrusted(addr, widest) {
+			t.Errorf("%q was trusted against the widest possible list", addr)
+		}
+	}
+
+	// and the guard is not simply refusing everything: a real peer inside
+	// the list is still trusted, in both families, with and without a port
+	for _, addr := range []string{"10.0.0.4:51000", "10.0.0.4", "[2001:db8::1]:443", "2001:db8::1"} {
+		if !peerTrusted(addr, widest) {
+			t.Errorf("%q was not trusted, and it is inside the list", addr)
+		}
+	}
+	// an empty list trusts nobody, whatever the address
+	if peerTrusted("10.0.0.4:51000", nil) {
+		t.Error("an empty trust list trusted a peer")
+	}
+}
+
+// The security headers are applied by authorship, on the whole public port -
+// and an upgrade was the one response that escaped, because ReverseProxy
+// hijacks the connection and writes the 101 to the socket itself, past the
+// wrapper that would have added them. Found by the verifier of phase 1 and
+// left documented for an hour, which is not the same as fixed.
+func TestTheHandshakeCarriesTheSecurityHeadersToo(t *testing.T) {
+	// a render service that upgrades, as the topic relay does
+	renderer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(internalKeyHeader) != testInternalKey {
+			w.WriteHeader(403)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+	}))
+	defer renderer.Close()
+	u, _ := url.Parse(renderer.URL)
+	security, err := securityFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(newFrontHandler(
+		apiUnderTest(),
+		frontOptions{trusted: trustAll, security: security},
+		u, testInternalKey, time.Second,
+	))
+	defer front.Close()
+
+	// the handshake has to be spoken by hand: the client must not follow or
+	// buffer, so the 101's own header block is what we read
+	conn, err := net.Dial("tcp", strings.TrimPrefix(front.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, "GET /ws HTTP/1.1\r\nHost: app.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("the upgrade answered %d", res.StatusCode)
+	}
+	for _, kv := range staticSecurity {
+		if got := res.Header.Get(kv[0]); got != kv[1] {
+			t.Errorf("the handshake carries %s: %q, want %q", kv[0], got, kv[1])
+		}
+	}
+	// and no csp: a 101 has no content type, and a policy on a socket is
+	// noise a client has to parse
+	if csp := res.Header.Get("Content-Security-Policy"); csp != "" {
+		t.Errorf("the handshake carries a csp: %q", csp)
 	}
 }
