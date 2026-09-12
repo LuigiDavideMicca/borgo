@@ -14,6 +14,7 @@ import { c, g } from "./colors";
 import { NO_BUILD_OUTPUTS, precompressAssets, type BuildOutputs } from "./compress";
 import { APP_ENV_FILE, appEnvMetas, clientEnvDefine, clientEnvRefusal, envClientShim } from "./env-app";
 import { stampWorkerFile } from "./pwa";
+import { parentGone, readParent } from "./parent-watch";
 import { filePathToPattern } from "./router";
 import { type AssetNames } from "./util";
 
@@ -1357,7 +1358,104 @@ export function reportBuildFailure(error: unknown, debug = debugEnabled()): void
   console.error("");
 }
 
-export async function buildAssets(dev = false): Promise<BuildResult> {
+// One asset build per directory at a time, across processes.
+//
+// Two builds writing public/assets together rename each other's chunks: one
+// moves [id]-hash.js to id-hash.js while the other, its Bun.build just done,
+// opens the name it was told about - ENOENT, and borgo dev answered 500.
+// That is F10, and it was recorded with the wrong mechanism ("bun reports
+// [id]-hash.js and writes id-hash.js"): measured on bun 1.4.0, bun writes the
+// name it reports, in a fresh build and in a rebuild over its own output.
+// Two concurrent builds into one directory produced that exact error in five
+// trials of six. dev's own lock refuses a second dev session, but not the
+// ordinary case: `borgo build`, `borgo start`'s rebuild or `borgo export`
+// run in another terminal while dev is up. All four go through here.
+//
+// The file is created exclusively, so it also serialises two builds inside
+// one process. It is removed only by the acquisition that made it (a token,
+// not just a pid), and a holder whose pid is gone is taken over at once -
+// dev kills the render service mid-build on every restart, and the next one
+// must not wait on a corpse. Liveness goes through parent-watch's reading,
+// never a bare kill probe, and uncertainty answers "alive": the expensive
+// mistake is two builds in one directory, not waiting once too long.
+export const BUILD_LOCK = ".borgo/build.lock";
+
+type LockHolder = { pid: number } | "stale" | "unreadable";
+
+function readLockHolder(lockPath: string): LockHolder {
+  let text: string;
+  try {
+    text = readFileSync(lockPath, "utf8");
+  } catch {
+    return "unreadable"; // gone between the refusal and the read: try again
+  }
+  try {
+    const held = JSON.parse(text) as { pid?: unknown };
+    if (typeof held.pid !== "number") return "stale";
+    return parentGone(held.pid, readParent(held.pid, false)) ? "stale" : { pid: held.pid };
+  } catch {
+    // torn: a writer is mid-write right now, or died mid-write long ago
+    try {
+      return Date.now() - statSync(lockPath).mtimeMs > 10_000 ? "stale" : "unreadable";
+    } catch {
+      return "unreadable";
+    }
+  }
+}
+
+export async function withBuildLock<T>(
+  body: () => Promise<T>,
+  lockPath: string = BUILD_LOCK,
+  waitMs = 300_000,
+): Promise<T> {
+  const token = `${process.pid}-${crypto.randomUUID()}`;
+  const deadline = Date.now() + waitMs;
+  let announced = false;
+  mkdirSync(dirname(lockPath), { recursive: true });
+  for (;;) {
+    try {
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token, startedAt: Date.now() }), { flag: "wx" });
+      break;
+    } catch (error) {
+      if ((error as { code?: string }).code !== "EEXIST") throw error;
+    }
+    const holder = readLockHolder(lockPath);
+    if (holder === "stale") {
+      rmSync(lockPath, { force: true });
+      continue;
+    }
+    if (Date.now() > deadline) {
+      const who = holder === "unreadable" ? "an unreadable holder" : `pid ${holder.pid}`;
+      throw new Error(
+        `another asset build in this directory (${who}) has held ${lockPath} for ${Math.round(waitMs / 1000)}s - if none is running, delete the file`,
+      );
+    }
+    if (!announced && holder !== "unreadable") {
+      console.log(
+        `  ${c.terracotta(g.change)} another asset build is running in this directory ${c.dim(`${g.dot} pid ${holder.pid}, waiting for it`)}`,
+      );
+      announced = true;
+    }
+    await Bun.sleep(50);
+  }
+  try {
+    return await body();
+  } finally {
+    try {
+      if ((JSON.parse(readFileSync(lockPath, "utf8")) as { token?: string }).token === token) {
+        rmSync(lockPath, { force: true });
+      }
+    } catch {
+      // already gone, or taken over as stale: not ours to remove
+    }
+  }
+}
+
+export function buildAssets(dev = false): Promise<BuildResult> {
+  return withBuildLock(() => buildAssetsUnlocked(dev));
+}
+
+async function buildAssetsUnlocked(dev: boolean): Promise<BuildResult> {
   const { hasIslands } = await generateManifest(dev);
   const lastNames = readAssetNames();
   const wroteCss = await compileCss(dev);
