@@ -49,6 +49,13 @@ const (
 	// how long the render service may take to answer with headers; the body
 	// streams unbounded after that, an ssr page or an event stream alike
 	defaultRenderTimeout = 30 * time.Second
+	// a public port has clients that never finish: the old zero was safe
+	// only because bun read every body before go saw it. Streams clear
+	// their own deadlines (borgo.SSE), upgrades hijack the connection, and a
+	// page that renders for a minute is broken whatever the deadline says
+	defaultPublicTimeout = 60 * time.Second
+	// BORGO_MAX_BODY's default, the number bun has always used
+	defaultMaxBody = 32 << 20
 )
 
 // frontEnabled reads BORGO_FRONT with the ParseBool grammar every other
@@ -110,6 +117,82 @@ func envPublicPort() (string, error) {
 	return v, nil
 }
 
+// envMaxBody reads BORGO_MAX_BODY in bytes, the cap bun has always applied
+// to what it read: 0 is no limit, a fraction or a sign is refused rather than
+// floored (`=0.5` must not switch a limit off).
+func envMaxBody() (int64, error) {
+	v := os.Getenv("BORGO_MAX_BODY")
+	if v == "" {
+		return defaultMaxBody, nil
+	}
+	if strings.Trim(v, "0123456789") != "" {
+		return 0, fmt.Errorf(`borgo: BORGO_MAX_BODY: invalid value %q (want a whole number of bytes; 0 means no limit; unset uses %d)`, v, defaultMaxBody)
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf(`borgo: BORGO_MAX_BODY: invalid value %q (want a whole number of bytes; 0 means no limit; unset uses %d)`, v, defaultMaxBody)
+	}
+	return n, nil
+}
+
+// trustedProxies reads BORGO_TRUSTED_PROXIES: the peers whose X-Forwarded-*
+// headers are believed. Unset trusts loopback and the private ranges - a
+// reverse proxy on the same box or lan, which is every nginx and caddy
+// recipe borgo emits; "none" trusts nobody; otherwise a comma-separated
+// list of addresses or cidrs. A public port cannot believe a header anyone
+// on the internet can write, and the old front believed the first hop
+// because the first hop was always bun.
+func trustedProxies() ([]*net.IPNet, error) {
+	v := strings.TrimSpace(os.Getenv("BORGO_TRUSTED_PROXIES"))
+	if v == "" {
+		v = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
+	}
+	if strings.EqualFold(v, "none") {
+		return nil, nil
+	}
+	var nets []*net.IPNet
+	for _, part := range strings.Split(v, ",") {
+		s := strings.TrimSpace(part)
+		if s == "" {
+			continue
+		}
+		if !strings.Contains(s, "/") {
+			ip := net.ParseIP(s)
+			if ip == nil {
+				return nil, fmt.Errorf(`borgo: BORGO_TRUSTED_PROXIES: %q is not an ip address or cidr (unset trusts loopback and the private ranges; "none" trusts nobody)`, s)
+			}
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			s = fmt.Sprintf("%s/%d", ip, bits)
+		}
+		_, n, err := net.ParseCIDR(s)
+		if err != nil {
+			return nil, fmt.Errorf(`borgo: BORGO_TRUSTED_PROXIES: %q is not an ip address or cidr (unset trusts loopback and the private ranges; "none" trusts nobody)`, part)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
+}
+
+func peerTrusted(remoteAddr string, trusted []*net.IPNet) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range trusted {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // keysEqual compares in constant time; a length mismatch is a mismatch, not
 // a shortcut a timing can see.
 func keysEqual(a, b string) bool {
@@ -130,10 +213,44 @@ func requireInternalKey(key string, next http.Handler) http.Handler {
 	})
 }
 
-// front is the public handler: the api in-process, the rest forwarded.
+// limitBody caps what a public handler may read: counted as it is read,
+// never trusted from a declaration, so a chunked body cannot walk past it.
+// Bind turns the reader's refusal into a 413 (BindError); a handler reading
+// the body itself gets the error from Read.
+func limitBody(maxBody int64, next http.Handler) http.Handler {
+	if maxBody <= 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.Body != http.NoBody {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// frontOptions is what the public handler is configured with, read from the
+// environment once by serveFront and handed in whole so tests can build the
+// same handler without an environment.
+type frontOptions struct {
+	// the double-submit check bun ran before proxying /api
+	csrf bool
+	// headers on every response this side writes; nil adds nothing
+	security *securityConfig
+	// bytes a public /api handler may read; 0 is no limit
+	maxBody int64
+	// peers whose X-Forwarded-* are believed; nil believes nobody
+	trusted []*net.IPNet
+	// public/ as indexed at boot; nil forwards every file request
+	assets *assetIndex
+}
+
+// front is the public handler: the api and the files in-process, the rest
+// forwarded.
 type front struct {
-	api   http.Handler
-	proxy *httputil.ReverseProxy
+	api    http.Handler
+	assets *assetIndex
+	proxy  *httputil.ReverseProxy
 }
 
 // inProcess names what the go binary answers itself on the public port.
@@ -165,17 +282,24 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.api.ServeHTTP(w, r)
 		return
 	}
+	if f.assets != nil && f.assets.tryServe(w, r) {
+		return
+	}
 	f.proxy.ServeHTTP(w, r)
 }
 
+// forwardedHeaders are what a proxy in front states about the client; from
+// anyone else they are the client's own claims and are dropped before the
+// reverse proxy rebuilds them from the connection.
+var forwardedHeaders = [...]string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"}
+
 // newFrontHandler builds the public handler. api is the mounted route mux,
-// already wrapped by Middleware; csrf adds the double-submit check bun ran
-// before proxying, which /api would otherwise lose the moment it stopped
-// passing through bun; renderer is where everything else goes.
-func newFrontHandler(api http.Handler, csrf bool, renderer *url.URL, key string, timeout time.Duration) http.Handler {
-	if csrf {
+// already wrapped by Middleware; renderer is where everything else goes.
+func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key string, timeout time.Duration) http.Handler {
+	if opts.csrf {
 		api = csrfMiddleware(api)
 	}
+	api = limitBody(opts.maxBody, api)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// one host, many concurrent pages: the default of two idle connections
 	// per host would open a socket per request under any load
@@ -193,19 +317,22 @@ func newFrontHandler(api http.Handler, csrf bool, renderer *url.URL, key string,
 			// absolute urls, checks websocket origins and keys its page cache
 			// on the host the browser asked for, so that one travels
 			pr.Out.Host = pr.In.Host
-			// the chain a proxy in front of this one built is kept and this
-			// hop appended, as the old front did; the scheme it saw is kept
-			// too, or a tls-terminating nginx would have every websocket
-			// origin compared against "http" and refused. The same trust the
-			// old topology extended to the first hop; a trusted-proxy policy
-			// narrows it in step 2
-			pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
+			// what a trusted proxy in front stated is kept and this hop
+			// appended: the chain, and the scheme it saw - or a
+			// tls-terminating nginx would have every websocket origin
+			// compared against "http" and refused. From an untrusted peer
+			// the same headers are the client's own claims, and the
+			// forwarded facts are rebuilt from the connection alone
+			trusted := peerTrusted(pr.In.RemoteAddr, opts.trusted)
+			if trusted {
+				pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
+			}
 			pr.SetXForwarded()
-			if proto := pr.In.Header.Get("X-Forwarded-Proto"); proto != "" {
+			if proto := pr.In.Header.Get("X-Forwarded-Proto"); trusted && proto != "" {
 				pr.Out.Header.Set("X-Forwarded-Proto", proto)
 			}
 			// a client presenting either name is a client forging a fact
-			// only this process may state: Set replaces, so the deletes are
+			// only this process may state: Set replaces, so the delete is
 			// the statement, not the mechanism
 			pr.Out.Header.Del(sessionHeader)
 			pr.Out.Header.Set(internalKeyHeader, key)
@@ -214,7 +341,8 @@ func newFrontHandler(api http.Handler, csrf bool, renderer *url.URL, key string,
 			}
 		},
 		// the render service sets neither; if it ever did, the names stay
-		// between the two processes
+		// between the two processes. The security headers need no hand here:
+		// the middleware wrapping the whole public port sees these writes too
 		ModifyResponse: func(res *http.Response) error {
 			res.Header.Del(internalKeyHeader)
 			res.Header.Del(sessionHeader)
@@ -226,16 +354,15 @@ func newFrontHandler(api http.Handler, csrf bool, renderer *url.URL, key string,
 		FlushInterval: -1,
 		ErrorHandler:  renderUnavailable,
 	}
-	return &front{api: api, proxy: proxy}
+	var h http.Handler = &front{api: api, assets: opts.assets, proxy: proxy}
+	// on the whole public port, including the proxy's own refusals: by
+	// authorship, not by path
+	return opts.security.middleware(h)
 }
 
 // renderUnavailable answers for a render service that did not: the api is
 // still up, so the page says so and asks the browser to come back rather
 // than reading as an outage. A deadline reads as 504, anything else as 503.
-//
-// The security headers the render service would have put on this page are
-// missing until the front owns them (phase 1, step 2); the page carries no
-// script and no markup from the request, which is what they would guard.
 func renderUnavailable(w http.ResponseWriter, r *http.Request, err error) {
 	status := http.StatusServiceUnavailable
 	var ne net.Error
@@ -253,4 +380,15 @@ func renderUnavailable(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 	fmt.Fprint(w, "the page service is unavailable; the api is up - retry in a moment\n")
+}
+
+// publicTimeouts gives the public server the deadlines newServer leaves at
+// zero for the api behind bun, unless the operator set them.
+func publicTimeouts(srv *http.Server) {
+	if os.Getenv("BORGO_READ_TIMEOUT") == "" {
+		srv.ReadTimeout = defaultPublicTimeout
+	}
+	if os.Getenv("BORGO_WRITE_TIMEOUT") == "" {
+		srv.WriteTimeout = defaultPublicTimeout
+	}
 }

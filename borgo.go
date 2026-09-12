@@ -536,9 +536,21 @@ func serveFront(ctx context.Context, onShutdown func(), apiPort string, grace ti
 	if err != nil {
 		return err
 	}
-	// the check bun ran before proxying /api comes across with the route:
+	// the checks bun ran before proxying /api come across with the route:
 	// a switch that made the app less safe would not be a switch
 	csrf, err := csrfEnforced()
+	if err != nil {
+		return err
+	}
+	security, err := securityFromEnv()
+	if err != nil {
+		return err
+	}
+	maxBody, err := envMaxBody()
+	if err != nil {
+		return err
+	}
+	trusted, err := trustedProxies()
 	if err != nil {
 		return err
 	}
@@ -546,6 +558,7 @@ func serveFront(ctx context.Context, onShutdown func(), apiPort string, grace ti
 	if err != nil {
 		return err
 	}
+	publicTimeouts(public)
 	internal, err := newServer(apiPort, nil)
 	if err != nil {
 		return err
@@ -565,7 +578,14 @@ func serveFront(ctx context.Context, onShutdown func(), apiPort string, grace ti
 
 	mux, patterns := mountRoutes()
 	api := Middleware(mux)
-	public.Handler = newFrontHandler(api, csrf, renderer, key, renderTimeout)
+	dev, _ := strconv.ParseBool(os.Getenv("BORGO_DEV"))
+	public.Handler = newFrontHandler(api, frontOptions{
+		csrf:     csrf,
+		security: security,
+		maxBody:  maxBody,
+		trusted:  trusted,
+		assets:   loadAssetIndex(dev),
+	}, renderer, key, renderTimeout)
 	internal.Handler = requireInternalKey(key, api)
 	defer armStreamShutdown(public)()
 	defer armStreamShutdown(internal)()

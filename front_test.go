@@ -3,6 +3,7 @@ package borgo
 import (
 	"encoding/base64"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -45,13 +46,25 @@ func apiUnderTest() http.Handler {
 	return Middleware(api)
 }
 
+// every peer trusted, as the tests before step 2a assumed
+var trustAll = func() []*net.IPNet {
+	_, v4, _ := net.ParseCIDR("0.0.0.0/0")
+	_, v6, _ := net.ParseCIDR("::/0")
+	return []*net.IPNet{v4, v6}
+}()
+
 func frontUnderTest(t *testing.T, renderer *httptest.Server, csrf bool) http.Handler {
+	t.Helper()
+	return frontWith(t, renderer, frontOptions{csrf: csrf, trusted: trustAll})
+}
+
+func frontWith(t *testing.T, renderer *httptest.Server, opts frontOptions) http.Handler {
 	t.Helper()
 	u, err := url.Parse(renderer.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newFrontHandler(apiUnderTest(), csrf, u, testInternalKey, time.Second)
+	return newFrontHandler(apiUnderTest(), opts, u, testInternalKey, time.Second)
 }
 
 func TestFrontAnswersApiInProcess(t *testing.T) {
@@ -316,7 +329,7 @@ func TestFrontRendererTimeoutIs504(t *testing.T) {
 	}))
 	defer slow.Close()
 	u, _ := url.Parse(slow.URL)
-	front := newFrontHandler(Middleware(http.NewServeMux()), false, u, testInternalKey, 50*time.Millisecond)
+	front := newFrontHandler(Middleware(http.NewServeMux()), frontOptions{}, u, testInternalKey, 50*time.Millisecond)
 
 	w := httptest.NewRecorder()
 	front.ServeHTTP(w, httptest.NewRequest("GET", "/slow", nil))
@@ -376,6 +389,170 @@ func TestFrontModeRefusesAnUnusableEnvironment(t *testing.T) {
 	t.Setenv("PORT", "80;ls")
 	if _, err := envPublicPort(); err == nil {
 		t.Error("PORT=80;ls was read as a port")
+	}
+}
+
+// a public port cannot believe a header anyone on the internet can write:
+// the forwarded chain and scheme are kept only from a trusted peer
+func TestFrontBelievesForwardedHeadersFromTrustedPeersOnly(t *testing.T) {
+	_, lan, _ := net.ParseCIDR("10.0.0.0/8")
+	var seen http.Header
+	renderer := fakeRenderer(t, &seen)
+	defer renderer.Close()
+	front := frontWith(t, renderer, frontOptions{trusted: []*net.IPNet{lan}})
+
+	forwarded := func(peer string) http.Header {
+		req := httptest.NewRequest("GET", "/live", nil)
+		req.RemoteAddr = peer
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-For", "203.0.113.9")
+		req.Header.Set("Forwarded", "for=203.0.113.9")
+		seen = nil
+		front.ServeHTTP(httptest.NewRecorder(), req)
+		return seen
+	}
+	got := forwarded("10.0.0.5:4444")
+	if got.Get("X-Forwarded-Proto") != "https" || got.Get("X-Forwarded-For") != "203.0.113.9, 10.0.0.5" {
+		t.Errorf("a trusted proxy's facts were not kept: %v", got)
+	}
+	got = forwarded("198.51.100.7:4444")
+	if got.Get("X-Forwarded-Proto") != "http" || got.Get("X-Forwarded-For") != "198.51.100.7" {
+		t.Errorf("an internet client's claims were believed: proto %q for %q", got.Get("X-Forwarded-Proto"), got.Get("X-Forwarded-For"))
+	}
+	if got.Get("Forwarded") != "" {
+		t.Errorf("an internet client's Forwarded header reached the renderer: %q", got.Get("Forwarded"))
+	}
+
+	// nobody trusted: the loopback peer is a client like any other
+	front = frontWith(t, renderer, frontOptions{trusted: nil})
+	got = forwarded("127.0.0.1:4444")
+	if got.Get("X-Forwarded-Proto") != "http" {
+		t.Errorf(`with "none" the loopback peer was believed: %q`, got.Get("X-Forwarded-Proto"))
+	}
+}
+
+func TestTrustedProxiesGrammar(t *testing.T) {
+	t.Setenv("BORGO_TRUSTED_PROXIES", "")
+	nets, err := trustedProxies()
+	if err != nil || !peerTrusted("127.0.0.1:1", nets) || !peerTrusted("[::1]:1", nets) || !peerTrusted("192.168.1.9:1", nets) || peerTrusted("8.8.8.8:1", nets) {
+		t.Errorf("the default is loopback and the private ranges: %v %v", nets, err)
+	}
+	t.Setenv("BORGO_TRUSTED_PROXIES", "none")
+	if nets, err = trustedProxies(); err != nil || nets != nil {
+		t.Errorf(`"none" must trust nobody: %v %v`, nets, err)
+	}
+	t.Setenv("BORGO_TRUSTED_PROXIES", "203.0.113.4, 2001:db8::/32")
+	nets, err = trustedProxies()
+	if err != nil || !peerTrusted("203.0.113.4:80", nets) || peerTrusted("203.0.113.5:80", nets) || !peerTrusted("[2001:db8::9]:80", nets) {
+		t.Errorf("a list of an address and a cidr: %v %v", nets, err)
+	}
+	for _, bad := range []string{"nginx", "10.0.0.0/33", "203.0.113.4,"[:len("203.0.113.4,")-1] + ",x"} {
+		t.Setenv("BORGO_TRUSTED_PROXIES", bad)
+		if _, err := trustedProxies(); err == nil {
+			t.Errorf("BORGO_TRUSTED_PROXIES=%q was accepted", bad)
+		}
+	}
+}
+
+// the cap bun applied to every body it read, counted as read: a chunked
+// body that declares nothing still cannot pass it
+func TestFrontCountsThePublicBodyAgainstMaxBody(t *testing.T) {
+	renderer := fakeRenderer(t, nil)
+	defer renderer.Close()
+	api := http.NewServeMux()
+	api.HandleFunc("POST /api/echo", func(w http.ResponseWriter, r *http.Request) {
+		body, err := Bind[map[string]string](r)
+		if err != nil {
+			BindError(w, err)
+			return
+		}
+		WriteJSON(w, 200, body)
+	})
+	u, _ := url.Parse(renderer.URL)
+	front := newFrontHandler(Middleware(api), frontOptions{maxBody: 64, trusted: trustAll}, u, testInternalKey, time.Second)
+
+	small := httptest.NewRequest("POST", "/api/echo", strings.NewReader(`{"a":"b"}`))
+	small.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	front.ServeHTTP(w, small)
+	if w.Code != 200 {
+		t.Fatalf("a body under the cap answered %d", w.Code)
+	}
+	big := httptest.NewRequest("POST", "/api/echo", strings.NewReader(`{"a":"`+strings.Repeat("x", 100)+`"}`))
+	big.Header.Set("Content-Type", "application/json")
+	big.ContentLength = -1 // chunked: nothing declared, only counted
+	w = httptest.NewRecorder()
+	front.ServeHTTP(w, big)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("a chunked body over the cap answered %d", w.Code)
+	}
+}
+
+func TestMaxBodyGrammar(t *testing.T) {
+	t.Setenv("BORGO_MAX_BODY", "")
+	if n, err := envMaxBody(); err != nil || n != defaultMaxBody {
+		t.Errorf("default: %d %v", n, err)
+	}
+	t.Setenv("BORGO_MAX_BODY", "0")
+	if n, err := envMaxBody(); err != nil || n != 0 {
+		t.Errorf("0 is no limit: %d %v", n, err)
+	}
+	for _, bad := range []string{"0.5", "-1", "1e6", "10MB", " 5"} {
+		t.Setenv("BORGO_MAX_BODY", bad)
+		if _, err := envMaxBody(); err == nil {
+			t.Errorf("BORGO_MAX_BODY=%q was accepted", bad)
+		}
+	}
+}
+
+func TestPublicServerHasDeadlinesUnlessTheOperatorSetThem(t *testing.T) {
+	t.Setenv("BORGO_READ_TIMEOUT", "")
+	t.Setenv("BORGO_WRITE_TIMEOUT", "")
+	srv, err := newServer("0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicTimeouts(srv)
+	if srv.ReadTimeout != defaultPublicTimeout || srv.WriteTimeout != defaultPublicTimeout {
+		t.Errorf("public deadlines %v/%v, want %v", srv.ReadTimeout, srv.WriteTimeout, defaultPublicTimeout)
+	}
+	t.Setenv("BORGO_WRITE_TIMEOUT", "0")
+	srv, _ = newServer("0", nil)
+	publicTimeouts(srv)
+	if srv.WriteTimeout != 0 || srv.ReadTimeout != defaultPublicTimeout {
+		t.Errorf("an operator's explicit 0 was overridden: %v/%v", srv.ReadTimeout, srv.WriteTimeout)
+	}
+}
+
+// every response written on the public port carries the headers, the
+// proxy's own refusals and the renderer's answers alike
+func TestFrontPutsSecurityHeadersOnWhatItAuthors(t *testing.T) {
+	t.Setenv("BORGO_SECURITY_HEADERS", "")
+	t.Setenv("BORGO_CSP", "")
+	cfg, _ := securityFromEnv()
+	renderer := fakeRenderer(t, nil)
+	defer renderer.Close()
+	front := frontWith(t, renderer, frontOptions{security: cfg, trusted: trustAll})
+
+	for _, path := range []string{"/api/hello", "/api/nope", "/__borgo/publish", "/about"} {
+		w := httptest.NewRecorder()
+		front.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("X-Frame-Options") != "DENY" {
+			t.Errorf("%s (%d): static headers missing: %v", path, w.Code, w.Header())
+		}
+	}
+	// the renderer's page is html without a csp of its own here, so this side's applies
+	w := httptest.NewRecorder()
+	front.ServeHTTP(w, httptest.NewRequest("GET", "/about", nil))
+	if w.Header().Get("Content-Security-Policy") != cspDefault {
+		t.Errorf("proxied html without a csp: %q", w.Header().Get("Content-Security-Policy"))
+	}
+
+	renderer.Close()
+	w = httptest.NewRecorder()
+	front.ServeHTTP(w, httptest.NewRequest("GET", "/about", nil))
+	if w.Code != 503 || w.Header().Get("X-Frame-Options") != "DENY" {
+		t.Errorf("the proxy's own 503 went out bare: %d %v", w.Code, w.Header())
 	}
 }
 
