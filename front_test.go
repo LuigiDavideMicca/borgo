@@ -73,19 +73,24 @@ func TestFrontAnswersApiInProcess(t *testing.T) {
 	defer renderer.Close()
 	front := frontUnderTest(t, renderer, false)
 
-	for _, path := range []string{"/api/hello", "/healthz"} {
-		w := httptest.NewRecorder()
-		front.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
-		if w.Code != 200 {
-			t.Fatalf("%s: %d", path, w.Code)
-		}
-		if strings.Contains(w.Body.String(), "rendered") {
-			t.Fatalf("%s reached the renderer: %s", path, w.Body.String())
-		}
+	w := httptest.NewRecorder()
+	front.ServeHTTP(w, httptest.NewRequest("GET", "/api/hello", nil))
+	if w.Code != 200 || strings.Contains(w.Body.String(), "rendered") {
+		t.Fatalf("/api/hello: %d %s", w.Code, w.Body.String())
+	}
+	if seen != nil {
+		t.Fatal("an in-process path was forwarded")
+	}
+	// /healthz is the front's own: it PROBES the render service and reports it
+	w = httptest.NewRecorder()
+	front.ServeHTTP(w, httptest.NewRequest("GET", "/healthz", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "\"render\":\"reachable\"") {
+		t.Fatalf("/healthz: %d %s", w.Code, w.Body.String())
 	}
 	// a dot-segment spelling is decided on its cleaned form and lands on the
 	// mux, which answers the canonical spelling with net/http's own redirect
-	w := httptest.NewRecorder()
+	seen = nil
+	w = httptest.NewRecorder()
 	front.ServeHTTP(w, httptest.NewRequest("GET", "/x/../api/hello", nil))
 	if w.Code != 307 || w.Header().Get("Location") != "/api/hello" {
 		t.Fatalf("/x/../api/hello: %d %q", w.Code, w.Header().Get("Location"))
@@ -215,6 +220,35 @@ func TestFrontForwardsAVerifiedSessionAsAFact(t *testing.T) {
 	front.ServeHTTP(httptest.NewRecorder(), expired)
 	if got := seen.Get(sessionHeader); got != "" {
 		t.Errorf("an expired cookie produced a session header: %q", got)
+	}
+}
+
+// in dev the fast-refresh channel is the one internal name a browser may
+// reach, and only that one: the render service's own pokes stay internal
+func TestFrontLetsTheDevChannelThroughInDevOnly(t *testing.T) {
+	var seen http.Header
+	renderer := fakeRenderer(t, &seen)
+	defer renderer.Close()
+	dev := frontWith(t, renderer, frontOptions{trusted: trustAll, dev: true})
+	w := httptest.NewRecorder()
+	dev.ServeHTTP(w, httptest.NewRequest("GET", "/__borgo/dev", nil))
+	if w.Code != 200 || seen == nil || seen.Get("X-Test-Path") != "/__borgo/dev" {
+		t.Errorf("dev channel in dev: %d forwarded=%v", w.Code, seen != nil)
+	}
+	for _, p := range []string{"/__borgo/dev/reload", "/__borgo/dev/css", "/__borgo/publish", "/__borgo/routes"} {
+		seen = nil
+		w = httptest.NewRecorder()
+		dev.ServeHTTP(w, httptest.NewRequest("POST", p, nil))
+		if w.Code != 404 || seen != nil {
+			t.Errorf("%s in dev: %d forwarded=%v", p, w.Code, seen != nil)
+		}
+	}
+	prod := frontWith(t, renderer, frontOptions{trusted: trustAll})
+	seen = nil
+	w = httptest.NewRecorder()
+	prod.ServeHTTP(w, httptest.NewRequest("GET", "/__borgo/dev", nil))
+	if w.Code != 404 || seen != nil {
+		t.Errorf("dev channel in production: %d forwarded=%v", w.Code, seen != nil)
 	}
 }
 

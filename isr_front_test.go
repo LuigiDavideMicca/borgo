@@ -52,6 +52,7 @@ func (f *fakeRenderService) handler() http.Handler {
 				{"pattern": "/me", "seconds": 60, "tags": []string{}},
 				{"pattern": "/guarded", "seconds": 60, "tags": []string{}},
 				{"pattern": "/away", "seconds": 60, "tags": []string{}},
+				{"pattern": "/posts/:slug", "seconds": nil, "tags": []string{}},
 			}})
 			return
 		}
@@ -227,5 +228,52 @@ func TestFrontKeysTheCacheOnTheCleanedPath(t *testing.T) {
 	front.ServeHTTP(w, httptest.NewRequest("GET", "http://app.example/news", nil))
 	if w.Header().Get(bootHeader) != "" || w.Header().Get(cacheStateHeader) != "hit" {
 		t.Errorf("a replay carried the stamp: %q (%q)", w.Header().Get(bootHeader), w.Header().Get(cacheStateHeader))
+	}
+}
+
+// pages are counted under their pattern, cache or no cache; the front's own
+// endpoints are answered here and never reach the render service
+func TestFrontLabelsPagesByPatternAndKeepsItsOwnEndpoints(t *testing.T) {
+	svc := &fakeRenderService{boot: 1}
+	renderer := httptest.NewServer(svc.handler())
+	defer renderer.Close()
+	u, _ := url.Parse(renderer.URL)
+	counters := newMetrics(time.Now())
+	front := newFrontHandler(apiUnderTest(), frontOptions{trusted: trustAll, metrics: counters}, u, testInternalKey, time.Second)
+	get := func(p string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		front.ServeHTTP(w, httptest.NewRequest("GET", "http://app.example"+p, nil))
+		return w
+	}
+	get("/posts/one")
+	get("/posts/two")
+	get("/news")
+	before := atomic.LoadInt32(&svc.regular)
+	w := get("/metrics")
+	if !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") || strings.Contains(w.Body.String(), "own /metrics") {
+		t.Errorf("/metrics was not the front's: %q %q", w.Header().Get("Content-Type"), w.Body.String()[:40])
+	}
+	if atomic.LoadInt32(&svc.regular) != before {
+		t.Error("/metrics was rendered as a page")
+	}
+	// /healthz is the front's too; what reaches the render service is the
+	// probe of ITS /healthz, never a page render of the name
+	w = get("/healthz")
+	if !strings.Contains(w.Body.String(), `"render":"reachable"`) || strings.Contains(w.Body.String(), "own /healthz") {
+		t.Errorf("/healthz was not the front's: %q", w.Body.String())
+	}
+	out := counters.render(time.Now())
+	if !strings.Contains(out, `route="/posts/:slug",status="200"} 2`) || strings.Contains(out, "/posts/one") {
+		t.Errorf("pages are counted by pattern:\n%s", out)
+	}
+	if strings.Contains(out, "/metrics") || strings.Contains(out, "/healthz") {
+		t.Errorf("the front's own endpoints were counted:\n%s", out)
+	}
+	// metrics off: /metrics is nothing, not a page
+	off := newFrontHandler(apiUnderTest(), frontOptions{trusted: trustAll}, u, testInternalKey, time.Second)
+	w = httptest.NewRecorder()
+	off.ServeHTTP(w, httptest.NewRequest("GET", "http://app.example/metrics", nil))
+	if w.Code != 404 || strings.Contains(w.Body.String(), "own /metrics") {
+		t.Errorf("/metrics with the counters off: %d %q", w.Code, w.Body.String())
 	}
 }

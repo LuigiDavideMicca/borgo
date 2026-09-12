@@ -588,6 +588,14 @@ func serveFront(ctx context.Context, onShutdown func(), apiPort string, grace ti
 	}
 	setFrontIsr(pages)
 	defer setFrontIsr(nil)
+	metricsOn, err := metricsEnabled()
+	if err != nil {
+		return err
+	}
+	var counters *metrics
+	if metricsOn {
+		counters = newMetrics(startTime)
+	}
 	public.Handler = newFrontHandler(api, frontOptions{
 		csrf:     csrf,
 		security: security,
@@ -595,6 +603,8 @@ func serveFront(ctx context.Context, onShutdown func(), apiPort string, grace ti
 		trusted:  trusted,
 		assets:   newAssetIndexLogged(outputs, dev),
 		isr:      pages,
+		metrics:  counters,
+		dev:      dev,
 	}, renderer, key, renderTimeout)
 	internal.Handler = requireInternalKey(key, api)
 	defer armStreamShutdown(public)()

@@ -56,6 +56,10 @@ const (
 	defaultPublicTimeout = 60 * time.Second
 	// BORGO_MAX_BODY's default, the number bun has always used
 	defaultMaxBody = 32 << 20
+	// the render service's fast-refresh channel, a websocket the browser
+	// dials in dev; the orchestrator's own pokes below it go straight to the
+	// render port and never through here
+	devChannelPath = "/__borgo/dev"
 )
 
 // frontEnabled reads BORGO_FRONT with the ParseBool grammar every other
@@ -245,6 +249,10 @@ type frontOptions struct {
 	assets *assetIndex
 	// the page cache; nil in dev, where pages are never shared
 	isr *isr
+	// the counters behind /metrics; nil when BORGO_METRICS is off
+	metrics *metrics
+	// the request line, printed in dev only
+	dev bool
 }
 
 // front is the public handler: the api and the files in-process, the rest
@@ -255,13 +263,15 @@ type front struct {
 	isr      *isr
 	policies *policySource
 	proxy    *httputil.ReverseProxy
+	health   http.Handler
+	metrics  http.Handler
+	dev      bool
 }
 
-// inProcess names what the go binary answers itself on the public port.
-// /metrics stays with the render service until the counters move (phase 1,
-// step 4): a label table that lives in two processes is two tables.
+// inProcess names what the api mux answers on the public port; /healthz
+// and /metrics are the front's own, below.
 func inProcess(cleaned string) bool {
-	return cleaned == "/api" || strings.HasPrefix(cleaned, "/api/") || cleaned == "/healthz"
+	return cleaned == "/api" || strings.HasPrefix(cleaned, "/api/")
 }
 
 // internalName is a path the two processes use between themselves.
@@ -277,13 +287,36 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the decision is taken on what it will mean at the far end
 	cleaned := path.Clean(r.URL.Path)
 	// the names the two processes use between themselves are not urls: a
-	// public request for one is answered as if it did not exist
-	if internalName(cleaned) {
+	// public request for one is answered as if it did not exist. One
+	// exception, in dev only: the browser's fast-refresh channel lives on
+	// the render service, and the browser can only reach it through here
+	if internalName(cleaned) && !(f.dev && cleaned == devChannelPath) {
 		http.NotFound(w, r)
+		return
+	}
+	// the front's own endpoints: out of the counters, like on the bun side
+	if cleaned == "/healthz" {
+		f.health.ServeHTTP(w, r)
+		return
+	}
+	if cleaned == "/metrics" {
+		if f.metrics == nil {
+			// off is off: never a page named /metrics rendered for whoever asks
+			http.NotFound(w, r)
+			return
+		}
+		f.metrics.ServeHTTP(w, r)
 		return
 	}
 	if inProcess(cleaned) {
 		f.api.ServeHTTP(w, r)
+		// the mux wrote the pattern it matched onto the request; a miss
+		// is counted under the prefix, as the old front counted everything
+		if r.Pattern != "" {
+			setRouteLabel(r, r.Pattern)
+		} else {
+			setRouteLabel(r, "/api/*")
+		}
 		return
 	}
 	if f.assets != nil && f.assets.tryServe(w, r) {
@@ -291,6 +324,11 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// a page that declared itself shareable: answered from the cache when
 	// it can be; bypass means this visitor gets their own render, marked
+	if f.policies != nil {
+		if _, pattern, ok := f.policies.lookupPattern(cleaned); ok {
+			setRouteLabel(r, pattern)
+		}
+	}
 	if f.isr != nil {
 		if policy, ok := f.policies.lookup(cleaned); ok && policy != nil {
 			switch f.isr.handle(w, r, policy) {
@@ -328,13 +366,18 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 
 	// the cache has its own conversations with the render service, on the
 	// same transport: the policy table once per boot, shared renders on demand
-	var policies *policySource
+	rc := newRenderClient(renderer, key, transport, func(in *http.Request, out http.Header) {
+		forwardFacts(in, out, opts.trusted)
+	})
+	// the policy table also names pages for the counters, cache or no cache
+	policies := &policySource{fetch: rc.policies}
 	if opts.isr != nil {
-		rc := newRenderClient(renderer, key, transport, func(in *http.Request, out http.Header) {
-			forwardFacts(in, out, opts.trusted)
-		})
-		policies = &policySource{fetch: rc.policies}
 		opts.isr.render = rc.shared
+	}
+	health := frontHealthz(newRenderProbe(renderer, key, transport))
+	var metricsEndpoint http.Handler
+	if opts.metrics != nil {
+		metricsEndpoint = metricsHandler(opts.metrics)
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -391,10 +434,11 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 		FlushInterval: -1,
 		ErrorHandler:  renderUnavailable,
 	}
-	var h http.Handler = &front{api: api, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy}
+	var h http.Handler = &front{api: api, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev}
 	// on the whole public port, including the proxy's own refusals: by
-	// authorship, not by path
-	return opts.security.middleware(h)
+	// authorship, not by path. The counters sit outside the headers, so a
+	// refusal the headers wrapper writes is counted too
+	return observeRequests(opts.metrics, opts.dev, opts.security.middleware(h))
 }
 
 // renderUnavailable answers for a render service that did not: the api is

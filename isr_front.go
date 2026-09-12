@@ -23,31 +23,99 @@ import (
 // to the boot stamp it declared it under: a restarted render service
 // (a deploy, a crash) may have new pages, and the stamp on every proxied
 // response says when to ask again.
+//
+// Read the way the health probe reads: one fetch in flight at a time, shared
+// by whoever asks meanwhile, outside the lock, and a failure remembered for
+// a second - the verifier measured five page requests against a hung render
+// service queuing behind five thirty-second fetches, one at a time, because
+// each took the mutex and fetched for itself.
 type policySource struct {
-	mu      sync.Mutex
-	boot    string
-	entries []policyEntry
-	loaded  bool
-	fetch   func() (boot string, entries []policyEntry, err error)
-	// said once per failure, not once per page request
+	mu       sync.Mutex
+	boot     string
+	entries  []policyEntry
+	loaded   bool
+	inflight chan struct{}
+	failedAt time.Time
+	// said once per outage, not once per page request
 	failedOnce bool
+	fetch      func() (boot string, entries []policyEntry, err error)
+	now        func() time.Time
+}
+
+const policyRetryAfter = time.Second
+
+// table returns the entries, loading them if nobody has; false while the
+// render service is not answering, in which case pages are served fresh
+func (p *policySource) table() ([]policyEntry, bool) {
+	now := p.now
+	if now == nil {
+		now = time.Now
+	}
+	p.mu.Lock()
+	if p.loaded {
+		entries := p.entries
+		p.mu.Unlock()
+		return entries, true
+	}
+	if !p.failedAt.IsZero() && now().Sub(p.failedAt) < policyRetryAfter {
+		p.mu.Unlock()
+		return nil, false
+	}
+	if p.inflight != nil {
+		wait := p.inflight
+		p.mu.Unlock()
+		<-wait
+		p.mu.Lock()
+		entries, ok := p.entries, p.loaded
+		p.mu.Unlock()
+		return entries, ok
+	}
+	done := make(chan struct{})
+	p.inflight = done
+	p.mu.Unlock()
+
+	boot, entries, err := p.fetch()
+
+	p.mu.Lock()
+	p.inflight = nil
+	if err != nil {
+		p.failedAt = now()
+		if !p.failedOnce {
+			p.failedOnce = true
+			log.Printf("borgo: page policies not read from the render service (%v): pages served fresh until it answers", err)
+		}
+		p.mu.Unlock()
+		close(done)
+		return nil, false
+	}
+	p.boot, p.entries, p.loaded, p.failedAt, p.failedOnce = boot, entries, true, time.Time{}, false
+	p.mu.Unlock()
+	close(done)
+	return entries, true
+}
+
+// lookupPattern is the policy and the pattern a path matched, for the cache
+// and the counters: a page is a page whether or not it declared a policy
+func (p *policySource) lookupPattern(pathname string) (*isrPolicy, string, bool) {
+	entries, ok := p.table()
+	if !ok {
+		return nil, "", false
+	}
+	pth := strings.TrimRight(pathname, "/")
+	if pth == "" {
+		pth = "/"
+	}
+	for _, e := range entries {
+		if matchPattern(e.pattern, pth) {
+			return e.policy, e.pattern, true
+		}
+	}
+	return nil, "", false
 }
 
 func (p *policySource) lookup(pathname string) (*isrPolicy, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.loaded {
-		boot, entries, err := p.fetch()
-		if err != nil {
-			if !p.failedOnce {
-				p.failedOnce = true
-				log.Printf("borgo: page policies not read from the render service (%v): pages served fresh until it answers", err)
-			}
-			return nil, false
-		}
-		p.boot, p.entries, p.loaded, p.failedOnce = boot, entries, true, false
-	}
-	return matchPolicy(p.entries, pathname)
+	policy, _, ok := p.lookupPattern(pathname)
+	return policy, ok
 }
 
 // sawBoot is told the stamp every proxied response carried; a different
@@ -70,8 +138,11 @@ type renderClient struct {
 	renderer *url.URL
 	key      string
 	client   *http.Client
+	table    *http.Client
 	forward  func(in *http.Request, out http.Header)
 }
+
+const policyFetchWait = 2 * time.Second
 
 func newRenderClient(renderer *url.URL, key string, transport http.RoundTripper, forward func(*http.Request, http.Header)) *renderClient {
 	client := &http.Client{Transport: transport, Timeout: sharedRenderWait}
@@ -83,7 +154,10 @@ func newRenderClient(renderer *url.URL, key string, transport http.RoundTripper,
 	// would have carried this boot's key to whatever Location named (found
 	// by the verifier of this step, with the real client the test had mocked)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &renderClient{renderer: renderer, key: key, client: client, forward: forward}
+	// the table is a few kilobytes of json, not a render: a hung render
+	// service must not hold the first page request for thirty seconds
+	table := &http.Client{Transport: transport, Timeout: policyFetchWait, CheckRedirect: client.CheckRedirect}
+	return &renderClient{renderer: renderer, key: key, client: client, table: table, forward: forward}
 }
 
 func (c *renderClient) policies() (string, []policyEntry, error) {
@@ -92,7 +166,7 @@ func (c *renderClient) policies() (string, []policyEntry, error) {
 		return "", nil, err
 	}
 	req.Header.Set(internalKeyHeader, c.key)
-	res, err := c.client.Do(req)
+	res, err := c.table.Do(req)
 	if err != nil {
 		return "", nil, err
 	}
