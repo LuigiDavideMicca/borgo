@@ -161,13 +161,14 @@ export async function dev() {
   const goNext = `.borgo/next-${goBinName()}`;
   const frontPort = process.env.PORT || "3000";
   const apiPort = process.env.API_PORT || "3501";
-  // BORGO_FRONT=1: go answers frontPort, the front server process is the
-  // render service on its own loopback port, and both hold this boot's key
+  // go answers frontPort, the front server process is the render service on
+  // its own loopback port, and both hold this boot's key
   const topology = frontTopology(process.env);
-  // where the front server process actually listens, key included: the
-  // orchestrator's own pokes (css, reload, readiness) go there directly
-  const renderBase = topology ? `http://127.0.0.1:${topology.renderPort}` : `http://localhost:${frontPort}`;
-  const renderHeaders: Record<string, string> = topology ? { [INTERNAL_KEY_HEADER]: topology.key } : {};
+  // where the front server process actually listens, key included: this
+  // orchestrator's own pokes (css, reload, readiness) go there directly and
+  // never through the front - they are not the browser's to reach
+  const renderBase = `http://127.0.0.1:${topology.renderPort}`;
+  const renderHeaders: Record<string, string> = { [INTERNAL_KEY_HEADER]: topology.key };
   let goProc: Subprocess | null = null;
   let frontProc: Subprocess | null = null;
   let reload = false;
@@ -218,7 +219,7 @@ export async function dev() {
   for (const [port, name] of [
     [frontPort, "front server"],
     [apiPort, "api"],
-    ...(topology ? [[String(topology.renderPort), "render service"] as const] : []),
+    [String(topology.renderPort), "render service"],
   ] as const) {
     try {
       await fetch(`http://localhost:${port}/`, { signal: AbortSignal.timeout(500) });
@@ -322,7 +323,7 @@ export async function dev() {
       stderr: "inherit",
       env: {
         ...process.env,
-        ...(topology ? goFrontEnv(topology) : {}),
+        ...goFrontEnv(topology),
         // this is borgo dev: as the front, go lets the browser's fast-refresh
         // channel through and keeps csrf off, like the front server always did
         BORGO_DEV: "1",
@@ -364,7 +365,7 @@ export async function dev() {
         // stream holds a slot for its whole life; overridable on purpose
         BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
         ...process.env,
-        ...(topology ? renderEnv(topology) : {}),
+        ...renderEnv(topology),
         BORGO_DEV: "1",
         ...(reload ? { BORGO_RELOAD: "1" } : {}),
         ...(changed?.length ? { BORGO_CHANGED: encodeChanged(changed) } : {}),

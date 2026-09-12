@@ -87,20 +87,15 @@ describe("render mode is wired where it must be", () => {
   });
 });
 
-// the orchestrator's half: one object both processes are configured from
+// the orchestrator's half: one object both processes are configured from.
+// Not a switch any more - this is the topology every borgo command runs, and
+// the go binary reads it from BORGO_RENDER_URL rather than from a flag
 describe("frontTopology", () => {
-  test("off unless BORGO_FRONT says so", () => {
-    expect(frontTopology({})).toBeNull();
-    expect(frontTopology({ BORGO_FRONT: "0" })).toBeNull();
-    expect(() => frontTopology({ BORGO_FRONT: "yes" })).toThrow(/BORGO_FRONT/);
-  });
-
   test("mints a key of the go side's floor and hands both halves the same addresses", () => {
-    const t = frontTopology({ BORGO_FRONT: "1", PORT: "8080", API_PORT: "9000", BORGO_RENDER_PORT: "9100" })!;
+    const t = frontTopology({ PORT: "8080", API_PORT: "9000", BORGO_RENDER_PORT: "9100" });
     expect(t.key.length).toBeGreaterThanOrEqual(INTERNAL_KEY_MIN_LEN);
     expect(t.key).toMatch(/^[0-9a-f]{64}$/);
     expect(goFrontEnv(t)).toEqual({
-      BORGO_FRONT: "1",
       PORT: "8080",
       API_PORT: "9000",
       BORGO_INTERNAL_KEY: t.key,
@@ -118,13 +113,13 @@ describe("frontTopology", () => {
 
   test("an operator's own key is kept when usable, replaced when not", () => {
     const own = "o".repeat(INTERNAL_KEY_MIN_LEN);
-    expect(frontTopology({ BORGO_FRONT: "1", BORGO_INTERNAL_KEY: own })!.key).toBe(own);
-    expect(frontTopology({ BORGO_FRONT: "1", BORGO_INTERNAL_KEY: "short" })!.key).not.toBe("short");
+    expect(frontTopology({ BORGO_INTERNAL_KEY: own }).key).toBe(own);
+    expect(frontTopology({ BORGO_INTERNAL_KEY: "short" }).key).not.toBe("short");
   });
 
   test("defaults: 3000 public, 3501 internal, 3600 render; two boots mint two keys", () => {
-    const a = frontTopology({ BORGO_FRONT: "1" })!;
-    const b = frontTopology({ BORGO_FRONT: "1" })!;
+    const a = frontTopology({});
+    const b = frontTopology({});
     expect([a.publicPort, a.apiPort, a.renderPort]).toEqual([3000, 3501, RENDER_PORT_DEFAULT]);
     expect(a.key).not.toBe(b.key);
   });
@@ -138,21 +133,23 @@ describe("the orchestrators wire the topology", () => {
   const exp = readFileSync(join(import.meta.dir, "../src/export.ts"), "utf8");
 
   test("borgo start: go gets the front env, this process becomes the renderer", () => {
-    expect(cli).toContain("if (topology) Object.assign(process.env, renderEnv(topology));");
-    expect(cli).toContain("...(topology ? goFrontEnv(topology) : {}),");
+    expect(cli).toContain("Object.assign(process.env, renderEnv(topology));");
+    expect(cli).toContain("...goFrontEnv(topology),");
   });
 
   test("borgo dev: go and the front server each get their half, and the pokes go to the render port with the key", () => {
-    expect(dev).toContain("...(topology ? goFrontEnv(topology) : {}),");
-    expect(dev).toContain("...(topology ? renderEnv(topology) : {}),");
+    expect(dev).toContain("...goFrontEnv(topology),");
+    expect(dev).toContain("...renderEnv(topology),");
     expect(dev).toContain("fetch(`${renderBase}/__borgo/dev/${path}`");
     expect(dev).toContain("headers: renderHeaders,");
   });
 
-  test("borgo export: go is started whenever it is the front, and readiness is asked of the public port", () => {
-    expect(exp).toContain("if (needApi || topology) {");
-    expect(exp).toContain("const probe = topology ? `http://localhost:${frontPort}/healthz` : `http://localhost:${apiPort}/`;");
+  test("borgo export: go is always the front, and readiness is asked of the public port", () => {
+    expect(exp).toContain("...goFrontEnv(topology),");
+    expect(exp).toContain("const probe = `http://localhost:${frontPort}/healthz`;");
     expect(exp).toContain("makeApiClient(`http://localhost:${apiPort}`, apiHeaders)");
+    // the flag is gone: nothing in the three commands asks whether to do this
+    for (const src of [cli, dev, exp]) expect(src).not.toContain("BORGO_FRONT");
   });
 });
 

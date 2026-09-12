@@ -283,10 +283,10 @@ export async function exportSite(): Promise<number> {
     return 1;
   }
 
-  // BORGO_FRONT=1: three ports - go answers frontPort, the render service
-  // this process becomes listens on its own, the api on the internal one -
-  // and the pages are fetched through go, so an export is what a visitor
-  // would have been served
+  // three ports - go answers frontPort, the render service this process
+  // becomes listens on its own, the api on the internal one - and the pages
+  // are fetched through go, so an export is what a visitor would have been
+  // served
   const [apiPort, frontPort, renderPort] = await freePorts(3);
   process.env.API_PORT = String(apiPort);
   process.env.PORT = String(frontPort);
@@ -295,8 +295,8 @@ export async function exportSite(): Promise<number> {
   delete process.env.API_URL;
   process.env.BORGO_RELOAD = "1"; // quiet startup lines from the servers
   const topology = frontTopology(process.env);
-  if (topology) Object.assign(process.env, renderEnv(topology));
-  const apiHeaders: Record<string, string> = topology ? { [INTERNAL_KEY_HEADER]: topology.key } : {};
+  Object.assign(process.env, renderEnv(topology));
+  const apiHeaders: Record<string, string> = { [INTERNAL_KEY_HEADER]: topology.key };
 
   let apiProc: import("bun").Subprocess | null = null;
   // named before the build: a build that dies partway still leaves the file
@@ -309,9 +309,9 @@ export async function exportSite(): Promise<number> {
   const outDir = "dist/site";
   const stageDir = `dist/.site-staged-${process.pid}`;
   try {
-    // with go in front the binary is needed whether or not a loader calls
-    // it: it is what answers the port the pages are fetched from
-    if (needApi || topology) {
+    // the binary is needed whether or not a loader calls it: it is what
+    // answers the port the pages are fetched from
+    {
       // dist/ may be running under borgo start, and windows locks executing binaries
       apiBin = `.borgo/export-${goBinName()}`;
       const goBuild = Bun.spawn(["go", "build", "-o", apiBin, "."], { stdout: "inherit", stderr: "inherit" });
@@ -327,12 +327,12 @@ export async function exportSite(): Promise<number> {
           ...process.env,
           API_PORT: String(apiPort),
           PORT: String(frontPort),
-          ...(topology ? goFrontEnv(topology) : {}),
+          ...goFrontEnv(topology),
         },
       });
       // the internal listener answers nothing without the key, so readiness
-      // is asked of the public port when go is the front
-      const probe = topology ? `http://localhost:${frontPort}/healthz` : `http://localhost:${apiPort}/`;
+      // is asked of the public port the front holds
+      const probe = `http://localhost:${frontPort}/healthz`;
       const deadline = Date.now() + 30_000;
       for (;;) {
         try {
@@ -340,7 +340,7 @@ export async function exportSite(): Promise<number> {
           break;
         } catch {}
         if (Date.now() > deadline) {
-          console.error(`  ${c.red(g.err)} api never answered on :${topology ? frontPort : apiPort}`);
+          console.error(`  ${c.red(g.err)} api never answered on :${frontPort}`);
           return 1;
         }
         await Bun.sleep(100);

@@ -134,11 +134,11 @@ switch (command) {
     const { watchParent } = await import("./parent-watch");
     watchParent(supervisor, () => process.exit(0), 2_000, "BORGO_SUPERVISOR_PID")?.unref();
 
-    // BORGO_FRONT=1: the go binary answers the public port, this process is
-    // its render service, and the boot key travels from here to both
+    // the go binary answers the public port, this process is its render
+    // service, and the boot key travels from here to both halves
     const { frontTopology, goFrontEnv, renderEnv } = await import("./util");
     const topology = frontTopology(process.env);
-    if (topology) Object.assign(process.env, renderEnv(topology));
+    Object.assign(process.env, renderEnv(topology));
 
     // --front-only: the api runs elsewhere (API_URL)
     if (!process.argv.includes("--front-only")) {
@@ -154,7 +154,7 @@ switch (command) {
         stderr: "inherit",
         env: {
           ...process.env,
-          ...(topology ? goFrontEnv(topology) : {}),
+          ...goFrontEnv(topology),
           BORGO_PARENT_PID: String(process.pid),
         },
       });

@@ -30,9 +30,10 @@ import (
 // paying a process hop. Pages pay that hop now instead, where a render of
 // milliseconds does not notice it.
 //
-// BORGO_FRONT=1 switches it on. While the switch exists the old topology
-// keeps working unchanged; it is removed once every responsibility has
-// moved across (the 0.30 plan, phase 1).
+// Not a switch: this is front mode when there is a render service to be
+// the front of, which BORGO_RENDER_URL names and every borgo command sets.
+// An app that uses borgo as its api alone - an embedder, a service with no
+// pages - names none, and keeps the single listener serveContext binds.
 
 const (
 	// every request between the two processes carries the boot key here; the
@@ -62,20 +63,6 @@ const (
 	devChannelPath = "/__borgo/dev"
 )
 
-// frontEnabled reads BORGO_FRONT with the ParseBool grammar every other
-// switch uses; unset is off.
-func frontEnabled() (bool, error) {
-	v := os.Getenv("BORGO_FRONT")
-	if v == "" {
-		return false, nil
-	}
-	on, err := strconv.ParseBool(v)
-	if err != nil {
-		return false, fmt.Errorf(`borgo: BORGO_FRONT: invalid value %q (want "1"/"true" or "0"/"false"; unset means off)`, v)
-	}
-	return on, nil
-}
-
 // internalKey reads BORGO_INTERNAL_KEY. Front mode refuses to start without
 // one: the loopback listeners are reachable by every process on the box,
 // and a key is what turns them from an api into a cable between two
@@ -88,13 +75,15 @@ func internalKey() (string, error) {
 	return key, nil
 }
 
-// renderURL reads BORGO_RENDER_URL, where the bun render service listens. A
-// path, query or userinfo is refused: the url names a host, and anything
-// else in it would be silently joined onto every forwarded request.
+// renderURL reads BORGO_RENDER_URL, where the bun render service listens,
+// and is what decides the topology: a nil url with no error means nobody
+// asked this binary to be a front, and it serves its api alone. A path,
+// query or userinfo is refused - the url names a host, and anything else in
+// it would be silently joined onto every forwarded request.
 func renderURL() (*url.URL, error) {
 	v := os.Getenv("BORGO_RENDER_URL")
 	if v == "" {
-		return nil, errors.New("borgo: BORGO_RENDER_URL must be set in front mode (the render service's address, e.g. http://127.0.0.1:3600)")
+		return nil, nil
 	}
 	u, err := url.Parse(v)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

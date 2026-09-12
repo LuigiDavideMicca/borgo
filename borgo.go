@@ -474,12 +474,14 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 		return fmt.Errorf("borgo: parent process %d has already exited; not starting", parentPID)
 	}
 	warnParentMismatch(parentPID, os.Getppid())
-	front, err := frontEnabled()
+	// a render service to be the front of, and this run is that front; none,
+	// and this is an api serving its own port as it always did
+	renderer, err := renderURL()
 	if err != nil {
 		return err
 	}
-	if front {
-		return serveFront(ctx, onShutdown, port, grace, parentPID)
+	if renderer != nil {
+		return serveFront(ctx, onShutdown, renderer, port, grace, parentPID)
 	}
 	// bound here, not in ListenAndServe: a port in use is a refusal like the
 	// others, with the registry untouched and no banner printed
@@ -519,16 +521,12 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 // a second, loopback-only listener on apiPort serves the same routes to the
 // render service's loaders, behind the boot key. Both are refused before the
 // registry is mounted, like the single listener above.
-func serveFront(ctx context.Context, onShutdown func(), apiPort string, grace time.Duration, parentPID int) error {
+func serveFront(ctx context.Context, onShutdown func(), renderer *url.URL, apiPort string, grace time.Duration, parentPID int) error {
 	publicPort, err := envPublicPort()
 	if err != nil {
 		return err
 	}
 	key, err := internalKey()
-	if err != nil {
-		return err
-	}
-	renderer, err := renderURL()
 	if err != nil {
 		return err
 	}

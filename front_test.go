@@ -398,14 +398,17 @@ func TestInternalListenerRequiresTheBootKey(t *testing.T) {
 }
 
 func TestFrontModeRefusesAnUnusableEnvironment(t *testing.T) {
-	t.Setenv("BORGO_FRONT", "1")
+	// no renderer named: an api serving its own port, not a refusal
+	t.Setenv("BORGO_RENDER_URL", "")
+	if u, err := renderURL(); u != nil || err != nil {
+		t.Errorf("an api with no render service: %v %v", u, err)
+	}
 	t.Setenv("BORGO_INTERNAL_KEY", "short")
-	t.Setenv("BORGO_RENDER_URL", "http://127.0.0.1:3600")
 	if _, err := internalKey(); err == nil || !strings.Contains(err.Error(), "BORGO_INTERNAL_KEY") {
 		t.Errorf("a short key was accepted: %v", err)
 	}
 	t.Setenv("BORGO_INTERNAL_KEY", testInternalKey)
-	for _, bad := range []string{"", "127.0.0.1:3600", "http://127.0.0.1:3600/render", "http://user:pw@127.0.0.1:3600", "ftp://x"} {
+	for _, bad := range []string{"127.0.0.1:3600", "http://127.0.0.1:3600/render", "http://user:pw@127.0.0.1:3600", "ftp://x"} {
 		t.Setenv("BORGO_RENDER_URL", bad)
 		if _, err := renderURL(); err == nil {
 			t.Errorf("BORGO_RENDER_URL=%q was accepted", bad)
@@ -415,10 +418,6 @@ func TestFrontModeRefusesAnUnusableEnvironment(t *testing.T) {
 	u, err := renderURL()
 	if err != nil || u.String() != "http://127.0.0.1:3600" {
 		t.Errorf("a trailing slash is a host: %v %v", u, err)
-	}
-	t.Setenv("BORGO_FRONT", "maybe")
-	if _, err := frontEnabled(); err == nil {
-		t.Error("BORGO_FRONT=maybe was read as something")
 	}
 	t.Setenv("PORT", "80;ls")
 	if _, err := envPublicPort(); err == nil {

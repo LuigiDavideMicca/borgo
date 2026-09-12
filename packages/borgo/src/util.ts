@@ -592,11 +592,10 @@ export function resolveSwitches(
   };
 }
 
-// BORGO_FRONT=1 for the orchestrator - borgo dev, start and export: the go
-// binary answers the public port and the bun process it starts is the
-// render service behind it. One boot key, minted here unless the operator
-// set one; the two halves receive their addresses from the same object, so
-// they cannot disagree. Removed with the old topology (phase 1, step 6).
+// The topology every borgo command runs: the go binary answers the public
+// port and the bun process beside it is the render service behind it. One
+// boot key, minted here unless the operator set a usable one; both halves
+// take their addresses from this one object, so they cannot disagree.
 export type FrontTopology = {
   publicPort: number;
   apiPort: number;
@@ -604,8 +603,7 @@ export type FrontTopology = {
   key: string;
 };
 
-export function frontTopology(env: Record<string, string | undefined>): FrontTopology | null {
-  if (!(envBool("BORGO_FRONT", env.BORGO_FRONT, "off") ?? false)) return null;
+export function frontTopology(env: Record<string, string | undefined>): FrontTopology {
   let key = env.BORGO_INTERNAL_KEY ?? "";
   if (key.length < INTERNAL_KEY_MIN_LEN) {
     // said, not silent: an operator who set a short key and later tries it
@@ -632,9 +630,9 @@ export function mintInternalKey(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// what the go binary needs to be the front
+// what the go binary needs to be the front: naming the render service is
+// what makes it one, so there is no flag to set
 export const goFrontEnv = (t: FrontTopology): Record<string, string> => ({
-  BORGO_FRONT: "1",
   PORT: String(t.publicPort),
   API_PORT: String(t.apiPort),
   BORGO_INTERNAL_KEY: t.key,
