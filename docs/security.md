@@ -2,11 +2,11 @@
 
 What borgo does for you before you write a line, what it deliberately leaves to you, and how to change either. If you are the person who has to approve this framework for production, this is the page to read.
 
-The short version: borgo ships a locked-down default posture — security headers, a strict Content-Security-Policy, CSRF on form actions *and* on proxied `/api/*` mutations, signed HttpOnly session cookies, bounded request bodies and timeouts — and it stays out of policy decisions like rate limiting, account lockout and TLS, which belong to your proxy and your product.
+The short version: borgo ships a locked-down default posture — security headers, a strict Content-Security-Policy, CSRF on form actions *and* on browser `/api/*` mutations, signed HttpOnly session cookies, bounded request bodies and timeouts — and it stays out of policy decisions like rate limiting, account lockout and TLS, which belong to your proxy and your product.
 
 ## Security headers
 
-Every rendered document leaves the front server with three headers set (only if the response does not already carry them, so you can override any of them per route). The front server's *own* answers on `/api/*` carry them too — the `403` of a failed csrf check, the `413` over `BORGO_MAX_BODY`, the `502`/`504` of an api that did not answer — because a response borgo writes is borgo's to protect; what the Go handler itself returns passes through untouched, and it is Go's to set (`borgo.Serve` already sends `nosniff` on its own errors).
+Every response on the public port leaves with three headers set, only where it does not already carry them — so you can override any of them per route. That is every response, by where it leaves and not by who wrote it: a rendered document, a static file, what an `/api/*` handler returns, and the front's own refusals — the `403` of a failed csrf check, the `413` over `BORGO_MAX_BODY`, the `503`/`504` of a render service that did not answer.
 
 | Header | Value |
 | --- | --- |
@@ -52,15 +52,15 @@ BORGO_CSP="default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancesto
 
 ## CSRF protection
 
-One double-submit token, echoed back in two different places — because the two request shapes borgo serves have nothing in common. The front server issues a single `borgo_csrf` cookie with every rendered page, and this is the whole scope of what it then demands back:
+One double-submit token, echoed back in two different places — because the two request shapes borgo serves have nothing in common. The render service issues a single `borgo_csrf` cookie with every rendered page, and this is the whole scope of what it then demands back:
 
 | Request | What must echo the token | Who attaches it |
 | --- | --- | --- |
 | `POST` to a page route (a form action) | the `__borgo_csrf` field of the form body | `<CsrfField />` |
-| `POST`, `PUT`, `PATCH` or `DELETE` to a proxied `/api/*` route | the `X-CSRF-Token` request header | `apiFetch` |
+| `POST`, `PUT`, `PATCH` or `DELETE` to an `/api/*` route | the `X-CSRF-Token` request header | `apiFetch` |
 | `GET`, `HEAD`, `OPTIONS` — anywhere | nothing. Safe methods are never checked | — |
 
-Both checks run **before** the request body is read: a rejected form action never pays for a parse, and a rejected `/api` call never reaches Go at all. Both answer `403`.
+Both checks run **before** the request body is read: a rejected form action never pays for a parse, and a rejected `/api` call never reaches your handler. Both answer `403`.
 
 ### Form actions
 
@@ -100,9 +100,9 @@ async function logout() {
 
 Everything else about it is `fetch`: same arguments, same return, safe methods passed straight through. A plain `fetch("/api/x", { method: "POST" })` from a page in a browser holding the cookie answers `403` — that is the check doing its job, and swapping the call for `apiFetch` is the fix. If you would rather roll it yourself, `csrfCookieValue(document.cookie)` reads the token and `CSRF_HEADER` is the header name.
 
-**Loaders and actions need none of this.** Their `api` client and `apiUrl` address the Go API directly, on its own port; they never cross the front server's `/api/*` proxy, so a server-side `api("POST /api/login", …)` is not checked here and cannot start failing because of it. The form action that called it already passed the field check on the way in.
+**Loaders and actions need none of this.** Their `api` client and `apiUrl` address the api's internal listener — loopback, behind the key minted for this boot — and the header check guards the public port, not that listener, so a server-side `api("POST /api/login", …)` is not checked here and cannot start failing because of it. The form action that called it already passed the field check on the way in.
 
-**What you get for free when you write your own `POST /api/…`:** a Go handler mounted at an `/api` route is covered the moment a browser calls it, with no annotation and no per-route wiring — the check sits on the proxy, not on the handler. The obligation that remains is the browser side: use `apiFetch`.
+**What you get for free when you write your own `POST /api/…`:** a Go handler mounted at an `/api` route is covered the moment a browser calls it, with no annotation and no per-route wiring — the check sits on the public port, not on the handler. The obligation that remains is the browser side: use `apiFetch`.
 
 ### What arms the check, and what stays untouched
 
@@ -123,7 +123,7 @@ Worth being precise, because the token is not the only thing holding this line. 
 
 The token is for the attacker `SameSite` says nothing about: a **same-site, cross-origin** one — a sibling subdomain you do not control, a stored XSS on another host of the same registrable domain, anything at `blog.example.com` shooting at `example.com`. The browser sends every cookie to that attacker's requests. They still cannot read the host-only `borgo_csrf` cookie, and they still cannot set a custom header cross-origin without a CORS approval borgo does not grant. That is the gap the double-submit closes, on both paths.
 
-A second layer sits behind the `/api` one and is worth knowing about: `borgo.Bind` requires `Content-Type: application/json` and rejects anything else — including a request with no `Content-Type` at all, which matters because an empty-type `Blob` is a CORS-safelisted body that earns no preflight. So a handler that calls `Bind` was never reachable by a cross-site simple form post in the first place. A handler that does *not* call `Bind` — a body-less `POST /api/logout`, say — had nothing, which is exactly why the check above is on the proxy and not in `Bind`. See [the typed bridge](typed-bridge.md) for what `Bind` accepts.
+A second layer sits behind the `/api` one and is worth knowing about: `borgo.Bind` requires `Content-Type: application/json` and rejects anything else — including a request with no `Content-Type` at all, which matters because an empty-type `Blob` is a CORS-safelisted body that earns no preflight. So a handler that calls `Bind` was never reachable by a cross-site simple form post in the first place. A handler that does *not* call `Bind` — a body-less `POST /api/logout`, say — had nothing, which is exactly why the check above is on the public port and not in `Bind`. See [the typed bridge](typed-bridge.md) for what `Bind` accepts.
 
 ## Cookies and sessions
 
@@ -154,7 +154,7 @@ openssl rand -base64 48
 
 ### Duplicate cookies are treated as no cookie
 
-If a request carries two `borgo_session` cookies with different values, borgo behaves as if there were none. The same rule applies to `borgo_csrf`, and Go, the front server and the browser runtime all agree on it.
+If a request carries two `borgo_session` cookies with different values, borgo behaves as if there were none. The same rule applies to `borgo_csrf`, and Go, the render service and the browser runtime all agree on it.
 
 This defends against **cookie tossing**. A cookie on a sibling subdomain (`blog.example.com`, or anything an attacker gets to run on your domain) can be set with `Domain=.example.com`, and the browser will then send *two* cookies with the same name. The order is not something you control — it depends on path length and creation time, both attacker-influenceable — so "take the first one" meant an attacker could decide which session or which CSRF token your server read. Refusing to guess is the only safe answer.
 

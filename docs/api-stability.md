@@ -144,7 +144,7 @@ Security fixes are the one exception, and a narrow one: if an API cannot be made
 
 [VISION.md](../VISION.md) lists what is permanently out of scope — an ORM, a queue, email, a scheduler, a Redis abstraction, GraphQL, cloud SDKs, a CMS, a plugin system, magic configuration. That list is not going to shrink, so the question worth answering here is what you do instead.
 
-**Reach for the platform underneath.** borgo is deliberately thin over things that already exist. The Go side is `net/http` — any middleware, any client library, any `database/sql` driver works unchanged, and `borgo.Handle` takes an ordinary `http.HandlerFunc`, so wrapping it is composition, not a plugin. The front server is Bun and React; a loader is an async function that can call anything.
+**Reach for the platform underneath.** borgo is deliberately thin over things that already exist. The Go side is `net/http` — any middleware, any client library, any `database/sql` driver works unchanged, and `borgo.Handle` takes an ordinary `http.HandlerFunc`, so wrapping it is composition, not a plugin. The render service is Bun and React; a loader is an async function that can call anything.
 
 **Put it beside borgo, not inside it.** A queue is a goroutine and a table, or a separate process. A scheduler is a `time.Ticker` in `main.go`, or cron. Email is one library call in a handler. None of these need to know borgo exists, which is precisely why borgo does not need to know they do.
 

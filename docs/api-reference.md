@@ -110,7 +110,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `Revalidate(path string) error` | Drops the cached copy of one page (query variants included; a trailing `*` drops a prefix). Rides the push channel on an internal topic, never fanned out to clients. | provisional |
 | `RevalidateTag(tag string) error` | Drops every cached page whose `tags` export named the tag. | provisional |
 
-Both refuse an empty name, and both reach the front server the way `Push` does — same `FRONT_URL`, same `BORGO_PUSH_KEY` rules across hosts. See [cached pages](pages-and-routing.md#cached-pages).
+Both refuse an empty name. Under `borgo start` the cache is in the process the call runs in, and the call drops the copies there directly; under `borgo dev`, where nothing is cached, it travels the way `Push` does and changes nothing. See [cached pages](pages-and-routing.md#cached-pages).
 
 ### Not exported, but worth knowing
 
@@ -130,7 +130,7 @@ Both refuse an empty name, and both reach the front server the way `Push` does �
 | `CsrfField()` | Renders the hidden CSRF input a `<form method="post">` needs. | stable |
 | `registerServiceWorker(path = "/sw.js")` | Registers a service worker in production only; no-ops in dev, on the server and where unsupported. | stable |
 | `ApiError` | Thrown by the api client for a non-2xx response. Carries `status`, `body` (first 2 KB) and a route-naming message. | stable |
-| `apiFetch(input, init?)` | `fetch` for browser calls to `/api/*`, attaching the `X-CSRF-Token` header on unsafe methods. Identical to `fetch` otherwise. Loaders and actions do not need it — their `api` client bypasses the proxy. | stable |
+| `apiFetch(input, init?)` | `fetch` for browser calls to `/api/*`, attaching the `X-CSRF-Token` header on unsafe methods. Identical to `fetch` otherwise. Loaders and actions do not need it — their `api` client calls the api's internal listener, where the header check does not run. | stable |
 | `CSRF_COOKIE` (`"borgo_csrf"`) | The double-submit cookie name. | provisional |
 | `CSRF_FIELD` (`"__borgo_csrf"`) | The hidden form field name, for a page form action. | provisional |
 | `CSRF_HEADER` (`"X-CSRF-Token"`) | The header name, for an unsafe `/api/*` request. | provisional |
@@ -199,7 +199,7 @@ Everything the generated client entries need and nothing an application should w
 | `registerIslands(components, createElement)` | Registers the island components a `hydrate=false` page mounts, plus the app's own `createElement` — React is injected rather than imported so the framework never bundles a second copy. | internal |
 | `withCsrf(element, token)` | Wraps a tree in the CSRF context `CsrfField` reads. | internal |
 | `csrfRuntime()`, `islandRegistry()` | The registries themselves, read by the server and the runtime across module boundaries. | internal |
-| `unsafeMethod(method)` | Whether a method is state-changing, and so subject to the CSRF checks. One list, read by `apiFetch` on the browser side and by the front server on the other. | internal |
+| `unsafeMethod(method)` | Whether a method is state-changing, and so subject to the CSRF checks. The safe set is `GET`, `HEAD`, `OPTIONS` and `TRACE`, read by `apiFetch` and by the render service's form-action check; the Go front's `/api` check spells the same four. | internal |
 | `CsrfReact` | Type of the React functions `registerCsrf` takes. | internal |
 
 ### `borgo-framework/refresh-runtime`

@@ -333,7 +333,7 @@ export async function dev() {
       },
     });
     goProc = proc;
-    // without this an api that dies on its own serves 502s in silence
+    // without this a go front that dies on its own leaves the port dark in silence
     proc.exited.then((code) => {
       if (goProc !== proc) return;
       goProc = null;
@@ -344,7 +344,7 @@ export async function dev() {
       dedup.forget();
       liveGoHash = "";
       console.error(
-        `  ${c.red(g.err)} the api exited on its own (${code}) - save a .go file to rebuild and restart it`,
+        `  ${c.red(g.err)} the go front exited on its own (${code}) - the page is down until you save a .go file to rebuild and restart it`,
       );
     });
     const ready = await apiReady(proc);
@@ -390,7 +390,7 @@ export async function dev() {
       frontProc = null;
       dedup.forget();
       console.error(
-        `  ${c.red(g.err)} the front server exited on its own (${code}) - save any page or style to restart it`,
+        `  ${c.red(g.err)} the render service exited on its own (${code}) - pages answer 503 until you save any page or style to restart it`,
       );
     });
     // the fs noise of the boot must land inside the busy window

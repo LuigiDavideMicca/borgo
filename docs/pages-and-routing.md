@@ -138,7 +138,7 @@ The stream is pull-based: React is asked for the next chunk only when the client
 
 ## Form actions
 
-A page may export an `action`; the front server runs it for `POST` requests to that page's URL:
+A page may export an `action`; the render service runs it for `POST` requests to that page's URL:
 
 ```tsx
 import { CsrfField, redirect, type ActionContext } from "borgo-framework";
@@ -172,7 +172,7 @@ What the action returns decides what happens next:
 
 On hydrated pages the runtime enhances the form: the action runs over `fetch` and the page re-renders in place, keeping your scroll position. A redirect back to the same page refreshes it where you are; a redirect elsewhere becomes a client-side navigation. Without JavaScript — or on a `hydrate = false` page — the identical form falls back to the classic post cycle. Both paths are real, and both are tested.
 
-One refusal is handled differently, because it happens *before* the action runs: a body over the size limit (`BORGO_MAX_BODY` on the front server, or a reverse proxy's own `client_max_body_size`) is answered `413`, and on a hydrated page the runtime does **not** reload. Reloading would empty the form and throw away the one thing the server had said. Instead the page stays as it is, with everything typed still in it, and an overlay explains that nothing was saved and why — quoting the server's own text when it is prose rather than an HTML error page. This is not a dev-only overlay; it is the production behaviour of an enhanced form. Two other answers the action never produced, a `403` (stale CSRF token) and a `405` (a post to a page without an action), fall back to a native submit so the real error is the one you see.
+One refusal is handled differently, because it happens *before* the action runs: a body over the size limit (`BORGO_MAX_BODY`, or a reverse proxy's own `client_max_body_size`) is answered `413`, and on a hydrated page the runtime does **not** reload. Reloading would empty the form and throw away the one thing the server had said. Instead the page stays as it is, with everything typed still in it, and an overlay explains that nothing was saved and why — quoting the server's own text when it is prose rather than an HTML error page. This is not a dev-only overlay; it is the production behaviour of an enhanced form. Two other answers the action never produced, a `403` (stale CSRF token) and a `405` (a post to a page without an action), fall back to a native submit so the real error is the one you see.
 
 Forms the runtime cannot re-render in place stay native: a `GET` form, a cross-origin target, a post to `/api/...`. To force the classic full-page submit on any form, add `data-borgo-native`:
 
@@ -184,7 +184,7 @@ Forms the runtime cannot re-render in place stay native: a `GET` form, a cross-o
 
 `<CsrfField />` is required inside every `<form method="post">` — see [CSRF protection](security.md#csrf-protection) for what it defends against. Required in *production*, that is: under `borgo dev` the check is off unless you set `BORGO_CSRF=1`, and it is skipped for a request carrying neither a session nor a csrf cookie. So a form that forgot the field works all the way through development and fails on the first real deploy. Add the field as you write the form, not when something 403s.
 
-The same is true one level down of a browser call that mutates through `/api/*`: those echo the token in an `X-CSRF-Token` header rather than a field, and `apiFetch` from `borgo-framework` is the `fetch` that attaches it. Loaders and actions are unaffected — their `api` client reaches Go directly and never crosses the proxy the check sits on.
+The same is true one level down of a browser call that mutates through `/api/*`: those echo the token in an `X-CSRF-Token` header rather than a field, and `apiFetch` from `borgo-framework` is the `fetch` that attaches it. Loaders and actions are unaffected — their `api` client calls the api's internal listener, and the header check guards the public port, not that listener.
 
 One limit worth stating: an action that returns its **own HTML document** (rather than props or a redirect) is swapped into the page by the runtime, and because that reuses the current browsing context, inline scripts in that document are blocked by the page's existing Content-Security-Policy — in production, where that policy is strict; under `borgo dev` it carries `'unsafe-inline'` and they run — and the page's hydration does not re-run. It is the right behavior for the error documents this path actually serves; if you need to send a custom HTML page from an action, redirect to a route that renders it instead.
 

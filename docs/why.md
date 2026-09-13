@@ -14,7 +14,7 @@ There is a second-order reason. When the long-lived process is Go, the interesti
 
 The subtler cost is that "server code" is now split across two runtimes. A page's `loader` runs in Bun; the handler it calls runs in Go. Which side does a piece of logic belong on? Usually Go, but the boundary is a judgment call you will make repeatedly, and getting it wrong shows up as a loader that has grown a business rule. Errors crossing that boundary lose their type: a Go error becomes an HTTP status and a body, and the loader gets an `ApiError` with a status and a string.
 
-## Why Bun for the front server rather than Node
+## Why Bun for the render service rather than Node
 
 Because the thing borgo is trying not to be is a bundler configuration.
 
@@ -64,7 +64,7 @@ What generated types buy is something else: they make refactoring possible. The 
 
 The second thing they buy is that they are free. The usual bargain with API types is that you pay maintenance for safety, and teams reasonably decide the trade is not worth it on a small service. Here there is nothing to maintain — the types are a build output. Turning them down would mean deliberately deleting information the compiler already has.
 
-**What it costs.** A version boundary the types cannot see: deploy a new front server against an old API and TypeScript is perfectly happy while the wire disagrees. If you deploy the two halves separately, that risk is real and yours to manage; deploying them as one unit, which is what `borgo build` and the scaffolded `Dockerfile` push you toward, mostly removes it.
+**What it costs.** A version boundary the types cannot see: run a render service from one build against an api from another and TypeScript is perfectly happy while the wire disagrees. `borgo start` runs both halves from one build and will not run the render service alone, so that boundary opens only if you assemble the pair from different builds by hand.
 
 There is also a comfort cost. The client's type machinery — conditional types that make `params` required exactly when the pattern has placeholders, and `body` required exactly when the handler binds one — is genuinely useful and produces genuinely bad error messages when you get a call wrong. And `unknown` is a real answer, not a placeholder: when the analysis cannot see a response type you will cast, and a cast is a promise the compiler stops checking.
 

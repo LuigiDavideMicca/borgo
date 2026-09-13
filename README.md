@@ -107,7 +107,7 @@ func ListTasks(w http.ResponseWriter, r *http.Request) {
 
 ### Form actions
 
-A page may export an `action`; the front server runs it for `POST` requests to that page's URL. On hydrated pages the runtime enhances the form — the action runs over `fetch`, the page re-renders in place and the scroll position stays put — while without JavaScript the same form falls back to the classic post cycle. `redirect(to)` gives you post/redirect/get either way:
+A page may export an `action`; the render service runs it for `POST` requests to that page's URL. On hydrated pages the runtime enhances the form — the action runs over `fetch`, the page re-renders in place and the scroll position stays put — while without JavaScript the same form falls back to the classic post cycle. `redirect(to)` gives you post/redirect/get either way:
 
 ```tsx
 import { redirect, type ActionContext } from "borgo-framework";
@@ -159,18 +159,20 @@ func init() {
 
 ### Security
 
-A locked-down default posture, not a checklist you assemble: security headers and a strict Content-Security-Policy on every document — with the server-rendered props script nonced, so no `'unsafe-inline'` is needed in production — CSRF on form actions and on proxied `/api/*` mutations, signed `HttpOnly` session cookies, request bodies bounded by the bytes that actually arrive (`BORGO_MAX_BODY`, not a declared `Content-Length`), a slowloris-resistant timeout matrix, an `Origin` check on WebSocket upgrades, and duplicate cookies treated as no cookie at all. Everything is overridable by environment variable, and [the security page](docs/security.md) is equally explicit about what borgo deliberately leaves to you.
+A locked-down default posture, not a checklist you assemble: security headers and a strict Content-Security-Policy on every document — with the server-rendered props script nonced, so no `'unsafe-inline'` is needed in production — CSRF on form actions and on browser `/api/*` mutations, signed `HttpOnly` session cookies, request bodies bounded by the bytes that actually arrive (`BORGO_MAX_BODY`, not a declared `Content-Length`), a slowloris-resistant timeout matrix, an `Origin` check on WebSocket upgrades, and duplicate cookies treated as no cookie at all. Everything is overridable by environment variable, and [the security page](docs/security.md) is equally explicit about what borgo deliberately leaves to you.
 
 ### Health checks and metrics
 
-The front server answers `/healthz` with `{status, uptime, api}` — probing the Go server's own `/healthz` (mounted automatically by `borgo.Serve`). Set `BORGO_METRICS=1` and `/metrics` serves Prometheus text: request counts and a duration histogram by route pattern and status, hand-rolled, zero dependencies. Deep dive: [deploy guide](docs/deploy.md#health-and-metrics).
+The Go front answers `/healthz` with `{status, uptime, render}` — `render` is `"reachable"` or `"down"`, from a probe of the render service behind it, and `status` turns `"degraded"` while it is down. Set `BORGO_METRICS=1` and `/metrics` serves Prometheus text: request counts and a duration histogram by route pattern and status, hand-rolled, zero dependencies. Deep dive: [deploy guide](docs/deploy.md#health-and-metrics).
 
 ## Architecture
 
 Two processes, one front door:
 
-- **Bun front server** (`borgo dev` / `borgo start`) — server-renders pages with `react-dom/server`, serves static assets, proxies `/api/*` to the Go server. Loaders run here, fetching from Go during SSR; props are serialized into the HTML and the client bundle hydrates the same tree. Compression is built-in: `borgo build` precompresses assets to `.gz`/`.br` (hashed chunks served immutable), SSR HTML and API JSON are gzipped at runtime.
-- **Go API server** — plain `net/http` with method patterns, bootstrapped by `borgo.Serve()`.
+- **Go front and API** — answers the public port: plain `net/http` with method patterns for `/api/*`, in its own process; the static assets; the cache for pages that export `revalidate`; and a reverse proxy to the render service for everything else, WebSockets included.
+- **Bun render service** — on loopback, behind a key minted for each boot: server-renders pages with `react-dom/server` and runs loaders and actions, which call the Go API on its internal listener during SSR; props are serialized into the HTML and the client bundle hydrates the same tree.
+
+`borgo dev` and `borgo start` launch both. Compression is built-in: `borgo build` precompresses assets to `.gz`/`.br` (hashed chunks served immutable), SSR HTML and API JSON are gzipped at runtime.
 
 ```
 packages/borgo          npm: the bun/typescript core (cli, ssr server, router, build, runtime, typed api client)

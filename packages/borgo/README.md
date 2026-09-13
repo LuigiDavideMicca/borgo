@@ -19,13 +19,13 @@ export async function loader({ params, api }: LoaderContext) {
 
 And every page picks how it ships, with one export: nothing for per-request SSR (streamed through Suspense), `revalidate`/`tags` for cached pages Go invalidates on demand, `prerender` for static export, `hydrate = false` for zero JavaScript, `"visible"` to defer it, islands in between. The [repository README](https://github.com/LuigiDavideMicca/borgo#every-page-picks-how-it-ships) shows the whole menu; the [docs](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/README.md) go deep on each.
 
-This package is the Bun/TypeScript core: SSR front server, file-based router, build pipeline, dev orchestrator and the `borgo` CLI. It ships its TypeScript source directly — Bun runs it natively, and what you read on npm is what runs. Requires Bun >= 1.4 and Go >= 1.27 (`bunx borgo doctor` checks both, and most of your machine besides).
+This package is the Bun/TypeScript core: SSR render service, file-based router, build pipeline, dev orchestrator and the `borgo` CLI. It ships its TypeScript source directly — Bun runs it natively, and what you read on npm is what runs. Requires Bun >= 1.4 and Go >= 1.27 (`bunx borgo doctor` checks both, and most of your machine besides).
 
 ## CLI
 
-- `borgo dev` — runs the Go API server and the SSR front server with fast refresh and css hot swap
+- `borgo dev` — runs the Go front and the SSR render service behind it, with fast refresh and css hot swap
 - `borgo build` — production client assets in `public/assets/` and the Go binary in `dist/`
-- `borgo start` — runs both servers from the build output (`--front-only` for split deployments, with `API_URL`)
+- `borgo start` — runs both from the build output, on one host
 - `borgo export` — prerenders the statically exportable pages into `dist/site/`
 - `borgo deploy init <caddy|nginx|systemd|compose>` — writes the deploy guide's config for the project
 - `borgo pwa init` — writes `public/manifest.webmanifest` and a working service worker

@@ -185,7 +185,7 @@ switch (command) {
       process.on("SIGTERM", stop);
       apiProc.exited.then((code) => {
         if (stopping) return;
-        console.error(`  ${c.red(g.err)} api process exited (${code})`);
+        console.error(`  ${c.red(g.err)} go front exited (${code})`);
         process.exit(code);
       });
     }

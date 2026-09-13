@@ -17,7 +17,7 @@ session, ok := borgo.GetSession[Session](r) // false when missing, tampered or e
 borgo.ClearSession(w)                       // logout
 ```
 
-The front server forwards the browser's cookies on every api call a loader or action makes, so Go sees the session during SSR — and forwards `Set-Cookie` headers coming back from Go to the browser, so an action that calls a login route actually logs the browser in.
+The render service forwards the browser's cookies on every api call a loader or action makes, so Go sees the session during SSR — and forwards `Set-Cookie` headers coming back from Go to the browser, so an action that calls a login route actually logs the browser in.
 
 Four behaviors worth knowing before you design around them:
 
@@ -138,7 +138,7 @@ export async function action({ request, api }: ActionContext) {
 }
 ```
 
-Go sets the session cookie on the api response; the front server forwards it on the action's redirect; the browser lands on `/account` logged in. Logout is the same shape: an action calling `POST /api/logout`, a redirect, done.
+Go sets the session cookie on the api response; the render service forwards it on the action's redirect; the browser lands on `/account` logged in. Logout is the same shape: an action calling `POST /api/logout`, a redirect, done.
 
 ## CSRF protection for actions and api calls
 
@@ -158,7 +158,7 @@ export default function NewTask() {
 }
 ```
 
-The front server issues a `borgo_csrf` cookie with the page, the field carries the same token back, and a mismatch is answered `403` before the action runs — a cross-site form cannot read the cookie, so it cannot produce the field. The check arms for any browser that holds the token, which is what closes login-CSRF; cookie-less clients are unaffected.
+The render service issues a `borgo_csrf` cookie with the page, the field carries the same token back, and a mismatch is answered `403` before the action runs — a cross-site form cannot read the cookie, so it cannot produce the field. The check arms for any browser that holds the token, which is what closes login-CSRF; cookie-less clients are unaffected.
 
 That covers forms. The other half of the obligation is browser calls to `/api/*` that change something — `POST`, `PUT`, `PATCH`, `DELETE` — which carry the same token in an `X-CSRF-Token` header instead of a field, because an api body is JSON and has no field to put it in. Use `apiFetch` and it is attached for you:
 
@@ -168,7 +168,7 @@ import { apiFetch } from "borgo-framework";
 await apiFetch("/api/logout", { method: "POST" });
 ```
 
-A loader or an action calling `api("POST /api/logout")` needs nothing: that client talks to the Go api directly and never crosses the proxy the check sits on. [Security](security.md#csrf-protection) has the exact scope, the mechanics and the environment overrides.
+A loader or an action calling `api("POST /api/logout")` needs nothing: that client calls the api's internal listener, and the header check guards the public port, not that listener. [Security](security.md#csrf-protection) has the exact scope, the mechanics and the environment overrides.
 
 ## What the framework protects, and what you still owe
 
