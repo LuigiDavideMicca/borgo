@@ -60,20 +60,26 @@ func Push[T any](topic, event string, data T) error {
 // may use.
 const revalidateTopic = "$borgo/revalidate"
 
-// Revalidate drops the front server's cached copy of a page that declared
+// Revalidate drops the page cache's copy of a page that declared
 // `export const revalidate`. The natural call site is the handler that just
 // wrote the data the page renders. An exact path drops the page and its
 // query variants; a trailing star drops the prefix: Revalidate("/blog/*").
 // In dev there is no cache and the call is a no-op that still answers 204,
 // so application code behaves the same in both modes.
 func Revalidate(path string) error {
+	// refused before either branch: a call that names no page answered nil
+	// in front mode, where a blank path or one without its slash matches no
+	// key, while the same call in dev was an error
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("borgo.Revalidate: an empty path names no page")
+	}
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("borgo.Revalidate: %q is not a path: a page is named as it is requested, starting with /", path)
+	}
 	// front mode: the cache is in this process
-	if i := localIsr(); i != nil && path != "" {
+	if i := localIsr(); i != nil {
 		i.invalidatePath(path)
 		return nil
-	}
-	if path == "" {
-		return fmt.Errorf("borgo.Revalidate: an empty path names no page")
 	}
 	return pushWith(defaultPush, revalidateTopic, "path", path)
 }
@@ -82,12 +88,14 @@ func Revalidate(path string) error {
 // export - one call from the handler that wrote the posts, and every page
 // depending on them re-renders on its next request.
 func RevalidateTag(tag string) error {
-	if i := localIsr(); i != nil && strings.TrimSpace(tag) != "" {
+	// a blank tag skipped the local branch and fell into the push, which in
+	// front mode answered nil having dropped nothing
+	if normalizeTag(tag) == "" {
+		return fmt.Errorf("borgo.RevalidateTag: an empty tag names no pages")
+	}
+	if i := localIsr(); i != nil {
 		i.invalidateTag(tag)
 		return nil
-	}
-	if tag == "" {
-		return fmt.Errorf("borgo.RevalidateTag: an empty tag names no pages")
 	}
 	return pushWith(defaultPush, revalidateTopic, "tag", tag)
 }

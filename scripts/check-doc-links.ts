@@ -196,7 +196,9 @@ const GO_IMPORTS = `import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"path"
 	"sync"
 	"time"
 
@@ -207,7 +209,9 @@ var (
 	_ = context.Background
 	_ = json.Marshal
 	_ = errors.New
+	_ = net.SplitHostPort
 	_ = http.StatusOK
+	_ = path.Clean
 	_ = sync.Mutex{}
 	_ = time.Now
 	_ = borgo.Serve

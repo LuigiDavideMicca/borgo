@@ -13,7 +13,8 @@ CI compiles the examples on these pages against the real framework types — eve
 | [The typed bridge](typed-bridge.md) | Go API routes, borgogen, typed request bodies, type overrides, honest limits |
 | [Client navigation and hydration](client-navigation.md) | client-side transitions, prefetching, scroll restoration, code splitting, hydration modes, islands |
 | [Realtime](realtime.md) | server-sent events, WebSocket topics, typed event payloads, `borgo.SSEHub` and `borgo.Push` |
-| [Auth and sessions](auth-and-sessions.md) | signed-cookie sessions, password hashing, `borgo.Auth`, guards on both sides of the bridge |
+| [Auth and sessions](auth-and-sessions.md) | signed-cookie sessions, password hashing, `borgo.Auth`, guards on both sides of the bridge, revoking sessions |
+| [Middleware and authorization](middleware-and-authorization.md) | `api/middleware.go`, `middleware.ts`, `borgo.Forward` and `//borgo:export`: where each decision runs, what it stands in front of, and rate limiting |
 | [Environment](environment.md) | the app's variables declared once, typed reads, boot refusal, the server/client wall |
 | [Security](security.md) | the default posture: headers, CSP and nonces, CSRF, cookie rules, limits and timeouts, and what borgo leaves to you |
 | [Dev experience](dev-experience.md) | fast refresh and its contract, styling and Tailwind, the error overlay, `borgo doctor` |
@@ -32,7 +33,7 @@ CI compiles the examples on these pages against the real framework types — eve
 1. [Pages and routing](pages-and-routing.md) — the page model everything else hangs off
 2. [The typed bridge](typed-bridge.md) — how Go handlers become typed TypeScript calls
 3. [Client navigation and hydration](client-navigation.md) — what happens after the first paint
-4. [Auth and sessions](auth-and-sessions.md) and [realtime](realtime.md) — when the app needs them
+4. [Auth and sessions](auth-and-sessions.md), [middleware and authorization](middleware-and-authorization.md) and [realtime](realtime.md) — when the app needs them
 5. [Dev experience](dev-experience.md) — worth ten minutes once, so the dev loop never surprises you
 
 **Running an app in production** — [deploy](deploy.md) is self-contained: pick a layout (single container, systemd), put a reverse proxy in front, wire `/healthz`, and keep the [environment reference](deploy.md#environment-reference) at hand. [Static export](deploy.md#static-export) is there too, for the pages that need no server. Read [security](security.md) once before the first deploy — it ends with a checklist.

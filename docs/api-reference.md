@@ -79,6 +79,18 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 
 `Auth.Principal` is provisional because it returns `any` in a struct that is otherwise generic over `U` — the one place in the Go API where a type is thrown away. `DefaultHasher` was a package-level *variable* of interface type until 0.21, which meant any code in the process could reassign it and silently change hashing for every `Auth` that did not set `Hasher`; it is a function now, and to use another algorithm you set `Hasher` on the `Auth` you own.
 
+### Middleware and request values
+
+| Symbol | What it is for | Stability |
+| --- | --- | --- |
+| `With(r, key string, value any) *http.Request` | Returns `r` carrying `value` under `key` for the handlers behind the middleware that set it. Stays in the Go process. A derived request leaves its parent's values alone. See [middleware and authorization](middleware-and-authorization.md#handing-a-decision-on-with-value-forward). | stable |
+| `Forward(r, key string, value any) *http.Request` | `With`, and the value also reaches the render service: `middleware.ts`, loaders and actions read it in `locals`. Must encode as JSON, and everything forwarded must fit in 16 KiB encoded; either failure answers `500` rather than rendering without it. | stable |
+| `Value[T any](r, key string) (T, bool)` | Reads what `With` or `Forward` set. False when nothing was set or the value is not a `T`. | stable |
+| `UseMiddleware(mw func(http.Handler) http.Handler, matcher []string)` | Registers `api/middleware.go`'s `Middleware` and `Matcher`. borgogen generates the call. Panics on `nil`, on a second registration, after `Serve`, and on a matcher entry that could never match. | internal |
+| `Export(name string, h ExportHandler)` | Registers a `//borgo:export` adapter. borgogen generates the call. | internal |
+| `ExportHandler` | `func(ctx, args []json.RawMessage) (any, error)`: the adapter borgogen generates for one export. | internal |
+| `ExportArity(name, want, got)`, `ExportArgument(name, index, err)` | The errors a generated adapter returns for a call that does not fit the function; answered `400`. | internal |
+
 ### Server-sent events
 
 | Symbol | What it is for | Stability |
@@ -109,8 +121,8 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 
 | Symbol | What it is for | Stability |
 | --- | --- | --- |
-| `Revalidate(path string) error` | Drops the cached copy of one page (query variants included; a trailing `*` drops a prefix). Rides the push channel on an internal topic, never fanned out to clients. | provisional |
-| `RevalidateTag(tag string) error` | Drops every cached page whose `tags` export named the tag. | provisional |
+| `Revalidate(path string) error` | Drops the cached copy of one page (query variants included; a trailing `*` drops a prefix). Under `borgo start` a call into the cache in the same process; in `borgo dev`, where nothing is cached, it changes nothing. An empty or blank path, or one not starting with `/`, is an error. | provisional |
+| `RevalidateTag(tag string) error` | Drops every cached page whose `tags` export named the tag, compared without surrounding spaces. An empty or blank tag is an error. | provisional |
 
 Both refuse an empty name. Under `borgo start` the cache is in the process the call runs in, and the call drops the copies there directly; under `borgo dev`, where nothing is cached, it travels the way `Push` does and changes nothing. See [cached pages](pages-and-routing.md#cached-pages).
 
@@ -126,12 +138,15 @@ Both refuse an empty name. Under `borgo start` the cache is in the process the c
 
 | Export | What it is for | Stability |
 | --- | --- | --- |
-| `redirect(to: string, status = 303)` | Builds a redirect `Response` for a loader or action. | stable |
+| `redirect(to: string, status = 303)` | Builds a redirect `Response` for a loader, an action or `middleware.ts`. | stable |
+| `next(init?)` | What `middleware.ts` returns to let the page through; `init.headers` are added to its response. | stable |
+| `rewrite(path, init?)` | What `middleware.ts` returns to render another page of this app for the request, once, without changing the URL. Refused for the page itself, `/api`, `/__borgo`, or a path with a query. | stable |
 | `subscribe(topic, onEvent, options?)` | Opens a WebSocket channel on a topic, with reconnect and backoff. Returns a `Channel`. `options.onRefused(reason)` fires once when the relay refuses the origin — the one close that will not change on a redial — and the channel is over. | stable |
 | `Island({ name, props, client })` | Renders a hydration marker for a component in `islands/`. `client` is `"load"` or `"visible"`. | stable |
 | `CsrfField()` | Renders the hidden CSRF input a `<form method="post">` needs. | stable |
 | `registerServiceWorker(path = "/sw.js")` | Registers a service worker in production only; no-ops in dev, on the server and where unsupported. | stable |
 | `ApiError` | Thrown by the api client for a non-2xx response. Carries `status`, `body` (first 2 KB) and a route-naming message. | stable |
+| `GoError` | Thrown by a `//borgo:export` call: `exportName`, the Go error's text as `message`, and `status` — 200 for an error the function returned, 400 for a call that did not fit it, 500 for a contained panic. | stable |
 | `apiFetch(input, init?)` | `fetch` for browser calls to `/api/*`, attaching the `X-CSRF-Token` header on unsafe methods. Identical to `fetch` otherwise. Loaders and actions do not need it — their `api` client calls the api's internal listener, where the header check does not run. | stable |
 | `CSRF_COOKIE` (`"borgo_csrf"`) | The double-submit cookie name. | provisional |
 | `CSRF_FIELD` (`"__borgo_csrf"`) | The hidden form field name, for a page form action. | provisional |
@@ -145,7 +160,12 @@ Both refuse an empty name. Under `borgo start` the cache is in the process the c
 | --- | --- | --- |
 | `ApiRoutes` | Empty interface the generated `.borgo/api-types.d.ts` augments with one entry per Go route. The seam of the typed bridge. | stable |
 | `WsEvents` | Empty interface mapping `"topic/event"` to a payload type. Filled by `borgo.Push` calls, or declared by hand for browser-published events. | stable |
-| `LoaderContext` | `{ request, params, api, apiUrl }` handed to a page's `loader`. | stable |
+| `LoaderContext` | `{ request, params, api, apiUrl, session, locals }` handed to a page's `loader`. | stable |
+| `Session` | The session Go verified, as loaders, actions and `middleware.ts` receive it. An app types it by augmenting the interface: `declare module "borgo-framework" { interface Session { userId: number } }`. | stable |
+| `Locals` | What `api/middleware.go` forwarded with `borgo.Forward`, typed the same way. | stable |
+| `PageMiddleware` | The type of `middleware.ts`'s `middleware`: `(request, { url, params, session, locals }) => next() \| rewrite() \| Response`, or a promise of one. | stable |
+| `PageMiddlewareContext` | The second argument of a `PageMiddleware`. | stable |
+| `MiddlewareResult` | What `next()` and `rewrite()` return. | stable |
 | `ActionContext` | The same shape, handed to a page's `action`. | stable |
 | `PrerenderContext` | `{ api, apiUrl }` handed to `prerenderPaths` during `borgo export`. | stable |
 | `Head` | `{ title?, meta? }`. Will grow optional fields (`link`, `script`); growth is additive. | stable |
@@ -203,6 +223,7 @@ Everything the generated client entries need and nothing an application should w
 | `csrfRuntime()`, `islandRegistry()` | The registries themselves, read by the server and the runtime across module boundaries. | internal |
 | `unsafeMethod(method)` | Whether a method is state-changing, and so subject to the CSRF checks. The safe set is `GET`, `HEAD`, `OPTIONS` and `TRACE`, read by `apiFetch` and by the render service's form-action check; the Go front's `/api` check spells the same four. | internal |
 | `CsrfReact` | Type of the React functions `registerCsrf` takes. | internal |
+| `callExport<T>(name, args)` | What the generated `.borgo/go.ts` calls: a `POST` to `/__borgo/export/<name>` on the internal listener with this boot's key. Throws outside the render service. | internal |
 
 ### `borgo-framework/refresh-runtime`
 
@@ -363,6 +384,9 @@ These are as much a public API as any function: an app depends on them, and chan
 | `pages/**/_*.tsx` | Any file whose basename starts with `_` is special and is not routed. | stable |
 | `islands/*.tsx` | Island components, default-exported, referenced by `<Island name="Counter" />`. | stable |
 | `api/*.go` | The Go API package. `api/borgo.gen.go` is generated; `*_test.go` is ignored by `borgogen`. | stable |
+| `api/middleware.go` | By convention, where `func Middleware(http.Handler) http.Handler` and an optional `var Matcher []string` live; borgogen finds them anywhere in package `api`. See [middleware and authorization](middleware-and-authorization.md#apimiddlewarego). | stable |
+| `middleware.ts` | The pages' middleware, at the app root: exports `middleware` and an optional `matcher`. A malformed one refuses the boot; a matcher naming `/api` or `/__borgo` refuses the build too. | stable |
+| `.borgo/go.ts` | Generated when the api package declares a `//borgo:export`: `export const go = { ... }`, one typed stub per export; removed when there are none. | stable |
 | `env.ts` | The app's [typed environment](environment.md), when it declares one: checked at boot, client values shipped by the build. | provisional |
 | `public/` | Served as-is. `public/assets/` is build output. | stable |
 | `index.html` | The SSR shell. | stable |
@@ -392,6 +416,7 @@ These are as much a public API as any function: an app depends on them, and chan
 | `//borgo:route METHOD /path` | Mounts the following package-level handler. Must be the function's doc comment, no space after `//`, and the handler must be `func(http.ResponseWriter, *http.Request)` with no type parameters. | stable |
 | `//borgo:type <GoType> <TSType>` | Overrides the TypeScript type generated for a named Go type. May sit anywhere in the `api` package. | stable |
 | `//borgo:type <GoType>@<file.go>:<line> <TSType>` | The same, aimed at one specific declaration — for when a bare name is ambiguous. | stable |
+| `//borgo:export` | Makes the following package-level function callable from the render service as `go.<name>` in `.borgo/go.ts`. It must be exported, not generic, not variadic, take a `context.Context` first, return `(T, error)` or `error`, and use types that cross as JSON; borgogen refuses anything else with the file and line. | stable |
 
 A comment that *looks* like a route directive but is not attached to a handler produces a warning rather than silence — as does a directive in a file the build excludes.
 

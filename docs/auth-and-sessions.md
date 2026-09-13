@@ -127,7 +127,7 @@ borgo.Handle("GET /api/me", borgo.Authed(currentUser))
 
 Without a valid session the request is answered `401 {"error": "unauthenticated"}` and the handler never runs. borgogen sees through the wrapper, so the route keeps its generated TypeScript types. Need the principal inside the handler? `borgo.GetSession[Me](r)` as usual — `Authed` only checks validity, it does not impose a session type.
 
-For anything beyond a boolean gate (roles, ownership), write the three-line wrapper yourself — handlers are ordinary `http.HandlerFunc`s:
+For anything beyond a boolean gate (roles, ownership), write the three-line wrapper yourself — handlers are ordinary `http.HandlerFunc`s — or put the rule in [`api/middleware.go`](middleware-and-authorization.md#apimiddlewarego) once, in front of every route its matcher covers:
 
 ```go no-check
 func admin(h http.HandlerFunc) http.HandlerFunc {
@@ -141,24 +141,30 @@ func admin(h http.HandlerFunc) http.HandlerFunc {
 }
 ```
 
-## Guarding pages: the loader guard
+## Guarding pages: middleware.ts
 
-**This is the pattern** for protected pages. A loader may return a `Response` to short-circuit rendering; `redirect()` makes it a guard, honored on full loads and client navigations alike:
+**The pattern for protected pages is `middleware.ts`** at the root of the app: one file that runs before the document, the props of a client navigation and the form actions of every page its matcher covers, with the session Go already verified. [Middleware and authorization](middleware-and-authorization.md#middlewarets) has all of it:
 
 ```tsx
-import { ApiError, redirect, type LoaderContext } from "borgo-framework";
+import { next, redirect, type PageMiddleware } from "borgo-framework";
 
-export async function loader({ api }: LoaderContext) {
-  try {
-    return { me: await api("GET /api/me") };
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 401) return redirect("/login");
-    throw error;
-  }
+export const matcher = ["/account"];
+
+export const middleware: PageMiddleware = (_request, { session }) => (session ? next() : redirect("/login"));
+```
+
+A loader receives the same verified `session`, so a rule only one page has can still live in its loader:
+
+```tsx
+import { redirect, type LoaderContext } from "borgo-framework";
+
+export async function loader({ session, api }: LoaderContext) {
+  if (!session) return redirect("/login");
+  return { tasks: await api("GET /api/tasks") };
 }
 ```
 
-The api call carries the browser's cookies, Go's `Authed` (or your own check) answers 401, the loader redirects. One source of truth — the Go route — guards both the page and the data.
+A guard in a loader covers that loader and nothing else: the page's action needs a check of its own, which is the gap `middleware.ts` closes. The data stays guarded where it lives either way — `borgo.Authed` or `api/middleware.go` answers the api call, from a loader or from a browser.
 
 ## Login and logout as form actions
 

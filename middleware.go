@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
 )
+
+var percentEncoded = regexp.MustCompile(`%[0-9A-Fa-f]{2}`)
 
 // The app's own middleware: api/middleware.go.
 //
@@ -79,6 +82,10 @@ func matcherRefusal(m string) string {
 		return `may only end in "*" or "/*"; a wildcard anywhere else is not supported`
 	case strings.ContainsAny(m, "?#"):
 		return "is matched against the path alone, without a query or a fragment"
+	case percentEncoded.MatchString(m):
+		// r.URL.Path is decoded, so an encoded entry compared against it could
+		// never match (found by the verifier of phase 2)
+		return "is matched against the decoded path: write the characters themselves, /città and not /citt%C3%A0"
 	case path.Clean(strings.TrimSuffix(strings.TrimSuffix(m, "*"), "/")) != strings.TrimSuffix(strings.TrimSuffix(m, "*"), "/") && strings.TrimSuffix(strings.TrimSuffix(m, "*"), "/") != "":
 		return "is not a clean path: requests are matched after dot segments and doubled slashes are resolved, so this entry could never match"
 	}

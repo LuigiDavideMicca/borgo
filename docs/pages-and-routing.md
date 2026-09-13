@@ -39,7 +39,7 @@ export default function TaskDetail({ task }: { task: Task }) {
 }
 ```
 
-The loader receives `{ request, params, api, apiUrl }`. `params` is `Record<string, string>` — every value is a string, decoded, exactly as it appeared in the URL. `api` is the [typed client](typed-bridge.md#the-generated-client); `apiUrl` is the raw base URL for anything it does not model.
+The loader receives `{ request, params, api, apiUrl, session, locals }`. `params` is `Record<string, string>` — every value is a string, decoded, exactly as it appeared in the URL. `api` is the [typed client](typed-bridge.md#the-generated-client); `apiUrl` is the raw base URL for anything it does not model. `session` is the session Go verified, or `null`, and `locals` holds what `api/middleware.go` forwarded — both covered in [middleware and authorization](middleware-and-authorization.md).
 
 Loader code is stripped from client bundles at build time, so server-only imports, database handles and secrets used there never reach the browser.
 

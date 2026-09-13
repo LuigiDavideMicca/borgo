@@ -186,8 +186,8 @@ func TestIsrRefusesWhatCannotBeShared(t *testing.T) {
 	}
 	for name, page := range cases {
 		render, n := countingRenderer(page)
-		var lines []string
-		i := newIsr(render, nil, func(l string) { lines = append(lines, l) })
+		said := make(chan string, 8)
+		i := newIsr(render, nil, func(l string) { said <- l })
 		policy := &isrPolicy{seconds: 300}
 		_, out := serve(t, i, policy, "/x")
 		if out != isrBypass {
@@ -198,8 +198,24 @@ func TestIsrRefusesWhatCannotBeShared(t *testing.T) {
 		if atomic.LoadInt32(n) != 1 {
 			t.Errorf("%s: rendered %d times", name, *n)
 		}
-		if len(lines) != 1 || !strings.Contains(lines[0], "never cached") {
-			t.Errorf("%s: said %v", name, lines)
+		// the line is written by the render goroutine's drain, which runs after
+		// the request it answered has returned: read when it arrives, not when
+		// serve returns - read at once, the full suite's load saw nothing said
+		// (found by the verifier of phase 2)
+		select {
+		case line := <-said:
+			if !strings.Contains(line, "never cached") {
+				t.Errorf("%s: said %q", name, line)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("%s: said nothing", name)
+		}
+		// the second request was answered from the refusal, with no render and
+		// nothing to drain: a second line would be the refusal forgotten
+		select {
+		case extra := <-said:
+			t.Errorf("%s: said twice: %q", name, extra)
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }

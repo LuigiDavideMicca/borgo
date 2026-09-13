@@ -744,14 +744,28 @@ func TestRevalidateRidesTheInternalTopic(t *testing.T) {
 }
 
 // an empty name would drop nothing while looking like it dropped something:
-// refused at the call site, before any request exists
+// refused at the call site, before any request exists - and in front mode as
+// well, where the cache is local and a blank tag used to skip it, fall into
+// the push and answer nil, and a path without its slash dropped nothing
 func TestRevalidateRefusesEmptyNames(t *testing.T) {
-	if err := Revalidate(""); err == nil || !strings.Contains(err.Error(), "empty path") {
-		t.Fatalf("Revalidate(\"\") = %v, want a named refusal", err)
+	refuses := func(mode string) {
+		t.Helper()
+		for p, want := range map[string]string{"": "empty path", "   ": "empty path", "blog/x": "not a path"} {
+			if err := Revalidate(p); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: Revalidate(%q) = %v, want a refusal naming %q", mode, p, err, want)
+			}
+		}
+		for _, tag := range []string{"", "  "} {
+			if err := RevalidateTag(tag); err == nil || !strings.Contains(err.Error(), "empty tag") {
+				t.Errorf("%s: RevalidateTag(%q) = %v, want a named refusal", mode, tag, err)
+			}
+		}
 	}
-	if err := RevalidateTag(""); err == nil || !strings.Contains(err.Error(), "empty tag") {
-		t.Fatalf("RevalidateTag(\"\") = %v, want a named refusal", err)
-	}
+	refuses("dev")
+
+	setFrontIsr(newIsr(nil, nil, func(string) {}))
+	defer setFrontIsr(nil)
+	refuses("front")
 }
 
 // FRONT_URL meant the public front server through 0.22 and the publish

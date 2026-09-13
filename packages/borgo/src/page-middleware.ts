@@ -60,6 +60,9 @@ export function matcherRefusal(entry: unknown): string {
   if (typeof entry !== "string" || entry === "") return "must be a non-empty path string";
   if (!entry.startsWith("/")) return "must start with /";
   if (/[?#]/.test(entry)) return "is matched against the path alone, without a query or a fragment";
+  if (/%[0-9A-Fa-f]{2}/.test(entry)) {
+    return "is matched against the decoded path: write the characters themselves, /città and not /citt%C3%A0";
+  }
   if (entry !== "/" && entry.endsWith("/")) return "must not end with /: a page has one spelling, and the go front redirects every other";
   const segments = entry === "/" ? [] : entry.slice(1).split("/");
   for (let i = 0; i < segments.length; i++) {
@@ -106,7 +109,11 @@ export function compileMatcher(entry: string): (pathname: string) => Record<stri
       if (part === undefined || part === "") return null;
       if (segment.startsWith(":")) {
         params[segment.slice(1)] = decodeSegment(part);
-      } else if (segment !== part) {
+      } else if (segment !== part && segment !== decodeSegment(part)) {
+        // the router's own rule (matchRoute): a static segment matches as
+        // written or decoded. Compared literally, /citt%C3%A0 - the only
+        // spelling a browser sends for /città - rendered the page and never
+        // met the guard (found by the verifier of phase 2)
         return null;
       }
     }

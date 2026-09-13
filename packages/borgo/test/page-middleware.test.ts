@@ -29,6 +29,9 @@ describe("the matcher grammar", () => {
       ["/:path*/x", "only last"],
       ["/:1bad", "without a valid name"],
       ["/app?x=1", "without a query"],
+      // compared against the decoded path, an encoded entry would never match
+      ["/%61dmin", "decoded path"],
+      ["/citt%C3%A0", "decoded path"],
     ];
     for (const [entry, reason] of cases) {
       expect(matcherRefusal(entry)).toContain(reason);
@@ -54,6 +57,28 @@ describe("the matcher grammar", () => {
     expect(match("/x/acme")).toBeNull();
     expect(compileMatcher("/app/:path*")("/apple")).toBeNull();
     expect(compileMatcher("/tasks/:id")("/tasks/1/edit")).toBeNull();
+  });
+
+  // the router matches a static segment as written or decoded, and a browser
+  // sends /città as /citt%C3%A0: a matcher that compared literally rendered
+  // the page and never ran the guard (found by the verifier of phase 2)
+  test("a static segment matches decoded, as the router matches it", () => {
+    expect(compileMatcher("/città")("/citt%C3%A0")).toEqual({});
+    expect(compileMatcher("/città")("/città")).toEqual({});
+    expect(compileMatcher("/città/:path*")("/citt%C3%A0/menu")).toEqual({ path: "menu" });
+    expect(compileMatcher("/città")("/citta")).toBeNull();
+  });
+
+  test("the guard runs for the encoded spelling of a guarded page", async () => {
+    const mw = resolvePageMiddleware({
+      matcher: ["/città"],
+      middleware: ((_request, { session }) => (session ? next() : new Response(null, { status: 303, headers: { Location: "/login" } }))) as PageMiddleware,
+    })!;
+    for (const spelling of ["/citt%C3%A0", "/città"]) {
+      const url = new URL(`http://app.test${spelling}`);
+      const decision = await decidePage(mw, new Request(url), url, { session: null, locals: {} });
+      expect(`${spelling}: ${decision.kind}`).toBe(`${spelling}: respond`);
+    }
   });
 });
 
