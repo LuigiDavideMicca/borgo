@@ -1,0 +1,160 @@
+{
+  "held": 1000,
+  "publishes": 50,
+  "results": [
+    {
+      "target": "B, go relay",
+      "memory": {
+        "idleMiB": 48.4,
+        "idleStable": true,
+        "loadedMiB": 73.2,
+        "open": 1000,
+        "failed": 0,
+        "firstError": "",
+        "kibPerConnection": 25.5,
+        "processes": [
+          "server.bin (pid 4540): 48.4 -> 73.2 MiB"
+        ]
+      },
+      "fanout": [
+        {
+          "subscribers": 1,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50,
+          "expected": 50,
+          "p50ms": 0.66,
+          "p99ms": 1.27,
+          "allReachedP50ms": 0.66,
+          "allReachedP99ms": 1.27
+        },
+        {
+          "subscribers": 100,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 3200,
+          "expected": 5000,
+          "p50ms": 1.47,
+          "p99ms": 2.46,
+          "allReachedP50ms": null,
+          "allReachedP99ms": null
+        },
+        {
+          "subscribers": 1000,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 1200,
+          "expected": 50000,
+          "p50ms": 0.94,
+          "p99ms": 1.96,
+          "allReachedP50ms": null,
+          "allReachedP99ms": null
+        }
+      ]
+    },
+    {
+      "target": "A, through the go front",
+      "memory": {
+        "idleMiB": 107.6,
+        "idleStable": true,
+        "loadedMiB": 240.3,
+        "open": 1000,
+        "failed": 0,
+        "firstError": "",
+        "kibPerConnection": 136,
+        "processes": [
+          "cmd.exe (pid 23952): 8.6 -> 8.6 MiB",
+          "bun.exe (pid 23928): 47.8 -> 54.0 MiB",
+          "api.exe (pid 180): 51.3 -> 177.7 MiB"
+        ]
+      },
+      "fanout": [
+        {
+          "subscribers": 1,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50,
+          "expected": 50,
+          "p50ms": 0.89,
+          "p99ms": 1.23,
+          "allReachedP50ms": 0.89,
+          "allReachedP99ms": 1.23
+        },
+        {
+          "subscribers": 100,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 5000,
+          "expected": 5000,
+          "p50ms": 2.17,
+          "p99ms": 4.05,
+          "allReachedP50ms": 3.69,
+          "allReachedP99ms": 4.43
+        },
+        {
+          "subscribers": 1000,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50000,
+          "expected": 50000,
+          "p50ms": 11.94,
+          "p99ms": 25.6,
+          "allReachedP50ms": 23.96,
+          "allReachedP99ms": 27.18
+        }
+      ]
+    },
+    {
+      "target": "A0, bun directly",
+      "memory": {
+        "idleMiB": 65,
+        "idleStable": true,
+        "loadedMiB": 71.4,
+        "open": 1000,
+        "failed": 0,
+        "firstError": "",
+        "kibPerConnection": 6.6,
+        "processes": [
+          "cmd.exe (pid 23412): 8.5 -> 8.5 MiB",
+          "bun.exe (pid 5736): 45.7 -> 52.1 MiB",
+          "api.exe (pid 23488): 10.8 -> 10.8 MiB"
+        ]
+      },
+      "fanout": [
+        {
+          "subscribers": 1,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50,
+          "expected": 50,
+          "p50ms": 0.56,
+          "p99ms": 0.87,
+          "allReachedP50ms": 0.56,
+          "allReachedP99ms": 0.87
+        },
+        {
+          "subscribers": 100,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 5000,
+          "expected": 5000,
+          "p50ms": 1.66,
+          "p99ms": 2.82,
+          "allReachedP50ms": 2.73,
+          "allReachedP99ms": 3.09
+        },
+        {
+          "subscribers": 1000,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50000,
+          "expected": 50000,
+          "p50ms": 6.72,
+          "p99ms": 13.65,
+          "allReachedP50ms": 10.61,
+          "allReachedP99ms": 16.51
+        }
+      ]
+    }
+  ]
+}

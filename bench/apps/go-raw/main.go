@@ -158,11 +158,20 @@ func main() {
 		sseHijack = true
 		log.Print("sse: hijacked connections")
 	}
+	// the phase 3 spike (ws.go): off unless asked, so a normal campaign
+	// measures go-raw exactly as before
+	wsRelay := os.Getenv("GO_RAW_WS") == "1"
+	if wsRelay {
+		log.Print("ws: topic relay on /ws")
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/hello", hello)
 	mux.HandleFunc("GET /api/items", items)
 	mux.HandleFunc("GET /static/payload.json", static)
 	mux.HandleFunc("GET /api/events", events)
+	if wsRelay {
+		mux.HandleFunc("GET /ws", wsHandler)
+	}
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("go-raw bench app"))
 	})

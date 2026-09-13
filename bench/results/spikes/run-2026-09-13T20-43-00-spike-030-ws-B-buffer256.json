@@ -1,0 +1,56 @@
+{
+  "held": 1000,
+  "publishes": 50,
+  "results": [
+    {
+      "target": "B, go relay",
+      "memory": {
+        "idleMiB": 9.2,
+        "idleStable": true,
+        "loadedMiB": 42.2,
+        "open": 1000,
+        "failed": 0,
+        "firstError": "",
+        "kibPerConnection": 33.8,
+        "processes": [
+          "server.bin (pid 22372): 9.2 -> 42.2 MiB"
+        ]
+      },
+      "fanout": [
+        {
+          "subscribers": 1,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50,
+          "expected": 50,
+          "p50ms": 0.67,
+          "p99ms": 0.81,
+          "allReachedP50ms": 0.67,
+          "allReachedP99ms": 0.81
+        },
+        {
+          "subscribers": 100,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 5000,
+          "expected": 5000,
+          "p50ms": 1.81,
+          "p99ms": 3.72,
+          "allReachedP50ms": 2.69,
+          "allReachedP99ms": 4.19
+        },
+        {
+          "subscribers": 1000,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50000,
+          "expected": 50000,
+          "p50ms": 7.2,
+          "p99ms": 12.92,
+          "allReachedP50ms": 10.59,
+          "allReachedP99ms": 14.47
+        }
+      ]
+    }
+  ]
+}
