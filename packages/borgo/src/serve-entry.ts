@@ -34,6 +34,9 @@ if (import.meta.main) {
     const port = switches.render ? switches.renderPort : Number(process.env.PORT || 3000);
     const hostname = switches.render ? "127.0.0.1" : undefined;
     const stamp = Date.now();
+    // as in serve(): a reload requested while the browser's socket was down
+    // with the go front is told again to every socket that connects
+    let reloadStamp = 0;
     const sockets = new Set<import("bun").ServerWebSocket<undefined>>();
     let server: import("bun").Server<undefined>;
     // the original failure may have been the port itself
@@ -45,6 +48,7 @@ if (import.meta.main) {
           open(ws) {
             sockets.add(ws);
             ws.send(JSON.stringify({ type: "js", file: process.env.BORGO_CHANGED ?? "(build)", chunks: {}, stamp }));
+            if (reloadStamp) ws.send(JSON.stringify({ type: "reload", stamp: reloadStamp }));
           },
           close(ws) {
             sockets.delete(ws);
@@ -56,7 +60,8 @@ if (import.meta.main) {
           if (url.pathname === "/__borgo/dev" && server.upgrade(req)) return undefined as never;
           if (req.method === "POST" && url.pathname.startsWith("/__borgo/dev/")) {
             if (url.pathname.endsWith("/reload")) {
-              const data = JSON.stringify({ type: "reload" });
+              reloadStamp = Date.now();
+              const data = JSON.stringify({ type: "reload", stamp: reloadStamp });
               for (const ws of sockets) ws.send(data);
             }
             return new Response(null, { status: 204, headers: { "x-borgo-fallback": "1" } });

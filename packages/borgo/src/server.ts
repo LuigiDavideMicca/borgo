@@ -697,6 +697,12 @@ export async function serve({
   // changed files and the new page -> chunk map
   const devSockets = new Set<import("bun").ServerWebSocket<SocketData>>();
   const bootStamp = Date.now();
+  // the last reload borgo dev asked for. A .go save restarts the go front the
+  // browser's dev socket runs through, so the broadcast reaches sockets that
+  // dropped with it and nobody reloaded (found by fastrefresh.e2e.ts, the
+  // first time it ran on the go front). Every socket that connects is told
+  // again, stamped, and a page loaded after the reload ignores it
+  let reloadStamp = 0;
   const changed = decodeChanged(process.env.BORGO_CHANGED);
   const broadcast = (msg: Record<string, unknown>) => {
     const data = JSON.stringify(msg);
@@ -797,6 +803,7 @@ export async function serve({
             JSON.stringify({ type: "js", files: changed, chunks: chunkMap, stamp: bootStamp }),
           );
         }
+        if (reloadStamp) ws.send(JSON.stringify({ type: "reload", stamp: reloadStamp }));
       },
       close(ws) {
         if (ws.data?.kind === "refused") return;
@@ -961,7 +968,8 @@ export async function serve({
           return secure(new Response(null, { status: 204 }));
         }
         if (req.method === "POST" && url.pathname === "/__borgo/dev/reload") {
-          broadcast({ type: "reload" });
+          reloadStamp = Date.now();
+          broadcast({ type: "reload", stamp: reloadStamp });
           return secure(new Response(null, { status: 204 }));
         }
         return secure(new Response("not found", { status: 404 }));

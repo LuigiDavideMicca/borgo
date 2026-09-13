@@ -35,7 +35,7 @@ export function overlayHtml(error: unknown): string {
             const ws = new WebSocket(proto + location.host + "/__borgo/dev");
             ws.onmessage = (e) => {
               const m = JSON.parse(e.data);
-              if (m.type === "reload") return location.reload();
+              if (m.type === "reload" && (!m.stamp || m.stamp > performance.timeOrigin)) return location.reload();
               if (m.type === "js" && (!m.stamp || m.stamp > performance.timeOrigin)) location.reload();
             };
             ws.onclose = () => setTimeout(connect, 300);

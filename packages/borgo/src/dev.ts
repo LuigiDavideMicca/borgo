@@ -261,7 +261,9 @@ export async function dev() {
     proc.exited.then(() => (exited = true));
     while (Date.now() < deadline && !exited) {
       try {
-        await fetch(`http://localhost:${apiPort}/`, { signal: AbortSignal.timeout(1_000) });
+        // with the key: a probe without it is logged by the internal listener as
+        // a stranger refused, once per restart
+        await fetch(`http://localhost:${apiPort}/`, { signal: AbortSignal.timeout(1_000), headers: renderHeaders });
         return true;
       } catch {}
       await Bun.sleep(100);
