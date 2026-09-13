@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
+import { connect, createServer } from "node:net";
 import { c, g } from "./colors";
 import { documentStream, gzipStream, pickEncoding } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD, CSRF_HEADER, csrfCookieValue } from "./index";
@@ -418,7 +419,77 @@ export const SHARED_RENDER_HEADER = "X-Borgo-Shared";
 export const BOOT_HEADER = "X-Borgo-Boot";
 export const ROUTES_PATH = "/__borgo/routes";
 export const INTERNAL_KEY_MIN_LEN = 32;
-export const RENDER_PORT_DEFAULT = 3600;
+// The render service's loopback port has no default. A fixed 3600 was where
+// two borgo apps on one machine met - the redeploy deploy.md describes, two
+// projects side by side - and each go front talked to the other's render
+// service with the wrong boot key: every page answered 403. On Windows the
+// second bind did not even fail (measured: three render services on 3600 at
+// once). The process that starts both halves resolves the port once and
+// hands it to each.
+const listenFree = () =>
+  new Promise<import("node:net").Server>((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen({ port: 0, host: "127.0.0.1" }, () => resolve(server));
+  });
+
+// closing one listener before asking for the next lets the os hand out the
+// same port twice
+export async function freePorts(count: number): Promise<number[]> {
+  const servers: Array<import("node:net").Server> = [];
+  for (let i = 0; i < count; i++) servers.push(await listenFree());
+  const ports = servers.map((s) => (s.address() as { port: number }).port);
+  await Promise.all(servers.map((s) => new Promise((done) => s.close(done))));
+  return ports;
+}
+
+// whether something accepts a connection on 127.0.0.1:port. A listen of our
+// own is no test: on Windows a second process binds a port another one listens
+// on without an error, exclusive or not, and takes its traffic (measured)
+export function portAnswers(port: number, timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ port, host: "127.0.0.1" });
+    const settle = (answers: boolean) => {
+      socket.destroy();
+      resolve(answers);
+    };
+    socket.setTimeout(timeoutMs, () => settle(false));
+    socket.once("connect", () => settle(true));
+    socket.once("error", () => settle(false));
+  });
+}
+
+// BORGO_RENDER_PORT as named, or undefined when it is not. 0 is refused with
+// anything past 65535: it would let the render service pick a port the front
+// never learns
+export function namedRenderPort(env: Record<string, string | undefined>): number | undefined {
+  const port = envInt("BORGO_RENDER_PORT", env.BORGO_RENDER_PORT, "a free port picked at boot");
+  if (port === undefined) return undefined;
+  if (port < 1 || port > 65535) {
+    throw new Error(`borgo: BORGO_RENDER_PORT: ${port} is not a port (want 1-65535; unset means a free port picked at boot)`);
+  }
+  return port;
+}
+
+// the port as named, or a free one. borgo dev uses this: it asks every port it
+// will use whether something already answers, after its own session lock
+export async function pickRenderPort(env: Record<string, string | undefined>): Promise<number> {
+  return namedRenderPort(env) ?? (await freePorts(1))[0]!;
+}
+
+// the port borgo start hands both halves: a free one, or the one named -
+// refused when something already answers there, rather than taking its traffic
+export async function resolveRenderPort(env: Record<string, string | undefined>): Promise<number> {
+  const named = namedRenderPort(env);
+  if (named === undefined) return (await freePorts(1))[0]!;
+  if (await portAnswers(named)) {
+    throw new Error(
+      `BORGO_RENDER_PORT ${named} is already answering on 127.0.0.1 - another app holds it. ` +
+        `Unset BORGO_RENDER_PORT and a free port is picked, or name one nothing uses`,
+    );
+  }
+  return named;
+}
 
 // whether a request reaching the render service is the front's: the key is
 // compared in constant time and a request without one is a stranger on the
@@ -475,7 +546,13 @@ export function frontTopology(env: Record<string, string | undefined>): FrontTop
   return {
     publicPort: envInt("PORT", env.PORT, "3000") ?? 3000,
     apiPort: envInt("API_PORT", env.API_PORT, "3501") ?? 3501,
-    renderPort: envInt("BORGO_RENDER_PORT", env.BORGO_RENDER_PORT, String(RENDER_PORT_DEFAULT)) ?? RENDER_PORT_DEFAULT,
+    // resolved by the caller first (resolveRenderPort, pickRenderPort): a
+    // topology built without it would bring the fixed default back
+    renderPort:
+      namedRenderPort(env) ??
+      (() => {
+        throw new Error("borgo: BORGO_RENDER_PORT is not set: the process starting both halves resolves it before the topology");
+      })(),
     key,
   };
 }
@@ -526,11 +603,15 @@ function renderSwitches(env: Record<string, string | undefined>) {
         `(the go front mints one per boot; by hand: openssl rand -base64 48)`,
     );
   }
-  return {
-    render,
-    internalKey,
-    renderPort: envInt("BORGO_RENDER_PORT", env.BORGO_RENDER_PORT, String(RENDER_PORT_DEFAULT)) ?? RENDER_PORT_DEFAULT,
-  };
+  // no fallback port either: a render service that binds a fixed one meets
+  // any other on the machine, and the front would not know where it went
+  const renderPort = namedRenderPort(env);
+  if (render && renderPort === undefined) {
+    throw new Error(
+      "borgo: BORGO_RENDER_PORT must be set in render mode (borgo start and borgo dev set it, and the go front's BORGO_RENDER_URL names the same port)",
+    );
+  }
+  return { render, internalKey, renderPort: renderPort ?? 0 };
 }
 
 // who may POST /__borgo/publish. a key presented to a side that holds none is

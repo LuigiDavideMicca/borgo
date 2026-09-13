@@ -9,6 +9,7 @@ import {
   goBinName,
   goFrontEnv,
   INTERNAL_KEY_HEADER,
+  pickRenderPort,
   renderEnv,
   runBorgogen,
   UNKNOWN_CHANGE,
@@ -162,7 +163,11 @@ export async function dev() {
   const frontPort = process.env.PORT || "3000";
   const apiPort = process.env.API_PORT || "3501";
   // go answers frontPort, the front server process is the render service on
-  // its own loopback port, and both hold this boot's key
+  // its own loopback port, and both hold this boot's key. That port is the one
+  // named or a free one, never a fixed default - where two projects' sessions
+  // met. A named port that already answers is refused below, after the lock,
+  // with the other two
+  process.env.BORGO_RENDER_PORT = String(await pickRenderPort(process.env));
   const topology = frontTopology(process.env);
   // where the front server process actually listens, key included: this
   // orchestrator's own pokes (css, reload, readiness) go there directly and
@@ -228,7 +233,7 @@ export async function dev() {
     }
     console.error(
       `  port ${port} already answers http - another dev session (or app) is the ${name} there.\n` +
-        `  stop it, or run with ${name === "api" ? "API_PORT" : "PORT"}=<free port>. \`bunx borgo doctor\` names the holder.`,
+        `  stop it, or run with ${name === "api" ? "API_PORT" : name === "render service" ? "BORGO_RENDER_PORT" : "PORT"}=<free port>. \`bunx borgo doctor\` names the holder.`,
     );
     process.exit(1);
   }

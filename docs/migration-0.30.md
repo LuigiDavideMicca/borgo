@@ -10,7 +10,7 @@ Through 0.2x the Bun process answered the public port and forwarded `/api/*` to 
 
 ```
   0.2x   browser -> bun :3000 -> go :3501
-  0.30   browser -> go :3000 -> bun :3600 (loopback)
+  0.30   browser -> go :3000 -> bun (a free loopback port)
                        `-> /api/* answered in this same process
 ```
 
@@ -39,7 +39,7 @@ Nothing in your app's code. Pages, loaders, actions, layouts, islands, `env.ts`,
 | `BORGO_FRONT_READ_TIMEOUT` (seconds) | `BORGO_READ_TIMEOUT` (Go duration, e.g. `30s`) |
 | `BORGO_API_TIMEOUT` (ms, waiting for the API) | nothing — `/api` does not cross a process. For the wait on a *render*, `BORGO_RENDER_TIMEOUT` (duration, default `30s`) |
 
-Neither old name is honoured as an alias, so a stale value is inert rather than half-applied. Three variables are new and normally set for you by `borgo start`: `BORGO_RENDER_URL` (naming a render service is what makes the binary a front), `BORGO_RENDER_PORT` (default `3600`, loopback) and `BORGO_INTERNAL_KEY` (minted per boot). Set `BORGO_TRUSTED_PROXIES` if borgo sits behind a TLS-terminating proxy — otherwise its `X-Forwarded-Proto` is not believed, and every WebSocket handshake is compared against `http` and refused. The full list is the [environment reference](deploy.md#environment-reference).
+Neither old name is honoured as an alias, so a stale value is inert rather than half-applied. Three variables are new and normally set for you by `borgo start`: `BORGO_RENDER_URL` (naming a render service is what makes the binary a front), `BORGO_RENDER_PORT` (a free loopback port unless you name one) and `BORGO_INTERNAL_KEY` (minted per boot). Set `BORGO_TRUSTED_PROXIES` if borgo sits behind a TLS-terminating proxy — otherwise its `X-Forwarded-Proto` is not believed, and every WebSocket handshake is compared against `http` and refused. The full list is the [environment reference](deploy.md#environment-reference).
 
 **5. Two smaller behaviour changes, both visible from outside.** An `/api/*` response now carries `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options` where your handler left them empty: the headers are applied by authorship rather than by path, and the whole public port is borgo's authorship. The CSP is unaffected — it still goes on HTML and SVG alone. And `/metrics` now labels API requests by the route pattern the mux matched rather than lumping them under `/api/*`, so a dashboard that grouped on that label needs its query adjusted.
 
@@ -59,7 +59,7 @@ One more that is not visible, and is a change in the other direction: an api-onl
 
 ## A new port to know about
 
-`BORGO_RENDER_PORT`, `3600` by default, on `127.0.0.1`. If something else on the box already holds it, set the variable — `borgo start` resolves the whole topology in one place and configures both halves from it, so they cannot disagree. It needs no firewall rule, and it must not get one: a listener reachable from outside the box is exactly what the boot key exists to make useless.
+`BORGO_RENDER_PORT`, on `127.0.0.1`: a free port picked at every boot unless you name one, so two borgo apps on one machine - a zero-downtime redeploy, two projects - never meet on it. A named port that already answers refuses the boot rather than taking another app's traffic: on Windows a second process binds a port another one listens on without an error. `borgo start` resolves the whole topology in one place and configures both halves from it, so they cannot disagree. It needs no firewall rule, and it must not get one: a listener reachable from outside the box is exactly what the boot key exists to make useless.
 
 ## Checklist
 

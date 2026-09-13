@@ -136,7 +136,16 @@ switch (command) {
 
     // the go binary answers the public port, this process is its render
     // service, and the boot key travels from here to both halves
-    const { frontTopology, goFrontEnv, renderEnv, withoutRenderEnv } = await import("./util");
+    const { frontTopology, goFrontEnv, renderEnv, resolveRenderPort, withoutRenderEnv } = await import("./util");
+    // the render port, resolved once here for both halves: a free one, or the
+    // one named - refused when something already answers there. A fixed
+    // default was where two apps on one machine met, every page a 403
+    try {
+      process.env.BORGO_RENDER_PORT = String(await resolveRenderPort(process.env));
+    } catch (error) {
+      console.error(`  ${c.red(g.err)} ${(error as Error).message}`);
+      process.exit(1);
+    }
     const topology = frontTopology(process.env);
     Object.assign(process.env, renderEnv(topology));
 

@@ -5,7 +5,6 @@ import { isrPolicyTable } from "../src/isr";
 import {
   INTERNAL_KEY_HEADER,
   INTERNAL_KEY_MIN_LEN,
-  RENDER_PORT_DEFAULT,
   frontTopology,
   goFrontEnv,
   internalKeyRejects,
@@ -23,7 +22,13 @@ describe("render mode switches", () => {
   test("off by default, and off means the public front server as before", () => {
     const s = resolveSwitches({}, false);
     expect(s.render).toBe(false);
-    expect(s.renderPort).toBe(RENDER_PORT_DEFAULT);
+  });
+
+  // no port to fall back to: a fixed one is where two apps on one machine met
+  // (render-port.test.ts), so render mode names its port or does not start
+  test("render mode without a port refuses the boot by name", () => {
+    expect(() => resolveSwitches({ BORGO_RENDER: "1", BORGO_INTERNAL_KEY: key }, false)).toThrow(/BORGO_RENDER_PORT/);
+    expect(() => frontTopology({ PORT: "8080", API_PORT: "9000" })).toThrow(/BORGO_RENDER_PORT/);
   });
 
   test("on with a key of the session secret's floor", () => {
@@ -114,14 +119,16 @@ describe("frontTopology", () => {
 
   test("an operator's own key is kept when usable, replaced when not", () => {
     const own = "o".repeat(INTERNAL_KEY_MIN_LEN);
-    expect(frontTopology({ BORGO_INTERNAL_KEY: own }).key).toBe(own);
-    expect(frontTopology({ BORGO_INTERNAL_KEY: "short" }).key).not.toBe("short");
+    expect(frontTopology({ BORGO_INTERNAL_KEY: own, BORGO_RENDER_PORT: "9100" }).key).toBe(own);
+    expect(frontTopology({ BORGO_INTERNAL_KEY: "short", BORGO_RENDER_PORT: "9100" }).key).not.toBe("short");
   });
 
-  test("defaults: 3000 public, 3501 internal, 3600 render; two boots mint two keys", () => {
-    const a = frontTopology({});
-    const b = frontTopology({});
-    expect([a.publicPort, a.apiPort, a.renderPort]).toEqual([3000, 3501, RENDER_PORT_DEFAULT]);
+  // the render port has no default: it is the one the launcher resolved
+  // (render-port.test.ts), and a topology without it is refused
+  test("defaults: 3000 public, 3501 internal, the render port as resolved; two boots mint two keys", () => {
+    const a = frontTopology({ BORGO_RENDER_PORT: "9100" });
+    const b = frontTopology({ BORGO_RENDER_PORT: "9100" });
+    expect([a.publicPort, a.apiPort, a.renderPort]).toEqual([3000, 3501, 9100]);
     expect(a.key).not.toBe(b.key);
   });
 });
@@ -132,6 +139,17 @@ describe("the orchestrators wire the topology", () => {
   const cli = readFileSync(join(import.meta.dir, "../src/cli.ts"), "utf8");
   const dev = readFileSync(join(import.meta.dir, "../src/dev.ts"), "utf8");
   const exp = readFileSync(join(import.meta.dir, "../src/export.ts"), "utf8");
+
+  // the render port is resolved before the topology in every launcher, or the
+  // topology refuses: start refuses a named port that answers, dev picks and
+  // asks after its session lock, export takes three free ports
+  test("every launcher resolves the render port before building the topology", () => {
+    const before = (source: string, first: string, then: string) =>
+      source.indexOf(first) >= 0 && source.indexOf(first) < source.indexOf(then);
+    expect(before(cli, "await resolveRenderPort(process.env)", "const topology = frontTopology(process.env)")).toBe(true);
+    expect(before(dev, "await pickRenderPort(process.env)", "const topology = frontTopology(process.env)")).toBe(true);
+    expect(before(exp, "process.env.BORGO_RENDER_PORT = String(renderPort)", "const topology = frontTopology(process.env)")).toBe(true);
+  });
 
   test("borgo start: go gets the front env, this process becomes the renderer", () => {
     expect(cli).toContain("Object.assign(process.env, renderEnv(topology));");

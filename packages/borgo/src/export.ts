@@ -1,5 +1,4 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { createServer } from "node:net";
 import { dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
@@ -8,7 +7,7 @@ import { banner, c, fmtMs, g } from "./colors";
 import { inHiddenDirectory, isHiddenAsset } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD } from "./index";
 import type { Route } from "./router";
-import { frontTopology, goBinName, INTERNAL_KEY_HEADER, renderEnv, runBorgogen, withoutRenderEnv } from "./util";
+import { freePorts, frontTopology, goBinName, INTERNAL_KEY_HEADER, renderEnv, runBorgogen, withoutRenderEnv } from "./util";
 
 type ExportModule = Route["module"];
 
@@ -162,22 +161,8 @@ export function requestResidue(html: string): Residue[] {
 export const residueMessage = (residue: Residue[]) =>
   `cannot be exported ${g.dot} it carries ${residue.map((r) => r.what).join(" and ")}`;
 
-const listenFree = () =>
-  new Promise<import("node:net").Server>((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen({ port: 0, host: "127.0.0.1" }, () => resolve(server));
-  });
-
-// closing one listener before asking for the next lets the os hand out the
-// same port twice
-export async function freePorts(count: number): Promise<number[]> {
-  const servers: Array<import("node:net").Server> = [];
-  for (let i = 0; i < count; i++) servers.push(await listenFree());
-  const ports = servers.map((s) => (s.address() as { port: number }).port);
-  await Promise.all(servers.map((s) => new Promise((done) => s.close(done))));
-  return ports;
-}
+// moved to util.ts, where borgo start and borgo dev pick the render port too
+export { freePorts };
 
 // the same two predicates as serveAsset: a dotfile borgo start refuses must
 // not reach dist/site either, or the 404 masks the exposure

@@ -19,7 +19,7 @@ A running borgo app is a Go process and a Bun process. The Go binary answers the
  |  /healthz  /metrics           gzip, csp, csrf, body limit  |
  +------------------------------------------------------------+
     |                                                ^
-    | a page: BORGO_RENDER_PORT (3600),              | a loader's api call:
+    | a page: BORGO_RENDER_PORT (free),              | a loader's api call:
     | loopback, X-Borgo-Internal                     | API_PORT (3501),
     v                                                | loopback
  +------------------------------------------------------------+
@@ -315,7 +315,7 @@ Both outputs are written only after every check has passed, so a failed run neve
      |
      |-- go build -o .borgo/next-api .  -> swap -> spawn -> the front, :3000
      |                                                          |
-     |-- bun serve-entry.ts (BORGO_DEV=1) -> the render service, :3600
+     |-- bun serve-entry.ts (BORGO_DEV=1) -> the render service, a free loopback port
      |                                                          |
      |   fs.watch(".", recursive)                               |  ws /__borgo/dev,
      |     *.go     -> borgogen, rebuild, restart api, reload    |  through the front
