@@ -331,8 +331,8 @@ These are borgo's own variables. Your application's variables get the same disci
 | `BUN_CONFIG_MAX_HTTP_REQUESTS` | `16384` under `borgo dev` and `borgo start`; `256` (bun's default) otherwise | render service: how many outbound calls it may have in flight, which in practice means loader and action calls to the api. Event streams and websockets are the front's own inbound sockets and do not draw on it. `borgo dev` sets it, every config borgo generates that *launches* the app sets it (Dockerfile, compose, systemd — not the caddy/nginx proxy configs, which set no environment), and `borgo start` re-execs itself to set it when nothing else did. Read at process start — exporting it afterwards has no effect, which is why the re-exec exists |
 | `BORGO_READ_HEADER_TIMEOUT` | `5s` | cap on reading request headers (slow-header clients), on the public port and the internal one |
 | `BORGO_IDLE_TIMEOUT` | `2m` | idle keep-alive reclaim (duration string) |
-| `BORGO_READ_TIMEOUT` | `0` (off) | whole-request read deadline (duration string) — this is the internet-facing one now |
-| `BORGO_WRITE_TIMEOUT` | `0` (off) | whole-response write deadline — `borgo.SSE` and a streaming render exempt themselves |
+| `BORGO_READ_TIMEOUT` | `60s` on the public port, `0` for an api alone | how long a request body may go without progress (duration string); each read moves it, so a slow upload that keeps arriving is not cut |
+| `BORGO_WRITE_TIMEOUT` | `60s` on the public port, `0` for an api alone | how long a response may go without a write; each write moves it, so a streaming render is not cut, and an event stream keeps its own |
 | `BORGO_SHUTDOWN_TIMEOUT` | `10s` | grace period for in-flight requests on shutdown; `0` waits indefinitely |
 | `BORGO_HASH_SLOTS` | `max(1, GOMAXPROCS/2)` | password hashes that may run at once. One costs ~140 ms of cpu, so the cap is what keeps a login flood from starving every other route. A value that is not a positive integer is refused at startup rather than ignored |
 | `NO_COLOR` | unset | disable ANSI colors in logs |

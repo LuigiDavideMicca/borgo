@@ -289,8 +289,8 @@ Read at runtime unless noted. Defaults in parentheses.
 | `FRONT_URL` (`http://localhost:$PORT`) | Where `Push` reaches the process holding the topic relay — the render service, whose address the front already knows, so this is for a layout that is not `borgo start`. An `http://` URL naming another machine holds the push key back unless `BORGO_PUSH_INSECURE` is set. | stable |
 | `BORGO_READ_HEADER_TIMEOUT` (`5s`) | Cap on reading request headers. | stable |
 | `BORGO_IDLE_TIMEOUT` (`2m`) | Idle keep-alive reclaim, on both listeners. | stable |
-| `BORGO_READ_TIMEOUT` (`0`, off) | Whole-request read deadline, and since 0.30 this is the public port's: it is the knob a slowloris meets. | stable |
-| `BORGO_WRITE_TIMEOUT` (`0`, off) | Whole-response write deadline; `SSE` exempts its own connection, and so does a streaming render. Off by default for that reason. | stable |
+| `BORGO_READ_TIMEOUT` (`60s` on the public port) | How long a request body may go without progress. Every read of the body moves the deadline forward, so an upload that keeps arriving is never cut and one that goes silent is. `0` turns it off; an api served alone defaults to `0`. | stable |
+| `BORGO_WRITE_TIMEOUT` (`60s` on the public port) | How long a response may go without a write. Every write moves the deadline forward, so a streaming render or a large file going to a slow link is never cut, and a client that stops reading is. An event stream clears it at its first byte and keeps its own: `SSE` bounds each of its writes at 10 seconds. `0` turns it off; an api served alone defaults to `0`. | stable |
 | `BORGO_SHUTDOWN_TIMEOUT` (`10s`) | Grace period for in-flight requests; `0` waits indefinitely. | stable |
 | `BORGO_HASH_SLOTS` (`max(1, GOMAXPROCS/2)`) | Password hashes that may run at once. A value that is not a positive integer is refused by `CheckEnv`, and so by `Serve` and `ServeContext`. | stable |
 

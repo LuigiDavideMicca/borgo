@@ -921,7 +921,7 @@ func printFrontStartup(patterns []string, publicPort, internalAddr string, rende
 // the front applies, and api/middleware.go guarding it exactly as it guards
 // the front.
 func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware, mux http.Handler) http.Handler {
-	return security.middleware(limitBody(maxBody, withSessionOnce(withAppMiddleware(app, Middleware(mux)))))
+	return security.middleware(progressDeadlines(limitBody(maxBody, withSessionOnce(withAppMiddleware(app, Middleware(mux))))))
 }
 
 // internalHandler is the loaders' way in. The app's middleware guards it as

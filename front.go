@@ -485,7 +485,8 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 	// on the whole public port, including the proxy's own refusals: by
 	// authorship, not by path. The counters sit outside the headers, so a
 	// refusal the headers wrapper writes is counted too
-	return observeRequests(opts.metrics, opts.dev, opts.security.middleware(h))
+	// deadlines on progress, not on the whole exchange: front_deadlines.go
+	return observeRequests(opts.metrics, opts.dev, opts.security.middleware(progressDeadlines(h)))
 }
 
 // renderUnavailable answers for a render service that did not: the api is
