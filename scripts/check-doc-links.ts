@@ -194,6 +194,7 @@ mkdirSync(goScratch, { recursive: true });
 // repeated across files because the blank identifier never collides
 const GO_IMPORTS = `import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -204,6 +205,7 @@ const GO_IMPORTS = `import (
 
 var (
 	_ = context.Background
+	_ = json.Marshal
 	_ = errors.New
 	_ = http.StatusOK
 	_ = sync.Mutex{}

@@ -519,8 +519,7 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 	if err != nil {
 		return err
 	}
-	// api/middleware.go guards an api alone exactly as it guards the front
-	srv.Handler = security.middleware(limitBody(maxBody, withAppMiddleware(registeredMiddleware(), Middleware(mux))))
+	srv.Handler = apiOnlyHandler(security, maxBody, registeredMiddleware(), mux)
 	// armed before anything can connect, dropped however this run ends
 	defer armStreamShutdown(srv)()
 	printStartup(patterns, port)
@@ -636,11 +635,7 @@ func serveFront(ctx context.Context, onShutdown func(), renderer *url.URL, apiPo
 		dev:      dev,
 		app:      app,
 	}, renderer, key, renderTimeout)
-	// the loaders' way in: the app's middleware guards it as it guards the
-	// public port, or a loader would reach an api path the browser cannot
-	// and the //borgo:export functions, which answer only here, behind the
-	// key and ahead of the app's middleware: export.go says why
-	internal.Handler = requireInternalKey(key, withExports(withAppMiddleware(app, api)))
+	internal.Handler = internalHandler(key, app, api)
 	defer armStreamShutdown(public)()
 	defer armStreamShutdown(internal)()
 	printFrontStartup(patterns, publicPort, internal.Addr, renderer)
@@ -920,4 +915,19 @@ func printFrontStartup(patterns []string, publicPort, internalAddr string, rende
 		parts := strings.SplitN(p, " ", 2)
 		fmt.Printf("  %s%-7s%s %s\n", sage, parts[0], reset, parts[1])
 	}
+}
+
+// apiOnlyHandler is the public port of an api with no pages: the protections
+// the front applies, and api/middleware.go guarding it exactly as it guards
+// the front.
+func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware, mux http.Handler) http.Handler {
+	return security.middleware(limitBody(maxBody, withSessionOnce(withAppMiddleware(app, Middleware(mux)))))
+}
+
+// internalHandler is the loaders' way in. The app's middleware guards it as
+// it guards the public port, or a loader would reach an api path the browser
+// cannot; the //borgo:export functions answer only here, behind the key and
+// ahead of the app's middleware: export.go says why.
+func internalHandler(key string, app *appMiddleware, api http.Handler) http.Handler {
+	return requireInternalKey(key, withSessionOnce(withExports(withAppMiddleware(app, api))))
 }

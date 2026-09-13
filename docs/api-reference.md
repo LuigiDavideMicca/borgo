@@ -54,6 +54,8 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `SetSession(w, v any, maxAge time.Duration) error` | Stores `v` JSON-encoded and HMAC-signed in the `borgo_session` cookie. The expiry is signed too. Errors if the cookie would exceed 4 KB. | stable |
 | `GetSession[T any](r) (T, bool)` | Verifies signature and expiry and decodes into `T`. False for missing, tampered, expired — or ambiguous (two valid cookies). | stable |
 | `ClearSession(w)` | Deletes the session cookie. | stable |
+| `CheckSession(check func(r *http.Request, s SessionInfo) bool)` | Registers the one check Go runs on every session whose signature and expiry verified, before anything reads it: `GetSession`, `Authed`, and the session handed to the render service. `false`, or a panic (logged), makes the request one without a session; the cookie is not rewritten. Runs at most once per request under `Serve`. Panics on `nil`, on a second registration, and after `Serve`. See [revoking sessions](auth-and-sessions.md#revoking-sessions). | stable |
+| `SessionInfo` | What the check sees: `IssuedAt time.Time`, to the millisecond (the Unix epoch for a session written before 0.30), and `Data json.RawMessage`, the stored JSON — decode it, do not modify it. | stable |
 | `ErrNoSessionSecret` | Returned by `SetSession` when there is no usable `SESSION_SECRET` — unset, **or set to fewer than 32 bytes**, which `sessionSecret()` reports as absent deliberately so that every guard covering the missing case covers the weak key too. In practice only the unset case reaches a running handler: `Serve` refuses to boot on a short secret. | stable |
 
 ### Auth

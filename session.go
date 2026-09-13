@@ -56,7 +56,11 @@ func sessionSecure() (bool, error) {
 }
 
 type sessionEnvelope struct {
-	Exp  int64           `json:"exp"`
+	Exp int64 `json:"exp"`
+	// milliseconds, where exp is seconds: a revocation cutoff set in the same
+	// second as a login must neither revoke the login nor spare a session
+	// issued just before it. Absent from envelopes written before 0.30: zero
+	Iat  int64           `json:"iat"`
 	Data json.RawMessage `json:"data"`
 }
 
@@ -140,11 +144,12 @@ func SetSession(w http.ResponseWriter, v any, maxAge time.Duration) error {
 	// zero is "expired", not "expires now": Unix() truncates to the second and
 	// GetSession's check is exclusive, so Exp == now stays valid for the rest
 	// of the current second
-	exp := time.Now().Add(maxAge)
+	now := time.Now()
+	exp := now.Add(maxAge)
 	if maxAge <= 0 {
-		exp = time.Now().Add(-time.Second)
+		exp = now.Add(-time.Second)
 	}
-	envelope, err := json.Marshal(sessionEnvelope{Exp: exp.Unix(), Data: data})
+	envelope, err := json.Marshal(sessionEnvelope{Exp: exp.Unix(), Iat: now.UnixMilli(), Data: data})
 	if err != nil {
 		return err
 	}
@@ -187,24 +192,42 @@ func GetSession[T any](r *http.Request) (T, bool) {
 }
 
 // sessionData is GetSession before the decode into T: the json the app
-// stored, from a cookie whose signature verified and whose expiry has not
-// passed. The front hands it to the render service as it is, so the app's
-// loaders read the same bytes GetSession would - without the render service
-// ever holding the key that made them trustworthy.
+// stored, from a cookie whose signature verified, whose expiry has not
+// passed, and which the app's CheckSession, if any, did not revoke. The
+// front hands it to the render service as it is, so the app's loaders read
+// the same bytes GetSession would - without the render service ever holding
+// the key that made them trustworthy.
 func sessionData(r *http.Request) (json.RawMessage, bool) {
+	check := sessionCheck.Load()
+	if check == nil {
+		envelope, ok := verifiedEnvelope(r)
+		return envelope.Data, ok
+	}
+	if r.Context().Value(inSessionCheckKey{}) != nil {
+		envelope, ok := verifiedEnvelope(r)
+		return envelope.Data, ok
+	}
+	if once, _ := r.Context().Value(sessionOnceKey{}).(*sessionOnce); once != nil {
+		return once.read(r, *check)
+	}
+	// an embedder's own server: no door to share an answer through
+	return checkedSession(r, *check)
+}
+
+func verifiedEnvelope(r *http.Request) (sessionEnvelope, bool) {
 	payload, ok := sessionPayload(r)
 	if !ok {
-		return nil, false
+		return sessionEnvelope{}, false
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
-		return nil, false
+		return sessionEnvelope{}, false
 	}
 	var envelope sessionEnvelope
 	if json.Unmarshal(raw, &envelope) != nil || time.Now().Unix() > envelope.Exp {
-		return nil, false
+		return sessionEnvelope{}, false
 	}
-	return envelope.Data, true
+	return envelope, true
 }
 
 // A request can carry several cookies of the same name (a sibling subdomain

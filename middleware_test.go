@@ -262,18 +262,23 @@ func TestAPanickingAppMiddlewareAnswers500AndReachesNothing(t *testing.T) {
 	}
 }
 
-// the loaders' way in and the api-only server are composed inside serveFront
-// and serveContext; the composition is pinned there, and withAppMiddleware is
-// the one function both go through
+// the loaders' way in and the api-only server are built by internalHandler
+// and apiOnlyHandler; serveFront and serveContext are pinned to calling them
 func TestTheInternalListenerAndAnApiAloneAreGuardedToo(t *testing.T) {
 	probe := &probeMiddleware{}
-	internal := requireInternalKey(testInternalKey, withAppMiddleware(probe.app(), apiUnderTest()))
+	internal := internalHandler(testInternalKey, probe.app(), apiUnderTest())
 	req := block(httptest.NewRequest("GET", "/api/hello", nil))
 	req.Header.Set(internalKeyHeader, testInternalKey)
 	w := httptest.NewRecorder()
 	internal.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("a loader's api call went around the app's middleware: %d", w.Code)
+	}
+	alone := apiOnlyHandler(nil, 1<<20, probe.app(), apiUnderTest())
+	w = httptest.NewRecorder()
+	alone.ServeHTTP(w, block(httptest.NewRequest("GET", "/api/hello", nil)))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("an api alone went around the app's middleware: %d", w.Code)
 	}
 
 	src, err := os.ReadFile("borgo.go")
@@ -282,8 +287,8 @@ func TestTheInternalListenerAndAnApiAloneAreGuardedToo(t *testing.T) {
 	}
 	code := strings.ReplaceAll(string(src), "\r\n", "\n")
 	for _, want := range []string{
-		"internal.Handler = requireInternalKey(key, withExports(withAppMiddleware(app, api)))",
-		"withAppMiddleware(registeredMiddleware(), Middleware(mux))",
+		"internal.Handler = internalHandler(key, app, api)",
+		"srv.Handler = apiOnlyHandler(security, maxBody, registeredMiddleware(), mux)",
 		"app:      app,",
 	} {
 		if !strings.Contains(code, want) {

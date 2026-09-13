@@ -26,6 +26,49 @@ Four behaviors worth knowing before you design around them:
 - **Logging in replaces any existing session**, so a session fixed on a victim before login cannot survive it.
 - **Two `borgo_session` cookies with different values are treated as none.** A sibling subdomain can plant a duplicate; guessing which one to trust is how an attacker chooses your session for you. See [security](security.md#duplicate-cookies-are-treated-as-no-cookie).
 
+### Revoking sessions
+
+A signed cookie is valid until it expires, unless the app says otherwise. `borgo.CheckSession` registers one check that Go runs on every session whose signature and expiry verified, before anything reads it: `GetSession`, `borgo.Authed`, and the session the front hands the render service for loaders and `middleware.ts`. Answer `false` and the request has no session. The cookie is not rewritten, so a revocation takes effect on the next request — and so does lifting one.
+
+The cheapest revocation needs no session store, because every session records when it was issued: "log me out everywhere" is one timestamp per user.
+
+```go
+// when each user last asked to be logged out everywhere
+var revokedBefore sync.Map // username -> time.Time
+
+func init() {
+	borgo.CheckSession(func(r *http.Request, s borgo.SessionInfo) bool {
+		var me Me
+		if json.Unmarshal(s.Data, &me) != nil {
+			return false
+		}
+		cutoff, revoked := revokedBefore.Load(me.Username)
+		return !revoked || s.IssuedAt.After(cutoff.(time.Time))
+	})
+}
+
+func logoutEverywhere(w http.ResponseWriter, r *http.Request) {
+	me, ok := borgo.GetSession[Me](r)
+	if !ok {
+		borgo.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+		return
+	}
+	revokedBefore.Store(me.Username, time.Now())
+	borgo.ClearSession(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+```
+
+The same shape takes a role away: store the moment it changed, and every session issued before it stops working on its next request instead of at its expiry.
+
+- **It runs once per request** under `borgo.Serve`, however many times the request reads the session: the app's middleware, the handler and the hand-off to the render service share one answer, so a check that queries a database queries it once. An embedder calling `GetSession` on its own server runs the check on every read.
+- **A panic is no session**, logged with its stack. A revocation store that is down does not hand revoked sessions back.
+- **`IssuedAt` is to the millisecond.** A session written by a borgo before 0.30 carries no issue time and reads as the Unix epoch, so any cutoff revokes it.
+- **Inside the check, `GetSession` answers with the session being checked**, unchecked, rather than recursing into the check; `s.Data` is the same bytes.
+- **The map above is per process.** Behind several instances the cutoffs belong in a store they share, or a revocation holds only on the instance that recorded it.
+
+Register the check in `init()`, beside your routes: after `Serve` it panics, as a late route does. Without a check nothing changes and nothing is paid.
+
 ## Password hashing
 
 `borgo.DefaultHasher()` returns PBKDF2-HMAC-SHA256 with OWASP parameters (600,000 iterations, 16-byte random salt), from the standard library's `crypto/pbkdf2`. The choice, honestly: argon2id is the state of the art, but it lives in `golang.org/x/crypto`, and the Go runtime's zero-dependency guarantee is part of what borgo is. PBKDF2 at these parameters is an OWASP-recommended configuration and FIPS-approved; if your threat model wants argon2id, the hasher is one small interface away:
@@ -178,7 +221,7 @@ borgo gives you the mechanics. These remain your decisions, and none of them are
 - **Rate limiting and lockout.** The login handler caps concurrent hashing and sheds excess with `503`, which protects the *server*; it does not slow an attacker down per account. Count failures yourself, or rate-limit `/login` at the proxy.
 - **Registration abuse.** No email verification, no captcha, no duplicate-signup throttling. `RegisterHandler` answers `409` on a taken username, which is an existence oracle you accept in exchange for a usable signup form — mask it if your threat model cannot.
 - **Password reset, email change, 2FA, OAuth, SSO.** All absent by design. They are product decisions with wildly different answers per app, and each needs a channel (email, TOTP, an identity provider) that borgo has no business owning.
-- **Session revocation.** Sessions are self-contained signed cookies, so there is no server-side list to delete from: a stolen cookie is valid until it expires. If you need instant revocation, keep a token version in your user row, put it in the principal, and check it in the guard — or rotate `SESSION_SECRET`, which logs everyone out at once.
+- **Session revocation is a check you write.** Sessions are self-contained signed cookies, so borgo keeps no list to delete from: without [`CheckSession`](#revoking-sessions) a stolen cookie is valid until it expires. The check is where you choose what revocation costs — a map, a cache, a query. Rotating `SESSION_SECRET` still logs everyone out at once.
 
 The trade that buys: no session store, no lookup per request, and a server that can be restarted or replicated without anybody being logged out.
 

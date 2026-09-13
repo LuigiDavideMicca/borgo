@@ -40,17 +40,34 @@ func plainPage(body string) func(*http.Request) (int, http.Header, string) {
 // cleanup: "RemoveAll cleanup: directory not empty", red about 40% of the
 // time on windows for TestIsrSweepsATornPair (found by the verifier of this
 // phase, whose mutation signal it polluted).
+//
+// Waiting meant counting entries, and that was not enough: a save writes two
+// temp files and renames them one at a time, so every step of it already
+// shows two entries. The wait returned before the renames and the cleanup
+// still raced them, under the load of the full suite - so it waits for
+// settled names and no temp file.
 func waitForPairs(t *testing.T, dir string, want int) {
 	t.Helper()
+	count := func() (settled, saving int) {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if strings.Contains(e.Name(), ".tmp.") {
+				saving++
+			} else {
+				settled++
+			}
+		}
+		return settled, saving
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if entries, _ := os.ReadDir(dir); len(entries) == want {
+		if settled, saving := count(); settled == want && saving == 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	entries, _ := os.ReadDir(dir)
-	t.Fatalf("the persist directory holds %d files after 2s, want %d", len(entries), want)
+	settled, saving := count()
+	t.Fatalf("the persist directory holds %d settled files and %d mid-save after 2s, want %d settled", settled, saving, want)
 }
 
 // waitFor is for the concurrency tests: they build a burst against a render

@@ -480,7 +480,8 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 	// api/middleware.go in front of everything the front does not answer
 	// itself; middleware.go says why each position is where it is
 	f.guarded = withAppMiddleware(opts.app, http.HandlerFunc(f.serveGuarded))
-	var h http.Handler = f
+	// every read of the session in one request shares one check: session_check.go
+	h := withSessionOnce(f)
 	// on the whole public port, including the proxy's own refusals: by
 	// authorship, not by path. The counters sit outside the headers, so a
 	// refusal the headers wrapper writes is counted too
