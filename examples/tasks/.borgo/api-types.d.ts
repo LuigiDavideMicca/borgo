@@ -47,6 +47,7 @@ declare module "borgo-framework" {
     "GET /api/events": { response: unknown };
     "POST /api/login": { response: unknown };
     "POST /api/logout": { response: unknown };
+    "POST /api/logout-everywhere": { response: unknown };
     "GET /api/me": { response: Me };
     "GET /api/ping": { response: Ping };
     "POST /api/register": { response: unknown };

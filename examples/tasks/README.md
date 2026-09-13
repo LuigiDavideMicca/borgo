@@ -2,7 +2,7 @@
 
 The kitchen-sink app this repository develops against, and the one the Playwright suite runs on. If you want to see every convention working in one place — before writing your own — this is the place.
 
-What it exercises: tasks CRUD through form actions backed by GORM + SQLite, register/login/logout with signed-cookie sessions and CSRF, a loader-guarded page (`/account`), server-sent events and a typed WebSocket topic (`/live`), islands (`/islands`), every hydration mode side by side (`/hydration`), streaming SSR with a deliberately slow section (`/slow`), fast-refresh playground (`/refresh`), custom error pages, and a cached page (`/news`, `revalidate` + `tags`) that the Go handler invalidates the moment a task is written.
+What it exercises: tasks CRUD through form actions backed by GORM + SQLite, register/login/logout with signed-cookie sessions and CSRF, logging out everywhere through `borgo.CheckSession` (`POST /api/logout-everywhere`), a page guarded by `middleware.ts` (`/account`), server-sent events and a typed WebSocket topic (`/live`), islands (`/islands`), every hydration mode side by side (`/hydration`), streaming SSR with a deliberately slow section (`/slow`), fast-refresh playground (`/refresh`), custom error pages, and a cached page (`/news`, `revalidate` + `tags`) that the Go handler invalidates the moment a task is written.
 
 ## Run it
 
