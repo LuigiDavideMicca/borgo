@@ -327,8 +327,10 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
 
   // keepScroll: an action redirecting back to its own page refreshes in place.
   // hops caps loader-redirect chains, which have no native browser limit.
-  // push: true adds a history entry, "replace" rewrites it, false is a back/forward render
-  async function navigate(to: URL, push: boolean | "replace", keepScroll = false, hops = 0) {
+  // push: true adds a history entry, "replace" rewrites it, false is a back/forward render.
+  // arriving: a back/forward destination's key, which becomes the current entry
+  // only when its page renders
+  async function navigate(to: URL, push: boolean | "replace", keepScroll = false, hops = 0, arriving?: string) {
     const seq = ++navSeq;
     const matched = matchRoute(to.pathname, routes);
     // a static export has no props endpoint: the navigation goes to the browser
@@ -363,9 +365,9 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
         }
         // a redirect followed without a push (back/forward) must still fix the address bar
         if (!push) {
-          history.replaceState({ __borgo: entryKey }, "", dest.pathname + dest.search + dest.hash);
+          history.replaceState({ __borgo: arriving ?? entryKey }, "", dest.pathname + dest.search + dest.hash);
         }
-        navigate(dest, push, keepScroll, hops + 1);
+        navigate(dest, push, keepScroll, hops + 1, arriving);
         return;
       }
       props = asProps(data.props);
@@ -381,6 +383,13 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
       history.pushState({ __borgo: entryKey }, "", to.pathname + to.search + to.hash);
     } else if (push === "replace") {
       history.replaceState({ __borgo: entryKey }, "", to.pathname + to.search + to.hash);
+    } else if (arriving) {
+      // the destination becomes the current entry now, with its page. Taken at
+      // popstate, while the page being left was still on screen, a scroll event
+      // of that page saved its own position under this key, and the restore
+      // below read it back: back from a detail at the top put the list at 0
+      // (found by nav.e2e.ts, 2 runs in 3 under a busy suite)
+      entryKey = arriving;
     }
     currentRoute = matched.route;
     renderedUrl = to.pathname + to.search;
@@ -694,15 +703,19 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
       clearTimeout(scrollTimer);
       saveScroll();
       const stamped = history.state?.__borgo;
-      entryKey = stamped ?? newKey();
+      const arriving = stamped ?? newKey();
       if (location.pathname + location.search === renderedUrl) {
         // a fragment entry the browser pushed on its own: page and loader data unchanged
+        entryKey = arriving;
         if (!stamped) history.replaceState({ ...history.state, __borgo: entryKey }, "");
         const target = location.hash && document.getElementById(location.hash.slice(1));
         target ? target.scrollIntoView() : restoreScroll(entryKey);
         return;
       }
-      navigate(new URL(location.href), false);
+      // the page on screen stays the current entry until the destination
+      // renders: navigate takes the key then, and a navigation superseded
+      // before it renders never takes it at all
+      navigate(new URL(location.href), false, false, 0, arriving);
     });
   }
 

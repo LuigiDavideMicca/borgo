@@ -47,8 +47,12 @@ test("scroll position restores on back and forward", async ({ page, request }) =
     // shrink it mid-test; if the page is short at the moment of the restore,
     // the browser clamps scrollTo(300) and the exact match fails. pin the
     // height so it cannot depend on the shared database - the style tag
-    // survives client-side navigations (same document)
-    await page.addStyleTag({ content: "main { min-height: 3000px; }" });
+    // survives client-side navigations (same document). And no scroll
+    // anchoring: other workers insert and delete tasks above the viewport the
+    // whole time, and chrome then moves scrollY to keep the content still - a
+    // browser feature this test is not about, which moved a correctly restored
+    // 357 to 300 while the assertion waited
+    await page.addStyleTag({ content: "main { min-height: 3000px; } html { overflow-anchor: none; }" });
     await page.evaluate(() => scrollTo(0, 300));
     await page.waitForTimeout(300);
 
@@ -66,14 +70,16 @@ test("scroll position restores on back and forward", async ({ page, request }) =
     // briefly destroy the execution context, so poll every position
     const scrollY = () => page.evaluate(() => window.scrollY).catch(() => NaN);
 
-    // captured at the click, not assumed to be the 300 set above: another
-    // worker's sse update can insert list items above the viewport and
-    // chrome's scroll anchoring then shifts scrollY to keep the content
-    // still - the restore faithfully brings back the shifted value, and a
-    // hardcoded 300 fails the test against a working feature
+    // read from outside the page, before the click: if anything in the page
+    // moved the position on its way out, the restore brings back that value
+    // and this still fails, which is the point
     const before = await scrollY();
     expect(before).toBeGreaterThan(0);
-    await page.click(`ul a[href="${visibleHref}"]`);
+    // a dispatched click, no pointer: a pointer click lets the test runner
+    // scroll the page for actionability first, and once the position was
+    // already 0 before the click (seen once in an instrumented run, never
+    // reproduced) - the runtime then saved 0 and restored 0 correctly
+    await page.locator(`ul a[href="${visibleHref}"]`).dispatchEvent("click");
     await expect(page.locator("a", { hasText: "Back home" })).toBeVisible();
     await expect.poll(scrollY, { timeout: 15_000 }).toBe(0);
 
@@ -83,6 +89,56 @@ test("scroll position restores on back and forward", async ({ page, request }) =
     await page.goForward();
     await expect.poll(scrollY, { timeout: 15_000 }).toBeLessThan(5);
   } finally {
+    await deleteTasks(request, ids);
+  }
+});
+
+// going back renders the destination only when its props arrive, and until
+// then the page being left is still on screen and still scrollable. A scroll
+// of that page in the meantime must be saved as its own position: saved under
+// the destination's key, it is what the restore reads back
+test("a scroll while going back does not overwrite the position the page returns to", async ({ page, request }) => {
+  const ids = await seedTasks(request, "back race seed", 25);
+  try {
+    await page.goto("/");
+    await page.addStyleTag({ content: "main { min-height: 3000px; } html { overflow-anchor: none; }" });
+    await page.evaluate(() => scrollTo(0, 300));
+    // the debounced save lands
+    await page.waitForTimeout(300);
+    const href = await page.evaluate(() => {
+      const links = [...document.querySelectorAll('ul a[href^="/tasks/"]')];
+      const hit = links.find((a) => {
+        const r = a.getBoundingClientRect();
+        return r.top > 0 && r.bottom < innerHeight;
+      });
+      return hit?.getAttribute("href");
+    });
+    expect(href).toBeTruthy();
+    const scrollY = () => page.evaluate(() => window.scrollY).catch(() => NaN);
+
+    // a dispatched click: no pointer, so nothing scrolls the page before it
+    await page.locator(`ul a[href="${href}"]`).dispatchEvent("click");
+    await expect(page.locator("a", { hasText: "Back home" })).toBeVisible();
+    await expect.poll(scrollY, { timeout: 15_000 }).toBe(0);
+
+    // hold the props of the page going back to
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route(/\/\?__borgo=props/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.evaluate(() => history.back());
+    await page.waitForURL((url) => url.pathname === "/");
+    // the detail page, still on screen, scrolls and its debounced save fires
+    await page.evaluate(() => scrollTo(0, 800));
+    await page.waitForTimeout(400);
+    release();
+
+    await expect(page.locator("h1")).toHaveText("Tasks");
+    await expect.poll(scrollY, { timeout: 15_000 }).toBe(300);
+  } finally {
+    await page.unroute(/\/\?__borgo=props/);
     await deleteTasks(request, ids);
   }
 });
