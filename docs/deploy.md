@@ -73,7 +73,7 @@ What stays refused is function-per-request — bundling the server into a FaaS r
 
 ## Reverse proxy
 
-Only the front server needs to be reachable — it proxies `/api/*` to Go and speaks WebSockets natively. Compression is built-in — static assets are precompressed to `.gz`/`.br` at build time, dynamic responses are gzipped on the fly — so the proxy should not compress again (no `encode` directive in Caddy, `gzip off` is nginx's default). `borgo deploy init caddy` (or `nginx`) writes these configs into your project — `Caddyfile` and `site.conf` respectively — templated with your app's name and port; an existing file is never overwritten unless you pass `--force`. Caddy gives you TLS in one block, and the rest of it is the policy nginx has to spell out longhand:
+Only the public port needs to be reachable — the Go front answers `/api/*` itself, serves the files, and carries WebSockets through to the render service. Compression is built-in — static assets are precompressed to `.gz`/`.br` at build time, dynamic responses are gzipped on the fly — so the proxy should not compress again (no `encode` directive in Caddy, `gzip off` is nginx's default). `borgo deploy init caddy` (or `nginx`) writes these configs into your project — `Caddyfile` and `site.conf` respectively — templated with your app's name and port; an existing file is never overwritten unless you pass `--force`. Caddy gives you TLS in one block, and the rest of it is the policy nginx has to spell out longhand:
 
 ```caddy
 example.com {
@@ -251,7 +251,7 @@ Do not drop that `BUN_CONFIG_MAX_HTTP_REQUESTS` line when you edit the unit. Wit
 
 ## Health and metrics
 
-Point the uptime monitor at the front server's `/healthz` — it returns `{status, uptime, api}`, probing the Go server's own `/healthz` (mounted by `borgo.Serve`) with a short timeout. The answer is always HTTP 200: `status` is `"ok"` or `"degraded"` and `api` is `"reachable"` or `"down"`, so a monitor that only checks the status code will never fire — match on the body.
+Point the uptime monitor at `/healthz` on the public port — it returns `{status, uptime, render}`, the Go front probing the render service behind it with a short timeout whose answer is shared for a second. The answer is always HTTP 200: `status` is `"ok"` or `"degraded"` and `render` is `"reachable"` or `"down"`, so a monitor that only checks the status code will never fire — match on the body. The api needs no probe of its own: it is the process answering.
 
 `borgo deploy init compose` writes exactly that check into the file, because `restart: unless-stopped` only ever sees the process *exit*: a front server that is alive and answering `"degraded"` is a container docker considers perfectly fine. These are the values it writes, and they are the values on this page on purpose — two numbers that drift apart are worse than one:
 
