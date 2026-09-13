@@ -16,6 +16,9 @@ export type {
 export { ApiError } from "./api";
 // what a //borgo:export call throws when the Go function returned an error
 export { GoError } from "./go-call";
+// middleware.ts: what the page middleware returns, beside redirect below
+export { next, rewrite } from "./page-middleware";
+export type { MiddlewareResult, PageMiddleware, PageMiddlewareContext } from "./page-middleware";
 export type { ApiClient, ApiOptions, ApiRequest, ApiResponse, ApiRouteKey } from "./api";
 export { browserEnv, defineEnv } from "./env";
 export type { Env, EnvSchema, EnvSpec, EnvType } from "./env";

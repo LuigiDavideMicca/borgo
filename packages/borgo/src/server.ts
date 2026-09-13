@@ -26,6 +26,7 @@ import { registerCsrf, registerIslands } from "./internal";
 import { appEnvMetas, envRefusal } from "./env-app";
 import { RENDER_ERRORED_HEADER, REVALIDATE_TOPIC, isrPolicyTable } from "./isr";
 import { overlayHtml } from "./overlay";
+import { answerForDoor, decidePage, resolvePageMiddleware } from "./page-middleware";
 import { canonicalPath, matchRoute, safeDecode, type Route } from "./router";
 import {
   bodyTooLarge,
@@ -367,11 +368,15 @@ export async function serve({
   }
 
   const manifest = pathToFileURL(join(process.cwd(), ".borgo/routes.gen.tsx")).href;
-  const { routes, notFound, serverError } = (await import(manifest)) as {
+  const { routes, notFound, serverError, pageMiddleware } = (await import(manifest)) as {
     routes: Route[];
     notFound: Route | null;
     serverError: Route | null;
+    // middleware.ts, or null; a manifest written before 0.30 has no such export
+    pageMiddleware?: unknown;
   };
+  // checked once, here: a middleware.ts that would guard nothing refuses the boot
+  const pageMw = resolvePageMiddleware(pageMiddleware ?? null);
   const islandsManifest = pathToFileURL(join(process.cwd(), ".borgo/islands.gen.ts")).href;
   const { islands } = (await import(islandsManifest)) as {
     islands: Record<string, import("react").ComponentType<any>>;
@@ -526,7 +531,11 @@ export async function serve({
   // the page policies the front reads once per boot of this process: which
   // pages it may share, for how long, under which tags. An invalid opt-in is
   // named here, once, in the process that imports the page module
-  const policyTable = isrPolicyTable(routes, (line) => console.error(`  ${c.red(g.err)} ${line}`));
+  const policyTable = isrPolicyTable(
+    routes,
+    (line) => console.error(`  ${c.red(g.err)} ${line}`),
+    (pattern) => pageMw?.guardsRoute(pattern) ?? false,
+  );
 
   // hashed build outputs cache forever, compressible types are served from the
   // .gz/.br siblings `borgo build` emitted; dev has no siblings and serves
@@ -565,6 +574,10 @@ export async function serve({
   // a page, a page's props, an action, an asset it still owns, or the dev
   // channel. /api arriving here at all would be the front forwarding what it
   // answers itself
+  // what middleware.ts added with next({ headers }), applied in fetch to
+  // whatever the page's door answered
+  const middlewareHeaders = new WeakMap<Request, Record<string, string>>();
+
   async function handle(req: Request, url: URL): Promise<Response> {
     // decoded form, so files with spaces or unicode resolve and traversal is
     // checked on what will be opened; on windows also ntfs alternate streams
@@ -602,8 +615,23 @@ export async function serve({
       }
     }
 
+    // middleware.ts, in front of all three doors a page has - the action
+    // below, the props a client navigation fetches, the document - and of the
+    // shared render the go front's cache asks for. A guard on two doors of
+    // three is not a guard
+    let pathname = url.pathname;
+    if (pageMw) {
+      const decision = await decidePage(pageMw, req, url, {
+        session: sessionFrom(req, render),
+        locals: localsFrom(req, render),
+      });
+      if (decision.kind === "respond") return answerForDoor(req, url, decision.response, sendJson);
+      pathname = decision.pathname;
+      if (Object.keys(decision.headers).length > 0) middlewareHeaders.set(req, decision.headers);
+    }
+
     if (req.method === "POST") {
-      const target = matchRoute(url.pathname, routes);
+      const target = matchRoute(pathname, routes);
       const answered = await runAction(req, target, actionOptions);
       if (answered) return answered;
     }
@@ -613,7 +641,7 @@ export async function serve({
       return new Response("method not allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
     }
 
-    const matched = matchRoute(url.pathname, routes);
+    const matched = matchRoute(pathname, routes);
     const wantsProps = url.searchParams.get("__borgo") === "props";
 
     if (!matched) {
@@ -947,6 +975,11 @@ export async function serve({
       let response: Response;
       try {
         response = await handle(req, url);
+        const added = middlewareHeaders.get(req);
+        if (added) {
+          response = new Response(response.body, response);
+          for (const [name, value] of Object.entries(added)) response.headers.set(name, value);
+        }
       } catch (error) {
         // the client is already gone: building the 500 document (loader, api
         // round trip, render) is work for nobody, and a client that declares a

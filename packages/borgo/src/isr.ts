@@ -73,6 +73,12 @@ export type IsrPolicyEntry = { pattern: string; seconds: number | "manual" | nul
 export function isrPolicyTable(
   routes: ReadonlyArray<RouteLike>,
   warn: (line: string) => void = (line) => console.error(line),
+  // whether middleware.ts guards a page of this pattern. The go front answers
+  // a cached copy without asking this process anything - that is the cache's
+  // whole point - so a shared copy of a guarded page would be served past the
+  // guard. Such a page is never shared: the failure direction is "served
+  // fresh", never "served to somebody the guard would have refused"
+  guarded: (pattern: string) => boolean = () => false,
 ): IsrPolicyEntry[] {
   return routes.map((route) => {
     const read = readIsrPolicy(route.module);
@@ -81,6 +87,12 @@ export function isrPolicyTable(
       return { pattern: route.pattern, seconds: null, tags: [] };
     }
     if (read === null) return { pattern: route.pattern, seconds: null, tags: [] };
+    if (guarded(route.pattern)) {
+      warn(
+        `${route.pattern}: exports revalidate but middleware.ts guards it - served fresh, never cached, because the go front's cache would serve a copy without running the guard (a guard in api/middleware.go runs before the cache)`,
+      );
+      return { pattern: route.pattern, seconds: null, tags: [] };
+    }
     return { pattern: route.pattern, seconds: read.seconds, tags: read.tags };
   });
 }

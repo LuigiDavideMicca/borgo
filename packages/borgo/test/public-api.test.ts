@@ -38,7 +38,10 @@ const ROOT_VALUES = [
   // schema-less proxy, public because the generated shim imports it by name
   "browserEnv",
   "defineEnv",
+  // 0.30: what middleware.ts returns, beside redirect
+  "next",
   "redirect",
+  "rewrite",
   "registerServiceWorker",
   "subscribe",
 ].sort();
