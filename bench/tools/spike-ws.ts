@@ -1,16 +1,19 @@
 // Phase 3 spike of borgo 0.30: what a held websocket costs, and how fast one
-// message reaches 1, 100 and 1000 subscribers, on the two roads the design
-// weighs:
+// message reaches 1, 100 and 1000 subscribers, on the roads the design weighs:
 //   A  - borgo's relay in bun behind the go front, today's code, reached
 //        through the go front and, from the same boot, directly on the render
 //        service, to separate the proxy's share from bun's;
+//   L  - the same bun relay behind a lean go forwarder (go-raw with
+//        GO_RAW_WS_FORWARD): road A as it would ship instead of as it runs;
 //   B  - a relay in go on the standard library (go-raw with GO_RAW_WS=1).
 // The method is memory-conn's (lib/memory.ts): raw TCP sockets, not a client
-// library, whose pools would measure themselves; RSS summed over the process
-// tree, idle polled until stable, and the delta divided by what is still open
-// when RSS is read.
+// library, whose pools would measure themselves; RSS summed over every
+// process tree the road runs, idle polled until stable, and the delta divided
+// by what is still open when RSS is read.
 //
-//   bun tools/spike-ws.ts
+//   bun tools/spike-ws.ts                      every road
+//   SPIKE_ONLY=L bun tools/spike-ws.ts         one road, by its letter
+//   SPIKE_WS_BUFFER=256                        the go relay's per-connection buffer
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
@@ -23,53 +26,67 @@ const HELD = Number(process.env.SPIKE_HELD ?? 1000);
 const FANOUT = [1, 100, 1000];
 const PUBLISHES = 50;
 const KEY = "b".repeat(64);
-// SPIKE_ONLY=B or =A runs one road; SPIKE_WS_BUFFER sets the go relay's per-connection buffer
 const ONLY = process.env.SPIKE_ONLY ?? "";
 const WS_BUFFER = process.env.SPIKE_WS_BUFFER ?? "";
 
 type Target = { name: string; url: string; headers: Record<string, string> };
-type Variant = {
-  name: string;
+type ServerSpec = {
   dir: string;
   build: string[][];
   start: string[];
   env: Record<string, string>;
   ready: string;
   ports: number[];
-  targets: Target[];
+};
+type Variant = { letter: string; name: string; servers: ServerSpec[]; targets: Target[] };
+
+const goRawDir = join(bench, "apps", "go-raw");
+const goRaw = (env: Record<string, string>, port: number): ServerSpec => ({
+  dir: goRawDir,
+  build: [["go", "build", "-o", "bin/server.bin", "."]],
+  start: ["./bin/server.bin"],
+  env: { PORT: String(port), ...env },
+  ready: `http://127.0.0.1:${port}/api/hello`,
+  ports: [port],
+});
+const borgoApp: ServerSpec = {
+  dir: join(bench, "apps", "borgo"),
+  build: [["go", "mod", "tidy"], ["bun", "run", "build"]],
+  start: ["bun", "node_modules/borgo-framework/src/cli.ts", "start"],
+  env: {
+    PORT: "43100",
+    API_PORT: "43101",
+    BORGO_RENDER_PORT: "43102",
+    BORGO_INTERNAL_KEY: KEY,
+    SESSION_SECRET: "bench-only-secret-0123456789abcdef",
+    BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
+    NODE_ENV: "production",
+  },
+  ready: "http://127.0.0.1:43100/api/hello",
+  ports: [43100, 43101, 43102],
 };
 
 const variants: Variant[] = [
   {
+    letter: "B",
     name: "B - go relay on the standard library (go-raw, GO_RAW_WS=1)",
-    dir: join(bench, "apps", "go-raw"),
-    build: [["go", "build", "-o", "bin/server.bin", "."]],
-    start: ["./bin/server.bin"],
-    env: { PORT: "43130", GO_RAW_WS: "1", ...(WS_BUFFER ? { GO_RAW_WS_BUFFER: WS_BUFFER } : {}) },
-    ready: "http://127.0.0.1:43130/api/hello",
-    ports: [43130],
-    targets: [{ name: "B, go relay", url: "http://127.0.0.1:43130/ws", headers: {} }],
+    servers: [goRaw({ GO_RAW_WS: "1", ...(WS_BUFFER ? { GO_RAW_WS_BUFFER: WS_BUFFER } : {}) }, 43130)],
+    targets: [{ name: `B, go relay${WS_BUFFER ? `, buffer ${WS_BUFFER}` : ""}`, url: "http://127.0.0.1:43130/ws", headers: {} }],
   },
   {
+    letter: "A",
     name: "A - bun relay behind the go front (borgo start, this checkout)",
-    dir: join(bench, "apps", "borgo"),
-    build: [["go", "mod", "tidy"], ["bun", "run", "build"]],
-    start: ["bun", "node_modules/borgo-framework/src/cli.ts", "start"],
-    env: {
-      PORT: "43100",
-      API_PORT: "43101",
-      BORGO_RENDER_PORT: "43102",
-      BORGO_INTERNAL_KEY: KEY,
-      SESSION_SECRET: "bench-only-secret-0123456789abcdef",
-      BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
-      NODE_ENV: "production",
-    },
-    ready: "http://127.0.0.1:43100/api/hello",
-    ports: [43100, 43101, 43102],
+    servers: [borgoApp],
     targets: [
       { name: "A, through the go front", url: "http://127.0.0.1:43100/ws", headers: {} },
       { name: "A0, bun directly", url: "http://127.0.0.1:43102/ws", headers: { "X-Borgo-Internal": KEY } },
     ],
+  },
+  {
+    letter: "L",
+    name: "L - bun relay behind a lean go forwarder (borgo start + go-raw GO_RAW_WS_FORWARD)",
+    servers: [borgoApp, goRaw({ GO_RAW_WS_FORWARD: "127.0.0.1:43102", GO_RAW_WS_KEY: KEY }, 43140)],
+    targets: [{ name: "L, bun behind a lean go forwarder", url: "http://127.0.0.1:43140/ws", headers: {} }],
   },
 ];
 
@@ -217,22 +234,37 @@ function breakdown(idle: ProcessSample[], loaded: ProcessSample[]) {
   });
 }
 
-async function measureMemory(server: Spawned, target: Target) {
-  const idle = await stableIdleRss(server.pid);
+// every tree the road runs is charged: road L is a bun app and a forwarder
+async function measureMemory(servers: Spawned[], target: Target) {
+  let idleRss = 0;
+  let idleStable = true;
+  const idleProcesses: ProcessSample[] = [];
+  for (const server of servers) {
+    const idle = await stableIdleRss(server.pid);
+    idleRss += idle.rss;
+    idleStable &&= idle.stable;
+    idleProcesses.push(...idle.processes);
+  }
   const held = await openMany(target, HELD, (i) => `held-${i}`);
   await Bun.sleep(3_000);
-  const loaded = await settledRss(server.pid, { samples: 6, intervalMs: 500 });
+  let loadedRss = 0;
+  const loadedProcesses: ProcessSample[] = [];
+  for (const server of servers) {
+    const loaded = await settledRss(server.pid, { samples: 6, intervalMs: 500 });
+    loadedRss += loaded.rss;
+    loadedProcesses.push(...loaded.processes);
+  }
   const open = held.sockets.filter((s) => !s.destroyed && s.readable).length;
   for (const s of held.sockets) s.destroy();
   return {
-    idleMiB: Number(mib(idle.rss)),
-    idleStable: idle.stable,
-    loadedMiB: Number(mib(loaded.rss)),
+    idleMiB: Number(mib(idleRss)),
+    idleStable,
+    loadedMiB: Number(mib(loadedRss)),
     open,
     failed: held.failed,
     firstError: held.firstError,
-    kibPerConnection: open ? Number(kib((loaded.rss - idle.rss) / open)) : NaN,
-    processes: breakdown(idle.processes, loaded.processes),
+    kibPerConnection: open ? Number(kib((loadedRss - idleRss) / open)) : NaN,
+    processes: breakdown(idleProcesses, loadedProcesses),
   };
 }
 
@@ -302,52 +334,72 @@ async function portsFree(ports: number[], maxMs = 30_000) {
       ),
     );
     if (!answering.some(Boolean)) return;
-    if (Date.now() > deadline) throw new Error(`ports ${ports.join(", ")} still answer after the server was stopped`);
+    if (Date.now() > deadline) throw new Error(`ports ${ports.join(", ")} still answer after the servers were stopped`);
     await Bun.sleep(250);
   }
 }
 
-async function boot(variant: Variant): Promise<Spawned> {
-  await portsFree(variant.ports);
-  const server = spawnServer(variant.start, { cwd: variant.dir, env: variant.env });
+async function bootOne(spec: ServerSpec): Promise<Spawned> {
+  await portsFree(spec.ports);
+  const server = spawnServer(spec.start, { cwd: spec.dir, env: spec.env });
   const deadline = Date.now() + 60_000;
   for (;;) {
     try {
-      const res = await fetch(variant.ready, { signal: AbortSignal.timeout(1_000) });
+      const res = await fetch(spec.ready, { signal: AbortSignal.timeout(1_000) });
       if (res.ok) return server;
     } catch {}
     if (Date.now() > deadline) {
       server.stop();
-      throw new Error(`${variant.name} never became ready:\n${server.output().slice(-2000)}`);
+      throw new Error(`${spec.dir} never became ready:\n${server.output().slice(-2000)}`);
     }
     await Bun.sleep(250);
   }
 }
 
+async function boot(variant: Variant): Promise<Spawned[]> {
+  const started: Spawned[] = [];
+  for (const spec of variant.servers) started.push(await bootOne(spec));
+  return started;
+}
+
+async function stop(variant: Variant, servers: Spawned[]) {
+  for (const server of [...servers].reverse()) server.stop();
+  await portsFree(variant.servers.flatMap((s) => s.ports));
+}
+
 installCleanupHooks();
-const results: Array<{ target: string; memory: unknown; fanout: unknown[] }> = [];
-for (const variant of variants.filter((v) => !ONLY || v.name.startsWith(ONLY))) {
-  console.log(`\n== ${variant.name}`);
-  for (const step of variant.build) {
-    const res = await run(step, { cwd: variant.dir, timeoutMs: 300_000 });
-    if (res.code !== 0) throw new Error(`build step ${step.join(" ")} failed:\n${res.stderr.slice(-2000)}`);
+const selected = variants.filter((v) => !ONLY || v.letter === ONLY);
+if (!selected.length) throw new Error(`SPIKE_ONLY=${ONLY} names no road (B, A or L)`);
+
+const built = new Set<string>();
+for (const variant of selected) {
+  for (const spec of variant.servers) {
+    if (built.has(spec.dir)) continue;
+    for (const step of spec.build) {
+      const res = await run(step, { cwd: spec.dir, timeoutMs: 300_000 });
+      if (res.code !== 0) throw new Error(`build step ${step.join(" ")} in ${spec.dir} failed:\n${res.stderr.slice(-2000)}`);
+    }
+    built.add(spec.dir);
   }
+}
+
+const results: Array<{ target: string; memory: unknown; fanout: unknown[] }> = [];
+for (const variant of selected) {
+  console.log(`\n== ${variant.name}`);
   for (const target of variant.targets) {
     console.log(`-- ${target.name}`);
-    let server = await boot(variant);
-    const memory = await measureMemory(server, target);
+    let servers = await boot(variant);
+    const memory = await measureMemory(servers, target);
     console.log(`   memory: ${memory.kibPerConnection} KiB per connection (${memory.open} open, idle ${memory.idleMiB} MiB, stable ${memory.idleStable})`);
-    server.stop();
-    await portsFree(variant.ports);
-    server = await boot(variant);
+    await stop(variant, servers);
+    servers = await boot(variant);
     const fanout = [];
     for (const n of FANOUT) {
       const f = await measureFanout(target, n);
       console.log(`   fan-out ${n}: p50 ${f.p50ms} ms, p99 ${f.p99ms} ms, all reached p50 ${f.allReachedP50ms} ms, delivered ${f.delivered}/${f.expected}`);
       fanout.push(f);
     }
-    server.stop();
-    await portsFree(variant.ports);
+    await stop(variant, servers);
     results.push({ target: target.name, memory, fanout });
   }
 }
@@ -368,9 +420,9 @@ const rows = results.map((r) => {
 writeFileSync(
   `${base}.md`,
   [
-    "# Spike 0.30 phase 3 - websocket relay, bun behind go (A) against go (B)",
+    "# Spike 0.30 phase 3 - websocket relay: bun behind go (A), bun behind a lean forwarder (L), go (B)",
     "",
-    `${HELD} held connections for memory, one topic each; ${PUBLISHES} publishes for fan-out.`,
+    `${HELD} held connections for memory, one topic each; ${PUBLISHES} publishes for fan-out. RSS summed over every process tree a road runs.`,
     "",
     "| target | KiB per held connection | fan-out: subscribers: p50 / p99 per delivery / p99 until all reached (delivered) |",
     "| --- | --- | --- |",

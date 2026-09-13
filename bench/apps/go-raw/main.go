@@ -164,12 +164,22 @@ func main() {
 	if wsRelay {
 		log.Print("ws: topic relay on /ws")
 	}
+	// GO_RAW_WS_FORWARD=<host:port>: the lean forwarder in front of a render
+	// service (wsforward.go), the other road of the same spike; it wins over
+	// the relay, so the two are never on at once by accident
+	wsForward := os.Getenv("GO_RAW_WS_FORWARD")
+	if wsForward != "" {
+		log.Printf("ws: forwarding /ws to %s", wsForward)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/hello", hello)
 	mux.HandleFunc("GET /api/items", items)
 	mux.HandleFunc("GET /static/payload.json", static)
 	mux.HandleFunc("GET /api/events", events)
-	if wsRelay {
+	switch {
+	case wsForward != "":
+		mux.HandleFunc("GET /ws", wsForwardHandler(wsForward, os.Getenv("GO_RAW_WS_KEY")))
+	case wsRelay:
 		mux.HandleFunc("GET /ws", wsHandler)
 	}
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {

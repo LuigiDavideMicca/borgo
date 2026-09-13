@@ -1,0 +1,59 @@
+{
+  "held": 1000,
+  "publishes": 50,
+  "results": [
+    {
+      "target": "L, bun behind a lean go forwarder",
+      "memory": {
+        "idleMiB": 69.5,
+        "idleStable": true,
+        "loadedMiB": 168.6,
+        "open": 1000,
+        "failed": 0,
+        "firstError": "",
+        "kibPerConnection": 101.5,
+        "processes": [
+          "cmd.exe (pid 20740): 8.6 -> 8.6 MiB",
+          "bun.exe (pid 1712): 41.0 -> 48.3 MiB",
+          "api.exe (pid 13936): 10.8 -> 10.8 MiB",
+          "server.bin (pid 23800): 9.2 -> 101.0 MiB"
+        ]
+      },
+      "fanout": [
+        {
+          "subscribers": 1,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50,
+          "expected": 50,
+          "p50ms": 0.95,
+          "p99ms": 2.01,
+          "allReachedP50ms": 0.95,
+          "allReachedP99ms": 2.01
+        },
+        {
+          "subscribers": 100,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 5000,
+          "expected": 5000,
+          "p50ms": 2.32,
+          "p99ms": 27.65,
+          "allReachedP50ms": 3.85,
+          "allReachedP99ms": 28.25
+        },
+        {
+          "subscribers": 1000,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50000,
+          "expected": 50000,
+          "p50ms": 12.24,
+          "p99ms": 25.94,
+          "allReachedP50ms": 24.14,
+          "allReachedP99ms": 28.21
+        }
+      ]
+    }
+  ]
+}
