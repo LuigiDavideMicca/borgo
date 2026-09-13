@@ -434,7 +434,22 @@ func pathMatchesKey(path, key string) bool {
 type isrPersist struct {
 	dir     string
 	buildID string
+	// how a saved file is read at boot; nil is os.ReadFile. A test stands in
+	// a disk that answers an error which is not "absent"
+	readFile func(string) ([]byte, error)
 }
+
+// what a boot does with one saved pair
+type savedVerdict int
+
+const (
+	savedLoad savedVerdict = iota
+	// another build's, malformed, torn, or missing a half: never servable
+	savedSweep
+	// could not be read at this moment - a file held open by another process,
+	// a scanner opening what was just renamed: left for the next boot
+	savedUnreadable
+)
 
 type flightMeta struct {
 	doomed bool
@@ -1060,6 +1075,7 @@ func (i *isr) loadSaved() {
 		entry *cachedPage
 	}
 	var found []loaded
+	unreadable := 0
 	jsonBases := map[string]bool{}
 	for _, d := range names {
 		name := d.Name()
@@ -1073,13 +1089,23 @@ func (i *isr) loadSaved() {
 		}
 		base := filepath.Join(i.persist.dir, strings.TrimSuffix(name, ".json"))
 		jsonBases[strings.TrimSuffix(name, ".json")] = true
-		entry, key, ok := i.readSaved(base)
-		if !ok {
+		entry, key, verdict := i.readSaved(base)
+		switch verdict {
+		case savedSweep:
 			os.Remove(base + ".json")
 			os.Remove(base + ".html")
 			continue
+		case savedUnreadable:
+			unreadable++
+			continue
 		}
 		found = append(found, loaded{key, entry})
+	}
+	// said, because a boot that serves cold for no visible reason is the thing
+	// an operator would otherwise chase
+	if unreadable > 0 {
+		i.log(fmt.Sprintf("cache: %d saved %s could not be read at boot and %s left on disk; served fresh until a boot reads them",
+			unreadable, plural(unreadable, "page", "pages"), plural(unreadable, "was", "were")))
 	}
 	for _, d := range names {
 		name := d.Name()
@@ -1093,24 +1119,43 @@ func (i *isr) loadSaved() {
 	}
 }
 
-func (i *isr) readSaved(base string) (*cachedPage, string, bool) {
-	raw, err := os.ReadFile(base + ".json")
+// readSaved told a read error apart from nothing: every one swept the pair, so
+// a file another process held open at the moment of a boot threw a warm copy
+// away as if it were torn
+func (i *isr) readSaved(base string) (*cachedPage, string, savedVerdict) {
+	read := i.persist.readFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	raw, err := read(base + ".json")
 	if err != nil {
-		return nil, "", false
+		return nil, "", readVerdict(err)
 	}
 	var meta savedMeta
 	if json.Unmarshal(raw, &meta) != nil || meta.BuildID != i.persist.buildID || meta.Key == "" || meta.Tags == nil || meta.Headers == nil || meta.Status == 0 {
-		return nil, "", false
+		return nil, "", savedSweep
 	}
-	body, err := os.ReadFile(base + ".html")
-	if err != nil || len(body) != meta.Bytes || meta.Sum == "" || bodySum(body) != meta.Sum {
-		return nil, "", false
+	body, err := read(base + ".html")
+	if err != nil {
+		return nil, "", readVerdict(err)
+	}
+	if len(body) != meta.Bytes || meta.Sum == "" || bodySum(body) != meta.Sum {
+		return nil, "", savedSweep
 	}
 	entry := &cachedPage{body: body, nonce: meta.Nonce, status: meta.Status, headers: meta.Headers, storedAt: time.UnixMilli(meta.StoredAt), tags: meta.Tags}
 	if entry.nonce == "" {
 		entry.gz = gzipBytes(body)
 	}
-	return entry, meta.Key, true
+	return entry, meta.Key, savedLoad
+}
+
+// a half that is gone makes a pair that will never be whole again; any other
+// read error says something about this moment, not about the pair
+func readVerdict(err error) savedVerdict {
+	if os.IsNotExist(err) {
+		return savedSweep
+	}
+	return savedUnreadable
 }
 
 // buildIDFromInventory keys the persisted copies to the build that rendered

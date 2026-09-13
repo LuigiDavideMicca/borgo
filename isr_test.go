@@ -1047,3 +1047,64 @@ func TestIsrReplayDeclaresTheCodingItNegotiates(t *testing.T) {
 		}
 	}
 }
+
+// a saved pair that cannot be read at the moment of a boot - held open by
+// another process, or by a scanner opening what was just renamed - is not a
+// broken pair: sweeping it threw a warm restart away
+func TestIsrLeavesAPairItCouldNotReadOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	persist := &isrPersist{dir: dir, buildID: "b"}
+	render, n := countingRenderer(plainPage("<html>kept</html>"))
+	i := newIsr(render, persist, func(string) {})
+	serve(t, i, &isrPolicy{manual: true}, "/kept")
+	waitForPairs(t, dir, 2)
+
+	var lines []string
+	busy := &isrPersist{dir: dir, buildID: "b", readFile: func(name string) ([]byte, error) {
+		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
+	}}
+	unlucky := newIsr(render, busy, func(l string) { lines = append(lines, l) })
+	if unlucky.cache.size() != 0 {
+		t.Fatal("a pair that could not be read was loaded")
+	}
+	if left, _ := os.ReadDir(dir); len(left) != 2 {
+		t.Fatalf("a pair that could not be read was swept: %d files left", len(left))
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "could not be read") {
+		t.Errorf("the unlucky boot said %v", lines)
+	}
+
+	// the next boot reads it, and serves it without a render
+	again := newIsr(render, persist, func(string) {})
+	w, _ := serve(t, again, &isrPolicy{manual: true}, "/kept")
+	if w.Header().Get(cacheStateHeader) != "hit" || atomic.LoadInt32(n) != 1 {
+		t.Errorf("after the unlucky boot: %q renders=%d", w.Header().Get(cacheStateHeader), *n)
+	}
+}
+
+// and a pair whose html is gone is still swept: absent is not a moment
+func TestIsrSweepsAPairWhoseHtmlIsGone(t *testing.T) {
+	dir := t.TempDir()
+	persist := &isrPersist{dir: dir, buildID: "b"}
+	render, _ := countingRenderer(plainPage("<html>half</html>"))
+	i := newIsr(render, persist, func(string) {})
+	serve(t, i, &isrPolicy{manual: true}, "/half")
+	waitForPairs(t, dir, 2)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".html") {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+	var lines []string
+	again := newIsr(render, persist, func(l string) { lines = append(lines, l) })
+	if again.cache.size() != 0 {
+		t.Error("half a pair was loaded")
+	}
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Errorf("a json without its html was left: %d files", len(left))
+	}
+	if len(lines) != 0 {
+		t.Errorf("a swept half pair was reported as unreadable: %v", lines)
+	}
+}
