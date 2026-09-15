@@ -165,11 +165,13 @@ func TestObserveRequestsUnwrapsForTheResponseController(t *testing.T) {
 	t.Setenv("BORGO_SECURITY_HEADERS", "")
 	t.Setenv("BORGO_CSP", "")
 	cfg, _ := securityFromEnv()
-	var deadlineErr, flushErr error
+	// a channel, not two variables: the flush hands the client its response
+	// before the handler has stored what the flush returned
+	got := make(chan [2]error, 1)
 	chain := observeRequests(newMetrics(time.Now()), false, cfg.middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rc := http.NewResponseController(w)
-		deadlineErr = rc.SetWriteDeadline(time.Time{})
-		flushErr = rc.Flush()
+		deadlineErr := rc.SetWriteDeadline(time.Time{})
+		got <- [2]error{deadlineErr, rc.Flush()}
 		w.Write([]byte("ok"))
 	})))
 	srv := httptest.NewServer(chain)
@@ -179,7 +181,13 @@ func TestObserveRequestsUnwrapsForTheResponseController(t *testing.T) {
 		t.Fatal(err)
 	}
 	res.Body.Close()
-	if deadlineErr != nil || flushErr != nil {
+	var errs [2]error
+	select {
+	case errs = <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never ran")
+	}
+	if deadlineErr, flushErr := errs[0], errs[1]; deadlineErr != nil || flushErr != nil {
 		t.Errorf("the controller could not reach the real writer: deadline %v, flush %v", deadlineErr, flushErr)
 	}
 }

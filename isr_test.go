@@ -319,7 +319,7 @@ func TestIsrPersistsAcrossARestartOfTheSameBuild(t *testing.T) {
 
 	// another build sweeps; a torn html sweeps; an orphan html sweeps
 	other := newIsr(render, &isrPersist{dir: dir, buildID: "build-b"}, func(string) {})
-	if other.cache.size() != 0 {
+	if cachedPages(other) != 0 {
 		t.Error("another build's copies were served")
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
@@ -403,7 +403,7 @@ func TestIsrDoomsARenderInFlight(t *testing.T) {
 	if w.Code != 200 || w.Body.String() != "<html>old data</html>" {
 		t.Errorf("the waiter was not served: %d %q", w.Code, w.Body.String())
 	}
-	if i.cache.size() != 0 {
+	if cachedPages(i) != 0 {
 		t.Error("a doomed render was stored")
 	}
 }
@@ -459,10 +459,10 @@ func TestIsrARefusalDropsTheOldCopy(t *testing.T) {
 		t.Fatalf("expected stale, got %q", w.Header().Get(cacheStateHeader))
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for i.cache.size() > 0 && time.Now().Before(deadline) {
+	for cachedPages(i) > 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if i.cache.size() != 0 {
+	if cachedPages(i) != 0 {
 		t.Error("the copy stored before the page turned personal is still served")
 	}
 	if _, out := serve(t, i, policy, "/r"); out != isrBypass {
@@ -502,7 +502,7 @@ func TestIsrSweepsATornPair(t *testing.T) {
 		}
 	}
 	again := newIsr(render, persist, func(string) {})
-	if again.cache.size() != 0 {
+	if cachedPages(again) != 0 {
 		t.Error("a torn html was loaded")
 	}
 	if left, _ := os.ReadDir(dir); len(left) != 0 {
@@ -534,7 +534,7 @@ func TestIsrAnInvalidatedCopyDoesNotComeBackFromDisk(t *testing.T) {
 		t.Errorf("files after an invalidation: %v", names)
 	}
 	again := newIsr(render, persist, func(string) {})
-	if again.cache.size() != 0 {
+	if cachedPages(again) != 0 {
 		t.Error("an invalidated copy came back on restart")
 	}
 }
@@ -823,7 +823,7 @@ func TestIsrARequestAfterAnInvalidationIsNotAnsweredByTheDoomedFlight(t *testing
 		t.Errorf("the flight's own waiter got %q", body)
 	}
 	// and nothing read before the invalidation is in the cache
-	waitFor(t, func() bool { return i.cache.size() == 1 }, "the fresh copy to be stored")
+	waitFor(t, func() bool { return cachedPages(i) == 1 }, "the fresh copy to be stored")
 	w, _ := serve(t, i, policy, "/news")
 	if body := w.Body.String(); body != "<html>read 2</html>" {
 		t.Errorf("the stored copy is %q", body)
@@ -840,7 +840,7 @@ func TestIsrEvictionKeepsTheTagIndexHonest(t *testing.T) {
 	for k := 0; k < maxCachedPages+88; k++ {
 		serve(t, i, policy, fmt.Sprintf("/p?k=%d", k))
 	}
-	if size := i.cache.size(); size != maxCachedPages {
+	if size := cachedPages(i); size != maxCachedPages {
 		t.Errorf("the cache holds %d copies, want the %d bound", size, maxCachedPages)
 	}
 	// every tag entry must name a page that is still there, or an
@@ -858,7 +858,7 @@ func TestIsrEvictionKeepsTheTagIndexHonest(t *testing.T) {
 	if len(i.cache.byTag) != 0 {
 		t.Errorf("the tag index kept %d tags after dropping everything", len(i.cache.byTag))
 	}
-	if size := i.cache.size(); size != 0 {
+	if size := cachedPages(i); size != 0 {
 		t.Errorf("%d copies survived the tag invalidation", size)
 	}
 }
@@ -885,7 +885,7 @@ func TestIsrContainsAPanicInTheRender(t *testing.T) {
 	if w.Body.Len() != 0 {
 		t.Errorf("the bypass wrote a body: %q", w.Body.String())
 	}
-	if i.cache.size() != 0 {
+	if cachedPages(i) != 0 {
 		t.Error("a panicking render stored something")
 	}
 	// and it is said, once, with the page named
@@ -1064,7 +1064,7 @@ func TestIsrLeavesAPairItCouldNotReadOnDisk(t *testing.T) {
 		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
 	}}
 	unlucky := newIsr(render, busy, func(l string) { lines = append(lines, l) })
-	if unlucky.cache.size() != 0 {
+	if cachedPages(unlucky) != 0 {
 		t.Fatal("a pair that could not be read was loaded")
 	}
 	if left, _ := os.ReadDir(dir); len(left) != 2 {
@@ -1098,7 +1098,7 @@ func TestIsrSweepsAPairWhoseHtmlIsGone(t *testing.T) {
 	}
 	var lines []string
 	again := newIsr(render, persist, func(l string) { lines = append(lines, l) })
-	if again.cache.size() != 0 {
+	if cachedPages(again) != 0 {
 		t.Error("half a pair was loaded")
 	}
 	if left, _ := os.ReadDir(dir); len(left) != 0 {
@@ -1107,4 +1107,12 @@ func TestIsrSweepsAPairWhoseHtmlIsGone(t *testing.T) {
 	if len(lines) != 0 {
 		t.Errorf("a swept half pair was reported as unreadable: %v", lines)
 	}
+}
+
+// cachedPages counts the cache under the lock every production path takes: a
+// background regeneration can be removing an entry while a test counts
+func cachedPages(i *isr) int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.cache.size()
 }

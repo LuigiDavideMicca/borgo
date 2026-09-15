@@ -889,13 +889,19 @@ func BenchmarkGzipManyWritesIdentity(b *testing.B) { benchGzipManyWrites(b, "ide
 
 // CI runs tests, not benchmarks, so the flat cost above is asserted here too:
 // the guard is the growth from 64 KB to 1 MB, which is ~0 when the body is
-// streamed and ~1 MB when it is copied.
+// streamed and ~1 MB when it is copied. Under the race detector, which is how
+// CI runs every test, the instrumentation alone grows it by ~170 KB: the bound
+// widens there and still sits well under the megabyte a copy costs.
 func TestGzipDoesNotCopyTheBodyPastTheDecision(t *testing.T) {
+	bound := int64(128 << 10)
+	if raceEnabled {
+		bound = 512 << 10
+	}
 	for _, ae := range []string{"gzip", "identity"} {
 		t.Run(ae, func(t *testing.T) {
 			small := bytesPerResponse(t, ae, 64<<10)
 			large := bytesPerResponse(t, ae, 1<<20)
-			if grown := int64(large) - int64(small); grown > 128<<10 {
+			if grown := int64(large) - int64(small); grown > bound {
 				t.Errorf("a 1 MB response allocates %d B more than a 64 KB one (%d vs %d): the body is copied, not streamed",
 					grown, large, small)
 			}
