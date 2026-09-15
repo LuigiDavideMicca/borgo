@@ -324,7 +324,7 @@ export function wsTopicRefusal(topics: string[]): string | null {
 export const WS_CLOSE_ORIGIN_REFUSED = 4403;
 export function wsOriginRefusal(origin: string | null, host: string): string {
   return origin === null
-    ? "no Origin header on the handshake: a non-browser client needs BORGO_WS_ALLOW_NO_ORIGIN=yes (wsAllowNoOrigin)"
+    ? "no Origin header on the handshake: a non-browser client needs BORGO_WS_ALLOW_NO_ORIGIN=1 (wsAllowNoOrigin)"
     : `origin ${JSON.stringify(origin.slice(0, 80))} is not this server (${host}): /ws accepts the page's own origin only`;
 }
 
