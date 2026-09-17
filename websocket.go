@@ -383,6 +383,15 @@ func jsTrim(s string) string {
 	})
 }
 
+// wsTopicSeparatorRefusal is bun's topicRejection, word for word: said on the
+// handshake and on a publish alike
+func wsTopicSeparatorRefusal(topic string) string {
+	if !strings.Contains(topic, ",") {
+		return ""
+	}
+	return "topic " + jsQuote(topic) + ` contains ",", which separates topics on the wire (/ws?topics=a,b) and cannot appear inside one - rename the topic`
+}
+
 // wsTopics reads the topics of a handshake as today's relay does: the first
 // topics= pair of the raw query, split on the comma as written, each part
 // with + as a space, percent-decoded and trimmed, empty parts skipped. A
@@ -413,8 +422,8 @@ func wsTopics(rawQuery string) ([]string, string) {
 		if topic == "" {
 			continue
 		}
-		if strings.Contains(topic, ",") {
-			return nil, "topic " + jsQuote(topic) + ` contains ",", which separates topics on the wire (/ws?topics=a,b) and cannot appear inside one - rename the topic`
+		if why := wsTopicSeparatorRefusal(topic); why != "" {
+			return nil, why
 		}
 		topics = append(topics, topic)
 	}

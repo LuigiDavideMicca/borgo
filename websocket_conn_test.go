@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,12 +39,18 @@ func dialWSPeer(t *testing.T, base string) *wsPeer {
 // dialWSPeerWith sends first in the same write as the handshake
 func dialWSPeerWith(t *testing.T, base string, first []byte) *wsPeer {
 	t.Helper()
+	return dialWSRaw(t, base, append([]byte(wsTestHandshake), first...))
+}
+
+// dialWSRaw writes a whole request as given and reads the answer's head
+func dialWSRaw(t *testing.T, base string, request []byte) *wsPeer {
+	t.Helper()
 	conn, err := net.Dial("tcp", strings.TrimPrefix(base, "http://"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	if _, err := conn.Write(append([]byte(wsTestHandshake), first...)); err != nil {
+	if _, err := conn.Write(request); err != nil {
 		t.Fatal(err)
 	}
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -447,36 +456,173 @@ func TestWSPeerThatNeverAnswersACloseIsCutAfterTheGrace(t *testing.T) {
 	}
 }
 
-func TestWSSendQueuesUpToTheBufferThenClosesWith1013(t *testing.T) {
+func TestWSSendQueuesUpToItsBoundsThenClosesWith1013(t *testing.T) {
+	cases := []struct {
+		name  string
+		frame []byte
+		fits  int
+	}{
+		// the byte bound, with frames the size of a real event
+		{"bytes", make([]byte, 64<<10), wsQueueBytes / (64 << 10)},
+		// the frame bound, with frames too small for the bytes to matter
+		{"frames", make([]byte, 2), wsQueueFrames},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newWSConn(nil, nil)
+			for i := range tc.fits {
+				if !c.send(tc.frame) {
+					t.Fatalf("frame %d of %d refused", i, tc.fits)
+				}
+			}
+			// and it comes back at once: a publisher fanning out to many slow
+			// sockets pays this per socket
+			start := time.Now()
+			if c.send(tc.frame) {
+				t.Fatalf("frame %d accepted past the bound", tc.fits+1)
+			}
+			if took := time.Since(start); took > 10*time.Millisecond {
+				t.Fatalf("the send past the bound waited %v", took)
+			}
+			if !c.ended() {
+				t.Fatal("a full queue did not close the socket")
+			}
+			if code, _ := wsCloseCode(c.closeFrame[2:]); code != wsCloseTryAgainLater {
+				t.Fatalf("closed with %d, want 1013", code)
+			}
+		})
+	}
+	// and a socket that is closing takes nothing more, with all the room
+	// there is
 	c := newWSConn(nil, nil)
-	frame := wsFrame(wsOpText, []byte("x"))
-	for i := 0; i < wsSendBuffer; i++ {
-		if !c.send(frame) {
-			t.Fatalf("frame %d of a %d-frame buffer refused", i, wsSendBuffer)
-		}
-	}
-	// and it comes back at once: a publisher fanning out to many slow sockets
-	// pays this per socket
-	start := time.Now()
-	if c.send(frame) {
-		t.Fatalf("frame %d accepted past the buffer", wsSendBuffer+1)
-	}
-	if took := time.Since(start); took > 10*time.Millisecond {
-		t.Fatalf("the send past the buffer waited %v", took)
-	}
-	select {
-	case <-c.quit:
-	default:
-		t.Fatal("a full buffer did not close the socket")
-	}
-	if code, _ := wsCloseCode(c.closeFrame[2:]); code != wsCloseTryAgainLater {
-		t.Fatalf("closed with %d, want 1013", code)
-	}
-	// and a socket that is closing takes nothing more, even with room
-	<-c.out
-	if c.send(frame) {
+	c.close(wsCloseNormal, "")
+	if c.send([]byte("x")) || c.pending != 0 {
 		t.Fatal("a closing socket accepted a frame")
 	}
+}
+
+// the queue is memory only while it holds something: written, it lets go of
+// a burst's backing array - and what the writer holds still counts until it
+// is written, or a reader draining one write at a time would hold twice the
+// bound (found by the verifier)
+func TestWSQueueLetsGoOfWhatItWroteAndCountsWhatItHasNot(t *testing.T) {
+	c := newWSConn(nil, nil)
+	for range 1000 {
+		c.send([]byte("x"))
+	}
+	batch := c.take()
+	if len(batch) != 1000 {
+		t.Fatalf("took %d of 1000", len(batch))
+	}
+	if c.queue != nil {
+		t.Fatalf("after a take the queue still holds %d frames in %d slots", len(c.queue), cap(c.queue))
+	}
+	if c.queued != 1000 || c.pending != 1000 {
+		t.Fatalf("a batch being written counts as %d bytes, %d frames", c.queued, c.pending)
+	}
+	for _, f := range batch {
+		c.wrote(f)
+	}
+	if c.queued != 0 || c.pending != 0 {
+		t.Fatalf("written, the queue still counts %d bytes, %d frames", c.queued, c.pending)
+	}
+	if !c.send([]byte("y")) || c.queued != 1 {
+		t.Fatalf("a written queue counts %d bytes for one", c.queued)
+	}
+}
+
+// the bound holds while the writer is blocked on a peer: the batch it took
+// is still unread by that peer
+func TestWSQueueBoundCountsTheBatchBeingWritten(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close()
+	c := newWSConn(server, server)
+	big := make([]byte, wsQueueBytes/4)
+	for i := range 4 {
+		if !c.send(big) {
+			t.Fatalf("frame %d of 4 refused", i)
+		}
+	}
+	written := make(chan struct{})
+	go c.writeLoop(nil, written)
+	// the writer is now blocked on the first frame, the batch taken
+	time.Sleep(50 * time.Millisecond)
+	if c.send(big) {
+		t.Fatal("a fifth frame was queued while four were being written")
+	}
+	server.Close()
+	<-written
+}
+
+// a close decided while the writer is in the middle of a batch goes out
+// after the frame in flight, not after the rest of the batch
+func TestWSCloseInTheMiddleOfABatchIsNotKeptWaiting(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close()
+	c := newWSConn(server, server)
+	for i := range 6 {
+		c.send(wsFrame(wsOpText, []byte{'0' + byte(i)}))
+	}
+	written := make(chan struct{})
+	go c.writeLoop(nil, written)
+	p := &wsPeer{t: t, conn: client, br: bufio.NewReader(client)}
+	if f, _ := p.next(time.Second); f.opcode != wsOpText || string(f.payload) != "0" {
+		t.Fatalf("first frame %#x %q", f.opcode, f.payload)
+	}
+	c.close(wsCloseNormal, "now")
+	// at most the frame already in flight, then the close
+	dataAfter := 0
+	for {
+		f, err := p.next(time.Second)
+		if err != nil {
+			t.Fatalf("no close frame: %v", err)
+		}
+		if f.opcode == wsOpClose {
+			break
+		}
+		dataAfter++
+	}
+	if dataAfter > 1 {
+		t.Fatalf("%d data frames went out after the close was decided", dataAfter)
+	}
+	p.nothingMore()
+	server.Close()
+	<-written
+}
+
+// nothingMore reads for a moment and expects the socket to stay silent: the
+// writer has nothing to say after a close frame
+func (p *wsPeer) nothingMore() {
+	p.t.Helper()
+	f, err := p.next(300 * time.Millisecond)
+	if err == nil {
+		p.t.Fatalf("a %#x frame with %q after the close frame", f.opcode, f.payload)
+	}
+	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		p.t.Fatalf("expected silence, got %v", err)
+	}
+}
+
+// a close decided before the writer ever ran goes out before the backlog
+func TestWSCloseGoesOutBeforeABacklog(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close()
+	c := newWSConn(server, server)
+	for range 3 {
+		c.send(wsFrame(wsOpText, []byte("backlog")))
+	}
+	c.close(wsCloseNormal, "first")
+	written := make(chan struct{})
+	go c.writeLoop(nil, written)
+	p := &wsPeer{t: t, conn: client, br: bufio.NewReader(client)}
+	f, err := p.next(time.Second)
+	if err != nil || f.opcode != wsOpClose {
+		t.Fatalf("first frame %#x %q, %v", f.opcode, f.payload, err)
+	}
+	// and the backlog never follows it
+	p.nothingMore()
+	server.Close()
+	<-written
 }
 
 func TestWSSubscriberThatFallsBehindIsClosedWith1013AndNeverBlocksTheSender(t *testing.T) {
@@ -640,6 +786,47 @@ func TestWSNothingIsWrittenAfterTheCloseFrame(t *testing.T) {
 	}
 }
 
+// a socket served on its own goroutine has no net/http recover above it: a
+// handler that panics ends that socket, and the writer with it, and nothing else
+func TestWSPanicInAHandlerEndsOnlyItsSocket(t *testing.T) {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	ended := make(chan struct{}, 4)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := wsUpgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		c.serveAsync(nil, func(p []byte) {
+			if string(p) == "boom" {
+				panic("the handler broke")
+			}
+			c.send(wsFrame(wsOpText, p))
+		}, func() { ended <- struct{}{} })
+	})}
+	base := serveOn(t, srv)
+	defer srv.Close()
+
+	before := runtime.NumGoroutine()
+	broken := dialWSPeer(t, base)
+	broken.send(textFrame("boom"))
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the socket whose handler panicked never ended")
+	}
+	broken.ended()
+	// its writer went with it: nothing is left waiting for a ping to fail
+	waitFor(t, func() bool { return runtime.NumGoroutine() <= before }, "the broken socket's goroutines to exit")
+
+	live := dialWSPeer(t, base)
+	live.send(textFrame("still serving"))
+	if f := live.nextData(2 * time.Second); string(f.payload) != "still serving" {
+		t.Fatalf("got %q", f.payload)
+	}
+}
+
 // the numbers the design chose, which no other test would notice changing:
 // bun cut a silent socket at 120 seconds and pinged it itself
 func TestWSDefaultTimersAreTheOnesTheDesignChose(t *testing.T) {
@@ -648,6 +835,14 @@ func TestWSDefaultTimersAreTheOnesTheDesignChose(t *testing.T) {
 	}
 	if wsCloseGrace != 2*time.Second || wsDrainQuiet != 100*time.Millisecond {
 		t.Errorf("close grace %v, drain quiet %v; want 2s and 100ms", wsCloseGrace, wsDrainQuiet)
+	}
+	// four times the largest message: at one times, a legal message of that
+	// size could never be queued
+	if wsQueueBytes != 4*wsMaxMessage || wsQueueFrames != 1<<14 {
+		t.Errorf("a socket may queue %d bytes and %d frames; want 4 MiB and 16384", wsQueueBytes, wsQueueFrames)
+	}
+	if wsCountWindow != 50*time.Millisecond {
+		t.Errorf("counts coalesced over %v; want 50ms", wsCountWindow)
 	}
 	if wsWriteTimeout != sseWriteTimeout {
 		t.Errorf("write timeout %v; want the one borgo.SSE bounds its writes with (%v)", wsWriteTimeout, sseWriteTimeout)

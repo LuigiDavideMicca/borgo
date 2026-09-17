@@ -1,0 +1,56 @@
+{
+  "held": 1000,
+  "publishes": 50,
+  "results": [
+    {
+      "target": "R, borgo relay",
+      "memory": {
+        "idleMiB": 9.3,
+        "idleStable": true,
+        "loadedMiB": 36.1,
+        "open": 1000,
+        "failed": 0,
+        "firstError": "",
+        "kibPerConnection": 27.4,
+        "processes": [
+          "borgo-relay.bin (pid 13364): 9.3 -> 36.1 MiB"
+        ]
+      },
+      "fanout": [
+        {
+          "subscribers": 1,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50,
+          "expected": 50,
+          "p50ms": 0.66,
+          "p99ms": 1.77,
+          "allReachedP50ms": 0.66,
+          "allReachedP99ms": 1.77
+        },
+        {
+          "subscribers": 100,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 5000,
+          "expected": 5000,
+          "p50ms": 1.86,
+          "p99ms": 6.83,
+          "allReachedP50ms": 2.82,
+          "allReachedP99ms": 7.53
+        },
+        {
+          "subscribers": 1000,
+          "failed": 0,
+          "stormSettled": true,
+          "delivered": 50000,
+          "expected": 50000,
+          "p50ms": 6.96,
+          "p99ms": 12.79,
+          "allReachedP50ms": 10.93,
+          "allReachedP99ms": 15.68
+        }
+      ]
+    }
+  ]
+}

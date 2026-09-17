@@ -5,7 +5,8 @@
 //        service, to separate the proxy's share from bun's;
 //   L  - the same bun relay behind a lean go forwarder (go-raw with
 //        GO_RAW_WS_FORWARD): road A as it would ship instead of as it runs;
-//   B  - a relay in go on the standard library (go-raw with GO_RAW_WS=1).
+//   B  - a relay in go on the standard library (go-raw with GO_RAW_WS=1);
+//   R  - borgo's own relay (ws_relay.go), road B as written into borgo.
 // The method is memory-conn's (lib/memory.ts): raw TCP sockets, not a client
 // library, whose pools would measure themselves; RSS summed over every
 // process tree the road runs, idle polled until stable, and the delta divided
@@ -66,7 +67,26 @@ const borgoApp: ServerSpec = {
   ports: [43100, 43101, 43102],
 };
 
+// borgo's own relay (ws_relay.go), measured before it is wired into the
+// front: the package's test binary, whose TestWSRelaySpikeServer serves the
+// relay alone when BORGO_WS_SPIKE_ADDR is set. go -C builds it from the repo
+// root into go-raw's ignored bin/, the one place relative spawning works
+const borgoRelay: ServerSpec = {
+  dir: goRawDir,
+  build: [["go", "-C", join(bench, ".."), "test", "-c", "-o", join(goRawDir, "bin", "borgo-relay.bin"), "."]],
+  start: ["./bin/borgo-relay.bin", "-test.run=^TestWSRelaySpikeServer$", "-test.timeout=0"],
+  env: { BORGO_WS_SPIKE_ADDR: "127.0.0.1:43150" },
+  ready: "http://127.0.0.1:43150/api/hello",
+  ports: [43150],
+};
+
 const variants: Variant[] = [
+  {
+    letter: "R",
+    name: "R - borgo's relay as written (ws_relay.go, before the front is wired to it)",
+    servers: [borgoRelay],
+    targets: [{ name: "R, borgo relay", url: "http://127.0.0.1:43150/ws", headers: {} }],
+  },
   {
     letter: "B",
     name: "B - go relay on the standard library (go-raw, GO_RAW_WS=1)",
@@ -110,7 +130,9 @@ function clientText(payload: string): Buffer {
 // server frames are unmasked; several arrive in one chunk and one can span
 // chunks, so each socket keeps what it has not parsed yet
 function frameReader(onText: (text: string) => void) {
-  let pending = Buffer.alloc(0);
+  // typed wide: alloc infers an ArrayBuffer-backed buffer, and a socket's
+  // chunk is not necessarily one
+  let pending: Buffer = Buffer.alloc(0);
   return (chunk: Buffer) => {
     pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
     for (;;) {
@@ -369,7 +391,7 @@ async function stop(variant: Variant, servers: Spawned[]) {
 
 installCleanupHooks();
 const selected = variants.filter((v) => !ONLY || v.letter === ONLY);
-if (!selected.length) throw new Error(`SPIKE_ONLY=${ONLY} names no road (B, A or L)`);
+if (!selected.length) throw new Error(`SPIKE_ONLY=${ONLY} names no road (R, B, A or L)`);
 
 const built = new Set<string>();
 for (const variant of selected) {

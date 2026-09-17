@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -33,12 +34,29 @@ var (
 	wsDrainQuiet = 100 * time.Millisecond
 )
 
-// frames a socket may fall behind by before it is closed. Measured: 16 closed
-// almost every subscriber in the __count storm of a thousand joins; 256
-// delivered all of it at 33.8 KiB a socket; 1024 cost 48.2 and bought no time
-const wsSendBuffer = 256
+// What a socket may have waiting to be written before it is closed with 1013.
+// A queue that grows, not a buffer held from the first frame: an idle socket
+// holds none of it, and a publisher's burst - a handler pushing a few hundred
+// events in a loop - fits, where the fixed 256 slots of the first version
+// closed every subscriber of the topic however fast it read. Bytes are counted
+// per socket although a frame is shared by every subscriber it goes to, so a
+// burst's memory is paid once; the frame count bounds the queue's own
+// headers when the frames are tiny. The byte bound is four times the largest
+// message's payload, which is three whole frames of it with their headers and
+// room for most of a fourth: at one times, a legal message of that size could
+// never be queued and closed every subscriber it was sent to (found by the
+// verifier).
+const (
+	wsQueueBytes  = 4 * wsMaxMessage
+	wsQueueFrames = 1 << 14
+)
 
 var wsPingFrame = wsFrame(wsOpPing, nil)
+
+// the connection cannot be taken - HTTP/2, or a writer that hides it - and
+// the response is still unwritten; any other upgrade error has the socket
+// taken and closed, and nothing may be written to the response after it
+var errWSNotHijacked = errors.New("borgo: the connection cannot be taken for a websocket")
 
 type wsTimers struct {
 	ping, read, write, grace, quiet time.Duration
@@ -48,8 +66,18 @@ type wsConn struct {
 	conn   net.Conn
 	src    io.Reader
 	timers wsTimers
-	out    chan []byte
-	// a pong has a slot of its own, never counted against the data buffer; one
+
+	// frames waiting for the writer, which takes them all at once when wake
+	// says there are some. queued and pending count bytes and frames not yet
+	// written - the batch the writer holds included, or a reader draining
+	// one write's worth at a time would hold twice the bound
+	queueMu sync.Mutex
+	queue   [][]byte
+	queued  int
+	pending int
+	wake    chan struct{}
+
+	// a pong has a slot of its own, never counted against the queue; one
 	// slot, and a ping arriving while it is taken is not answered again: a peer
 	// pinging faster than it reads is owed one answer (RFC 6455 section 5.5.3)
 	pong chan []byte
@@ -68,7 +96,7 @@ func newWSConn(conn net.Conn, src io.Reader) *wsConn {
 		conn:   conn,
 		src:    src,
 		timers: wsTimers{ping: wsPingInterval, read: wsReadTimeout, write: wsWriteTimeout, grace: wsCloseGrace, quiet: wsDrainQuiet},
-		out:    make(chan []byte, wsSendBuffer),
+		wake:   make(chan struct{}, 1),
 		pong:   make(chan []byte, 1),
 		quit:   make(chan struct{}),
 	}
@@ -80,7 +108,8 @@ func newWSConn(conn net.Conn, src io.Reader) *wsConn {
 func wsUpgrade(w http.ResponseWriter, r *http.Request, security *securityConfig) (*wsConn, error) {
 	conn, brw, err := http.NewResponseController(w).Hijack()
 	if err != nil {
-		return nil, err
+		// nothing was written: the caller still holds a response it can answer
+		return nil, fmt.Errorf("%w: %v", errWSNotHijacked, err)
 	}
 	h := http.Header{}
 	security.apply(h)
@@ -115,6 +144,15 @@ func (c *wsConn) finish(frame []byte) {
 	})
 }
 
+func (c *wsConn) ended() bool {
+	select {
+	case <-c.quit:
+		return true
+	default:
+		return false
+	}
+}
+
 // close ends the socket with a close frame; the first ending decides. What is
 // still queued is not sent: a socket closed for falling behind is not owed the
 // backlog, and one closed by shutdown has no time for it.
@@ -122,23 +160,49 @@ func (c *wsConn) close(code int, reason string) {
 	c.finish(wsCloseFrame(code, reason))
 }
 
-// send queues a frame and never waits: a socket wsSendBuffer frames behind is
-// closed with 1013 instead of holding the publisher or skipping frames in
-// silence - order and presence are part of a websocket's contract, and the
-// client redials by itself.
+// send queues a frame and never waits: a socket with more unread than the
+// queue allows is closed with 1013 instead of holding the publisher or
+// skipping frames in silence - order and presence are part of a websocket's
+// contract, and the client redials by itself.
 func (c *wsConn) send(frame []byte) bool {
-	select {
-	case <-c.quit:
-		return false
-	default:
-	}
-	select {
-	case c.out <- frame:
-		return true
-	default:
-		c.close(wsCloseTryAgainLater, fmt.Sprintf("more than %d messages unread - reconnect", wsSendBuffer))
+	if c.ended() {
 		return false
 	}
+	c.queueMu.Lock()
+	full := c.pending >= wsQueueFrames || c.queued+len(frame) > wsQueueBytes
+	if !full {
+		c.queue = append(c.queue, frame)
+		c.queued += len(frame)
+		c.pending++
+	}
+	c.queueMu.Unlock()
+	if full {
+		c.close(wsCloseTryAgainLater, fmt.Sprintf("more than %d KiB or %d messages unread - reconnect", wsQueueBytes>>10, wsQueueFrames))
+		return false
+	}
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// take empties the queue; the backing array goes with it, so a socket that
+// was sent a burst does not keep the burst's size once it is written. What
+// was taken still counts until wrote says it went out
+func (c *wsConn) take() [][]byte {
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	batch := c.queue
+	c.queue = nil
+	return batch
+}
+
+func (c *wsConn) wrote(frame []byte) {
+	c.queueMu.Lock()
+	c.queued -= len(frame)
+	c.pending--
+	c.queueMu.Unlock()
 }
 
 type wsEnding int
@@ -168,6 +232,26 @@ func (c *wsConn) serve(shutdown <-chan struct{}, onMessage func([]byte)) {
 		c.drain()
 	}
 	c.conn.Close()
+}
+
+// serveAsync runs serve on a goroutine of its own and calls done when the
+// socket has ended, so the handler that upgraded can return: net/http's
+// goroutine keeps the stack it grew reading the request, and a subscriber is
+// held for hours (the spike measured 40.2 KiB a socket served in place, 36
+// served here). Out here there is no net/http recover, so a panic in
+// onMessage ends this socket, is logged, and leaves the process alone.
+func (c *wsConn) serveAsync(shutdown <-chan struct{}, onMessage func([]byte), done func()) {
+	go func() {
+		defer done()
+		defer func() {
+			if v := recover(); v != nil {
+				log.Printf("borgo: a websocket handler panicked, and its socket was closed: %v", v)
+				c.finish(nil)
+				c.conn.Close()
+			}
+		}()
+		c.serve(shutdown, onMessage)
+	}()
 }
 
 // drain drops what the peer still sends until it goes quiet, ends, or the
@@ -243,9 +327,9 @@ func (c *wsConn) writeLoop(shutdown <-chan struct{}, written chan<- struct{}) {
 	ping := time.NewTicker(c.timers.ping)
 	defer ping.Stop()
 	for {
-		var frame []byte
-		select {
-		case <-c.quit:
+		// a decided close goes out before anything still queued, which the
+		// select below would otherwise pick at random against it
+		if c.ended() {
 			if c.closeFrame != nil {
 				c.write(c.closeFrame)
 			}
@@ -253,22 +337,42 @@ func (c *wsConn) writeLoop(shutdown <-chan struct{}, written chan<- struct{}) {
 			c.conn.SetReadDeadline(time.Now().Add(c.timers.grace))
 			c.deadline.Unlock()
 			return
+		}
+		select {
+		case <-c.quit:
 		case <-shutdown:
 			c.close(wsCloseGoingAway, "the server is shutting down")
 			shutdown = nil
-			continue
-		case frame = <-c.pong:
-		case frame = <-c.out:
+		case frame := <-c.pong:
+			c.writeOrEnd(frame)
 		case <-ping.C:
-			frame = wsPingFrame
-		}
-		if !c.write(frame) {
-			// gone, or not reading for a whole write timeout: nothing more can
-			// reach it, and the reader is woken rather than left to its deadline
-			c.conn.Close()
-			c.finish(nil)
+			c.writeOrEnd(wsPingFrame)
+		case <-c.wake:
+			for _, frame := range c.take() {
+				if !c.writeOrEnd(frame) {
+					break
+				}
+				c.wrote(frame)
+				// and a close decided in the middle of a burst is not kept
+				// waiting behind the rest of it
+				if c.ended() {
+					break
+				}
+			}
 		}
 	}
+}
+
+// writeOrEnd writes a frame, or ends the socket: gone, or not reading for a
+// whole write timeout, nothing more can reach it, and the reader is woken
+// rather than left to its own deadline
+func (c *wsConn) writeOrEnd(frame []byte) bool {
+	if c.write(frame) {
+		return true
+	}
+	c.conn.Close()
+	c.finish(nil)
+	return false
 }
 
 func (c *wsConn) write(frame []byte) bool {
