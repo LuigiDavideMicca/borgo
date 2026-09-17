@@ -16,9 +16,11 @@ import (
 	"unicode/utf8"
 )
 
+// a dev relay unless configured otherwise: with no CanSubscribe registered a
+// production relay admits nothing, and these tests are about the relay
 func startRelay(t *testing.T, configure func(r *wsRelay)) (*wsRelay, string) {
 	t.Helper()
-	relay := newWSRelay(wsRelayOptions{})
+	relay := newWSRelay(wsRelayOptions{dev: true})
 	if configure != nil {
 		configure(relay)
 	}
@@ -263,7 +265,7 @@ func TestWSRelayCountsOnlyTheTopicsThatChanged(t *testing.T) {
 }
 
 func TestWSRelayShutdownClosesEverySubscriber(t *testing.T) {
-	relay := newWSRelay(wsRelayOptions{})
+	relay := newWSRelay(wsRelayOptions{dev: true})
 	srv := &http.Server{Handler: relay}
 	armStreamShutdown(srv)
 	base := serveOn(t, srv)
@@ -699,7 +701,8 @@ func TestWSRelaySpikeServer(t *testing.T) {
 		t.Skip("BORGO_WS_SPIKE_ADDR is not set")
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/ws", newWSRelay(wsRelayOptions{}))
+	// dev: the spike registers no CanSubscribe, and measures the relay
+	mux.Handle("/ws", newWSRelay(wsRelayOptions{dev: true}))
 	mux.HandleFunc("/api/hello", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	t.Fatal(http.ListenAndServe(addr, mux))
 }

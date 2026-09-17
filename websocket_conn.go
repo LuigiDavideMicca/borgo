@@ -85,6 +85,9 @@ type wsConn struct {
 	once sync.Once
 	// set once, before quit closes; nil ends the socket without a close frame
 	closeFrame []byte
+	// called once, as the ending is decided: the relay cancels the socket's
+	// context with it, so a check blocked on that context is let go
+	onEnd func()
 	// the reader re-arms its deadline before every frame and the writer cuts it
 	// short after a close: without the lock a re-arm racing the cut would wait
 	// the full read timeout for a peer that never answers the close
@@ -141,6 +144,9 @@ func (c *wsConn) finish(frame []byte) {
 	c.once.Do(func() {
 		c.closeFrame = frame
 		close(c.quit)
+		if c.onEnd != nil {
+			c.onEnd()
+		}
 	})
 }
 

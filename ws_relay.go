@@ -8,6 +8,7 @@ package borgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -35,6 +37,9 @@ type wsRelayOptions struct {
 	security      *securityConfig
 	trusted       []*net.IPNet
 	allowNoOrigin bool
+	// borgo dev: with no CanSubscribe registered every topic is open, where
+	// borgo start refuses them all
+	dev bool
 }
 
 type wsRelay struct {
@@ -118,6 +123,12 @@ func (h *wsRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	topics, why := wsTopics(r.URL.RawQuery)
+	// a socket asking for nothing can receive nothing and publish nothing,
+	// and bun kept it open anyway; here it is a 400, so an anonymous caller
+	// in production holds no goroutines for a socket that means nothing
+	if why == "" && len(topics) == 0 {
+		why = "no topics: a socket subscribes at its handshake, /ws?topics=a,b"
+	}
 	if why != "" {
 		log.Printf("borgo: /ws refused: %s", why)
 		http.Error(w, why, http.StatusBadRequest)
@@ -127,17 +138,67 @@ func (h *wsRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, handshake.reason, handshake.status)
 		return
 	}
+	// every topic asked for is judged before the socket is taken, with the
+	// request it came in on: the first refusal closes the socket with 4403
+	// naming the topic, and "__count" for it is never seen either. After the
+	// handshake check, since a malformed one is not worth a check that reads
+	// the session
+	// the checks run before the upgrade, on the request's own context - which
+	// net/http cancels when the client goes away, and never on Shutdown: a
+	// check blocked on it would hold the shutdown for its whole grace (found
+	// by the verifier). The shutdown latch cancels it too, through a
+	// goroutine that lives only while the checks do
+	hctx, checksDone := context.WithCancel(r.Context())
+	defer checksDone()
+	if sig := shutdownSignal(r); sig != nil {
+		go func() {
+			select {
+			case <-sig:
+				checksDone()
+			case <-hctx.Done():
+			}
+		}()
+	}
+	policy := h.policy()
+	for _, topic := range topics {
+		if why := policy.subscribeRefusal(r.WithContext(hctx), topic); why != "" {
+			log.Printf("borgo: /ws refused: %s", why)
+			c := h.upgrade(w, r)
+			if c == nil {
+				return
+			}
+			c.close(wsCloseOriginRefused, why)
+			c.serve(nil, nil)
+			return
+		}
+	}
 	c := h.upgrade(w, r)
 	if c == nil {
 		return
 	}
+	// the request's context is cancelled by net/http the moment the handler
+	// returns, and this handler returns while the socket lives: a check on a
+	// later publish would get a dead context, and a db.QueryContext in it
+	// would fail at once (found by the verifier). The socket's own context
+	// keeps the request's values - the server for shutdownSignal, the shared
+	// session answer - and ends when the socket does, so a check waiting on
+	// it is let go by a close, a shutdown, or the peer going away
+	checksDone()
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	r = r.WithContext(ctx)
+	c.onEnd = cancel
 	// joined before the socket is served: one that ends at once must still
 	// find itself there to leave
 	h.join(c, topics)
+	// a refused publish is said once for the socket: a page publishing where
+	// it may only read is a bug in the page, and must not flood the log
+	var refusedOnce atomic.Bool
 	c.serveAsync(shutdownSignal(r),
-		func(payload []byte) { h.fromClient(topics, payload) },
+		func(payload []byte) { h.fromClient(r, topics, &refusedOnce, payload) },
 		func() { h.leave(c, topics) })
 }
+
+func (h *wsRelay) policy() wsTopicPolicy { return wsTopicPolicy{dev: h.opts.dev} }
 
 func (h *wsRelay) upgrade(w http.ResponseWriter, r *http.Request) *wsConn {
 	c, err := wsUpgrade(w, r, h.opts.security)
@@ -228,7 +289,7 @@ func (h *wsRelay) publishFrame(topic string, frame []byte) {
 // holds, as bun's relay did: "topic" and "event" both strings, "data" passed
 // on as it came, and anything else dropped in silence - a client sending
 // garbage learns nothing from an answer.
-func (h *wsRelay) fromClient(topics []string, payload []byte) {
+func (h *wsRelay) fromClient(r *http.Request, topics []string, refusedOnce *atomic.Bool, payload []byte) {
 	// a text message is utf-8 already; a binary one was read by bun as a
 	// string, with each broken sequence replaced. Relayed as it came, it would
 	// reach every subscriber inside a text frame that is not utf-8, and each
@@ -254,6 +315,14 @@ func (h *wsRelay) fromClient(topics []string, payload []byte) {
 	// "__count" is the relay's own: a browser sending one would set every
 	// other subscriber's count. bun relayed it; this does not
 	if !ok || event == wsCountEvent {
+		return
+	}
+	// the topic passed CanSubscribe at the handshake; CanPublish, if any,
+	// decides again for this message. Dropped, socket kept
+	if !h.policy().publishAllowed(r, topic, refusedOnce) {
+		if refusedOnce.CompareAndSwap(false, true) {
+			log.Printf("borgo: /ws publish to %s refused by borgo.CanPublish (said once for this socket)", jsQuote(topic))
+		}
 		return
 	}
 	h.publish(topic, fields["event"], fields["data"])
