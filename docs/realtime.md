@@ -67,25 +67,22 @@ export default function Tasks({ tasks: initial }: { tasks: Task[] }) {
 
 `Send` and `Ping` return an error, and it is worth reading: a stream the handler ended itself with `stream.Close()` answers every later write with `borgo.ErrStreamClosed` (one value, `errors.Is`-able), while a stream the client dropped or the server is shutting down reports whatever the connection reported — that is the more useful answer, and `Done()` is where you watch for it. `Close()` is for the handler that detached the request context (`context.WithoutCancel`, a clone onto a background context) and so holds a stream no disconnection will ever end: idempotent, safe from any goroutine, and it writes nothing — the response ends when the handler returns. The hub has the same pair: `hub.Subscribers()` for the live count (publish it on a timer for presence, or skip producing when it is zero) and `hub.Close()`, which ends every open stream and makes later `Publish` calls no-ops.
 
-Create a task in one tab, watch it appear in the other. The front server proxies streams without buffering, so a plain `EventSource` works with no client library, and the whole thing is standard library on the Go side.
+Create a task in one tab, watch it appear in the other. The stream is written by the process that answers the port, nothing between it and the socket buffers, so a plain `EventSource` works with no client library, and the whole thing is standard library on the Go side.
 
 A publish never blocks on a slow subscriber — a subscriber whose buffer is full misses that frame rather than stalling everyone else, which is one more reason to refetch state rather than apply deltas — and a subscriber that disappears without closing its connection — a laptop lid, a dropped mobile connection — is reaped rather than holding a goroutine and a file descriptor forever: every write carries a 10-second deadline, so a stream nobody is reading errors out on its next frame and unsubscribes itself.
 
 ## WebSocket topics
 
-> **A topic is a public broadcast channel. Nothing sensitive may ride one.**
-> The handshake checks the browser's `Origin` and the topic's spelling, and
-> then subscribes whoever asked — there is no point at which your app is
-> consulted. Any client that can reach the server can join `channel:42` or
-> `dm:ana:luigi` and receive everything published there, session or no
-> session; a `curl`-class client is not bound by the `Origin` check at all.
-> Measured on a real app: an anonymous client with no cookie read a private
-> channel's messages, and the `__count` event told it how many people were in
-> the room. Per-topic authorization is the first item of the next release;
-> until it lands, publish only what every visitor may read, and keep private
-> data behind an authenticated API route or a per-user server-sent stream.
+> **A topic is what your app says it is.** Every topic a socket asks for is
+> put to `borgo.CanSubscribe` at the handshake, with the session already
+> verified, before the socket is upgraded — see [who may hold a topic](#who-may-hold-a-topic).
+> Without a check, `borgo dev` leaves every topic open and says so at
+> startup; `borgo start` refuses every subscription, and says so too.
+> Through 0.22 nothing was asked: an anonymous client with no cookie read a
+> private channel by guessing its name, and `__count` told it how many
+> people were in the room. That is the hole the check closes.
 
-The Bun front server is also a native WebSocket server. Browsers join named topics with the `subscribe` helper; every `{event, data}` published on a topic reaches every subscriber, including the publisher's other tabs:
+The Go process that answers the public port is also the WebSocket server: `/ws` is answered in-process, behind `api/middleware.go` and the same session verification as every page, by a relay written on `net/http` alone. Browsers join named topics with the `subscribe` helper; every `{event, data}` published on a topic reaches every subscriber, including the publisher's other tabs:
 
 ```tsx
 import { subscribe } from "borgo-framework";
@@ -95,11 +92,35 @@ channel.publish("message", "hello");   // browser -> everyone on the topic
 channel.close();
 ```
 
-The built-in `__count` event reports the topic's subscriber count (presence for free), and the connection reconnects itself. One close is final: a page whose origin the front server does not accept (the handshake's `Origin` is not the server's own, or there is no `Origin` and `BORGO_WS_ALLOW_NO_ORIGIN` is unset) is closed with code `4403` and a reason naming the origin and the switch; `subscribe` stops redialling, and reports the reason to an `onRefused` callback — `subscribe(topic, handler, { onRefused })` — or to `console.error` without one. Every other close keeps reconnecting with backoff. On the Go side, `borgo.Push(topic, event, data)` publishes into the same topics — it POSTs to the front server's internal endpoint, accepted from loopback. When the two halves are on different hosts, set `FRONT_URL` and the same `BORGO_PUSH_KEY` on both — and if `FRONT_URL` is `http://`, `BORGO_PUSH_INSECURE=1` as well, since Go will not put the key on a cleartext connection to another machine without being told the network is yours ([the key and cleartext](deploy.md#the-key-and-cleartext)). A key *replaces* the loopback check on the side that has it, and the two one-sided configurations fail in opposite directions: with the key on the **front server only**, Go sends no `X-Borgo-Key` and every push is refused — loud, and closed. With the key on the **Go side only**, the front server never learns there is a key, ignores the header Go now sends, and falls back to accepting anything from loopback — so on a single box that setting is a no-op that reads like protection. Set it on both halves or neither.
+The built-in `__count` event reports the topic's subscriber count (presence for free), and the connection reconnects itself. One close is final: a socket the server refuses — the handshake's `Origin` is not the server's own, or there is no `Origin` and `BORGO_WS_ALLOW_NO_ORIGIN` is unset, or a topic `CanSubscribe` said no to — is closed with code `4403` and a reason naming the origin and the switch, or the topic; `subscribe` stops redialling, and reports the reason to an `onRefused` callback — `subscribe(topic, handler, { onRefused })` — or to `console.error` without one. Every other close keeps reconnecting with backoff.
+
+On the Go side, `borgo.Push(topic, event, data)` publishes into the same topics. Since 0.30 that is a call inside the process, not a request: there is no endpoint, no key, and nothing crosses the network. It returns an error for an event no subscriber could ever receive — a topic no handshake could name (empty, blank, over 128 characters, containing a comma), or a payload over the 1 MB a socket may carry — and `nil` for a topic nobody holds right now, which is delivered to nobody. An app that mounts borgo's handlers on a server of its own mounts `borgo.Realtime()` at `/ws` — one relay per process, configured from the environment, its `101` carrying the security headers — and `Push` reaches it the same way.
 
 ```go
 borgo.Push("live", "task-created", task.Title)
 ```
+
+### Who may hold a topic
+
+`borgo.CanSubscribe` registers the check every topic a socket asks for must pass. It runs once per topic at the handshake, before the socket is upgraded, with the request the socket came in on — so it reads the session with `GetSession` as a handler would, the front having verified it, and a `CheckSession` you registered is consulted once for the whole handshake. A refused topic closes the socket with `4403` and a reason naming the topic; `__count` is a subscription like any other, so a refused topic's count is never seen either.
+
+```go
+type User struct{ Name string }
+
+func init() {
+	borgo.CanSubscribe(func(r *http.Request, topic string) bool {
+		if topic == "lobby" {
+			return true
+		}
+		user, ok := borgo.GetSession[User](r)
+		return ok && topic == "user:"+user.Name
+	})
+}
+```
+
+A socket is judged once, at its handshake, and keeps its topics until it ends: a session revoked or expired afterwards is refused at its next handshake, not cut mid-socket. A check that panics refuses — failing open would hand a private topic to whoever hits the panic — and its stack is logged once per process. `borgo.CanPublish` decides a browser's publish separately, per message, for the topic it names; without one, publishing follows `CanSubscribe` — a socket may publish to what it may hold. A refused message is dropped, the socket stays open, and the refusal is logged once per socket. Go's own `Push` is never asked: it is your code publishing.
+
+Without a `CanSubscribe`, `borgo dev` leaves every topic open to every socket and prints so at startup; `borgo start` refuses every subscription with `4403` and prints so too. A production relay with no rule is a relay with the wrong rule, and the one that fails loud is the one you notice before a visitor does.
 
 ## Typed events
 
@@ -121,23 +142,23 @@ One naming rule: a topic cannot contain `/`, which would make the `"topic/event"
 
 `Channel.publish` is declared with method syntax on purpose: TypeScript checks method parameters bivariantly, so a typed `Channel<"live">` stays assignable to a plain `Channel` — you can keep a `Channel[]` of mixed topics for cleanup, or pass a typed channel to a helper that only ever calls `close()`. Strict property syntax would reject those assignments; the loosened direction (publishing through the widened reference) is the same escape hatch `borgo.Push` already provides, so nothing new leaks. Wrong payloads through the *typed* reference still fail `tsc`, and CI proves it with deliberate wrong-payload files.
 
-Go itself stays stdlib-only — the WebSocket termination lives where Bun already provides it natively. Choose SSE for one-way server→browser feeds; choose WebSocket topics for anything browsers also write to. The `/live` page in `examples/tasks` demos both directions: two-tab chat plus Go pushes.
+Go stays stdlib-only: the WebSocket server is borgo's own, an RFC 6455 implementation on `net/http` in the process that answers the port. Choose SSE for one-way server→browser feeds; choose WebSocket topics for anything browsers also write to. The `/live` page in `examples/tasks` demos both directions: two-tab chat plus Go pushes, with `api/realtime.go` deciding who may hold the topic.
 
-The relay itself stays dumb by design: the front server forwards `{event, data}` between subscribers and Go; per-message business logic belongs in Go routes.
+The relay itself stays dumb by design: it forwards `{event, data}` between subscribers and `Push`. Per-message business logic belongs in Go routes, and in `CanPublish` when the logic is a yes or a no.
 
 ## Honest limits
 
 - **The relay is not a message broker.** There is no durability, no replay, no delivery guarantee and no ordering guarantee across topics. A subscriber that was offline missed what happened. If a client must not miss an event, give it a way to re-fetch state on reconnect — which is what the SSE example above does by refetching rather than applying a delta.
-- **Nothing is authorized per topic.** Any browser that can open the socket can subscribe to any topic name, so treat topic names as public and never put a secret in one. Scope by unguessable id, and keep anything sensitive behind an authenticated API route.
-- **Limits are enforced**: 32 topics per client, 128 characters per topic name, 1 MB per message, and a same-origin check on the upgrade — scheme *and* host, and an absent `Origin` is a refusal, not a pass. That changed in 0.21: skipping the check for a request with no `Origin` meant the one header an attacker can simply omit turned the check off. Browsers always send one, so this costs them nothing; a non-browser client — including bun's own `WebSocket` — is now refused, and `BORGO_WS_ALLOW_NO_ORIGIN=1` is how you take that back, along with every other originless caller. Behind a proxy that terminates TLS, `X-Forwarded-Proto` supplies the scheme; the nginx config `borgo deploy init` writes already sets it. See [security](security.md#realtime-surface).
-- **A topic containing a comma is refused**, on subscribe and on publish alike. The comma separates topics in the relay protocol, so one embedded in a name used to connect, report its subscriber counts, and deliver nothing — the worst shape a defect can take, because everything looks like it is working. `subscribe()` now refuses it before opening a socket, throwing with the topic in the message, so the mistake is a stack trace at the call site rather than a connection that closes. It also refuses an empty topic, one padded with whitespace — which fail the same silent way: the relay trims the name, the client filters on the untrimmed one, and nothing is ever delivered — and one over 128 characters, which the relay would answer `400` to and the client would otherwise redial forever. The server refuses the comma too, and logs it, for anything that reaches `/ws` or `/__borgo/publish` without going through `subscribe()`: a `borgo.Push` to such a topic returns `front server responded 400`.
+- **Authorization is per topic and yours.** `CanSubscribe` is the whole rule: a topic it admits is public to everyone it admits, and a name is not a secret — scope by the session, not by an unguessable id. The check is taken once at the handshake, so a revocation reaches a socket at its next handshake and not before; cut the socket yourself if that is too late.
+- **Limits are enforced**: 32 topics per client, 128 characters per topic name, 1 MB per message, and a same-origin check on the upgrade — scheme *and* host, and an absent `Origin` is a refusal, not a pass. That changed in 0.21: skipping the check for a request with no `Origin` meant the one header an attacker can simply omit turned the check off. Browsers always send one, so this costs them nothing; a non-browser client — including bun's own `WebSocket` — is now refused, and `BORGO_WS_ALLOW_NO_ORIGIN=1` is how you take that back, along with every other originless caller (Go reads it since 0.30, with the grammar of every other boolean: `yes` refuses the boot). Behind a proxy that terminates TLS, `X-Forwarded-Proto` supplies the scheme from a peer in `BORGO_TRUSTED_PROXIES`; the nginx config `borgo deploy init` writes already sets it. See [security](security.md#realtime-surface).
+- **A topic containing a comma is refused**, on subscribe and on publish alike. The comma separates topics in the relay protocol, so one embedded in a name used to connect, report its subscriber counts, and deliver nothing — the worst shape a defect can take, because everything looks like it is working. `subscribe()` now refuses it before opening a socket, throwing with the topic in the message, so the mistake is a stack trace at the call site rather than a connection that closes. It also refuses an empty topic, one padded with whitespace — which fail the same silent way: the relay trims the name, the client filters on the untrimmed one, and nothing is ever delivered — and one over 128 characters, which the relay would answer `400` to and the client would otherwise redial forever. The server refuses the comma too, and logs it, for anything that reaches `/ws` without going through `subscribe()`; a `borgo.Push` to such a topic returns an error naming it.
 - **Reconnection is exponential and capped** at 30 seconds. After a long outage a client can be up to half a minute behind before it even tries; a page that must feel live should refetch on reconnect rather than trusting the gap was empty.
 - **SSE holds a connection per subscriber.** That is cheap in Go, but it is not free at the proxy in front of you: make sure it does not buffer, and does not cut idle connections shorter than your ping interval. [`borgo deploy init nginx`](deploy.md#borgo-deploy-init) writes a config that gets both right.
 - **borgo's own front is not one of those proxies.** An `/api` event stream is written by the process that answers the public port, so nothing between your handler and the socket buffers it or holds a slot for it.
 
 ## Streams and server timeouts
 
-`borgo.Serve` runs a hardened `http.Server`: `ReadHeaderTimeout` (5s) cuts off slow-header clients, `IdleTimeout` (2m) reclaims kept-alive connections. Read and write timeouts stay `0` by choice — they are wall-clock deadlines on the *whole* request, and any value long enough to be safe for an SSE stream or a streamed SSR response is too long to protect anything; request-body abuse is bounded by `Bind`'s 1 MB cap instead (see [the typed bridge](typed-bridge.md#typed-request-bodies)). WebSockets terminate on the Bun server and never touch Go's timeouts. All four knobs have env overrides (`BORGO_READ_HEADER_TIMEOUT` and friends — see the [environment reference](deploy.md#environment-reference)), and if you do set a write timeout, `borgo.SSE` clears the deadlines on its own connection, so event streams outlive it by design.
+`borgo.Serve` runs a hardened `http.Server`: `ReadHeaderTimeout` (5s) cuts off slow-header clients, `IdleTimeout` (2m) reclaims kept-alive connections. The public port's read and write timeouts (a minute each) are deadlines on *progress*, not on the whole request: every byte read or written moves them, so a slow upload that keeps arriving and a document that keeps streaming are never cut, and a client that stops is. An api served alone leaves both at `0`. Request-body abuse is bounded by `Bind`'s 1 MB cap and `BORGO_MAX_BODY` (see [the typed bridge](typed-bridge.md#typed-request-bodies)). A WebSocket is hijacked from the server at its handshake and keeps deadlines of its own: a ping every 30 seconds, and a socket that says nothing for two minutes is closed. All four knobs have env overrides (`BORGO_READ_HEADER_TIMEOUT` and friends — see the [environment reference](deploy.md#environment-reference)), and if you do set a write timeout, `borgo.SSE` clears the deadlines on its own connection, so event streams outlive it by design.
 
 Nothing sits in front of Go on this path any more: an event stream is written by the process that answered the public port, and the deadline that could cut it (`BORGO_WRITE_TIMEOUT`, a minute on the public port) is cleared by an event stream at its first byte, and `borgo.SSE` then bounds each of its own writes at 10 seconds. The read deadlines bound what a client *sends* and cannot reach a stream — see [security](security.md#request-limits-and-timeouts).
 

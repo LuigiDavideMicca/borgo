@@ -473,17 +473,17 @@ describe("prepareShell", () => {
     // the islands tail really is the zero-js page that still runs js
     expect(s.zeroJsEnd.islands).toContain("islands-client.js");
     expect(s.zeroJsEnd.islands).not.toContain("__PROPS__");
-    // and it is set before the reload client opens its socket, so anything the
+    // and it is set before the reload client opens its stream, so anything the
     // page runs afterwards sees it
     const tail = s.zeroJsEnd.plain;
-    expect(tail.indexOf("__BORGO_DEV__")).toBeLessThan(tail.indexOf("WebSocket"));
+    expect(tail.indexOf("__BORGO_DEV__")).toBeLessThan(tail.indexOf("EventSource"));
   });
 
   test("production zero-js tails carry no dev flag and no reload client", () => {
     const s = prepareShell(SHELL, false);
     for (const tail of [s.zeroJsEnd.plain, s.zeroJsEnd.islands]) {
       expect(tail).not.toContain("__BORGO_DEV__");
-      expect(tail).not.toContain("WebSocket");
+      expect(tail).not.toContain("EventSource");
     }
     expect(s.stateTail).not.toContain("__BORGO_DEV__");
   });

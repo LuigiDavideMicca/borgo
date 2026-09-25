@@ -233,31 +233,47 @@ func TestFrontForwardsAVerifiedSessionAsAFact(t *testing.T) {
 }
 
 // in dev the fast-refresh channel is the one internal name a browser may
-// reach, and only that one: the render service's own pokes stay internal
-func TestFrontLetsTheDevChannelThroughInDevOnly(t *testing.T) {
+// reach, answered by this process as an event stream and never forwarded;
+// its pokes are the internal listener's, and every other internal name is
+// nothing, in dev as in production
+func TestFrontAnswersTheDevChannelInDevOnly(t *testing.T) {
 	var seen http.Header
 	renderer := fakeRenderer(t, &seen)
 	defer renderer.Close()
-	dev := frontWith(t, renderer, frontOptions{trusted: trustAll, dev: true})
-	w := httptest.NewRecorder()
-	dev.ServeHTTP(w, httptest.NewRequest("GET", "/__borgo/dev", nil))
-	if w.Code != 200 || seen == nil || seen.Get("X-Test-Path") != "/__borgo/dev" {
-		t.Errorf("dev channel in dev: %d forwarded=%v", w.Code, seen != nil)
+	dev := httptest.NewServer(frontWith(t, renderer, frontOptions{trusted: trustAll, dev: true, devCh: newDevChannel()}))
+	defer dev.Close()
+	res, err := http.Get(dev.URL + "/__borgo/dev")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, p := range []string{"/__borgo/dev/reload", "/__borgo/dev/css", "/__borgo/routes", "/__borgo/render"} {
+	defer res.Body.Close()
+	if res.StatusCode != 200 || res.Header.Get("Content-Type") != "text/event-stream" || seen != nil {
+		t.Errorf("dev channel in dev: %d %q forwarded=%v", res.StatusCode, res.Header.Get("Content-Type"), seen != nil)
+	}
+	for _, p := range []string{"/__borgo/dev/reload", "/__borgo/dev/css", "/__borgo/dev/js", "/__borgo/routes", "/__borgo/render"} {
 		seen = nil
-		w = httptest.NewRecorder()
-		dev.ServeHTTP(w, httptest.NewRequest("POST", p, nil))
-		if w.Code != 404 || seen != nil {
-			t.Errorf("%s in dev: %d forwarded=%v", p, w.Code, seen != nil)
+		r, err := http.Post(dev.URL+p, "application/json", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		if r.StatusCode != 404 || seen != nil {
+			t.Errorf("%s in dev: %d forwarded=%v", p, r.StatusCode, seen != nil)
 		}
 	}
-	prod := frontWith(t, renderer, frontOptions{trusted: trustAll})
-	seen = nil
-	w = httptest.NewRecorder()
-	prod.ServeHTTP(w, httptest.NewRequest("GET", "/__borgo/dev", nil))
-	if w.Code != 404 || seen != nil {
-		t.Errorf("dev channel in production: %d forwarded=%v", w.Code, seen != nil)
+	// production, and the two halves of the decision apart: a channel with
+	// no dev flag, a dev flag with no channel - neither is the stream
+	for name, opts := range map[string]frontOptions{
+		"production":            {trusted: trustAll},
+		"a channel but not dev": {trusted: trustAll, devCh: newDevChannel()},
+		"dev but no channel":    {trusted: trustAll, dev: true},
+	} {
+		seen = nil
+		w := httptest.NewRecorder()
+		frontWith(t, renderer, opts).ServeHTTP(w, httptest.NewRequest("GET", "/__borgo/dev", nil))
+		if w.Code != 404 || seen != nil {
+			t.Errorf("dev channel, %s: %d forwarded=%v", name, w.Code, seen != nil)
+		}
 	}
 }
 

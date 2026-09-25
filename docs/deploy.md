@@ -134,9 +134,9 @@ server {
 
 **The body cap is the app's, not a number.** `borgo.Bind` reads at most 1 MiB and answers `413` above it (`borgo.BindError` picks the status); a route that legitimately takes more declares it with `borgo.BindMax`, and then the proxy line moves with it. A proxy that lets more through does not make the app accept more — it only moves the refusal one hop later, into a Go handler, where nothing in the proxy's logs explains it. `BORGO_MAX_BODY` (32 MB) is a different ceiling: the most the Go front will *read* on the public port, not what a handler will decode. It is counted byte by byte as the body arrives, so how the body is framed does not change where the refusal happens.
 
-**Neither header is the client's to write.** borgo authorizes `/__borgo/publish` as *from loopback and not forwarded*; behind a proxy on the same box every request arrives from loopback, so with no forwarding header the second half of the test never fires and anyone on the internet can broadcast into every subscribed browser. Both generated configs now write `X-Real-IP` and `X-Forwarded-For` from the peer they read the request from — `$remote_addr` in nginx, `{remote_host}` in Caddy — and neither appends to, or passes through, what arrived. An inbound `X-Real-IP` is a header anyone on the internet can send, and nothing downstream can tell it from a real one; `$proxy_add_x_forwarded_for`, which nginx used to use here, keeps the client's invention as the *first* entry of the chain, which is the entry most code reads.
+**Neither header is the client's to write.** borgo believes `X-Forwarded-For` and `X-Forwarded-Proto` from a peer in `BORGO_TRUSTED_PROXIES` and from nobody else — and from that peer it believes them: the client address in your logs and the scheme a WebSocket `Origin` is compared against come from those headers. Both generated configs write `X-Real-IP` and `X-Forwarded-For` from the peer they read the request from — `$remote_addr` in nginx, `{remote_host}` in Caddy — and neither appends to, or passes through, what arrived. An inbound `X-Real-IP` is a header anyone on the internet can send, and nothing downstream can tell it from a real one; `$proxy_add_x_forwarded_for`, which nginx used to use here, keeps the client's invention as the *first* entry of the chain, which is the entry most code reads.
 
-Behind a proxy that is not this one — a CDN, a load balancer, another nginx — `$remote_addr` is that proxy and the headers describe *it*, not the client. Then, and only then, tell your proxy which hop to trust: `set_real_ip_from` plus `real_ip_header` in nginx, `trusted_proxies` in Caddy. Set `BORGO_PUSH_KEY` on both halves if you would rather not depend on a proxy header at all — see [realtime](realtime.md).
+Behind a proxy that is not this one — a CDN, a load balancer, another nginx — `$remote_addr` is that proxy and the headers describe *it*, not the client. Then, and only then, tell your proxy which hop to trust: `set_real_ip_from` plus `real_ip_header` in nginx, `trusted_proxies` in Caddy — and name that hop in `BORGO_TRUSTED_PROXIES`.
 
 Behind https, set `SESSION_SECURE=1` so session cookies carry the `Secure` attribute. Responses marked with `borgo.Cache` carry ordinary `Cache-Control` headers — see [Caching](#caching) below.
 
@@ -276,31 +276,9 @@ Set `BORGO_METRICS=1` and the Go front also serves `/metrics` in Prometheus text
 
 Route labels are the matched route *pattern*, not each concrete URL — and the pattern is the router's colon form, so `pages/tasks/[id].tsx` is labelled `route="/tasks/:id"`, never `/tasks/[id]` and never `/tasks/7`. After 100 distinct routes new ones fold into `route="other"`, so cardinality stays bounded.
 
-## The key and cleartext
+## Where the push key went
 
-`BORGO_PUSH_KEY` authenticates `borgo.Push` to the front server. Go sends it as a header, so whoever can read the connection can read the key — and a key that leaks authenticates the leaker.
-
-Go therefore refuses to send it when it cannot establish that the connection protects it. `https://` is fine. So is any address that is this machine — `127.0.0.1`, `localhost`, `::1` — because `borgo start` puts both halves on one box and nothing leaves it. What is refused is cleartext to a *different* host. `borgo.Serve` says so at boot, before it binds — the process still starts, because the api may have other work — and every `borgo.Push` then returns the refusal as its error:
-
-```
-borgo: every borgo.Push will fail: front:3000 is not this machine and FRONT_URL is http://,
-so BORGO_PUSH_KEY would cross the network in clear. Use https, or BORGO_PUSH_INSECURE=1
-if that network is one you control
-```
-
-```
-borgo.Push: BORGO_PUSH_KEY is set and FRONT_URL is http://front:3000, so the key would
-cross the network in clear: use https, a front server on this machine, or set
-BORGO_PUSH_INSECURE=1 to send it anyway
-```
-
-"This machine" is read literally: `127.0.0.1`, `::1`, any loopback address `net.ParseIP` accepts, and the name `localhost` (case-insensitive, root dot tolerated). The `inet_aton` short forms — `127.1`, `2130706433`, `0x7f000001` — are deliberately *not* loopback here: Go hands none of them to `connect()` as an address, it looks them up as names, and a verdict of "this machine" for something a resolver answers would authorise the key to travel to whatever the answer is. Write `127.0.0.1`. A `BORGO_PUSH_INSECURE` that is not a boolean is fatal at boot, by name, rather than read as "no".
-
-`BORGO_PUSH_INSECURE=1` is the answer when the network really is yours: a compose network, a private VPC, two containers on one host. The boot then logs the opposite line — that the key crosses the network in clear on every push — so a skimmed log reads the right way round. It is not a workaround for a missing certificate on the public internet — there the key is readable by anyone on the path, and so is everything else you push.
-
-A push is also refused when the front server **redirects** it, whatever the escape hatch says. A redirect is the destination choosing where the key goes next, and the check that cleared the first hop knows nothing about the second — `https://front` answering `307` towards somewhere else would hand the key over encrypted and still hand it over. So if your front server sits behind a proxy that redirects `http` to `https`, point `FRONT_URL` at the front server itself rather than at the proxy; the push is an internal call and has no reason to travel through the redirect.
-
-The refusal is deliberate and it is new in 0.21: before, the key went out over whatever `FRONT_URL` named. If your deployment worked yesterday and pushes fail today, this is why, and the fix is one line in your environment.
+Through 0.2x `borgo.Push` was a request from the Go process to the front server, and `BORGO_PUSH_KEY` authenticated it across hosts, with a page of rules about cleartext. Since 0.30 the relay is in the Go process and a push is a call: there is no request, no key, and nothing for a key to protect. `BORGO_PUSH_KEY` and `BORGO_PUSH_INSECURE` refuse the boot by name if still set, so a deployment carried over with them cannot run on a rule that no longer exists. `FRONT_URL` is no longer borgo's: nothing reads it. The [migration page](migration-0.30.md#realtime-moved-into-the-go-process) has the checklist.
 
 ## Environment reference
 
@@ -315,9 +293,6 @@ These are borgo's own variables. Your application's variables get the same disci
 | `BORGO_RENDER_PORT` | a free port | the loopback port the render service binds. Unset, `borgo start` picks a free one at boot and configures both halves from it; set, a port that already answers on `127.0.0.1` refuses the boot |
 | `BORGO_INTERNAL_KEY` | minted per boot | the key that authorises the front's requests to the render service, 32 bytes minimum. Normally never set by hand: the CLI mints one per boot for both halves. A render service without a usable one refuses to boot |
 | `BORGO_TRUSTED_PROXIES` | loopback and the private ranges | CIDRs or addresses whose `X-Forwarded-For` and `X-Forwarded-Proto` are believed. Behind nginx or Caddy, set it to your proxy — a TLS terminator whose `X-Forwarded-Proto` is not trusted has every websocket origin compared against `http`. The default is what makes the recipes on this page work unconfigured, and on a shared private network it lets any peer that can reach the port forge the client address in your logs; `none` trusts nobody |
-| `FRONT_URL` | `http://localhost:$PORT` | where `borgo.Push` reaches the topic relay, which lives in the render service. Under `borgo start` the front already knows that address and this is unnecessary |
-| `BORGO_PUSH_KEY` | unset | shared secret for `borgo.Push` across hosts — on the render service it *replaces* the loopback check, so set it on both halves or neither. Go refuses to send it over cleartext to another host unless `BORGO_PUSH_INSECURE` says so |
-| `BORGO_PUSH_INSECURE` | unset | `1`/`true` lets `BORGO_PUSH_KEY` travel over `http://` to a host that is not this one. For a private network you control — a compose network, a VPC. A value it cannot parse is refused, not read as "no" |
 | `SESSION_SECRET` | unset | HMAC key for signed-cookie sessions, **32 bytes minimum**. Unset warns and boots anyway — session routes then fail per request, closed in both directions. Set but shorter than 32 is fatal at startup: `borgo.Serve` refuses to bind |
 | `SESSION_SECURE` | unset | `1`/`true` adds `Secure` to the session and csrf cookies; `0`/`false` and unset do not. A value that is neither is refused at startup by both halves, rather than read as "not secure" |
 | `BORGO_CSRF` | unset | `0` disables both csrf checks (form actions on the render service, unsafe `/api/*` requests on the front), `1` forces them in dev |
@@ -327,7 +302,7 @@ These are borgo's own variables. Your application's variables get the same disci
 | `BORGO_CSP` | unset | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per request |
 | `BORGO_MAX_BODY` | `33554432` (32 MB) | most either half will read of a request body, in bytes, counted as it arrives; `0` means no limit |
 | `BORGO_RENDER_TIMEOUT` | `30s` | how long the front waits for the render service's response headers before answering `504`. The body is then unbounded, so streaming renders and websockets are not cut |
-| `BORGO_WS_ALLOW_NO_ORIGIN` | unset | `1`/`true` admits websocket clients that send no `Origin` header. Browsers always send one, so this is for non-browser clients — and it re-admits **every** originless caller with them, which is the whole hole it opens |
+| `BORGO_WS_ALLOW_NO_ORIGIN` | unset | `1`/`true` admits websocket clients that send no `Origin` header. Browsers always send one, so this is for non-browser clients — and it re-admits **every** originless caller with them, which is the whole hole it opens. Read by the Go front since 0.30, with the grammar of every other boolean: anything else refuses the boot |
 | `BUN_CONFIG_MAX_HTTP_REQUESTS` | `16384` under `borgo dev` and `borgo start`; `256` (bun's default) otherwise | render service: how many outbound calls it may have in flight, which in practice means loader and action calls to the api. Event streams and websockets are the front's own inbound sockets and do not draw on it. `borgo dev` sets it, every config borgo generates that *launches* the app sets it (Dockerfile, compose, systemd — not the caddy/nginx proxy configs, which set no environment), and `borgo start` re-execs itself to set it when nothing else did. Read at process start — exporting it afterwards has no effect, which is why the re-exec exists |
 | `BORGO_READ_HEADER_TIMEOUT` | `5s` | cap on reading request headers (slow-header clients), on the public port and the internal one |
 | `BORGO_IDLE_TIMEOUT` | `2m` | idle keep-alive reclaim (duration string) |

@@ -741,10 +741,10 @@ export function withCookies(res: Response, cookies: string[]): Response {
 // props script, and without the flag registerServiceWorker installs a caching
 // worker over a dev session
 export const DEV_INLINE_CLIENT =
-  "<script>window.__BORGO_DEV__=1;(()=>{const c=()=>{const w=new WebSocket(`ws://${location.host}/__borgo/dev`);" +
+  '<script>window.__BORGO_DEV__=1;(()=>{const w=new EventSource("/__borgo/dev");' +
   'w.onmessage=(e)=>{const m=JSON.parse(e.data);if(m.type==="css"){for(const l of document.querySelectorAll(\'link[rel="stylesheet"]\'))l.href=l.href.split("?")[0]+"?t="+Date.now();}' +
   'else if(!m.stamp||(m.stamp>performance.timeOrigin&&Number(sessionStorage.getItem("borgo:devstamp")||0)<m.stamp)){if(m.stamp)sessionStorage.setItem("borgo:devstamp",String(m.stamp));location.reload();}};' +
-  "w.onclose=()=>setTimeout(c,300);};c();})()</script>";
+  "})()</script>";
 
 export type ShellParts = {
   // everything before <!--app-->, untouched

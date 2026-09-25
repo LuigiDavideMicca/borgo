@@ -156,11 +156,16 @@ describe("the orchestrators wire the topology", () => {
     expect(cli).toContain("...goFrontEnv(topology),");
   });
 
-  test("borgo dev: go and the front server each get their half, and the pokes go to the render port with the key", () => {
+  test("borgo dev: go and the front server each get their half, and the pokes carry the key to either port", () => {
     expect(dev).toContain("...goFrontEnv(topology),");
     expect(dev).toContain("...renderEnv(topology),");
-    expect(dev).toContain("fetch(`${renderBase}/__borgo/dev/${path}`");
+    expect(dev).toContain("fetch(`${base}/__borgo/dev/${path}`");
     expect(dev).toContain("headers: renderHeaders,");
+    // the css compiles on the render service, the browsers are told by go
+    expect(dev).toContain("const notifyFront = (path: string) => poke(renderBase, path);");
+    expect(dev).toContain("const notifyGo = (path: string) => poke(goBase, path);");
+    expect(dev).toContain('await notifyGo("reload")');
+    expect(dev).toContain('await notifyGo("css")');
   });
 
   // an export has no front: the pages come from the render service itself,

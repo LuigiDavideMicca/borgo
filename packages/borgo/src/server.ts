@@ -642,25 +642,11 @@ export async function serve({
     console.log(`  ${method} ${path.padEnd(24)} ${statusColor(status)(String(status))} ${c.dim(fmtMs(ms))}`);
   }
 
-  // dev channel: a fresh boot after a code change greets browsers with the
-  // changed files and the new page -> chunk map
-  const devSockets = new Set<import("bun").ServerWebSocket<SocketData>>();
   const bootStamp = Date.now();
-  // the last reload borgo dev asked for. A .go save restarts the go front the
-  // browser's dev socket runs through, so the broadcast reaches sockets that
-  // dropped with it and nobody reloaded (found by fastrefresh.e2e.ts, the
-  // first time it ran on the go front). Every socket that connects is told
-  // again, stamped, and a page loaded after the reload ignores it
-  let reloadStamp = 0;
+  // the dev channel is the go front's (dev_channel.go): a fresh boot after a
+  // code change tells it the changed files and the new page -> chunk map,
+  // and it greets every browser with them, the ones reconnecting included
   const changed = decodeChanged(process.env.BORGO_CHANGED);
-  const broadcast = (msg: Record<string, unknown>) => {
-    const data = JSON.stringify(msg);
-    for (const ws of devSockets) ws.send(data);
-  };
-
-  // the one websocket left here is the dev channel: the topic relay, /ws
-  // and borgo.Push's endpoint moved into the go front in 0.30
-  type SocketData = { kind: "dev" };
 
   // a dev restart can try to bind before the os releases the previous port
   const bindRetry = async <T>(start: () => T): Promise<T> => {
@@ -677,7 +663,7 @@ export async function serve({
     }
   };
 
-  const server = await bindRetry(() => Bun.serve<SocketData, never>({
+  await bindRetry(() => Bun.serve({
     port,
     ...(hostname ? { hostname } : {}),
     // bun's ceiling is out of the way and borgo counts instead: every body
@@ -705,27 +691,6 @@ export async function serve({
         }),
       );
     },
-    websocket: {
-      // websockets have their own deadline and bun pings them itself
-      idleTimeout: 120,
-      // the dev channel only listens: nothing a browser sends here is read
-      maxPayloadLength: 1024,
-      open(ws) {
-        devSockets.add(ws);
-        if (changed.length) {
-          // the whole set: a browser told about one file of a two-file save may
-          // be told about the one it is not showing, and applies nothing
-          ws.send(
-            JSON.stringify({ type: "js", files: changed, chunks: chunkMap, stamp: bootStamp }),
-          );
-        }
-        if (reloadStamp) ws.send(JSON.stringify({ type: "reload", stamp: reloadStamp }));
-      },
-      close(ws) {
-        devSockets.delete(ws);
-      },
-      message() {},
-    },
     async fetch(req) {
       const t0 = performance.now();
       const url = new URL(req.url);
@@ -747,10 +712,9 @@ export async function serve({
       // ssr/gzip pipeline keeps rendering into a stream nobody reads
       const dropBody = (res: Response) => headResponse(req.method, res);
 
+      // the orchestrator's one poke here: compile the css in place. Telling
+      // the browsers is the go front's, through its dev channel, poked next
       if (dev && url.pathname.startsWith("/__borgo/dev")) {
-        if (url.pathname === "/__borgo/dev" && server.upgrade(req, { data: { kind: "dev" } })) {
-          return undefined as never;
-        }
         if (req.method === "POST" && url.pathname === "/__borgo/dev/css") {
           try {
             await compileCss(true);
@@ -758,12 +722,6 @@ export async function serve({
             console.error(error instanceof Error ? error.message : error);
             return secure(new Response(null, { status: 500 }));
           }
-          broadcast({ type: "css" });
-          return secure(new Response(null, { status: 204 }));
-        }
-        if (req.method === "POST" && url.pathname === "/__borgo/dev/reload") {
-          reloadStamp = Date.now();
-          broadcast({ type: "reload", stamp: reloadStamp });
           return secure(new Response(null, { status: 204 }));
         }
         return secure(new Response("not found", { status: 404 }));
@@ -817,6 +775,20 @@ export async function serve({
       return secure(response);
     },
   }));
+
+  // bound, so what the browsers fetch on hearing this is answered: the go
+  // front's dev channel greets them with the changed files and the chunk
+  // map, this boot's and every later browser's (dev_channel.go). The whole
+  // set: a browser told about one file of a two-file save may be told about
+  // the one it is not showing, and applies nothing
+  if (dev && render && changed.length) {
+    fetch(`${api}/__borgo/dev/js`, {
+      method: "POST",
+      headers: { ...apiDefaults, "Content-Type": "application/json" },
+      body: JSON.stringify({ files: changed, chunks: chunkMap, stamp: bootStamp }),
+      signal: AbortSignal.timeout(2_000),
+    }).catch((error) => console.error(`  the go front was not told about this build: ${error instanceof Error ? error.message : error}`));
+  }
 
   const ready = performance.now() - started;
   if (reloading) {

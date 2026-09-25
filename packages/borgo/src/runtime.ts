@@ -776,36 +776,40 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
       }
     }
 
+    // the go front's event stream: the browser only receives. The stream
+    // names a retry, but a stopped dev server is not probed three times a
+    // second until the tab closes: the redial backs off, and opens fresh
     let attempts = 0;
     const connect = () => {
-      const scheme = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${scheme}://${location.host}/__borgo/dev`);
-      // edits made before the channel is open are lost: tests wait on this flag
-      ws.onopen = () => {
-        attempts = 0;
-        (window as unknown as Record<string, unknown>).__borgoDevConnected = true;
-      };
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "reload") {
-          // a reconnect after our own reload re-delivers the boot's welcome message: applying it would loop
-          if (msg.stamp && (msg.stamp <= performance.timeOrigin || msg.stamp <= lastStamp)) return;
-          if (msg.stamp) {
-            lastStamp = msg.stamp;
-            try {
-              sessionStorage.setItem("borgo:devstamp", String(msg.stamp));
-            } catch {}
-          }
-          location.reload();
+    const channel = new EventSource("/__borgo/dev");
+    // edits made before the channel is open are lost: tests wait on this flag
+    channel.onopen = () => {
+      attempts = 0;
+      (window as unknown as Record<string, unknown>).__borgoDevConnected = true;
+    };
+    channel.onerror = () => {
+      channel.close();
+      setTimeout(connect, Math.min(3_000, 300 * ++attempts));
+    };
+    channel.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "reload") {
+        // a reconnect after our own reload re-delivers the boot's welcome message: applying it would loop
+        if (msg.stamp && (msg.stamp <= performance.timeOrigin || msg.stamp <= lastStamp)) return;
+        if (msg.stamp) {
+          lastStamp = msg.stamp;
+          try {
+            sessionStorage.setItem("borgo:devstamp", String(msg.stamp));
+          } catch {}
         }
-        else if (msg.type === "css") {
-          for (const link of document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')) {
-            link.href = link.href.split("?")[0] + "?t=" + Date.now();
-          }
-        } else if (msg.type === "js") applyUpdate(msg);
-      };
-      // a stopped dev server is not probed three times a second until the tab closes
-      ws.onclose = () => setTimeout(connect, Math.min(3_000, 300 * ++attempts));
+        location.reload();
+      }
+      else if (msg.type === "css") {
+        for (const link of document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')) {
+          link.href = link.href.split("?")[0] + "?t=" + Date.now();
+        }
+      } else if (msg.type === "js") applyUpdate(msg);
+    };
     };
     connect();
   }

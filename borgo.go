@@ -635,6 +635,14 @@ func serveFront(ctx context.Context, onShutdown func(), renderer *url.URL, apiPo
 	if err != nil {
 		return err
 	}
+	// borgo dev's fast-refresh channel: the browser's stream on the public
+	// port, the pokes on the internal one, nothing in production
+	var devCh *devChannel
+	var pokes http.Handler
+	if dev {
+		devCh = newDevChannel()
+		pokes = devCh.pokes()
+	}
 	public.Handler = newFrontHandler(api, frontOptions{
 		csrf:     csrf,
 		security: security,
@@ -646,8 +654,9 @@ func serveFront(ctx context.Context, onShutdown func(), renderer *url.URL, apiPo
 		dev:      dev,
 		app:      app,
 		ws:       relay,
+		devCh:    devCh,
 	}, renderer, key, renderTimeout)
-	internal.Handler = internalHandler(key, app, api)
+	internal.Handler = internalHandler(key, app, api, pokes)
 	defer armStreamShutdown(public)()
 	defer armStreamShutdown(internal)()
 	printFrontStartup(patterns, publicPort, internal.Addr, renderer)
@@ -897,6 +906,8 @@ func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware,
 // it guards the public port, or a loader would reach an api path the browser
 // cannot; the //borgo:export functions answer only here, behind the key and
 // ahead of the app's middleware: export.go says why.
-func internalHandler(key string, app *appMiddleware, api http.Handler) http.Handler {
-	return requireInternalKey(key, withSessionOnce(withExports(withAppMiddleware(app, api))))
+func internalHandler(key string, app *appMiddleware, api http.Handler, pokes http.Handler) http.Handler {
+	// the dev channel's pokes are borgo's own, like the exports: behind the
+	// key, ahead of the app's middleware, and nothing in production
+	return requireInternalKey(key, withDevPokes(pokes, withSessionOnce(withExports(withAppMiddleware(app, api)))))
 }

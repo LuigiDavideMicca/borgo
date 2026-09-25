@@ -109,13 +109,17 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `(*SSEHub).Subscribers() int` | How many clients are connected right now. | stable |
 | `(*SSEHub).Close()` | Ends every stream on the hub and drops its subscribers. Idempotent. | stable |
 
-### WebSocket push
+### WebSocket topics
 
 | Symbol | What it is for | Stability |
 | --- | --- | --- |
-| `Push[T any](topic, event string, data T) error` | Publishes to a WebSocket topic on the front server. `borgogen` records `T` in the generated event map, typing the browser's `subscribe` callback. | stable |
+| `Push[T any](topic, event string, data T) error` | Publishes to a WebSocket topic, in this process: since 0.30 the relay lives beside the handlers and a push is a call. An error names a topic no handshake could hold or a payload over the message limit; a topic nobody holds right now is delivered to nobody and is not an error. `borgogen` records `T` in the generated event map, typing the browser's `subscribe` callback. | stable |
+| `TopicCheck` | `func(r *http.Request, topic string) bool`: one topic on one request, the session readable with `GetSession`. | provisional |
+| `CanSubscribe(check TopicCheck)` | The check every topic a socket asks for must pass, once per topic at the handshake. A refused topic closes the socket with `4403` naming it. Registered once, before `Serve`. Without one, `borgo dev` admits everything and `borgo start` refuses everything, each saying so at startup. A check that panics refuses. | provisional |
+| `CanPublish(check TopicCheck)` | The check a browser's publish must pass, per message; without one, publishing follows `CanSubscribe`. A refused message is dropped, the socket stays open. | provisional |
+| `Realtime() http.Handler` | The relay as a handler, for an app that mounts borgo on a server of its own: mount it at `/ws`. One per process, configured from the environment; an environment it cannot read answers `500` with the reason. | provisional |
 
-`push.go` declares exactly one exported function for app topics. `PushT` was folded into it in 0.21 — see [finding 2](#duplicated-apis).
+`push.go` declares exactly one exported function for publishing. `PushT` was folded into it in 0.21 — see [finding 2](#duplicated-apis).
 
 ### Cache invalidation
 
@@ -141,7 +145,7 @@ Both refuse an empty name. Under `borgo start` the cache is in the process the c
 | `redirect(to: string, status = 303)` | Builds a redirect `Response` for a loader, an action or `middleware.ts`. | stable |
 | `next(init?)` | What `middleware.ts` returns to let the page through; `init.headers` are added to its response. | stable |
 | `rewrite(path, init?)` | What `middleware.ts` returns to render another page of this app for the request, once, without changing the URL. Refused for the page itself, `/api`, `/__borgo`, or a path with a query. | stable |
-| `subscribe(topic, onEvent, options?)` | Opens a WebSocket channel on a topic, with reconnect and backoff. Returns a `Channel`. `options.onRefused(reason)` fires once when the relay refuses the origin — the one close that will not change on a redial — and the channel is over. | stable |
+| `subscribe(topic, onEvent, options?)` | Opens a WebSocket channel on a topic, with reconnect and backoff. Returns a `Channel`. `options.onRefused(reason)` fires once when the relay refuses the socket — its origin, or a topic `CanSubscribe` said no to: the one close that will not change on a redial — and the channel is over. | stable |
 | `Island({ name, props, client })` | Renders a hydration marker for a component in `islands/`. `client` is `"load"` or `"visible"`. | stable |
 | `CsrfField()` | Renders the hidden CSRF input a `<form method="post">` needs. | stable |
 | `registerServiceWorker(path = "/sw.js")` | Registers a service worker in production only; no-ops in dev, on the server and where unsupported. | stable |
@@ -254,11 +258,9 @@ Read at runtime unless noted. Defaults in parentheses.
 | `PORT` (`3000`) | Go, which binds it; the CLI, which resolves the topology | The public port, and the only one. | stable |
 | `API_PORT` (`3501`) | Go, which binds it on `127.0.0.1` alone; the render service, to dial it | The API's internal listener, for loaders and form actions. The browser never reaches it — `/api/*` on the public port is the same mux in the same process. A value that is not a port number (0-65535, digits only) is refused before the Go server binds. | stable |
 | `SESSION_SECRET` | Go | HMAC key for signed-cookie sessions. At least 32 bytes. Missing is logged at startup and fails session routes per request; **shorter than 32 bytes is fatal at startup** — see [sessions](auth-and-sessions.md#sessions). | stable |
-| `SESSION_SECURE` | Go and the render service | Adds `Secure` to the session and CSRF cookies. The grammar is exactly Go's `strconv.ParseBool`, case-sensitive: `1`, `t`, `T`, `true`, `TRUE`, `True` mean on; `0`, `f`, `F`, `false`, `FALSE`, `False` mean off; unset means off. Both halves read that alphabet and **refuse anything else at startup** — `yes`, `on`, `Yes` included — rather than reading it as "not secure". The same grammar governs every boolean switch below (`BORGO_CSRF`, `BORGO_SECURITY_HEADERS`, `BORGO_METRICS`, `BORGO_WS_ALLOW_NO_ORIGIN`, `BORGO_PUSH_INSECURE`). | stable |
-| `BORGO_PUSH_KEY` | Go and the render service | Shared secret for `Push` across hosts. On the render service, which holds the topic relay and so receives the push, it *replaces* the loopback check. On the Go side it is held back rather than sent over cleartext to another machine — see `BORGO_PUSH_INSECURE`. | stable |
-| `BORGO_PUSH_INSECURE` | Go | `1`/`true` lets `BORGO_PUSH_KEY` travel over `http://` to a host that is not this one, for a private network you control. Unset, or anything it cannot parse, means no — a value it cannot read is refused rather than treated as absent. | stable |
+| `SESSION_SECURE` | Go and the render service | Adds `Secure` to the session and CSRF cookies. The grammar is exactly Go's `strconv.ParseBool`, case-sensitive: `1`, `t`, `T`, `true`, `TRUE`, `True` mean on; `0`, `f`, `F`, `false`, `FALSE`, `False` mean off; unset means off. Both halves read that alphabet and **refuse anything else at startup** — `yes`, `on`, `Yes` included — rather than reading it as "not secure". The same grammar governs every boolean switch below (`BORGO_CSRF`, `BORGO_SECURITY_HEADERS`, `BORGO_METRICS`, `BORGO_WS_ALLOW_NO_ORIGIN`). | stable |
 | `NO_COLOR` | Go and the render service | Any value disables ANSI colour. | stable |
-| `BORGO_MAX_BODY` (`33554432`) | Both, each for what it reads | Largest request body either half reads, in bytes, counted as the bytes arrive rather than taken from a header — so a chunked body is bounded like any other, and one that lies about its length is bounded by the smaller of what it declares and what it sends. The front applies it to `/api/*`, the render service to a form action and a push. `0` means no limit. Refused at boot if it is not a whole number. | stable |
+| `BORGO_MAX_BODY` (`33554432`) | Both, each for what it reads | Largest request body either half reads, in bytes, counted as the bytes arrive rather than taken from a header — so a chunked body is bounded like any other, and one that lies about its length is bounded by the smaller of what it declares and what it sends. The front applies it to `/api/*`, the render service to a form action. `0` means no limit. Refused at boot if it is not a whole number. | stable |
 | `BORGO_CSRF` | Both, each for its own half | `0` disables both CSRF checks, `1` forces them in dev. Unsafe `/api/*` requests are checked by the front, form actions by the render service, against the same cookie and the same rejection table. | stable |
 | `BORGO_SECURITY_HEADERS` | Both | `0` drops the security headers and the CSP. Each half applies them to what it authors, and adds only what the other left empty. | stable |
 | `BORGO_CSP` | Both | `0` drops the CSP alone; any other value replaces the policy, with `{nonce}` substituted per render. The nonced policy is the render service's, since only it knows the nonce; the front applies the same policy without one to what it writes itself. | stable |
@@ -270,7 +272,6 @@ Read at runtime unless noted. Defaults in parentheses.
 | `API_URL` (`http://localhost:$API_PORT`) | Where the render service reaches the api. | stable |
 | `BORGO_RENDER_PORT` (a free port, picked at boot) | The loopback port the render service binds. Unset, `borgo start` and `borgo dev` pick a free one and set it on both halves from one place, so two apps on one machine never meet on it. Set, it is used as named, and a port that already answers on `127.0.0.1` refuses the boot: on Windows a second process binds a port another one listens on without an error, and takes its traffic. | provisional |
 | `BORGO_INTERNAL_KEY` | The per-boot key that authorises the front's requests to the render service, at least 32 bytes. Normally you never set it: the CLI mints 32 random bytes per boot and hands the same value to both halves. A value shorter than the floor is announced and replaced; a render service that has no usable key refuses to boot, because a loopback listener without one is a listener anyone on the box can drive. | provisional |
-| `BORGO_WS_ALLOW_NO_ORIGIN` | `1`/`true` admits websocket clients sending no `Origin`. Browsers always send one, so this exists for non-browser clients — and it admits every other originless caller too. | stable |
 | `BUN_CONFIG_MAX_HTTP_REQUESTS` (`16384` under `borgo dev` and `borgo start`; `256`, bun's default, otherwise) | How many outbound calls the render service may have in flight — in practice, loader and action calls to the api. Read by bun at process start and unraisable afterwards. Event streams and websockets are the front's own inbound sockets and are not drawn from this pool. | stable |
 
 `BORGO_METRICS` was `METRICS` before 0.21. The old name is not honoured, and not honouring it is the point: a bare `METRICS` is the most collidable variable borgo ever read, and an alias kept for compatibility would keep the collision alive.
@@ -286,7 +287,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `BORGO_TRUSTED_PROXIES` (loopback and the private ranges) | CIDRs or addresses whose `X-Forwarded-For` and `X-Forwarded-Proto` are believed. From anyone else those headers are the client's own claims and are rebuilt from the connection. Unset it trusts `127.0.0.0/8`, `::1/128`, `10/8`, `172.16/12`, `192.168/16` and `fc00::/7`, which is what makes the generated compose and reverse-proxy recipes work unconfigured — and it means that on a shared private network (a pod network, an office LAN) **any peer that can reach the port can forge the client address in your logs**. `none` trusts nobody; a list of your own proxies is better than both. A malformed entry is refused at boot naming the variable. | provisional |
 | `BORGO_METRICS` | `1` exposes `/metrics` on the public port, in Prometheus text format. | stable |
 | `BORGO_CACHE_DIR` (`.borgo/cache/html`) | Where cached pages persist across restarts, keyed to the build that rendered them. | provisional |
-| `FRONT_URL` (`http://localhost:$PORT`) | Where `Push` reaches the process holding the topic relay — the render service, whose address the front already knows, so this is for a layout that is not `borgo start`. An `http://` URL naming another machine holds the push key back unless `BORGO_PUSH_INSECURE` is set. | stable |
+| `BORGO_WS_ALLOW_NO_ORIGIN` | `1`/`true` admits websocket clients sending no `Origin`. Browsers always send one, so this exists for non-browser clients — and it admits every other originless caller too. Read by Go since 0.30, where `/ws` is answered; the grammar is the boolean one above, and anything else refuses the boot. | stable |
 | `BORGO_READ_HEADER_TIMEOUT` (`5s`) | Cap on reading request headers. | stable |
 | `BORGO_IDLE_TIMEOUT` (`2m`) | Idle keep-alive reclaim, on both listeners. | stable |
 | `BORGO_READ_TIMEOUT` (`60s` on the public port) | How long a request body may go without progress. Every read of the body moves the deadline forward, so an upload that keeps arriving is never cut and one that goes silent is. `0` turns it off; an api served alone defaults to `0`. | stable |
@@ -294,7 +295,7 @@ Read at runtime unless noted. Defaults in parentheses.
 | `BORGO_SHUTDOWN_TIMEOUT` (`10s`) | Grace period for in-flight requests; `0` waits indefinitely. | stable |
 | `BORGO_HASH_SLOTS` (`max(1, GOMAXPROCS/2)`) | Password hashes that may run at once. A value that is not a positive integer is refused by `CheckEnv`, and so by `Serve` and `ServeContext`. | stable |
 
-The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` is a positive integer and `FRONT_URL` a URL. A malformed duration or a non-positive slot count stops the boot before the startup banner, as an error `ServeContext` returns and `Serve` exits on — never a panic, so a program that embeds the api keeps its process and can act on the refusal. The slot count is read while the package initialises, before `main`: there it can only fall back to the default cap and log, and `CheckEnv` is where it becomes a value.
+The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` is a positive integer. A malformed duration or a non-positive slot count stops the boot before the startup banner, as an error `ServeContext` returns and `Serve` exits on — never a panic, so a program that embeds the api keeps its process and can act on the refusal. The slot count is read while the package initialises, before `main`: there it can only fall back to the default cap and log, and `CheckEnv` is where it becomes a value.
 
 > **Where `BORGO_FRONT_READ_TIMEOUT` went.** It was the Bun front's socket deadline, and it needed `FRONT` in the name because one environment reached both halves and Go reads `BORGO_READ_TIMEOUT` and `BORGO_IDLE_TIMEOUT` as durations while bun read whole seconds — `=2m` configured one half and silently left the other on its default. The public port is Go's now, so the deadlines a client meets are the Go ones above, in Go's grammar, refused loudly when malformed. The render service has no deadline knob at all: its only client is the front, on loopback, and a deadline there would have bounded the response write too — which is what the *keep-warm* mechanism existed to work around, and it is deleted with it. Neither old name is honoured as an alias.
 
@@ -445,7 +446,6 @@ Failing is the point: a directive that is well formed and still does nothing rea
 | `data-borgo-native` | `<form>` | Opts a form out of enhanced submission. | stable |
 | `?__borgo=props` | URL | Asks a page for its loader props as JSON. | internal |
 | `X-Borgo-Action`, `X-Borgo` | HTTP | Action request marker, and the response discriminator (`action` / `raw`). | internal |
-| `X-Borgo-Key` | HTTP | `BORGO_PUSH_KEY` on a cross-host push. | internal |
 | `X-Borgo-Cache` | HTTP | How a [cached page](pages-and-routing.md#cached-pages) answered: `miss`, `hit`, `stale` or `bypass`. Diagnostic — read it, do not build on it. | provisional |
 | `X-CSRF-Token` | HTTP | The double-submit token on an unsafe `/api/*` request. `apiFetch` attaches it. | stable |
 | `borgo_session`, `borgo_csrf` | Cookies | The two cookies borgo owns. | stable |
@@ -535,7 +535,7 @@ Three verbs, and the two Go ones differ by transport rather than by intent.
 *Cost:* zero.
 
 **4. Environment variable prefixes are inconsistent.**
-Most variables are `BORGO_*`; the exceptions are `PORT`, `API_PORT`, `API_URL`, `FRONT_URL`, `SESSION_SECRET`, `SESSION_SECURE` and `NO_COLOR`, plus bun's own `BUN_CONFIG_MAX_HTTP_REQUESTS`. Those are defensible — `PORT` and `NO_COLOR` are ecosystem conventions, `SESSION_*` is self-describing, and the bun one is not borgo's to rename. The two that were not defensible, `METRICS` and `DEV`, were prefixed in 0.21.
+Most variables are `BORGO_*`; the exceptions are `PORT`, `API_PORT`, `API_URL`, `SESSION_SECRET`, `SESSION_SECURE` and `NO_COLOR`, plus bun's own `BUN_CONFIG_MAX_HTTP_REQUESTS`. Those are defensible — `PORT` and `NO_COLOR` are ecosystem conventions, `SESSION_*` is self-describing, and the bun one is not borgo's to rename. The two that were not defensible, `METRICS` and `DEV`, were prefixed in 0.21.
 *Disposition taken:* **`METRICS` → `BORGO_METRICS` and `DEV` → `BORGO_DEV`, both in 0.21, neither with an alias.** An alias for `METRICS` was considered and rejected: honouring the old name would preserve the exact collision the prefix exists to end, and an app that wants metrics on an upgrade sets one variable. `BORGO_DEV` needed no alias either way — it is set only by borgo's own dev loop, so nothing outside the framework was reading it.
 
 **5. "Route" means three different things.**

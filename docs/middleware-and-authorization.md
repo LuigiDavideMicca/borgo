@@ -208,7 +208,7 @@ func limited(next http.Handler) http.Handler {
 
 - **One of each.** One `api/middleware.go` middleware and one `middleware.ts`; composition happens inside them.
 - **`middleware.ts` never runs on `/api`.** The api is Go's, and its guard is `api/middleware.go`.
-- **WebSocket topics are not authorized per topic.** `api/middleware.go` sees the `/ws` handshake when its matcher covers `/ws`, but nothing yet decides which topics an accepted socket may subscribe to — see [realtime](realtime.md#honest-limits).
+- **`api/middleware.go` sees the `/ws` handshake, not the topics.** Which topics an accepted socket may hold is `borgo.CanSubscribe`'s decision, per topic and with the session — see [who may hold a topic](realtime.md#who-may-hold-a-topic).
 - **Exports skip the app's middleware by design**, and trust the render service that holds the key.
 - **What the examples keep in memory is per process** — the limiter's counts, a revocation cutoff. Several instances need a store they share.
 - **Forwarded values are capped at 16 KiB** in total, encoded.

@@ -1,6 +1,6 @@
 import { describeParentMismatch, parentGone, readParent } from "./parent-watch";
 import { serve } from "./server";
-import { resolveSwitches } from "./util";
+import { INTERNAL_KEY_HEADER, decodeChanged, resolveSwitches } from "./util";
 
 // every switch read once, above the try: a value borgo refuses must fail the
 // boot, not be thrown inside the catch that binds a port to serve failures
@@ -33,45 +33,41 @@ if (import.meta.main) {
     // loopback render port, and the public one belongs to the go front
     const port = switches.render ? switches.renderPort : Number(process.env.PORT || 3000);
     const hostname = switches.render ? "127.0.0.1" : undefined;
-    const stamp = Date.now();
-    // as in serve(): a reload requested while the browser's socket was down
-    // with the go front is told again to every socket that connects
-    let reloadStamp = 0;
-    const sockets = new Set<import("bun").ServerWebSocket<undefined>>();
-    let server: import("bun").Server<undefined>;
     // the original failure may have been the port itself
     try {
-      server = Bun.serve<undefined, never>({
+      Bun.serve({
         port,
         ...(hostname ? { hostname } : {}),
-        websocket: {
-          open(ws) {
-            sockets.add(ws);
-            ws.send(JSON.stringify({ type: "js", file: process.env.BORGO_CHANGED ?? "(build)", chunks: {}, stamp }));
-            if (reloadStamp) ws.send(JSON.stringify({ type: "reload", stamp: reloadStamp }));
-          },
-          close(ws) {
-            sockets.delete(ws);
-          },
-          message() {},
-        },
         fetch(req) {
           const url = new URL(req.url);
-          if (url.pathname === "/__borgo/dev" && server.upgrade(req)) return undefined as never;
+          // the css poke: nothing to compile here, and the header sends the
+          // orchestrator to restart this process instead
           if (req.method === "POST" && url.pathname.startsWith("/__borgo/dev/")) {
-            if (url.pathname.endsWith("/reload")) {
-              reloadStamp = Date.now();
-              const data = JSON.stringify({ type: "reload", stamp: reloadStamp });
-              for (const ws of sockets) ws.send(data);
-            }
             return new Response(null, { status: 204, headers: { "x-borgo-fallback": "1" } });
           }
+          // every browser waits on the go front's channel: the poke below,
+          // and the next boot that builds, tell it, and the overlay reloads
           return new Response(overlayHtml(error), {
             status: 500,
             headers: { "Content-Type": "text/html; charset=utf-8", "x-borgo-fallback": "1" },
           });
         },
       });
+      // bound: the browsers are told there is a new page to show - the
+      // overlay of this error, in place of the one before it, or of the page
+      // that was there. The same poke serve() sends for a build that worked
+      if (switches.render) {
+        const api = process.env.API_URL || `http://127.0.0.1:${process.env.API_PORT || 3501}`;
+        const files = decodeChanged(process.env.BORGO_CHANGED);
+        fetch(`${api}/__borgo/dev/js`, {
+          method: "POST",
+          headers: { [INTERNAL_KEY_HEADER]: switches.internalKey, "Content-Type": "application/json" },
+          body: JSON.stringify({ files: files.length ? files : ["(build)"], chunks: {}, stamp: Date.now() }),
+          signal: AbortSignal.timeout(2_000),
+        }).catch((pokeError) =>
+          console.error(`  the go front was not told about this build: ${pokeError instanceof Error ? pokeError.message : pokeError}`),
+        );
+      }
     } catch (fallbackError) {
       if ((fallbackError as { code?: string }).code === "EADDRINUSE") {
         console.error(`port ${port} is in use - stop whatever holds it (borgo doctor names it) or set PORT`);

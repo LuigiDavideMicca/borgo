@@ -26,7 +26,7 @@ A running borgo app is a Go process and a Bun process. The Go binary answers the
  |  bun render service           packages/borgo/src/server.ts |
  |                                                            |
  |  ssr documents                loaders, form actions        |
- |  (react-dom/server)           websocket topic relay        |
+ |  (react-dom/server)                                        |
  +------------------------------------------------------------+
 ```
 
@@ -68,7 +68,7 @@ The long sequence is the render service's. `serve()` in `packages/borgo/src/serv
 
 **6. Index the static files.** The front serves `public/` and rarely leaves anything for this process, so the index here is the fallback: in production one walk records every file's size, mtime, content type, cache-control, whether it has `.br`/`.gz` siblings and an ETag for each variant. What still reaches it is the path the front deliberately declines — a file whose name carries no extension, which is almost always a page — so the lookup has to be there when a route misses. Dev skips this on both sides: it rewrites assets in place under stable names, where a cached ETag would pin the browser to yesterday's bundle.
 
-**7. Bind.** `Bun.serve` on `127.0.0.1` and the render port, with a WebSocket handler for both the app topic relay and the dev channel, and no socket deadline at all. That is not a relaxation: bun's `idleTimeout` bounds the response write as well as the inbound read, so on the public port it used to cut a document that streamed longer than it had, and borgo had to keep re-arming it by hand for every request that provably had nothing left to send. The deadlines that matter moved to where the browser actually is — the front's read, read-header and write timeouts, and a header deadline on the render hop — and the only client of this listener is the front, on loopback, which has its own.
+**7. Bind.** `Bun.serve` on `127.0.0.1` and the render port, with no websocket handler at all — the topic relay and the dev channel are the front's since 0.30 — and no socket deadline at all. That is not a relaxation: bun's `idleTimeout` bounds the response write as well as the inbound read, so on the public port it used to cut a document that streamed longer than it had, and borgo had to keep re-arming it by hand for every request that provably had nothing left to send. The deadlines that matter moved to where the browser actually is — the front's read, read-header and write timeouts, and a header deadline on the render hop — and the only client of this listener is the front, on loopback, which has its own.
 
 The route table is then printed and the server is live. Nothing about the table can change afterwards: adding a page means a restart, which in dev is what the watcher does for you.
 
@@ -81,10 +81,12 @@ The front's, on the public port:
 ```
   request
     |
+    +-- /__borgo/dev ....... dev only: the fast-refresh stream, this process's
     +-- /__borgo/* ......... a name the two processes use: 404 to the browser
     +-- /healthz ........... status of both halves
     +-- /metrics ........... prometheus text, only with BORGO_METRICS=1
     +-- /api/* ............. your go handlers, in this process
+    +-- /ws ................ the websocket relay: Origin checked, CanSubscribe asked per topic
     |
     +-- an alias of a path ................ 308 to its one spelling
     +-- GET|HEAD + a file under public/ ... from memory, or opened per request
@@ -97,9 +99,7 @@ And the render service's, behind it:
 ```
   request  (loopback; without this boot's key, 403 before the path is read)
     |
-    +-- /ws ................ websocket upgrade, Origin checked, topics joined
-    +-- POST /__borgo/publish  go -> browser push (loopback, or BORGO_PUSH_KEY)
-    +-- /__borgo/dev* ...... dev only: the fast-refresh channel
+    +-- POST /__borgo/dev/css  dev only: recompile the css in place
     +-- /__borgo/routes .... which pages may be shared, and under which tags
     +-- /healthz ........... this process alone, for the front's probe
     |
@@ -124,10 +124,10 @@ What the front does not answer itself it forwards to the render service, and wha
 
 - **`X-Borgo-Internal`**, the key for this boot: minted by the parent process, handed to both halves in the environment, compared in constant time at the top of the render service's handler and again on everything that calls back this way. Without it the answer is 403, before the path is even looked at.
 - **`X-Borgo-Session`**, the session the front already verified, as the stored JSON. The render service has never held the signing key; a loader reads a fact, not a credential. A client presenting either of these header names is a client forging something only this process may state, so both are deleted before the key is set.
-- **`Host` as the browser stated it**, because the render service builds absolute URLs and compares WebSocket origins against it. `X-Forwarded-For` and `X-Forwarded-Proto` are kept only from a peer in `BORGO_TRUSTED_PROXIES` and otherwise rebuilt from the connection alone: from anyone else they are the client's own claims, and a TLS-terminating proxy whose `X-Forwarded-Proto` got crushed to `http` would have every WebSocket handshake refused as cross-origin.
+- **`Host` as the browser stated it**, because the render service builds absolute URLs from it. `X-Forwarded-For` and `X-Forwarded-Proto` are kept only from a peer in `BORGO_TRUSTED_PROXIES` and otherwise rebuilt from the connection alone: from anyone else they are the client's own claims. The front holds itself to the same rule on `/ws`, where a TLS-terminating proxy whose `X-Forwarded-Proto` is not believed has every WebSocket handshake refused as cross-origin.
 - **`X-Borgo-Boot`**, on the way back: the render service stamps every response with the moment it booted, so a restart makes the front re-read the page policies rather than cache against a table that no longer exists. That header and the internal names beside it are stripped before the response reaches the browser.
 
-The deadline on the hop (`BORGO_RENDER_TIMEOUT`) covers the wait for response *headers* only and is then dropped, so a streaming document and a WebSocket run as long as they want. When the render service cannot be reached the front answers 503, and 504 when it did not answer in time, each with `Retry-After` — never a rendered error page, which would need the half that is down.
+The deadline on the hop (`BORGO_RENDER_TIMEOUT`) covers the wait for response *headers* only and is then dropped, so a streaming document runs as long as it wants. When the render service cannot be reached the front answers 503, and 504 when it did not answer in time, each with `Retry-After` — never a rendered error page, which would need the half that is down.
 
 ### A rendered document
 
@@ -308,7 +308,7 @@ Both outputs are written only after every check has passed, so a failed run neve
 
 ## The dev loop
 
-`borgo dev` is the same machinery with three switches flipped: React is built in development mode, precompression and the asset indexes are skipped, and the render service opens a WebSocket channel to the browser — which reaches it through the front, the one internal name the front forwards instead of refusing.
+`borgo dev` is the same machinery with three switches flipped: React is built in development mode, precompression and the asset indexes are skipped, and the front answers the browser an event stream on `/__borgo/dev` — the one internal name it answers instead of refusing — fed by what the watcher and the render service post to its internal listener.
 
 ```
   borgo dev  (the watcher)
@@ -317,15 +317,15 @@ Both outputs are written only after every check has passed, so a failed run neve
      |                                                          |
      |-- bun serve-entry.ts (BORGO_DEV=1) -> the render service, a free loopback port
      |                                                          |
-     |   fs.watch(".", recursive)                               |  ws /__borgo/dev,
-     |     *.go     -> borgogen, rebuild, restart api, reload    |  through the front
+     |   fs.watch(".", recursive)                               |  sse /__borgo/dev,
+     |     *.go     -> borgogen, rebuild, restart api, reload    |  from the front
      |     *.css    -> recompile, hot-swap the <link>            v
      |     *.ts(x)  -> restart the render service, fast refresh  browser
 ```
 
-The interesting part is what "restart the render service" means for the browser. A `.tsx` edit kills and respawns the render Bun process with `BORGO_CHANGED` set to the file. That process rebuilds the assets, and while building it records which output chunk each page landed in. When the browser's socket reconnects, the server greets it with that map, and the browser re-imports only the chunk for the page it is on, runs `performReactRefresh`, refetches props through the same `?__borgo=props` endpoint a navigation uses, and re-renders. Component state survives. A layout, the shell or a `.go` file cannot be applied that way and take a full reload instead.
+The interesting part is what "restart the render service" means for the browser. A `.tsx` edit kills and respawns the render Bun process with `BORGO_CHANGED` set to the file. That process rebuilds the assets, and while building it records which output chunk each page landed in. Once bound it posts that map to the front's dev channel, which hands it to every open stream — and to a stream that opens later, stamped, so a page loaded after the change ignores it — and the browser re-imports only the chunk for the page it is on, runs `performReactRefresh`, refetches props through the same `?__borgo=props` endpoint a navigation uses, and re-renders. Component state survives. A layout, the shell or a `.go` file cannot be applied that way and take a full reload instead.
 
-Restarting the whole process for every edit sounds heavy and is not: the module graph is clean every time, so there is no stale-module class of bug at all, and the cost is the asset rebuild, which is a `Bun.build` of your app. A boot that throws does not take the site down — the public port is the Go process's and stays bound, and the render service falls back to a tiny server that answers every request with the error overlay and keeps the dev channel alive, so the next successful rebuild reloads the browser instead of leaving you looking at a 503.
+Restarting the whole process for every edit sounds heavy and is not: the module graph is clean every time, so there is no stale-module class of bug at all, and the cost is the asset rebuild, which is a `Bun.build` of your app. A boot that throws does not take the site down — the public port is the Go process's and stays bound, and the render service falls back to a tiny server that answers every request with the error overlay; the dev channel is the front's and stays open, so the next successful rebuild reloads the browser instead of leaving you looking at a 503.
 
 Go edits go through a scratch binary: the build writes `.borgo/next-api` while the old API keeps serving, the output is hashed to skip no-op rebuilds, and only then is the old process killed and the file swapped. The browser is reloaded after the new API answers, not before. [Dev experience](dev-experience.md#fast-refresh) covers the contract from the other side.
 

@@ -181,17 +181,11 @@ A hung render cannot take the front with it: past `BORGO_RENDER_TIMEOUT` the req
 
 ## Realtime surface
 
-A WebSocket on `/ws` whose `Origin` header names a different scheme or host is refused, because browsers attach cookies to WebSocket handshakes regardless of origin — without the check, any page on the internet could open a socket as your logged-in user. **An absent `Origin` is refused too**, as of 0.21: admitting it meant the one header an attacker can simply leave out switched the check off. Non-browser clients send none and are now refused; `BORGO_WS_ALLOW_NO_ORIGIN=1` admits them, and admits every other originless caller with them.
+A WebSocket on `/ws` — answered by the Go process on the public port since 0.30, behind `api/middleware.go` like every other path — whose `Origin` header names a different scheme or host is refused, because browsers attach cookies to WebSocket handshakes regardless of origin — without the check, any page on the internet could open a socket as your logged-in user. **An absent `Origin` is refused too**, as of 0.21: admitting it meant the one header an attacker can simply leave out switched the check off. Non-browser clients send none and are now refused; `BORGO_WS_ALLOW_NO_ORIGIN=1` admits them, and admits every other originless caller with them.
 
-The shape of that refusal matters to whoever reads the client's log. A non-101 answer to a handshake reaches the browser as close code `1006` with no reason, indistinguishable from a server that is down, so the origin refusal is not a `403`: the handshake completes, and the socket is closed at once with code `4403` and a reason naming the origin it saw and the switch that would admit it — `origin "http://evil.example" is not this server (app.example.com): /ws accepts the page's own origin only`. The socket is subscribed to nothing and lives one tick. borgo's own client treats exactly that code as final (`onRefused` fires, once) rather than redialling a refusal every 30 seconds for the life of the tab — see [realtime](realtime.md#websocket-topics). Every other refusal on the handshake stays a `400`: a client may subscribe to at most 32 topics of at most 128 characters, and a single message is capped at 1 MB.
+The shape of that refusal matters to whoever reads the client's log. A non-101 answer to a handshake reaches the browser as close code `1006` with no reason, indistinguishable from a server that is down, so the origin refusal is not a `403`: the handshake completes, and the socket is closed at once with code `4403` and a reason naming the origin it saw and the switch that would admit it — `origin "http://evil.example" is not this server (app.example.com): /ws accepts the page's own origin only`. The socket is subscribed to nothing and lives one tick. borgo's own client treats exactly that code as final (`onRefused` fires, once) rather than redialling a refusal every 30 seconds for the life of the tab — see [realtime](realtime.md#websocket-topics). Every other refusal on the handshake stays a `400`: a client may subscribe to at most 32 topics of at most 128 characters, and a single message is capped at 1 MB. A topic the socket may not hold is the same `4403`, with the topic in the reason.
 
-Go pushes to browsers through `/__borgo/publish` on the front server. Without a shared key that endpoint accepts loopback traffic only — but behind a reverse proxy on the same box, *every* request arrives from loopback, so borgo additionally refuses anything carrying forwarding headers. In any deployment where Go and the front server are not the same machine, set a key on both sides:
-
-```bash
-BORGO_PUSH_KEY=$(openssl rand -hex 32)
-```
-
-The key is only worth what the connection carrying it is worth, so Go will not send it over `http://` to another host: use `https://`, or `BORGO_PUSH_INSECURE=1` to say the network between them is one you control. See [the key and cleartext](deploy.md#the-key-and-cleartext).
+What a socket may hold is your app's decision: `borgo.CanSubscribe` is asked for every topic at the handshake, with the session the front verified, and `borgo.CanPublish` for every message a browser publishes — see [who may hold a topic](realtime.md#who-may-hold-a-topic). A production relay with no `CanSubscribe` refuses every subscription and says so at startup, because a relay with no rule is a relay with the wrong rule. Go pushes to browsers with a call: `borgo.Push` publishes into the relay in its own process, so there is no endpoint to guard and no key to share. The push road of 0.2x — `/__borgo/publish`, `BORGO_PUSH_KEY`, `BORGO_PUSH_INSECURE` — is gone, and the two variables refuse the boot by name if still set.
 
 ## What borgo does not do
 
@@ -209,7 +203,7 @@ Deliberate omissions. Each is a policy decision that belongs to your app or your
 
 - `SESSION_SECRET` set, 32+ random bytes, out of version control — confirmed by the *absence* of the startup warning, since nothing else stops a secretless boot.
 - `SESSION_SECURE=1`, and TLS terminating in front of the app.
-- `BORGO_PUSH_KEY` set on both processes if they are not on the same loopback, and `FRONT_URL` on `https://` — or `BORGO_PUSH_INSECURE=1` if the network between them is private and yours.
+- `borgo.CanSubscribe` registered in `api/` if the app uses WebSocket topics — without one every subscription is refused — and deciding by the session, never by how hard a topic name is to guess.
 - CSRF left on (`BORGO_CSRF` unset in production), `<CsrfField />` in every `<form method="post">`, and `apiFetch` — not bare `fetch` — behind every browser `POST`/`PUT`/`PATCH`/`DELETE` to `/api/*`.
 - The default CSP kept, or a custom one that still nonces or allows your own scripts — load a page and check the browser console for violations.
 - Rate limiting configured in the proxy for `/login`, `/register` and anything expensive.

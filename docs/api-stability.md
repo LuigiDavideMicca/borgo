@@ -43,7 +43,7 @@ Breaking:
 - Adding a required field or a method to an exported interface (`PasswordHasher` gaining a method breaks every app that implements it).
 - Changing the meaning of a return value — for example, making `GetSession` report `true` for an expired session.
 - Changing an HTTP status a documented handler produces: `LoginHandler` answering 400 instead of 401, `RegisterHandler` answering 200 instead of 201, `Authed` answering 403 instead of 401.
-- Changing a wire format both halves rely on: the session cookie envelope, the password hash string format, the SSE frame shape, the `/__borgo/publish` body.
+- Changing a wire format both halves rely on: the session cookie envelope, the password hash string format, the SSE frame shape, the relay's websocket frames.
 - Tightening a default such that previously working apps stop working — dropping `Bind`'s cap from 1 MB, say, or making an *absent* `SESSION_SECRET` fatal at boot. (A `SESSION_SECRET` that is set but shorter than 32 bytes is already fatal at boot, and was made so deliberately: a searchable key is not a weaker secret, it is no secret. Unset still only warns, because an app with no sessions is legitimate.)
 
 Not breaking:

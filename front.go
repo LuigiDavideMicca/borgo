@@ -60,9 +60,9 @@ const (
 	defaultPublicTimeout = 60 * time.Second
 	// BORGO_MAX_BODY's default, the number bun has always used
 	defaultMaxBody = 32 << 20
-	// the render service's fast-refresh channel, a websocket the browser
-	// dials in dev; the orchestrator's own pokes below it go straight to the
-	// render port and never through here
+	// borgo dev's fast-refresh channel, an event stream the browser opens in
+	// dev and this process answers (dev_channel.go); the pokes below it are
+	// posted to the internal listener and never come through here
 	devChannelPath = "/__borgo/dev"
 )
 
@@ -249,13 +249,17 @@ type frontOptions struct {
 	app *appMiddleware
 	// the topic relay, answering /ws; nil forwards it like any other path
 	ws http.Handler
+	// borgo dev's fast-refresh channel, answered on /__borgo/dev; nil in production
+	devCh *devChannel
 }
 
 // front is the public handler: the api and the files in-process, the rest
 // forwarded.
 type front struct {
-	api      http.Handler
-	ws       http.Handler
+	api http.Handler
+	ws  http.Handler
+	// borgo dev's fast-refresh channel, answered on /__borgo/dev; nil in production
+	devCh    *devChannel
 	assets   *assetIndex
 	isr      *isr
 	policies *policySource
@@ -289,7 +293,14 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// public request for one is answered as if it did not exist. One
 	// exception, in dev only: the browser's fast-refresh channel lives on
 	// the render service, and the browser can only reach it through here
-	if internalName(cleaned) && !(f.dev && cleaned == devChannelPath) {
+	if internalName(cleaned) {
+		// one exception, in dev only: the browser's fast-refresh channel,
+		// answered here as an event stream. The orchestrator's pokes for it
+		// go to the internal listener and never through here
+		if f.dev && f.devCh != nil && cleaned == devChannelPath {
+			f.devCh.ServeHTTP(w, r)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -488,7 +499,7 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 		FlushInterval: -1,
 		ErrorHandler:  renderUnavailable,
 	}
-	f := &front{api: api, ws: opts.ws, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev}
+	f := &front{api: api, ws: opts.ws, devCh: opts.devCh, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev}
 	// api/middleware.go in front of everything the front does not answer
 	// itself; middleware.go says why each position is where it is
 	f.guarded = withAppMiddleware(opts.app, http.HandlerFunc(f.serveGuarded))

@@ -29,21 +29,12 @@ export function overlayHtml(error: unknown): string {
     </div>
     <script>
       (() => {
-        const connect = () => {
-          try {
-            const proto = location.protocol === "https:" ? "wss://" : "ws://";
-            const ws = new WebSocket(proto + location.host + "/__borgo/dev");
-            ws.onmessage = (e) => {
-              const m = JSON.parse(e.data);
-              if (m.type === "reload" && (!m.stamp || m.stamp > performance.timeOrigin)) return location.reload();
-              if (m.type === "js" && (!m.stamp || m.stamp > performance.timeOrigin)) location.reload();
-            };
-            ws.onclose = () => setTimeout(connect, 300);
-          } catch {
-            setTimeout(connect, 300);
-          }
+        // the go front's event stream; reconnection is the browser's
+        new EventSource("/__borgo/dev").onmessage = (e) => {
+          const m = JSON.parse(e.data);
+          if (m.type === "reload" && (!m.stamp || m.stamp > performance.timeOrigin)) return location.reload();
+          if (m.type === "js" && (!m.stamp || m.stamp > performance.timeOrigin)) location.reload();
         };
-        connect();
       })();
     </script>
   </body>

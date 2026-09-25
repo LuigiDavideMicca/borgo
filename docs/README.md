@@ -12,7 +12,7 @@ CI compiles the examples on these pages against the real framework types — eve
 | [Pages and routing](pages-and-routing.md) | pages and loaders, layouts, `<head>` management, streaming SSR, form actions, cached pages, error pages |
 | [The typed bridge](typed-bridge.md) | Go API routes, borgogen, typed request bodies, type overrides, honest limits |
 | [Client navigation and hydration](client-navigation.md) | client-side transitions, prefetching, scroll restoration, code splitting, hydration modes, islands |
-| [Realtime](realtime.md) | server-sent events, WebSocket topics, typed event payloads, `borgo.SSEHub` and `borgo.Push` |
+| [Realtime](realtime.md) | server-sent events, WebSocket topics and who may hold them (`borgo.CanSubscribe`), typed event payloads, `borgo.SSEHub` and `borgo.Push` |
 | [Auth and sessions](auth-and-sessions.md) | signed-cookie sessions, password hashing, `borgo.Auth`, guards on both sides of the bridge, revoking sessions |
 | [Middleware and authorization](middleware-and-authorization.md) | `api/middleware.go`, `middleware.ts`, `borgo.Forward` and `//borgo:export`: where each decision runs, what it stands in front of, and rate limiting |
 | [Environment](environment.md) | the app's variables declared once, typed reads, boot refusal, the server/client wall |

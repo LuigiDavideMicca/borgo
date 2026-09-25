@@ -128,7 +128,7 @@ Plain `<a>` tags become client-side transitions — no `<Link>` component — wi
 
 ### Realtime
 
-`borgo.SSE` and `borgo.NewSSEHub` make any handler an event stream, proxied without buffering. The front server is also a native WebSocket server: browsers join named topics with `subscribe`, Go publishes into them with `borgo.Push(topic, event, data)` — and borgogen types the payloads end to end, so checking `event` narrows `data` and an undeclared event name fails `tsc`. **Topics are public broadcast channels**: anyone who can reach the server can subscribe to any topic name, so keep private data behind an authenticated route ([why, and what is coming](docs/realtime.md#websocket-topics)).
+`borgo.SSE` and `borgo.NewSSEHub` make any handler an event stream, written by the process that answers the port. The Go front is also a native WebSocket server: browsers join named topics with `subscribe`, Go publishes into them with `borgo.Push(topic, event, data)` — a call, in the same process — and borgogen types the payloads end to end, so checking `event` narrows `data` and an undeclared event name fails `tsc`. **A topic is what `borgo.CanSubscribe` says it is**: the check runs per topic at the handshake with the session verified, and a production relay with no check refuses every subscription ([who may hold a topic](docs/realtime.md#who-may-hold-a-topic)).
 
 ```go
 borgo.Push("live", "task-created", task.Title)
@@ -169,7 +169,7 @@ The Go front answers `/healthz` with `{status, uptime, render}` — `render` is 
 
 Two processes, one front door:
 
-- **Go front and API** — answers the public port: plain `net/http` with method patterns for `/api/*`, in its own process; the static assets; the cache for pages that export `revalidate`; and a reverse proxy to the render service for everything else, WebSockets included.
+- **Go front and API** — answers the public port: plain `net/http` with method patterns for `/api/*`, in its own process; the static assets; the cache for pages that export `revalidate`; the WebSocket relay on `/ws`; and a reverse proxy to the render service for the pages.
 - **Bun render service** — on loopback, behind a key minted for each boot: server-renders pages with `react-dom/server` and runs loaders and actions, which call the Go API on its internal listener during SSR; props are serialized into the HTML and the client bundle hydrates the same tree.
 
 `borgo dev` and `borgo start` launch both. Compression is built-in: `borgo build` precompresses assets to `.gz`/`.br` (hashed chunks served immutable), SSR HTML and API JSON are gzipped at runtime.
@@ -283,7 +283,7 @@ Everything here is a deliberate choice, with the reason attached:
 - **Loader data is not streamed on client navigations** — one JSON payload, fetched in parallel with the route chunk (and usually prefetched on hover). Streaming applies to initial SSR, where it matters most.
 - **Auth is mechanics, not policy.** Signed cookie, hashing, login/logout/register handlers and CSRF for actions are provided; the user store, its schema, OAuth and everything beyond username/password stay in your hands.
 - **The typed bridge is static analysis, no runtime reflection.** Helpers are followed across the packages of your module, inline `json.NewEncoder(w).Encode(v)` is read, and `//borgo:type` covers custom marshalers; what stays invisible is a helper *outside* your module, an encoder stored in a variable, and a dynamically chosen type — those routes type as `unknown`, so the escape hatch is visible, not silent.
-- **WebSocket topics are a relay, not RPC — and not authorized.** The front server forwards `{event, data}` between subscribers and Go; per-message business logic belongs in Go routes. The relay stays dumb in both senses: it runs no logic, and it asks your app nothing about who may join a topic. Treat every topic as public until per-topic authorization ships.
+- **WebSocket topics are a relay, not RPC.** The Go process forwards `{event, data}` between subscribers and `borgo.Push`; per-message business logic belongs in Go routes. The relay runs no logic of its own: who may hold a topic is `borgo.CanSubscribe`'s answer, taken once at the handshake with the session verified, and a production relay with no answer refuses every subscription.
 
 Development happens in [issues](https://github.com/LuigiDavideMicca/borgo/issues).
 

@@ -4,14 +4,14 @@ What `borgo dev` does while you work: what hot-applies and what reloads, how sty
 
 ## Fast refresh
 
-`borgo dev` runs both servers and keeps the browser hot over a WebSocket channel (`/__borgo/dev`). What that means concretely, in decreasing order of magic:
+`borgo dev` runs both servers and keeps the browser hot over an event stream (`/__borgo/dev`, served by the Go front; the browser only receives). What that means concretely, in decreasing order of magic:
 
 - **Component, page and hook edits apply in place** through the [react-refresh](https://www.npmjs.com/package/react-refresh) runtime, instrumented by bun's own native fast-refresh transform (dev builds only — Babel left in 0.22, see [the transform, since 0.22](#the-transform-since-022)). The current route's new chunk is imported, loader props are refetched, and component state survives a body edit. Change a component's *hooks* — add, remove, reorder, or alter a custom hook's signature — and just that component remounts, Next-style; the rest of the page keeps its state. Editing a custom hook's body hot-applies with dependent state intact.
 - **Style edits swap the stylesheet in place** — no reload, no state loss.
 - **Everything else is a full reload**: layouts, error pages, `index.html`, and any Go change. Layouts because they are imported statically into the shared entry chunk; `_404`/`_500` because the update planner reloads on them by name, there being no safe in-place swap for a page the router may not currently be showing. On a Go edit the Go binary is rebuilt while the old one keeps serving, then swapped in — and since that binary holds the public port, the page does not answer for the moment of the swap. The browser reloads exactly once, *after* the new one answers, so you never land on a dead backend.
-- **A broken build does not take the port down.** A failed Go build leaves the previous binary serving; a failed page build leaves the render service serving the error overlay and the dev channel, and the page reloads itself when the next good save lands.
+- **A broken build does not take the port down.** A failed Go build leaves the previous binary serving; a failed page build leaves the render service serving the error overlay, and the channel — the front's — open, so the page reloads itself when the next good save lands.
 
-The mechanics, honestly: an edit restarts the render service so the server module graph is clean. The browser never reloads for that — it reconnects and hot-applies the change from the boot greeting it receives.
+The mechanics, honestly: an edit restarts the render service so the server module graph is clean. The browser never reloads for that — its stream to the front stays open, the new boot tells the front what changed, and the browser hot-applies it.
 
 ## The transform, since 0.22
 
@@ -88,7 +88,7 @@ One honest edge of staying in-process: within a single long-lived `borgo dev` se
 
 In dev, a server-side render error becomes a readable overlay page instead of the production 500. The client runtime also surfaces uncaught errors and unhandled rejections in the browser, in a dismissable overlay showing the stack.
 
-If the *build* is what broke, the fallback server keeps `/__borgo/dev` alive so the page can heal itself: fix the file, and the browser reloads on its own.
+If the *build* is what broke, the fallback server serves the overlay and the front keeps `/__borgo/dev` open, so the page heals itself: fix the file, and the browser reloads on its own.
 
 ## borgo doctor
 

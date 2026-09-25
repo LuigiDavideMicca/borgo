@@ -166,6 +166,9 @@ export async function dev() {
   // never through the front - they are not the browser's to reach
   const renderBase = `http://127.0.0.1:${topology.renderPort}`;
   const renderHeaders: Record<string, string> = { [INTERNAL_KEY_HEADER]: topology.key };
+  // the go front's internal listener, same key: what the browsers are told
+  // goes there, and its dev channel tells them (dev_channel.go)
+  const goBase = `http://127.0.0.1:${apiPort}`;
   let goProc: Subprocess | null = null;
   let frontProc: Subprocess | null = null;
   let reload = false;
@@ -230,12 +233,14 @@ export async function dev() {
     process.exit(1);
   }
 
-  // the front server may be mid-restart: keep knocking
-  const notifyFront = async (path: string): Promise<Response | null> => {
+  // either process may be mid-restart: keep knocking. The render service
+  // takes the css poke (it compiles); the go front takes what the browsers
+  // are told
+  const poke = async (base: string, path: string): Promise<Response | null> => {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       try {
-        return await fetch(`${renderBase}/__borgo/dev/${path}`, {
+        return await fetch(`${base}/__borgo/dev/${path}`, {
           method: "POST",
           headers: renderHeaders,
           signal: AbortSignal.timeout(2_000),
@@ -245,6 +250,8 @@ export async function dev() {
     }
     return null;
   };
+  const notifyFront = (path: string) => poke(renderBase, path);
+  const notifyGo = (path: string) => poke(goBase, path);
 
   // a reload before the api listens lands the browser on a dead backend
   const apiReady = async (proc: Subprocess) => {
@@ -348,7 +355,7 @@ export async function dev() {
     });
     const ready = await apiReady(proc);
     if (!ready) console.error(`  ${c.red(g.err)} api is not answering on :${apiPort}`);
-    if (reload && ready) await notifyFront("reload");
+    if (reload && ready) await notifyGo("reload");
   };
 
   // a restart for a clean module graph; the browser hot-applies on reconnect
@@ -398,17 +405,19 @@ export async function dev() {
     proc.exited.then(() => (exited = true));
     while (Date.now() < deadline && !exited) {
       try {
-        await fetch(`${renderBase}/__borgo/dev`, { headers: renderHeaders, signal: AbortSignal.timeout(1_000) });
+        await fetch(`${renderBase}/healthz`, { headers: renderHeaders, signal: AbortSignal.timeout(1_000) });
         break;
       } catch {}
       await Bun.sleep(100);
     }
   };
 
-  // a front server parked on a build error cannot hot-swap: restart it
+  // a front server parked on a build error cannot hot-swap: restart it. A
+  // swap that compiled is told to the browsers by the go front
   const swapCss = async (changed: string[]) => {
     const res = await notifyFront("css");
-    if (res?.headers.get("x-borgo-fallback")) await startFront(changed);
+    if (res?.headers.get("x-borgo-fallback")) return startFront(changed);
+    if (res?.ok) await notifyGo("css");
   };
 
   await startGo();

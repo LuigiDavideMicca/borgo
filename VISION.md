@@ -64,7 +64,7 @@ Once requests are flowing, the polarity flips: a panicking handler becomes a 500
 
 ### 10. Two processes, one front door — the deployment shape is part of the design
 
-borgo is self-hosted by conviction: a Bun front server, a Go API server, a reverse proxy, one box. `borgo start` supervises both, and the Go side watches `BORGO_PARENT_PID` so a force-killed supervisor on Windows — which delivers no signal — cannot leave an orphan holding the port.
+borgo is self-hosted by conviction: a Go front that is also the API, a Bun render service behind it on loopback, a reverse proxy, one box. `borgo start` supervises both, and the Go side watches `BORGO_PARENT_PID` so a force-killed supervisor on Windows — which delivers no signal — cannot leave an orphan holding the port.
 
 This is why edge and serverless targets are not on the roadmap. They are not merely unimplemented; they contradict a shape the rest of the framework depends on.
 

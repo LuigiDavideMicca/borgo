@@ -60,10 +60,10 @@ Every line below is a behaviour that changed on purpose between 0.20.1 and 0.21.
 - `SSEStream.Send` and `Ping` return `borgo.ErrStreamClosed` once the client has gone; `borgo.SSE` flushes a comment on open so the browser's `fetch()` resolves before the first event.
 - The gzip layer reads every `Content-Encoding` value, so a handler that produced `["", "br"]` (an `Add("")` before `Add("br")`) is left alone instead of recompressed.
 - A `SESSION_SECRET` under 32 bytes is refused at startup, not warned about. An unsigned cookie never authenticates.
-- `BORGO_PUSH_KEY` does not leave the Go process in clear: pushing to an `http://` `FRONT_URL` on another host fails unless `BORGO_PUSH_INSECURE=1` says that network is yours.
+- `borgo.Push` is a call inside the Go process, which answers `/ws` itself since 0.30: no endpoint, no key. `BORGO_PUSH_KEY` and `BORGO_PUSH_INSECURE` refuse the boot by name if still set, and a production relay with no `borgo.CanSubscribe` refuses every subscription.
 - `subscribe(topic, handler, { onRefused })`: a WebSocket closed for its origin (code `4403`) is final — no redial — and the reason reaches `onRefused` once, or the console.
 - A comma, an empty string or padding in a subscribe topic throws at the call site.
-- `borgo deploy init caddy` writes `tls internal` (a local CA, no ACME order against a domain you may not own — delete the line to go live); `deploy init systemd` reads secrets from `EnvironmentFile=-/srv/<app>/.env` and carries hardening; `deploy init nginx` sets the forwarding headers that keep `/__borgo/publish` closed to the internet.
+- `borgo deploy init caddy` writes `tls internal` (a local CA, no ACME order against a domain you may not own — delete the line to go live); `deploy init systemd` reads secrets from `EnvironmentFile=-/srv/<app>/.env` and carries hardening; `deploy init nginx` sets the forwarding headers a WebSocket `Origin` is judged against behind TLS.
 - `borgo doctor` is new: versions, Docker, permissions, disk, the Bun shim.
 
 ## Exports

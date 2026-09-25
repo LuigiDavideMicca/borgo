@@ -201,7 +201,7 @@ func TestTheCheckRunsOncePerRequestOnEveryDoor(t *testing.T) {
 		h    http.Handler
 		key  bool
 	}{
-		{"internal", internalHandler(testInternalKey, app, handler), true},
+		{"internal", internalHandler(testInternalKey, app, handler, nil), true},
 		{"api-only", apiOnlyHandler(nil, 1<<20, app, handler, nil), false},
 	}
 	for _, door := range doors {

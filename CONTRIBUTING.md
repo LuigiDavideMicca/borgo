@@ -6,7 +6,7 @@ Read [VISION.md](VISION.md) first if you are proposing a feature — it says wha
 
 | Tool | Version | Why |
 | --- | --- | --- |
-| [Bun](https://bun.sh) | `>= 1.3.0` | Declared in `engines.bun` for both packages. The CLI, the front server, the build and the TypeScript tests all run on it. |
+| [Bun](https://bun.sh) | `>= 1.3.0` | Declared in `engines.bun` for both packages. The CLI, the render service, the build and the TypeScript tests all run on it. |
 | [Go](https://go.dev) | `>= 1.27.0` | The floor declared in `go.mod`, raised with the toolchains the suite proves — one requirements change per release, same policy as bun. The `encoding/json` this release is verified against is 1.27's. |
 | Git | any recent | — |
 
@@ -18,7 +18,7 @@ Playwright's browser is installed on demand:
 npx playwright install --with-deps chromium
 ```
 
-Nothing borgo itself builds or runs needs Node — the CLI, the front server, the build and the tests are all Bun. Node still has to be on your machine to develop borgo, because two things around the edges want it: the `npx playwright` line above (and the same line in CI), and the publish workflow, where npm's trusted publishing needs it. `borgo doctor` reports Node for this reason and treats its absence as a note, not a failure.
+Nothing borgo itself builds or runs needs Node — the CLI, the render service, the build and the tests are all Bun. Node still has to be on your machine to develop borgo, because two things around the edges want it: the `npx playwright` line above (and the same line in CI), and the publish workflow, where npm's trusted publishing needs it. `borgo doctor` reports Node for this reason and treats its absence as a note, not a failure.
 
 ## Setup
 
@@ -42,7 +42,7 @@ cmd/borgogen             the codegen binary: go/ast + go/types static analysis, 
                          Part of the same module — it has no go.mod of its own — so the root
                          go.mod requires golang.org/x/tools and a scaffolded app inherits it
                          as an indirect requirement. Fixtures live in cmd/borgogen/testdata.
-packages/borgo           npm "borgo-framework": the CLI, the Bun SSR front server, the router,
+packages/borgo           npm "borgo-framework": the CLI, the Bun render service, the router,
                          the build, the browser runtime, the typed api client.
 packages/create-borgo    npm "create-borgo": the scaffolder and its three templates.
 examples/tasks           the demo app CI exercises end to end.

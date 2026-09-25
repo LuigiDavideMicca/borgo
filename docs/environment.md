@@ -65,6 +65,6 @@ Server variables and client variables are different species, and the schema keys
 
 ## What this is not
 
-- **Not a validator for borgo's variables.** Declaring `PORT`, `API_URL`, `FRONT_URL` or anything `BORGO_*` in the schema is refused at define time: the framework already validates those at boot, and a second source of truth is how two halves drift.
+- **Not a validator for borgo's variables.** Declaring `PORT`, `API_URL` or anything `BORGO_*` in the schema is refused at define time: the framework already validates those at boot, and a second source of truth is how two halves drift.
 - **Not shared with the Go half.** The Go api reads its environment with Go code, and `borgo.Serve` already hardens the variables it owns (`SESSION_SECRET`'s length rule, the timeout grammars). The schema types what your *TypeScript* reads; a variable both halves consume is validated by each on its own terms — the full template's `SESSION_SECRET` entry mirrors Go's rule on purpose, it does not replace it.
 - **Not a build-time ban on referencing server variables in client code.** The wall is a named runtime throw plus the CI grep, not static analysis of your components; a page that reads `env.SECRET` typechecks (the type is honest — the value exists on the server) and fails loudly the first time it hydrates. The [scaffolded templates](https://github.com/LuigiDavideMicca/borgo/tree/main/packages/create-borgo/templates) show the working pattern.

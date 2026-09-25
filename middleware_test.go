@@ -268,7 +268,7 @@ func TestAPanickingAppMiddlewareAnswers500AndReachesNothing(t *testing.T) {
 // and apiOnlyHandler; serveFront and serveContext are pinned to calling them
 func TestTheInternalListenerAndAnApiAloneAreGuardedToo(t *testing.T) {
 	probe := &probeMiddleware{}
-	internal := internalHandler(testInternalKey, probe.app(), apiUnderTest())
+	internal := internalHandler(testInternalKey, probe.app(), apiUnderTest(), nil)
 	req := block(httptest.NewRequest("GET", "/api/hello", nil))
 	req.Header.Set(internalKeyHeader, testInternalKey)
 	w := httptest.NewRecorder()
@@ -289,10 +289,12 @@ func TestTheInternalListenerAndAnApiAloneAreGuardedToo(t *testing.T) {
 	}
 	code := strings.ReplaceAll(string(src), "\r\n", "\n")
 	for _, want := range []string{
-		"internal.Handler = internalHandler(key, app, api)",
+		"internal.Handler = internalHandler(key, app, api, pokes)",
 		"srv.Handler = apiOnlyHandler(security, maxBody, registeredMiddleware(), mux, relay)",
 		"app:      app,",
 		"ws:       relay,",
+		"pokes = devCh.pokes()",
+		"devCh:    devCh,",
 	} {
 		if !strings.Contains(code, want) {
 			t.Errorf("borgo.go no longer contains %q", want)
