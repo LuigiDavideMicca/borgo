@@ -179,12 +179,13 @@ export function nginxConf({ name, port }: DeployContext): string {
     "        proxy_set_header Upgrade $http_upgrade;",
     "        proxy_set_header Connection $connection_upgrade;",
     "        proxy_set_header Host $host;",
-    // nginx adds no forwarding header on its own, and borgo authorizes
-    // /__borgo/publish as "from loopback and not forwarded": behind a proxy on
-    // the same box every request is from loopback, so without these lines
-    // anyone on the internet can publish. set, never appended: at the edge an
-    // inbound chain is the client's invention. behind a proxy that is not ours,
-    // add it to set_real_ip_from (nginx) / trusted_proxies (caddy)
+    // nginx adds no forwarding header on its own, and borgo judges what it is
+    // told: a websocket Origin is compared against the scheme the request
+    // arrived on, so behind a proxy terminating TLS, without the proto line,
+    // every https origin is refused as a cross-scheme one. set, never
+    // appended: at the edge an inbound chain is the client's invention. behind
+    // a proxy that is not ours, add it to set_real_ip_from (nginx) /
+    // trusted_proxies (caddy)
     "        # written from the peer, never from what the client sent",
     "        proxy_set_header X-Real-IP $remote_addr;",
     "        proxy_set_header X-Forwarded-For $remote_addr;",

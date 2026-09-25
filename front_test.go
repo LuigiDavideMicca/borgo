@@ -244,7 +244,7 @@ func TestFrontLetsTheDevChannelThroughInDevOnly(t *testing.T) {
 	if w.Code != 200 || seen == nil || seen.Get("X-Test-Path") != "/__borgo/dev" {
 		t.Errorf("dev channel in dev: %d forwarded=%v", w.Code, seen != nil)
 	}
-	for _, p := range []string{"/__borgo/dev/reload", "/__borgo/dev/css", "/__borgo/publish", "/__borgo/routes"} {
+	for _, p := range []string{"/__borgo/dev/reload", "/__borgo/dev/css", "/__borgo/routes", "/__borgo/render"} {
 		seen = nil
 		w = httptest.NewRecorder()
 		dev.ServeHTTP(w, httptest.NewRequest("POST", p, nil))
@@ -269,7 +269,7 @@ func TestFrontInternalNamesAreNotPublic(t *testing.T) {
 
 	// the dot-segment spellings are the ones that passed a prefix test and
 	// were normalised into the internal name at the far end
-	for _, path := range []string{"/__borgo/publish", "/__borgo", "/x/../__borgo/publish", "/./__borgo/dev", "//__borgo/publish", "/__borgo/dev/../publish"} {
+	for _, path := range []string{"/__borgo/routes", "/__borgo", "/x/../__borgo/routes", "/./__borgo/dev", "//__borgo/routes", "/__borgo/dev/../routes"} {
 		w := httptest.NewRecorder()
 		front.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(`{}`)))
 		if w.Code != 404 {
@@ -576,7 +576,7 @@ func TestFrontPutsSecurityHeadersOnWhatItAuthors(t *testing.T) {
 	defer renderer.Close()
 	front := frontWith(t, renderer, frontOptions{security: cfg, trusted: trustAll})
 
-	for _, path := range []string{"/api/hello", "/api/nope", "/__borgo/publish", "/about"} {
+	for _, path := range []string{"/api/hello", "/api/nope", "/__borgo/routes", "/about"} {
 		w := httptest.NewRecorder()
 		front.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
 		if w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("X-Frame-Options") != "DENY" {
@@ -595,24 +595,6 @@ func TestFrontPutsSecurityHeadersOnWhatItAuthors(t *testing.T) {
 	front.ServeHTTP(w, httptest.NewRequest("GET", "/about", nil))
 	if w.Code != 503 || w.Header().Get("X-Frame-Options") != "DENY" {
 		t.Errorf("the proxy's own 503 went out bare: %d %v", w.Code, w.Header())
-	}
-}
-
-// in front mode PORT is the public port, whose internal names answer 404:
-// a push must go to the render service without the operator having to say so
-func TestPushDefaultsToTheRenderServiceInFrontMode(t *testing.T) {
-	t.Setenv("FRONT_URL", "")
-	t.Setenv("PORT", "3000")
-	t.Setenv("BORGO_RENDER_URL", "http://127.0.0.1:3600")
-	base, from, err := pushBase()
-	if err != nil || base != "http://127.0.0.1:3600" || from != "BORGO_RENDER_URL" {
-		t.Errorf("pushBase = %q from %q (%v)", base, from, err)
-	}
-	// an explicit FRONT_URL still wins: the split deployment names it
-	t.Setenv("FRONT_URL", "https://front.example")
-	base, from, _ = pushBase()
-	if base != "https://front.example" || from != "FRONT_URL" {
-		t.Errorf("FRONT_URL did not win: %q from %q", base, from)
 	}
 }
 

@@ -276,7 +276,7 @@ func TestTheInternalListenerAndAnApiAloneAreGuardedToo(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Errorf("a loader's api call went around the app's middleware: %d", w.Code)
 	}
-	alone := apiOnlyHandler(nil, 1<<20, probe.app(), apiUnderTest())
+	alone := apiOnlyHandler(nil, 1<<20, probe.app(), apiUnderTest(), nil)
 	w = httptest.NewRecorder()
 	alone.ServeHTTP(w, block(httptest.NewRequest("GET", "/api/hello", nil)))
 	if w.Code != http.StatusForbidden {
@@ -290,8 +290,9 @@ func TestTheInternalListenerAndAnApiAloneAreGuardedToo(t *testing.T) {
 	code := strings.ReplaceAll(string(src), "\r\n", "\n")
 	for _, want := range []string{
 		"internal.Handler = internalHandler(key, app, api)",
-		"srv.Handler = apiOnlyHandler(security, maxBody, registeredMiddleware(), mux)",
+		"srv.Handler = apiOnlyHandler(security, maxBody, registeredMiddleware(), mux, relay)",
 		"app:      app,",
+		"ws:       relay,",
 	} {
 		if !strings.Contains(code, want) {
 			t.Errorf("borgo.go no longer contains %q", want)

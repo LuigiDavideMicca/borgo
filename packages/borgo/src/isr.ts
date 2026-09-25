@@ -16,9 +16,6 @@
 //
 // production only, like the asset index: dev rebuilds under stable names and
 // a cached page would fight the reload the dev channel just asked for.
-import { readdirSync, readFileSync, unlinkSync } from "node:fs";
-import { pickEncoding } from "./compress";
-import { NONCE_RESIDUE, requestResidue, type Residue } from "./export";
 
 // the grammar mirrors prerender's: a flag on the page module, read at serve
 // time, never involving borgogen. `revalidate` is seconds - how long a copy
@@ -102,10 +99,3 @@ export function isrPolicyTable(
 // cannot see that from the bytes. It travels as a header, so the front can
 // refuse a degraded document rather than share it (isr.go, unstorable)
 export const RENDER_ERRORED_HEADER = "X-Borgo-Render-Errored";
-
-// the topic borgo.Revalidate used to ride on: the page cache is in the go
-// front now and Revalidate is a local call there, so nothing should ever
-// publish this - the endpoint refuses it by name rather than accepting a
-// push it can no longer act on. The "$" prefix keeps it out of the
-// namespace client topics may use
-export const REVALIDATE_TOPIC = "$borgo/revalidate";

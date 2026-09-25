@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -519,7 +520,13 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 	if err != nil {
 		return err
 	}
-	srv.Handler = apiOnlyHandler(security, maxBody, registeredMiddleware(), mux)
+	// the relay too: an api with no pages still has subscribers, on /ws of
+	// this port, and borgo.Push reaches them from here
+	relay, err := mountRelay(security)
+	if err != nil {
+		return err
+	}
+	srv.Handler = apiOnlyHandler(security, maxBody, registeredMiddleware(), mux, relay)
 	// armed before anything can connect, dropped however this run ends
 	defer armStreamShutdown(srv)()
 	printStartup(patterns, port)
@@ -624,6 +631,10 @@ func serveFront(ctx context.Context, onShutdown func(), renderer *url.URL, apiPo
 	if metricsOn {
 		counters = newMetrics(startTime)
 	}
+	relay, err := mountRelay(security)
+	if err != nil {
+		return err
+	}
 	public.Handler = newFrontHandler(api, frontOptions{
 		csrf:     csrf,
 		security: security,
@@ -634,6 +645,7 @@ func serveFront(ctx context.Context, onShutdown func(), renderer *url.URL, apiPo
 		metrics:  counters,
 		dev:      dev,
 		app:      app,
+		ws:       relay,
 	}, renderer, key, renderTimeout)
 	internal.Handler = internalHandler(key, app, api)
 	defer armStreamShutdown(public)()
@@ -742,76 +754,6 @@ func shutdown(srv *http.Server, grace time.Duration) {
 	}
 }
 
-// checkPushEnv says at boot what Push would otherwise reveal on the first
-// publish - and a key crossing the network in clear is the event that leaves
-// no other trace. It lives here rather than beside Push so that publishing
-// stays free of logging.
-func checkPushEnv() error {
-	// the destination before the key: an unreachable one is broken whether
-	// or not a secret is involved
-	var endpoint *url.URL
-	base, from, err := pushBase()
-	if err == nil {
-		endpoint, err = pushEndpoint(base, from)
-	}
-	if err != nil {
-		// an explicit FRONT_URL is a declared intent and stops the boot; a
-		// broken default comes from PORT, which the front server reads for
-		// itself and may be fine with
-		if from == "FRONT_URL" {
-			return err
-		}
-		log.Printf("borgo: every borgo.Push will fail: %v", err)
-		return nil
-	}
-	// FRONT_URL meant the public front server through 0.22, and the publish
-	// endpoint lived there. It is the render service now, and the public port
-	// answers 404 to every internal name - so a deployment upgraded with its
-	// old FRONT_URL still in place has a borgo.Push that fails forever, with
-	// nothing naming the cause (found by the verifier of phase 1). Refused
-	// here while somebody is still reading the output
-	if from == "FRONT_URL" && os.Getenv("BORGO_RENDER_URL") != "" {
-		public := os.Getenv("PORT")
-		if public == "" {
-			public = "3000"
-		}
-		named := endpoint.Port()
-		if named == "" {
-			named = "80"
-			if endpoint.Scheme == "https" {
-				named = "443"
-			}
-		}
-		if named == public {
-			if loopbackHost(endpoint.Hostname()) {
-				return fmt.Errorf(
-					"borgo: FRONT_URL is %s, which is this process own public port: since 0.30 borgo.Push goes to the render service, and the public port answers 404 to every internal name. Unset FRONT_URL - borgo start configures the render service itself - or point it at the render service (BORGO_RENDER_PORT, 3600 by default)",
-					endpoint.Host)
-			}
-		}
-	}
-	if os.Getenv("BORGO_PUSH_KEY") == "" {
-		return nil
-	}
-	if travel := pushKeyMayTravel(endpoint); travel != nil {
-		// an unreadable switch is refused at boot, as SESSION_SECURE is
-		if v := os.Getenv("BORGO_PUSH_INSECURE"); v != "" {
-			if _, perr := strconv.ParseBool(v); perr != nil {
-				return travel
-			}
-		}
-		log.Printf("borgo: every borgo.Push will fail: %s is not this machine and FRONT_URL is http://, so BORGO_PUSH_KEY would cross the network in clear. Use https, or BORGO_PUSH_INSECURE=1 if that network is one you control", endpoint.Host)
-		return nil
-	}
-	if endpoint.Scheme == "https" || loopbackHost(endpoint.Hostname()) {
-		return nil
-	}
-	// the key really is leaving in clear: this line has to read worse than
-	// the refusal above it, which is the safe state
-	log.Printf("borgo: BORGO_PUSH_KEY crosses the network in clear to %s on every push, because BORGO_PUSH_INSECURE is set", endpoint.Host)
-	return nil
-}
-
 // CheckEnv settles the session and push environment while somebody is still
 // watching the terminal. Serve and ServeContext call it before they bind;
 // call it yourself at startup if you mount borgo's handlers on your own
@@ -843,7 +785,10 @@ func CheckEnv() error {
 	if _, err := sessionSecure(); err != nil {
 		return err
 	}
-	if err := checkPushEnv(); err != nil {
+	if err := retiredPushEnv(); err != nil {
+		return err
+	}
+	if _, err := wsAllowNoOriginFromEnv(); err != nil {
 		return err
 	}
 	secret := os.Getenv("SESSION_SECRET")
@@ -890,6 +835,17 @@ func printStartup(patterns []string, port string) {
 		parts := strings.SplitN(p, " ", 2)
 		fmt.Printf("  %s%-7s%s %s\n", sage, parts[0], reset, parts[1])
 	}
+	printRelayNotice(terra, reset)
+}
+
+// the rule the relay runs under, when there is something to say: no
+// CanSubscribe registered is every topic open in dev and every subscription
+// refused in production, and either is worth a line nobody can miss
+func printRelayNotice(terra, reset string) {
+	dev, _ := strconv.ParseBool(os.Getenv("BORGO_DEV"))
+	if n := wsPolicyNotice(dev); n != "" {
+		fmt.Printf("  %s%s%s\n", terra, n, reset)
+	}
 }
 
 // printFrontStartup is printStartup for front mode: the public port first,
@@ -915,13 +871,26 @@ func printFrontStartup(patterns []string, publicPort, internalAddr string, rende
 		parts := strings.SplitN(p, " ", 2)
 		fmt.Printf("  %s%-7s%s %s\n", sage, parts[0], reset, parts[1])
 	}
+	printRelayNotice(terra, reset)
 }
 
 // apiOnlyHandler is the public port of an api with no pages: the protections
 // the front applies, and api/middleware.go guarding it exactly as it guards
-// the front.
-func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware, mux http.Handler) http.Handler {
-	return security.middleware(progressDeadlines(limitBody(maxBody, withSessionOnce(withAppMiddleware(app, Middleware(mux))))))
+// the front; /ws is the relay's, behind the same guards, nil when there is
+// none.
+func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware, mux http.Handler, ws http.Handler) http.Handler {
+	var routed http.Handler = Middleware(mux)
+	if ws != nil {
+		api := routed
+		routed = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if path.Clean(r.URL.Path) == "/ws" {
+				ws.ServeHTTP(w, r)
+				return
+			}
+			api.ServeHTTP(w, r)
+		})
+	}
+	return security.middleware(progressDeadlines(limitBody(maxBody, withSessionOnce(withAppMiddleware(app, routed)))))
 }
 
 // internalHandler is the loaders' way in. The app's middleware guards it as

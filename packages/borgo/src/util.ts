@@ -3,8 +3,8 @@ import { existsSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { c, g } from "./colors";
 import { documentStream, gzipStream, pickEncoding } from "./compress";
-import { CSRF_COOKIE, CSRF_FIELD, CSRF_HEADER, csrfCookieValue } from "./index";
-import { unsafeMethod, withCsrf } from "./internal";
+import { CSRF_COOKIE, CSRF_FIELD, csrfCookieValue } from "./index";
+import { withCsrf } from "./internal";
 import { resolveHead, safeHeadAttrs, type ActionContext, type Head, type Route } from "./router";
 
 // length compared first, then constant-time on the bytes
@@ -353,8 +353,6 @@ export type Switches = {
   csrfCookieAttrs: string;
   reloading: boolean;
   maxBody: number;
-  // a /ws handshake with no Origin is a non-browser client; off by default
-  wsAllowNoOrigin: boolean;
   // BORGO_RENDER=1: this process is the render service behind the go front
   // (front.go): bound to loopback, answering only requests that carry the
   // key the front minted for this boot, and reaching the api on the front's
@@ -515,7 +513,6 @@ export function resolveSwitches(
     csrfCookieAttrs: `Path=/; SameSite=Lax${sessionSecure(env) ? "; Secure" : ""}`,
     reloading: reloadBanner(env),
     maxBody: envInt("BORGO_MAX_BODY", env.BORGO_MAX_BODY, `${MAX_BODY_BYTES} bytes`) ?? MAX_BODY_BYTES,
-    wsAllowNoOrigin: envBool("BORGO_WS_ALLOW_NO_ORIGIN", env.BORGO_WS_ALLOW_NO_ORIGIN, "refused") ?? false,
     ...renderSwitches(env),
   };
 }
@@ -612,75 +609,6 @@ function renderSwitches(env: Record<string, string | undefined>) {
     );
   }
   return { render, internalKey, renderPort: renderPort ?? 0 };
-}
-
-// who may POST /__borgo/publish. a key presented to a side that holds none is
-// refused, not dropped to the loopback rule: loopback admits every process on
-// the box. with a key on both sides loopback and forwarding do not apply
-export type PushVerdict = "ok" | "bad-key" | "half-configured" | "not-local";
-
-// presence, never content: an empty X-Forwarded-For is still a hop, and every
-// header a proxy stamps counts (borgo's nginx sets X-Forwarded-Proto)
-export const FORWARDING_HEADERS = [
-  "x-forwarded-for",
-  "forwarded",
-  "x-forwarded-proto",
-  "x-forwarded-host",
-  "x-forwarded-port",
-  "x-real-ip",
-] as const;
-
-export const isForwarded = (headers: Headers): boolean =>
-  FORWARDING_HEADERS.some((name) => headers.has(name));
-
-export function pushAuthorized(req: {
-  key: string | undefined;
-  presented: string | null;
-  address: string | undefined;
-  // isForwarded, never a header value
-  forwarded: boolean;
-}): PushVerdict {
-  if (req.key) return keysEqual(req.presented ?? "", req.key) ? "ok" : "bad-key";
-  if (req.presented !== null) return "half-configured";
-  const local =
-    req.address === "127.0.0.1" || req.address === "::1" || req.address === "::ffff:127.0.0.1";
-  return local && !req.forwarded ? "ok" : "not-local";
-}
-
-// a comma inside a topic would be split on the wire (/ws?topics=a,b) and the
-// push would land in a topic with no subscribers, 101 and counters intact.
-// refused rather than escaped: three producers would have to agree on the escape
-export const TOPIC_SEPARATOR = ",";
-
-export const topicRejection = (topic: string): string | null =>
-  topic.includes(TOPIC_SEPARATOR)
-    ? `topic ${JSON.stringify(topic)} contains ${JSON.stringify(TOPIC_SEPARATOR)}, which separates topics ` +
-      `on the wire (/ws?topics=a,b) and cannot appear inside one - rename the topic`
-    : null;
-
-// a websocket handshake carries cookies with no preflight, so Origin is the
-// only guard: scheme and host, not host alone (http://app.test must not join
-// https://app.test), and no Origin is a refusal. X-Forwarded-Proto is trusted
-// here because anything that can set it can set Origin too.
-// BORGO_WS_ALLOW_NO_ORIGIN=1 re-admits every non-browser caller, on purpose
-export function wsOriginAllowed(req: {
-  origin: string | null;
-  host: string;
-  proto: string;
-  forwardedProto: string | null;
-  allowNoOrigin: boolean;
-}): boolean {
-  if (req.origin === null) return req.allowNoOrigin;
-  // a proxy chain joins its values; the first is the client's hop
-  const scheme = (req.forwardedProto?.split(",")[0] ?? "").trim().toLowerCase() || req.proto;
-  let origin: URL;
-  try {
-    // "null" (sandboxed iframe, cross-origin redirect) fails to parse: refused
-    origin = new URL(req.origin);
-  } catch {
-    return false;
-  }
-  return origin.host === req.host && origin.protocol === `${scheme}:`;
 }
 
 export const goBinName = () => "api" + (process.platform === "win32" ? ".exe" : "");

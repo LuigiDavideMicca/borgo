@@ -25,6 +25,11 @@ import (
 
 const wsCountEvent = "__count"
 
+// revalidateTopic carried borgo.Revalidate to the front server through 0.22,
+// and is not a topic: the "$" keeps it out of the names a page may hold, and a
+// push to it is refused by name so a binary of another version says why
+const revalidateTopic = "$borgo/revalidate"
+
 var wsCountEventJSON = json.RawMessage(`"` + wsCountEvent + `"`)
 
 // one "__count" per topic per window, whatever joined or left during it. bun

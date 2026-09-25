@@ -1,12 +1,10 @@
 // Phase 3 spike of borgo 0.30: what a held websocket costs, and how fast one
 // message reaches 1, 100 and 1000 subscribers, on the roads the design weighs:
-//   A  - borgo's relay in bun behind the go front, today's code, reached
-//        through the go front and, from the same boot, directly on the render
-//        service, to separate the proxy's share from bun's;
-//   L  - the same bun relay behind a lean go forwarder (go-raw with
-//        GO_RAW_WS_FORWARD): road A as it would ship instead of as it runs;
 //   B  - a relay in go on the standard library (go-raw with GO_RAW_WS=1);
 //   R  - borgo's own relay (ws_relay.go), road B as written into borgo.
+// Roads A (bun's relay behind the go front, as 0.2x ran it) and L (the same
+// behind a lean go forwarder) were measured on 13/9 and are gone with bun's
+// relay: their numbers stay in results/spikes.
 // The method is memory-conn's (lib/memory.ts): raw TCP sockets, not a client
 // library, whose pools would measure themselves; RSS summed over every
 // process tree the road runs, idle polled until stable, and the delta divided
@@ -26,7 +24,6 @@ const bench = join(import.meta.dir, "..");
 const HELD = Number(process.env.SPIKE_HELD ?? 1000);
 const FANOUT = [1, 100, 1000];
 const PUBLISHES = 50;
-const KEY = "b".repeat(64);
 const ONLY = process.env.SPIKE_ONLY ?? "";
 const WS_BUFFER = process.env.SPIKE_WS_BUFFER ?? "";
 
@@ -50,23 +47,6 @@ const goRaw = (env: Record<string, string>, port: number): ServerSpec => ({
   ready: `http://127.0.0.1:${port}/api/hello`,
   ports: [port],
 });
-const borgoApp: ServerSpec = {
-  dir: join(bench, "apps", "borgo"),
-  build: [["go", "mod", "tidy"], ["bun", "run", "build"]],
-  start: ["bun", "node_modules/borgo-framework/src/cli.ts", "start"],
-  env: {
-    PORT: "43100",
-    API_PORT: "43101",
-    BORGO_RENDER_PORT: "43102",
-    BORGO_INTERNAL_KEY: KEY,
-    SESSION_SECRET: "bench-only-secret-0123456789abcdef",
-    BUN_CONFIG_MAX_HTTP_REQUESTS: "16384",
-    NODE_ENV: "production",
-  },
-  ready: "http://127.0.0.1:43100/api/hello",
-  ports: [43100, 43101, 43102],
-};
-
 // borgo's own relay (ws_relay.go), measured before it is wired into the
 // front: the package's test binary, whose TestWSRelaySpikeServer serves the
 // relay alone when BORGO_WS_SPIKE_ADDR is set. go -C builds it from the repo
@@ -92,21 +72,6 @@ const variants: Variant[] = [
     name: "B - go relay on the standard library (go-raw, GO_RAW_WS=1)",
     servers: [goRaw({ GO_RAW_WS: "1", ...(WS_BUFFER ? { GO_RAW_WS_BUFFER: WS_BUFFER } : {}) }, 43130)],
     targets: [{ name: `B, go relay${WS_BUFFER ? `, buffer ${WS_BUFFER}` : ""}`, url: "http://127.0.0.1:43130/ws", headers: {} }],
-  },
-  {
-    letter: "A",
-    name: "A - bun relay behind the go front (borgo start, this checkout)",
-    servers: [borgoApp],
-    targets: [
-      { name: "A, through the go front", url: "http://127.0.0.1:43100/ws", headers: {} },
-      { name: "A0, bun directly", url: "http://127.0.0.1:43102/ws", headers: { "X-Borgo-Internal": KEY } },
-    ],
-  },
-  {
-    letter: "L",
-    name: "L - bun relay behind a lean go forwarder (borgo start + go-raw GO_RAW_WS_FORWARD)",
-    servers: [borgoApp, goRaw({ GO_RAW_WS_FORWARD: "127.0.0.1:43102", GO_RAW_WS_KEY: KEY }, 43140)],
-    targets: [{ name: "L, bun behind a lean go forwarder", url: "http://127.0.0.1:43140/ws", headers: {} }],
   },
 ];
 
@@ -391,7 +356,7 @@ async function stop(variant: Variant, servers: Spawned[]) {
 
 installCleanupHooks();
 const selected = variants.filter((v) => !ONLY || v.letter === ONLY);
-if (!selected.length) throw new Error(`SPIKE_ONLY=${ONLY} names no road (R, B, A or L)`);
+if (!selected.length) throw new Error(`SPIKE_ONLY=${ONLY} names no road (R or B)`);
 
 const built = new Set<string>();
 for (const variant of selected) {

@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,19 +23,15 @@ import {
 } from "./compress";
 import { registerCsrf, registerIslands } from "./internal";
 import { appEnvMetas, envRefusal } from "./env-app";
-import { RENDER_ERRORED_HEADER, REVALIDATE_TOPIC, isrPolicyTable } from "./isr";
+import { RENDER_ERRORED_HEADER, isrPolicyTable } from "./isr";
 import { overlayHtml } from "./overlay";
 import { answerForDoor, decidePage, resolvePageMiddleware } from "./page-middleware";
 import { canonicalPath, matchRoute, safeDecode, type Route } from "./router";
 import {
-  bodyTooLarge,
   csrfRejects,
   decodeChanged,
   headResponse,
-  isForwarded,
-  limitRequestBody,
   prepareShell,
-  pushAuthorized,
   renderPage as renderDocument,
   resolveSwitches,
   INTERNAL_KEY_HEADER,
@@ -48,8 +43,6 @@ import {
   localsFrom,
   runAction,
   runPropsRequest,
-  topicRejection,
-  wsOriginAllowed,
   type ActionOptions,
   type PropsOptions,
   type RenderPageOptions,
@@ -282,50 +275,6 @@ function replaceRoots(
   if (!hit) return null;
   pieces.push(buf.subarray(from));
   return Buffer.concat(pieces);
-}
-
-// each topic is a subscription table entry held for the life of the socket
-export const MAX_WS_TOPICS = 32;
-export const MAX_WS_TOPIC_LENGTH = 128;
-
-// the only words the caller will ever get: a refused handshake carries no
-// status and no body to the client (bun: close 1002 "Expected 101 status
-// code"; browser: 1006, empty reason), so this sentence and the log line
-// beside it are the two places the cause exists. both caps named when both
-// hold, or fixing one comes straight back on the other; the topic is
-// truncated because it is the client's own string, with its exact length stated
-export function wsTopicRefusal(topics: string[]): string | null {
-  const refusals: string[] = [];
-  const overlong = topics.find((t) => t.length > MAX_WS_TOPIC_LENGTH);
-  if (overlong !== undefined) {
-    const shown = overlong.slice(0, 40);
-    refusals.push(
-      `topic ${JSON.stringify(shown)}${overlong.length > shown.length ? "..." : ""} is ` +
-        `${overlong.length} characters, over the ${MAX_WS_TOPIC_LENGTH} a topic may have - shorten the name`,
-    );
-  }
-  if (topics.length > MAX_WS_TOPICS) {
-    refusals.push(
-      `${topics.length} topics on one socket, over the ${MAX_WS_TOPICS} it accepts - ` +
-        `subscribe to fewer, or spread them over more sockets`,
-    );
-  }
-  return refusals.length ? refusals.join("; ") : null;
-}
-
-// a close frame, not a 403: a 403 on the handshake reaches a bun client as
-// 1002 "Expected 101 status code" and a browser as 1006 with an empty reason,
-// the same shape as a 400 and as a server that is down, so a misconfigured
-// browser redialled every 30s for the life of the tab. a close frame reaches
-// the client intact, with a reason naming the origin and the switch; the
-// socket exists for one tick. every other refusal on /ws stays a 400: those
-// are programming errors subscribe() refuses at the call site before the first
-// dial, and the client treats exactly this code as final
-export const WS_CLOSE_ORIGIN_REFUSED = 4403;
-export function wsOriginRefusal(origin: string | null, host: string): string {
-  return origin === null
-    ? "no Origin header on the handshake: a non-browser client needs BORGO_WS_ALLOW_NO_ORIGIN=1 (wsAllowNoOrigin)"
-    : `origin ${JSON.stringify(origin.slice(0, 80))} is not this server (${host}): /ws accepts the page's own origin only`;
 }
 
 // `switches` is resolved by the caller when one can do it earlier (serve-entry,
@@ -709,32 +658,9 @@ export async function serve({
     for (const ws of devSockets) ws.send(data);
   };
 
-  // a refusal names the value it refused, and states its own type
-  const badRequest = (why: string) =>
-    new Response(why, { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } });
-
-  // "refused" lives for one tick: wsOriginRefusal above says why it is not a 403
-  type SocketData =
-    | { kind: "dev" }
-    | { kind: "app"; topics: string[] }
-    | { kind: "refused"; reason: string };
-  const wsTopic = (topic: string) => "borgo:ws:" + topic;
-  const publishCount = (topic: string) => {
-    server.publish(
-      wsTopic(topic),
-      JSON.stringify({ topic, event: "__count", data: server.subscriberCount(wsTopic(topic)) }),
-    );
-  };
-  // said once: a refused pusher can retry as fast as it likes
-  let warnedPushKey = false;
-  const warnHalfConfiguredPushKey = () => {
-    if (warnedPushKey) return;
-    warnedPushKey = true;
-    console.error(
-      `  ${c.red(g.err)} a push arrived with X-Borgo-Key but BORGO_PUSH_KEY is not set on the front server ` +
-        `${c.dim(`${g.dot} refusing rather than falling back to the loopback rule - set it on both halves`)}`,
-    );
-  };
+  // the one websocket left here is the dev channel: the topic relay, /ws
+  // and borgo.Push's endpoint moved into the go front in 0.30
+  type SocketData = { kind: "dev" };
 
   // a dev restart can try to bind before the os releases the previous port
   const bindRetry = async <T>(start: () => T): Promise<T> => {
@@ -755,9 +681,9 @@ export async function serve({
     port,
     ...(hostname ? { hostname } : {}),
     // bun's ceiling is out of the way and borgo counts instead: every body
-    // read in this process goes through a counter (`runAction` and the
-    // `/__borgo/publish` read below), and body-limit.test.ts fails the build
-    // if a third appears without one. raising this is safe only while that holds
+    // read in this process goes through a counter (`runAction`), and
+    // body-limit.test.ts fails the build if another appears without one.
+    // raising this is safe only while that holds
     maxRequestBodySize: Number.MAX_SAFE_INTEGER,
     // no deadline: the only client of this process is the go front on
     // loopback, which has its own - a header deadline on the render and the
@@ -782,19 +708,9 @@ export async function serve({
     websocket: {
       // websockets have their own deadline and bun pings them itself
       idleTimeout: 120,
-      // every message is relayed to every subscriber: bun's 16mb default would
-      // make one socket a broadcast amplifier
-      maxPayloadLength: 1024 * 1024,
+      // the dev channel only listens: nothing a browser sends here is read
+      maxPayloadLength: 1024,
       open(ws) {
-        if (ws.data?.kind === "refused") {
-          ws.close(WS_CLOSE_ORIGIN_REFUSED, ws.data.reason);
-          return;
-        }
-        if (ws.data?.kind === "app") {
-          for (const topic of ws.data.topics) ws.subscribe(wsTopic(topic));
-          for (const topic of ws.data.topics) publishCount(topic);
-          return;
-        }
         devSockets.add(ws);
         if (changed.length) {
           // the whole set: a browser told about one file of a two-file save may
@@ -806,31 +722,9 @@ export async function serve({
         if (reloadStamp) ws.send(JSON.stringify({ type: "reload", stamp: reloadStamp }));
       },
       close(ws) {
-        if (ws.data?.kind === "refused") return;
-        if (ws.data?.kind === "app") {
-          const topics = ws.data.topics;
-          setTimeout(() => topics.forEach(publishCount), 0);
-          return;
-        }
         devSockets.delete(ws);
       },
-      // clients may publish to topics they are subscribed to, relayed verbatim
-      message(ws, raw) {
-        if (ws.data?.kind !== "app") return;
-        try {
-          const msg = JSON.parse(String(raw));
-          if (
-            typeof msg.topic === "string" &&
-            typeof msg.event === "string" &&
-            ws.data.topics.includes(msg.topic)
-          ) {
-            server.publish(
-              wsTopic(msg.topic),
-              JSON.stringify({ topic: msg.topic, event: msg.event, data: msg.data }),
-            );
-          }
-        } catch {}
-      },
+      message() {},
     },
     async fetch(req) {
       const t0 = performance.now();
@@ -852,106 +746,6 @@ export async function serve({
       // heads render for real, only the body is dropped and cancelled, or the
       // ssr/gzip pipeline keeps rendering into a stream nobody reads
       const dropBody = (res: Response) => headResponse(req.method, res);
-
-      // browsers attach cookies to ws handshakes from any origin, so a
-      // cross-origin page must not join (or publish into) topics
-      if (url.pathname === "/ws") {
-        // scheme AND host, and no Origin at all is a refusal (wsOriginAllowed in util.ts)
-        const allowed = wsOriginAllowed({
-          origin: req.headers.get("origin"),
-          host: url.host,
-          proto: url.protocol.replace(":", ""),
-          forwardedProto: req.headers.get("x-forwarded-proto"),
-          allowNoOrigin: switches.wsAllowNoOrigin,
-        });
-        if (!allowed) {
-          const why = wsOriginRefusal(req.headers.get("origin"), url.host);
-          console.error(`  ${c.red(g.err)} /ws refused: ${why}`);
-          if (server.upgrade(req, { data: { kind: "refused", reason: why } })) return undefined as never;
-          return secure(new Response("forbidden", { status: 403 }));
-        }
-        // split on the ENCODED comma: searchParams decodes %2C first, and one
-        // topic named "a,b" became two, a socket that upgrades and delivers nothing
-        const raw = url.search.slice(1).split("&").find((p) => p.startsWith("topics="))?.slice(7) ?? "";
-        const topics: string[] = [];
-        for (const part of raw.split(",")) {
-          let topic: string;
-          try {
-            topic = decodeURIComponent(part.replaceAll("+", " ")).trim();
-          } catch {
-            // the part itself, truncated: WHICH of the topics on the wire would not decode
-            const why = `topics is not a decodable query value: ${JSON.stringify(part.slice(0, 40))}`;
-            console.error(`  ${c.red(g.err)} /ws refused: ${why}`);
-            return secure(badRequest(why));
-          }
-          if (!topic) continue;
-          const rejected = topicRejection(topic);
-          if (rejected) {
-            // logged: the browser reports "connection closed", which names nothing
-            console.error(`  ${c.red(g.err)} /ws refused: ${rejected}`);
-            return secure(badRequest(rejected));
-          }
-          topics.push(topic);
-        }
-        // logged: a refused handshake reaches the browser as "connection closed"
-        // with no status and no body, so a silent 400 is a cause nobody can read
-        const refusal = wsTopicRefusal(topics);
-        if (refusal) {
-          console.error(`  ${c.red(g.err)} /ws refused: ${refusal}`);
-          return secure(badRequest(refusal));
-        }
-        if (server.upgrade(req, { data: { kind: "app", topics } })) return undefined as never;
-        return secure(new Response("upgrade required", { status: 426 }));
-      }
-
-      // go -> browser push: accepted from loopback (or with the shared key)
-      if (req.method === "POST" && url.pathname === "/__borgo/publish") {
-        // without a key, loopback-only: behind a local reverse proxy every
-        // external request arrives from 127.0.0.1, so a forwarded one is rejected too
-        const verdict = pushAuthorized({
-          key: process.env.BORGO_PUSH_KEY,
-          presented: req.headers.get("x-borgo-key"),
-          address: server.requestIP(req)?.address,
-          // presence, not the value: `x-forwarded-for ?? forwarded` read an empty
-          // X-Forwarded-For as "nothing forwarded this" and swallowed a real Forwarded
-          forwarded: isForwarded(req.headers),
-        });
-        if (verdict === "half-configured") warnHalfConfiguredPushKey();
-        if (verdict !== "ok") return secure(new Response("forbidden", { status: 403 }));
-        // `req.json()` buffers whatever arrives: an authorized pusher is a process
-        // on the box or anything holding the key, neither a reason for an unbounded body
-        const limited = await limitRequestBody(req, maxBody);
-        if (limited === null) return secure(bodyTooLarge(maxBody));
-        const msg = await limited.json().catch(() => null);
-        if (!msg || typeof msg.topic !== "string" || typeof msg.event !== "string") {
-          return secure(new Response("bad request", { status: 400 }));
-        }
-        // the revalidate channel rides the same authorized endpoint and stops
-        // here: an invalidation is the server's business, never fanned out to
-        // websocket clients - a browser must not be able to watch which pages
-        // the operator drops, nor subscribe to a topic that was never a topic
-        // the page cache is the go front's, and borgo.Revalidate is a local
-        // call there: a push on this topic can only be a binary of another
-        // version talking to this one, and answering 204 would acknowledge an
-        // invalidation nobody here can act on
-        if (msg.topic === REVALIDATE_TOPIC) {
-          const why = `${REVALIDATE_TOPIC} is not published any more: the page cache lives in the go front, where borgo.Revalidate is a local call`;
-          console.error(`  ${c.red(g.err)} /__borgo/publish refused: ${why}`);
-          return secure(badRequest(why));
-        }
-
-        // a topic no subscriber can ever name is a message dropped with a 204 on it
-        const rejected = topicRejection(msg.topic);
-        if (rejected) {
-          console.error(`  ${c.red(g.err)} /__borgo/publish refused: ${rejected}`);
-          return secure(badRequest(rejected));
-        }
-        server.publish(
-          wsTopic(msg.topic),
-          JSON.stringify({ topic: msg.topic, event: msg.event, data: msg.data }),
-        );
-        return secure(new Response(null, { status: 204 }));
-      }
 
       if (dev && url.pathname.startsWith("/__borgo/dev")) {
         if (url.pathname === "/__borgo/dev" && server.upgrade(req, { data: { kind: "dev" } })) {

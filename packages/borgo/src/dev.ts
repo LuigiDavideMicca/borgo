@@ -106,14 +106,6 @@ export function gitignoredMatcher(text: string): (file: string) => boolean {
   };
 }
 
-const readGitignore = (): ((file: string) => boolean) => {
-  try {
-    return gitignoredMatcher(readFileSync(".gitignore", "utf8"));
-  } catch {
-    return () => false;
-  }
-};
-
 // One dev session per directory. Two share public/assets and rename each
 // other's chunks mid-build; the loser reports ENOENT on a file that existed
 // a millisecond earlier, which reads as a bundler bug and is not one (found

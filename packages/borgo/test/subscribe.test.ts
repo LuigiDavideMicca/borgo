@@ -237,13 +237,14 @@ describe("subscribe", () => {
   });
 
   test("the client's final code and the relay's are the same number", async () => {
+    // the relay is go since 0.30: the two sources are read and compared
     const dir = import.meta.dir;
     const client = await Bun.file(`${dir}/../src/index.ts`).text();
-    const server = await Bun.file(`${dir}/../src/server.ts`).text();
+    const relay = await Bun.file(`${dir}/../../../websocket.go`).text();
     const clientCode = /const CLOSE_ORIGIN_REFUSED = (\d+);/.exec(client)?.[1];
-    const serverCode = /export const WS_CLOSE_ORIGIN_REFUSED = (\d+);/.exec(server)?.[1];
+    const relayCode = /wsCloseOriginRefused\s*=\s*(\d+)/.exec(relay)?.[1];
     expect(clientCode).toBeDefined();
-    expect(clientCode).toBe(serverCode!);
+    expect(clientCode).toBe(relayCode!);
   });
 
   test("close during the reconnect backoff cancels the redial for good", () => {
@@ -329,16 +330,17 @@ describe("subscribe", () => {
     });
 
     test("the client's cap and the relay's are the same number", async () => {
-      // index.ts is browser code and cannot import the server, so it carries a
-      // copy: the two sources are read and compared
+      // index.ts is browser code and the relay is go, so each carries a copy:
+      // the two sources are read and compared (websocket_test.go does the
+      // same from the other side)
       const dir = import.meta.dir;
       const client = await Bun.file(`${dir}/../src/index.ts`).text();
-      const server = await Bun.file(`${dir}/../src/server.ts`).text();
+      const relay = await Bun.file(`${dir}/../../../websocket.go`).text();
       const clientCap = /const MAX_TOPIC_LENGTH = (\d+);/.exec(client)?.[1];
-      const serverCap = /export const MAX_WS_TOPIC_LENGTH = (\d+);/.exec(server)?.[1];
+      const relayCap = /wsMaxTopicLength\s*=\s*(\d+)/.exec(relay)?.[1];
       expect(clientCap).toBeDefined();
-      expect(serverCap).toBeDefined();
-      expect(clientCap).toBe(serverCap!);
+      expect(relayCap).toBeDefined();
+      expect(clientCap).toBe(relayCap!);
     });
 
     test("one call is one topic, so the 32-topic cap is unreachable from here", () => {

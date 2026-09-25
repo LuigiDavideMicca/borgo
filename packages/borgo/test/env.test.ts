@@ -18,9 +18,12 @@ describe("schema mistakes are the author's, thrown at define", () => {
   });
 
   test("borgo's own variables are refused - one source of truth", () => {
-    for (const name of ["BORGO_CSP", "PORT", "API_PORT", "API_URL", "FRONT_URL"]) {
+    for (const name of ["BORGO_CSP", "PORT", "API_PORT", "API_URL"]) {
       expect(() => defineEnv({ server: { [name]: {} } }, {})).toThrow("borgo's own");
     }
+    // FRONT_URL was borgo's through 0.22, when a push was a request to the
+    // front server; retired in 0.30, the name is an app's to declare
+    expect(() => defineEnv({ server: { FRONT_URL: {} } }, { FRONT_URL: "https://example.test" })).not.toThrow();
   });
 
   test("one name on both sides", () => {

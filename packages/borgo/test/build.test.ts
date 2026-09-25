@@ -24,7 +24,6 @@ import {
   channelLines,
   metaPathConcats,
   buildLeftUnfinished,
-  buildModeFor,
   buildReasons,
   BundleFailed,
   caseOnlyMismatches,

@@ -1,7 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { CSRF_HEADER } from "../src/index";
 import { csrfRejects, keysEqual } from "../src/util";
 
 const TOKEN = "deadbeefcafe4444aaaa000011112222";

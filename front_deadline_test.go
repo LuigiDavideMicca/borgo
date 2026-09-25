@@ -255,7 +255,7 @@ func TestAnApiAloneStreamsPastTheWriteDeadline(t *testing.T) {
 			time.Sleep(150 * time.Millisecond)
 		}
 	})
-	srv := httptest.NewUnstartedServer(apiOnlyHandler(nil, 1<<20, nil, mux))
+	srv := httptest.NewUnstartedServer(apiOnlyHandler(nil, 1<<20, nil, mux, nil))
 	srv.Config.WriteTimeout = 200 * time.Millisecond
 	srv.Start()
 	defer srv.Close()

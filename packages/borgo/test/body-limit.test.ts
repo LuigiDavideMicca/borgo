@@ -681,8 +681,6 @@ describe("every request body borgo reads is counted", () => {
     // has already bounded; the proxy's buffered branch, bounded by the
     // declaration it checked; and the two halves of the counter itself
     "util.ts": ["req.clone().formData()", "req.arrayBuffer()", "req.body.pipeThrough(", "body.getReader()"],
-    // the push endpoint, bounded at its call site
-    "server.ts": ["limited.json()"],
   };
   // substrings, judged a line at a time with comments dropped: a regex over
   // whole files matched borgo's own prose about the reads (and took 19s doing

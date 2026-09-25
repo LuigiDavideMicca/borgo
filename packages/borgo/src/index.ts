@@ -39,7 +39,7 @@ export type Channel<T extends string = string> = {
 // onRefused fires once, for the one verdict that will not change; the channel is over
 export type SubscribeOptions = { onRefused?: (reason: string) => void };
 
-// WS_CLOSE_ORIGIN_REFUSED in src/server.ts, pinned by subscribe.test.ts. The one
+// wsCloseOriginRefused in websocket.go, pinned by subscribe.test.ts. The one
 // close that may be treated as final: the only refusal whose code and reason
 // reach the client intact - a 400 arrives as 1002/1006, same as a server down
 const CLOSE_ORIGIN_REFUSED = 4403;

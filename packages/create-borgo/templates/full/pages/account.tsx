@@ -1,17 +1,12 @@
-import { ApiError, CsrfField, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
+import { CsrfField, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
 import type { Me } from "@/.borgo/api-types";
 
 export const head = { title: "Account · {{name}}" };
 
-// the guard: an unauthenticated visit redirects to /login, on full loads and
-// client navigations alike
+// the guard is middleware.ts: an unauthenticated visit is redirected to
+// /login before this loader runs, on full loads and client navigations alike
 export async function loader({ api }: LoaderContext) {
-  try {
-    return { me: await api("GET /api/me") };
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 401) return redirect("/login");
-    throw error;
-  }
+  return { me: await api("GET /api/me") };
 }
 
 // logout as a form action: works without client javascript too

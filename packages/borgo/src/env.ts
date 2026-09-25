@@ -212,7 +212,7 @@ export function defineEnv<const S extends EnvSchema>(
         `borgo env: server variable ${name} carries the ${CLIENT_ENV_PREFIX} prefix - declare it under client, or rename it so it cannot be mistaken for one the browser may see`,
       );
     }
-    if (name.startsWith("BORGO_") || name === "PORT" || name === "API_PORT" || name === "API_URL" || name === "FRONT_URL") {
+    if (name.startsWith("BORGO_") || name === "PORT" || name === "API_PORT" || name === "API_URL") {
       throw new Error(
         `borgo env: ${name} is borgo's own - the framework already validates it at boot, and declaring it here would give it two sources of truth`,
       );

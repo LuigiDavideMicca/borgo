@@ -247,12 +247,15 @@ type frontOptions struct {
 	dev bool
 	// api/middleware.go; nil when the app has none
 	app *appMiddleware
+	// the topic relay, answering /ws; nil forwards it like any other path
+	ws http.Handler
 }
 
 // front is the public handler: the api and the files in-process, the rest
 // forwarded.
 type front struct {
 	api      http.Handler
+	ws       http.Handler
 	assets   *assetIndex
 	isr      *isr
 	policies *policySource
@@ -277,9 +280,9 @@ func internalName(cleaned string) bool {
 
 func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// decided on the cleaned path: go leaves dot segments in URL.Path and the
-	// render service normalises them, so /x/../__borgo/publish would pass a
-	// prefix test here and land on the publish handler there (found by the
-	// verifier of this step). The request itself travels as written; only
+	// render service normalises them, so /x/../__borgo/routes would pass a
+	// prefix test here and land on the routes handler there (found by the
+	// verifier of the step that put go in front). The request itself travels as written; only
 	// the decision is taken on what it will mean at the far end
 	cleaned := path.Clean(r.URL.Path)
 	// the names the two processes use between themselves are not urls: a
@@ -319,6 +322,15 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // api, public files, the page cache and the render service, in that order.
 func (f *front) serveGuarded(w http.ResponseWriter, r *http.Request) {
 	cleaned := path.Clean(r.URL.Path)
+	// the relay, behind the app's middleware, the shared session answer, the
+	// deadlines (whose writer unwraps for the hijack) and the counters, as
+	// every other guarded path is: the socket reads the session the front
+	// verified, and the 101 sets the security headers itself
+	if f.ws != nil && cleaned == "/ws" {
+		setRouteLabel(r, "/ws")
+		f.ws.ServeHTTP(w, r)
+		return
+	}
 	if inProcess(cleaned) {
 		f.api.ServeHTTP(w, r)
 		// the mux wrote the pattern it matched onto the request; a miss
@@ -476,7 +488,7 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 		FlushInterval: -1,
 		ErrorHandler:  renderUnavailable,
 	}
-	f := &front{api: api, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev}
+	f := &front{api: api, ws: opts.ws, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev}
 	// api/middleware.go in front of everything the front does not answer
 	// itself; middleware.go says why each position is where it is
 	f.guarded = withAppMiddleware(opts.app, http.HandlerFunc(f.serveGuarded))
