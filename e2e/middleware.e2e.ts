@@ -53,6 +53,7 @@ test("a signed-in visit goes through, with the headers next() added", async ({ p
   const username = `guarded${Date.now()}`;
   await page.goto("/register");
   await page.fill('input[name="username"]', username);
+  await page.fill('input[name="email"]', username + "@example.test");
   await page.fill('input[name="password"]', "pw123456");
   await page.click("form button");
   await expect(page).toHaveURL(/\/account$/);

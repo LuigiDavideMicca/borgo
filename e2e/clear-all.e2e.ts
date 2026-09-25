@@ -7,6 +7,7 @@ test("a logged-in user clears all tasks, over the api and from the button", asyn
   const username = `clear${Date.now()}`;
   await page.goto("/register");
   await page.fill('input[name="username"]', username);
+  await page.fill('input[name="email"]', username + "@example.test");
   await page.fill('input[name="password"]', "pw123456");
   await page.click("form button");
   await expect(page).toHaveURL(/\/account$/);

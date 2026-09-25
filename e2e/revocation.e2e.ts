@@ -9,6 +9,7 @@ import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 async function signIn(page: Page, path: "/register" | "/login", username: string) {
   await page.goto(path);
   await page.fill('input[name="username"]', username);
+  if (path === "/register") await page.fill('input[name="email"]', username + "@example.test");
   await page.fill('input[name="password"]', "pw123456");
   await page.click("form button");
   await expect(page).toHaveURL(/\/account$/);

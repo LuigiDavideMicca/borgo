@@ -8,6 +8,16 @@ export interface Ping {
   pong: string;
 }
 
+// Signup as encoding/json reads it, which is not
+// the response it writes: a field the decoder never receives is not an
+// error, and neither is one that arrives null, so every property below
+// is optional and admits null whatever its Go type is.
+export interface Signup$Request {
+  username?: string | null;
+  password?: string | null;
+  email?: string | null;
+}
+
 export interface Cleared {
   cleared: number;
 }
@@ -50,7 +60,7 @@ declare module "borgo-framework" {
     "POST /api/logout-everywhere": { response: unknown };
     "GET /api/me": { response: Me };
     "GET /api/ping": { response: Ping };
-    "POST /api/register": { response: unknown };
+    "POST /api/register": { response: unknown; request: Signup$Request };
     "DELETE /api/tasks": { response: Cleared };
     "GET /api/tasks": { response: TaskList };
     "POST /api/tasks": { response: TaskItem; request: TaskCreate$Request };

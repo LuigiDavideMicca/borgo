@@ -70,7 +70,9 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `Auth.Hasher PasswordHasher` | Password hasher; default `DefaultHasher()`. | stable |
 | `(*Auth[U]).LoginHandler` | Verifies credentials, starts a session, responds with the principal. 503 + `Retry-After` when the hash queue is saturated. | stable |
 | `(*Auth[U]).LogoutHandler` | Clears the session cookie, 204. | stable |
-| `(*Auth[U]).RegisterHandler` | Hashes, creates, starts a session, 201. 409 for a taken username. | stable |
+| `(*Auth[U]).RegisterHandler` | Hashes, creates, starts a session, 201. 409 for a taken username. `Signup` over `Credentials` alone. | stable |
+| `Signup[U, S SignupForm](a *Auth[U], register func(ctx, form S, hash string) (U, error)) http.HandlerFunc` | The register handler for a body of the app's shape: any struct embedding `Credentials`, decoded with `Bind` and handed to `register` beside the password's hash. Same answers as `RegisterHandler`; the typed bridge reads `S` as the route's request type. | provisional |
+| `SignupForm` | What `Signup` accepts: a struct embedding `Credentials` by value. The interface's method is unexported, so embedding is the way to satisfy it; the compiler also admits a pointer, an interface or an embedded `*Credentials`, and `Signup` refuses those by name where it is built, since a body of `null` would leave the promoted method a nil to call. | provisional |
 | `Authed(next http.HandlerFunc) http.HandlerFunc` | Guards an API route: 401 JSON without a valid session. `borgogen` sees through the wrapper, so the route keeps its types. | stable |
 | `Credentials` | The `{username, password}` JSON body the login and register handlers decode. | stable |
 | `ErrUserExists` | Sentinel for `Auth.Register`, answered as 409. | stable |

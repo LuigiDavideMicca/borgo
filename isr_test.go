@@ -524,15 +524,15 @@ func TestIsrAnInvalidatedCopyDoesNotComeBackFromDisk(t *testing.T) {
 	render, _ := countingRenderer(plainPage("<html>gone</html>"))
 	i := newIsr(render, persist, func(string) {})
 	serve(t, i, &isrPolicy{manual: true}, "/g")
+	// the save is asynchronous: invalidate a copy that is on disk, or the
+	// test races the writer it means to contradict (a fixed sleep lost that
+	// race under the load of the other gates)
+	waitForPairs(t, dir, 2)
 	i.invalidatePath("/g")
-	time.Sleep(100 * time.Millisecond)
-	if left, _ := os.ReadDir(dir); len(left) != 0 {
-		names := []string{}
-		for _, e := range left {
-			names = append(names, e.Name())
-		}
-		t.Errorf("files after an invalidation: %v", names)
-	}
+	waitFor(t, func() bool {
+		left, _ := os.ReadDir(dir)
+		return len(left) == 0
+	}, "the invalidated copy to leave the disk")
 	again := newIsr(render, persist, func(string) {})
 	if cachedPages(again) != 0 {
 		t.Error("an invalidated copy came back on restart")

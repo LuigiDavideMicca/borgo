@@ -32,6 +32,16 @@ export interface Deleted {
   deleted: boolean;
 }
 
+// Signup as encoding/json reads it, which is not
+// the response it writes: a field the decoder never receives is not an
+// error, and neither is one that arrives null, so every property below
+// is optional and admits null whatever its Go type is.
+export interface Signup$Request {
+  username?: string | null;
+  password?: string | null;
+  email?: string | null;
+}
+
 declare module "borgo-framework" {
   interface ApiRoutes {
     "GET /api/events": { response: unknown };
@@ -41,7 +51,7 @@ declare module "borgo-framework" {
     "GET /api/notes": { response: NoteList };
     "POST /api/notes": { response: NoteItem; request: NoteCreate$Request };
     "DELETE /api/notes/{id}": { response: Deleted };
-    "POST /api/register": { response: unknown };
+    "POST /api/register": { response: unknown; request: Signup$Request };
   }
   interface WsEvents {
     "live/note-created": string;

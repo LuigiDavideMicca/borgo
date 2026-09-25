@@ -117,6 +117,42 @@ func init() {
 - `RegisterHandler` hashes the password, calls `Register`, starts the session, responds 201. `borgo.ErrUserExists` becomes a 409; with no `Register` configured the route answers 404.
 - `LogoutHandler` clears the cookie, responds 204.
 
+### A signup form of your own shape: borgo.Signup
+
+`RegisterHandler` takes `{username, password}` and nothing else, and no signup form anybody ships stops there. `borgo.Signup` is the same handler over a body of your own: any struct that embeds `borgo.Credentials`, so the framework finds the username and the password, and the rest is yours. It is decoded as `borgo.Bind` decodes it, and handed to your function beside the hash of its password:
+
+```go
+type Account struct{ Username, Email, Hash string }
+
+type SignupBody struct {
+	borgo.Credentials
+	Email string `json:"email"`
+}
+
+var accounts = borgo.Auth[Account]{
+	Lookup: func(ctx context.Context, username string) (Account, string, error) {
+		a, err := findAccount(ctx, username)
+		return a, a.Hash, err
+	},
+}
+
+// the form reaches register whole; the password reaches it hashed
+func register(ctx context.Context, form SignupBody, hash string) (Account, error) {
+	a := Account{Username: form.Username, Email: form.Email, Hash: hash}
+	return a, saveAccount(ctx, a)
+}
+
+func init() {
+	borgo.Handle("POST /api/register", borgo.Signup(&accounts, register))
+}
+
+// your store
+func findAccount(ctx context.Context, username string) (Account, error) { return Account{}, nil }
+func saveAccount(ctx context.Context, a Account) error             { return nil }
+```
+
+The answers are `RegisterHandler`'s, which is `Signup` over `Credentials` alone: an empty username or password is a 400 before any hashing, `ErrUserExists` a 409, a missing `SESSION_SECRET` a 500 before the store is written, too many parallel hashes a 503 with `Retry-After`; on success the session starts and the principal comes back with a 201. What your function validates beyond that is yours, and an error it returns is a 500 `registration failed` — so refuse a malformed email in the page's action, where the message can be shown, as `pages/register.tsx` in `examples/tasks` does. The typed bridge reads the form as the route's request type, so a misspelled field in `api("POST /api/register", { body })` fails `tsc`. Embedding by value is the way in, deliberately: a form that spelled its own `password` field would leave the framework hashing nothing, and a form that reaches `Credentials` through a pointer or an interface is refused when `Signup` is built, since a body of `null` would leave it nothing to call.
+
 Defaults: 7-day sessions (`MaxAge`), `DefaultHasher()` (`Hasher`), the user itself as principal (`Principal`). All three are fields, not policy — and `Hasher` is the only way to change hashing, deliberately: `DefaultHasher` is a function, so no code in the process can reassign the default out from under an `Auth` that did not ask for it.
 
 ## Guarding api routes: borgo.Authed

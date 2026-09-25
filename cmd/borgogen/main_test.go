@@ -28,6 +28,7 @@ import (
 	overrideapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/overrideunion/api"
 	recursiveapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/recursive/api"
 	requestapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/request/api"
+	signupapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/signup/api"
 	stringoptapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/stringopt/api"
 	textapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/textmarshal/api"
 	wireapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/wire/api"
@@ -1405,6 +1406,30 @@ func TestClosureAndConvertedHandlersAreTyped(t *testing.T) {
 // TopicEvents<T> closes a topic's union as soon as one of its events is
 // declared, so the subscriber for the dropped one fails tsc with nothing
 // pointing back at the generator.
+// borgo.Signup is the one framework handler whose request type is the app's:
+// the form is read from the instantiation, not from a body, and the wrappers
+// handlerTarget looks through are looked through here too
+func TestSignupFormIsTheRouteRequestType(t *testing.T) {
+	var form signupapi.SignupBody
+	form.Username, form.Password, form.Email = "u", "p", "e"
+	marshals(t, form, `{"username":"u","password":"p","email":"e"}`)
+	var types string
+	out := captureStderr(t, func() { types = generateFresh(t, "signup") })
+	// the request side's shape, as every Bind decodes: optional and nullable
+	wants(t, types,
+		"export interface SignupBody$Request {\n  username?: string | null;\n  password?: string | null;\n  email?: string | null;\n  name?: string | null;\n}",
+		`"POST /api/register": { response: unknown; request: SignupBody$Request };`,
+		`"POST /api/invite": { response: unknown; request: Credentials$Request };`,
+		// explicit type arguments are an IndexListExpr, not an IndexExpr:
+		// the generator read them as no call of borgo's at all (found by
+		// the verifier of this step)
+		`"POST /api/explicit": { response: unknown; request: SignupBody$Request };`,
+	)
+	if strings.Contains(out, "stay unknown") {
+		t.Errorf("a Signup handler must not read as an unresolvable registration:\n%s", out)
+	}
+}
+
 func TestPushBeyondTheHopCapWarns(t *testing.T) {
 	marshals(t, deeph3.PThree{}, `{"n":0}`)
 	marshals(t, deeph4.PFour{}, `{"n":0}`)

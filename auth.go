@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -103,6 +104,39 @@ var ErrUserExists = errors.New("user already exists")
 type Credentials struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+func (c Credentials) signupCredentials() Credentials { return c }
+
+// SignupForm is the body a Signup handler decodes: a struct that embeds
+// Credentials by value, so the username and the password are where the
+// framework looks for them and the rest of the form is the app's. The method
+// is unexported on purpose - embedding borgo.Credentials is the way in, and
+// a form that spells its own password field would leave the framework
+// hashing nothing. The compiler admits a little more than that (a pointer,
+// an interface, an embedded *Credentials); Signup refuses those by name
+// where it is built, since a nil among them is a panic per request.
+type SignupForm interface{ signupCredentials() Credentials }
+
+var credentialsType = reflect.TypeFor[Credentials]()
+
+// embedsCredentialsByValue reports whether t is Credentials or a struct that
+// embeds it by value, at any depth of value embedding
+func embedsCredentialsByValue(t reflect.Type) bool {
+	if t == credentialsType {
+		return true
+	}
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		// a pointer or an interface embedded is refused by the recursion
+		if f.Anonymous && embedsCredentialsByValue(f.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 // Auth wires an app-supplied user provider to ready-made login, logout and
@@ -304,43 +338,93 @@ func (a *Auth[U]) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	creds, ok := readCredentials(w, r)
-	if !ok {
-		return
+	Signup(a, func(ctx context.Context, c Credentials, hash string) (U, error) {
+		return a.Register(ctx, c.Username, hash)
+	})(w, r)
+}
+
+// Signup returns a register handler for a body of the app's own shape: any
+// struct embedding Credentials, decoded as Bind decodes it and handed to
+// register beside the hash of its password. A signup form with an email, a
+// display name or an invitation code is one struct away, and the typed
+// bridge reads that struct as the route's request type:
+//
+//	type SignupBody struct {
+//		borgo.Credentials
+//		Email string `json:"email"`
+//	}
+//
+//	borgo.Handle("POST /api/register", borgo.Signup(&auth, func(ctx context.Context, form SignupBody, hash string) (User, error) {
+//		return users.Create(ctx, form.Username, form.Email, hash)
+//	}))
+//
+// The handler answers as RegisterHandler does - which is Signup over
+// Credentials alone: an empty username or password is a 400 before any
+// hashing, ErrUserExists a 409, a missing SESSION_SECRET a 500 before the
+// store is written, more parallel hashes than the box can take a 503 with
+// Retry-After - and on success it starts the session and responds 201 with
+// the principal. What register validates beyond that is the app's: an
+// error it returns is a 500 "registration failed", so refuse a malformed
+// email in the page's action, where the message can be shown.
+func Signup[U any, S SignupForm](a *Auth[U], register func(ctx context.Context, form S, hash string) (U, error)) http.HandlerFunc {
+	if a == nil {
+		panic("borgo.Signup: auth is nil")
 	}
-	var hash string
-	var err error
-	if !WithHashSlot(w, r, func() { hash, err = a.hasher().Hash(creds.Password) }) {
-		return
+	if register == nil {
+		panic("borgo.Signup: register is nil")
 	}
-	if err != nil {
-		WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "hashing failed"})
-		return
+	// the constraint admits more than the embedding by value that is meant:
+	// a pointer to a form, an interface, a struct embedding *Credentials all
+	// carry the promoted method through a pointer a body of `null` or `{}`
+	// leaves nil, and the first such request would panic (found by the
+	// verifier of this step). Refused where Signup runs, in init, by name
+	if t := reflect.TypeFor[S](); !embedsCredentialsByValue(t) {
+		panic("borgo.Signup: the form " + t.String() + " must be a struct embedding borgo.Credentials by value, not through a pointer or an interface")
 	}
-	// refuse before writing to the user store: creating an account we then
-	// cannot issue a session for leaves the caller with a 500 and a username
-	// that answers "taken" on the retry
-	if sessionSecret() == "" {
-		log.Print("borgo: register refused: " + ErrNoSessionSecret.Error())
-		WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "session write failed"})
-		return
+	return func(w http.ResponseWriter, r *http.Request) {
+		form, err := Bind[S](r)
+		if err != nil {
+			BindError(w, err)
+			return
+		}
+		creds := form.signupCredentials()
+		if creds.Username == "" || creds.Password == "" {
+			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "username and password required"})
+			return
+		}
+		var hash string
+		if !WithHashSlot(w, r, func() { hash, err = a.hasher().Hash(creds.Password) }) {
+			return
+		}
+		if err != nil {
+			WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "hashing failed"})
+			return
+		}
+		// refuse before writing to the user store: creating an account we then
+		// cannot issue a session for leaves the caller with a 500 and a username
+		// that answers "taken" on the retry
+		if sessionSecret() == "" {
+			log.Print("borgo: register refused: " + ErrNoSessionSecret.Error())
+			WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "session write failed"})
+			return
+		}
+		user, err := register(r.Context(), form, hash)
+		if errors.Is(err, ErrUserExists) {
+			WriteJSON(w, http.StatusConflict, map[string]string{"error": "username taken"})
+			return
+		}
+		if err != nil {
+			WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "registration failed"})
+			return
+		}
+		principal := a.principal(user)
+		if err := SetSession(w, principal, a.maxAge()); err != nil {
+			log.Printf("borgo: session write failed: %v", err)
+			WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "session write failed"})
+			return
+		}
+		WriteJSON(w, http.StatusCreated, principal)
 	}
-	user, err := a.Register(r.Context(), creds.Username, hash)
-	if errors.Is(err, ErrUserExists) {
-		WriteJSON(w, http.StatusConflict, map[string]string{"error": "username taken"})
-		return
-	}
-	if err != nil {
-		WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "registration failed"})
-		return
-	}
-	principal := a.principal(user)
-	if err := SetSession(w, principal, a.maxAge()); err != nil {
-		log.Printf("borgo: session write failed: %v", err)
-		WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "session write failed"})
-		return
-	}
-	WriteJSON(w, http.StatusCreated, principal)
 }
 
 // Authed guards an api route: without a valid session the request is answered

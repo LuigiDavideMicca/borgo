@@ -16,6 +16,7 @@ test("register, protected page, logout, login round trip", async ({ page }) => {
 
   await page.goto("/register");
   await page.fill('input[name="username"]', username);
+  await page.fill('input[name="email"]', username + "@example.test");
   await page.fill('input[name="password"]', "pw123456");
   await page.click("form button");
   await expect(page).toHaveURL(/\/account$/);
@@ -47,6 +48,7 @@ test("wrong password re-renders with an error", async ({ page }) => {
 async function login(page: Page, username: string) {
   await page.goto("/register");
   await page.fill('input[name="username"]', username);
+  await page.fill('input[name="email"]', username + "@example.test");
   await page.fill('input[name="password"]', "pw123456");
   await page.click("form button");
   await expect(page).toHaveURL(/\/account$/);

@@ -53,7 +53,11 @@ type route struct {
 	// decl carries the body to read bridge types from when the handler is not a
 	// declared function - an inline closure has no *types.Func to look up.
 	decl *ast.FuncDecl
-	pos  token.Position
+	// signup is the form type of a borgo.Signup handler: the one framework
+	// handler whose request type is the app's, read from the instantiation
+	// rather than from a body the generator cannot see
+	signup types.Type
+	pos    token.Position
 }
 
 type genError struct{ msg string }
@@ -175,6 +179,12 @@ func run(root string) (err error) {
 		first[r.pattern] = r.pos
 		hpkg, hdecls, body := handlerBody(pkg, decls, r, loader)
 		resp, req := gen.bridgeTypes(hpkg, hdecls, body, loader)
+		if r.signup != nil {
+			// decoded by Bind inside Signup: addressable, inbound
+			var form union
+			form.add(gen.tsType(r.signup, inbound()))
+			req = form.String()
+		}
 		entry := "{ response: " + resp
 		if req != "" {
 			entry += "; request: " + req
@@ -847,8 +857,12 @@ func writeIfChanged(path, content string) {
 // package, returning its name, or "" when it is anything else.
 func borgoFunc(info *types.Info, call *ast.CallExpr) (string, *ast.Ident) {
 	fun := call.Fun
-	if idx, ok := fun.(*ast.IndexExpr); ok {
+	switch idx := fun.(type) {
+	case *ast.IndexExpr:
 		// explicit type arguments, e.g. borgo.Bind[T](r)
+		fun = idx.X
+	case *ast.IndexListExpr:
+		// two or more of them, e.g. borgo.Signup[User, Form](...)
 		fun = idx.X
 	}
 	sel, ok := fun.(*ast.SelectorExpr)
@@ -885,7 +899,8 @@ func collectRoutes(pkg *packages.Package) []route {
 			}
 			pos := pkg.Fset.Position(call.Pos())
 			fn, decl := handlerTarget(pkg.TypesInfo, call.Args[1])
-			if fn == nil && decl == nil {
+			signup := signupForm(pkg.TypesInfo, call.Args[1])
+			if fn == nil && decl == nil && signup == nil {
 				// the route is mounted and serves; only the body behind it is
 				// out of reach. Left silent it just came out "response: unknown"
 				warn("%s: borgo.Handle with a handler expression that is not a function, a closure or a conversion of one; the route is registered but its request and response types stay unknown", pos)
@@ -894,6 +909,7 @@ func collectRoutes(pkg *packages.Package) []route {
 				pattern: constant.StringVal(tv.Value),
 				handler: fn,
 				decl:    decl,
+				signup:  signup,
 				pos:     pos,
 			})
 			return true
@@ -1056,6 +1072,31 @@ func handlerTarget(info *types.Info, expr ast.Expr) (*types.Func, *ast.FuncDecl)
 		}
 	}
 	return nil, nil
+}
+
+// signupForm returns the form type S of a borgo.Signup[U, S](...) handler
+// expression, through borgo.Authed and conversions as handlerTarget looks,
+// or nil for anything else. The body of Signup is the framework's and never
+// read; its request type is the instantiation's second argument.
+func signupForm(info *types.Info, expr ast.Expr) types.Type {
+	switch e := expr.(type) {
+	case *ast.ParenExpr:
+		return signupForm(info, e.X)
+	case *ast.CallExpr:
+		if name, sel := borgoFunc(info, e); name == "Signup" {
+			if inst, ok := info.Instances[sel]; ok && inst.TypeArgs.Len() == 2 {
+				return inst.TypeArgs.At(1)
+			}
+			return nil
+		}
+		if name, _ := borgoFunc(info, e); name == "Authed" && len(e.Args) == 1 {
+			return signupForm(info, e.Args[0])
+		}
+		if len(e.Args) == 1 && info.Types[e.Fun].IsType() {
+			return signupForm(info, e.Args[0])
+		}
+	}
+	return nil
 }
 
 // handlerBody resolves the package, declarations and body a route's bridge
