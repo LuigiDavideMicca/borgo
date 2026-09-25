@@ -107,6 +107,11 @@ func wsEventFrame(topic string, event, data json.RawMessage) ([]byte, error) {
 // ServeHTTP answers /ws in bun's order: the origin, then the topics, then the
 // handshake itself.
 func (h *wsRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// one check of the session for the whole handshake, whoever mounted the
+	// relay: Serve's chain puts this on every request, an embedder's need
+	// not, and 32 topics were 32 reads of the store behind CheckSession
+	// (found by the verifier of the phase)
+	r = ensureSessionOnce(r)
 	handshake := wsHandshakeRefusal(r)
 	if why := wsOriginRefusal(r, h.opts.trusted, h.opts.allowNoOrigin); why != "" {
 		// logged: the browser is told nothing it can show
@@ -205,10 +210,18 @@ func (h *wsRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *wsRelay) policy() wsTopicPolicy { return wsTopicPolicy{dev: h.opts.dev} }
 
+// said once per process: an embedder whose wrapper hides the hijack sees
+// every socket answered 426, which a browser reads as a server down and
+// redials forever, and nothing in the log said why
+var wsNotHijackedSaid atomic.Bool
+
 func (h *wsRelay) upgrade(w http.ResponseWriter, r *http.Request) *wsConn {
 	c, err := wsUpgrade(w, r, h.opts.security)
 	// any other error has the connection taken, and the response with it
 	if errors.Is(err, errWSNotHijacked) {
+		if !wsNotHijackedSaid.Swap(true) {
+			log.Printf("borgo: /ws answered 426: %v - a ResponseWriter wrapper in front of the relay needs an Unwrap method for the hijack (said once)", err)
+		}
 		http.Error(w, "upgrade required", http.StatusUpgradeRequired)
 	}
 	return c

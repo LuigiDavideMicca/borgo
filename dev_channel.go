@@ -169,6 +169,13 @@ func (d *devChannel) pokes() http.Handler {
 			if poke.Chunks == nil {
 				poke.Chunks = map[string]string{}
 			}
+			// the browser imports what the map names: only this app's assets
+			for page, chunk := range poke.Chunks {
+				if !strings.HasPrefix(chunk, "/assets/") {
+					http.Error(w, "js poke: chunk for "+page+" is not under /assets/", http.StatusBadRequest)
+					return
+				}
+			}
 			frame = devFrame(map[string]any{"type": "js", "files": poke.Files, "chunks": poke.Chunks, "stamp": poke.Stamp})
 		}
 		d.publish(kind, frame)

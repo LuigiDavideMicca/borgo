@@ -193,9 +193,17 @@ func TestWsHandshakeSharesOneSessionCheck(t *testing.T) {
 	}))
 	defer renderer.Close()
 	renderURL, _ := url.Parse(renderer.URL)
-	front := httptest.NewServer(newFrontHandler(apiUnderTest(), frontOptions{trusted: trustAll, security: security, ws: relay}, renderURL, testInternalKey, time.Second))
+	// an app middleware that reads the session first, as one forwarding a
+	// username does: the relay's reads share its answer
+	app := &appMiddleware{wrap: func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			GetSession[testSession](r)
+			next.ServeHTTP(w, r)
+		})
+	}}
+	front := httptest.NewServer(newFrontHandler(apiUnderTest(), frontOptions{trusted: trustAll, security: security, ws: relay, app: app}, renderURL, testInternalKey, time.Second))
 	defer front.Close()
-	api := httptest.NewServer(apiOnlyHandler(security, 1<<20, nil, http.NewServeMux(), relay))
+	api := httptest.NewServer(apiOnlyHandler(security, 1<<20, app, http.NewServeMux(), relay))
 	defer api.Close()
 	cookie := setAndExtract(t, testSession{User: "ada"}, time.Hour)
 	for i, port := range []struct{ name, base string }{{"front", front.URL}, {"api", api.URL}} {

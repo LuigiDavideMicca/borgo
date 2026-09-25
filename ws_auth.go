@@ -159,7 +159,7 @@ func wsPolicyNotice(dev bool) string {
 		return ""
 	}
 	if dev {
-		return "realtime: no borgo.CanSubscribe registered - every topic is open to every socket in dev; borgo start will refuse them all until one is"
+		return "realtime: BORGO_DEV=1 and no borgo.CanSubscribe registered - every topic is open to every socket; unset BORGO_DEV in production, where a relay with no check refuses every subscription"
 	}
 	return "realtime: no borgo.CanSubscribe registered - every subscription is refused (4403); register one in api/ to open topics"
 }

@@ -29,7 +29,7 @@ export interface ApiRoutes {}
 export const redirect = (to: string, status = 303) =>
   new Response(null, { status, headers: { Location: to } });
 
-// the front server relays {topic, event, data} between subscribers of a topic;
+// the go process relays {topic, event, data} between subscribers of a topic;
 // go pushes into the same topics via borgo.Push. "__count" is built in.
 export type Channel<T extends string = string> = {
   publish(...args: PublishArgs<T>): void;
@@ -71,8 +71,8 @@ export type PublishArgs<T extends string> = string extends T
     ? [event: string, data?: unknown]
     : EventPairs<EventsFor<T>>;
 
-// MAX_WS_TOPIC_LENGTH in src/server.ts, duplicated not imported (that file is
-// the whole front server); subscribe.test.ts pins the pair
+// wsMaxTopicLength in websocket.go, copied not imported (the relay is go's);
+// subscribe.test.ts pins the pair
 const MAX_TOPIC_LENGTH = 128;
 
 // second overload: tsc rejects a single-parameter callback against a rest

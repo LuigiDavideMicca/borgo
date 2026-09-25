@@ -542,7 +542,7 @@ func TestWSOriginRefusal(t *testing.T) {
 		refusal string
 	}{
 		{"no origin", "203.0.113.9:1", nil, "", false, false,
-			"no Origin header on the handshake: a non-browser client needs BORGO_WS_ALLOW_NO_ORIGIN=1 (wsAllowNoOrigin)"},
+			"no Origin header on the handshake: a non-browser client needs BORGO_WS_ALLOW_NO_ORIGIN=1"},
 		{"no origin, admitted", "203.0.113.9:1", nil, "", false, true, ""},
 		{"the page's own origin", "203.0.113.9:1", []string{"http://app.test"}, "", false, false, ""},
 		{"the host in another case", "203.0.113.9:1", []string{"http://APP.test"}, "", false, false, ""},

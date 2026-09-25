@@ -754,12 +754,30 @@ export function mount({ createElement, hydrateRoot, routes, notFound }: MountOpt
       try {
         const route = currentRoute;
         const seq = navSeq;
-        const [module, res] = await Promise.all([
-          import(chunk + bust) as Promise<ClientPageModule>,
-          fetchProps(new URL(location.href)),
-        ]);
-        if (!res.ok) throw new Error(`props fetch failed: ${res.status}`);
-        const props = asProps((await res.json()).props);
+        const fetchFresh = async () => {
+          const [module, res] = await Promise.all([
+            import(chunk + bust) as Promise<ClientPageModule>,
+            fetchProps(new URL(location.href)),
+          ]);
+          if (!res.ok) throw new Error(`props fetch failed: ${res.status}`);
+          return { module, props: asProps((await res.json()).props) };
+        };
+        // the render service that just rebuilt is told to the front's channel
+        // the moment it binds, and may be a moment from answering through
+        // the front: a refused fetch here is retried for a few seconds, not
+        // taken for a reason to reload (the websocket that reconnected through
+        // the render service used to hide that moment)
+        let fresh: Awaited<ReturnType<typeof fetchFresh>> | undefined;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            fresh = await fetchFresh();
+            break;
+          } catch (error) {
+            if (attempt >= 12 || lastStamp !== msg.stamp) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+        }
+        const { module, props } = fresh;
         // a navigation started while this was in flight already owns root
         if (seq !== navSeq) return;
         // refresh first: families must swap (and hook-signature changes remount)

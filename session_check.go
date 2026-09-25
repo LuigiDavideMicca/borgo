@@ -113,6 +113,16 @@ func (o *sessionOnce) read(r *http.Request, check sessionCheckFunc) (json.RawMes
 // service each read the session, and a check that queries a store would
 // otherwise query it once per read. Built after the registry latched, so no
 // check means no wrapper at all.
+// ensureSessionOnce is withSessionOnce for one request that may or may not
+// have come through it: the relay applies it itself, so an embedder's mount
+// shares one check across a handshake as Serve's does
+func ensureSessionOnce(r *http.Request) *http.Request {
+	if sessionCheck.Load() == nil || r.Context().Value(sessionOnceKey{}) != nil {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), sessionOnceKey{}, &sessionOnce{}))
+}
+
 func withSessionOnce(next http.Handler) http.Handler {
 	if sessionCheck.Load() == nil {
 		return next

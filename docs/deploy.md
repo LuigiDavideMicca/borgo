@@ -73,7 +73,7 @@ What stays refused is function-per-request — bundling the server into a FaaS r
 
 ## Reverse proxy
 
-Only the public port needs to be reachable — the Go front answers `/api/*` itself, serves the files, and carries WebSockets through to the render service. Compression is built-in — static assets are precompressed to `.gz`/`.br` at build time, dynamic responses are gzipped on the fly — so the proxy should not compress again (no `encode` directive in Caddy, `gzip off` is nginx's default). `borgo deploy init caddy` (or `nginx`) writes these configs into your project — `Caddyfile` and `site.conf` respectively — templated with your app's name and port; an existing file is never overwritten unless you pass `--force`. Caddy gives you TLS in one block, and the rest of it is the policy nginx has to spell out longhand:
+Only the public port needs to be reachable — the Go front answers `/api/*` itself, serves the files, answers `/ws` itself, and forwards the pages to the render service. Compression is built-in — static assets are precompressed to `.gz`/`.br` at build time, dynamic responses are gzipped on the fly — so the proxy should not compress again (no `encode` directive in Caddy, `gzip off` is nginx's default). `borgo deploy init caddy` (or `nginx`) writes these configs into your project — `Caddyfile` and `site.conf` respectively — templated with your app's name and port; an existing file is never overwritten unless you pass `--force`. Caddy gives you TLS in one block, and the rest of it is the policy nginx has to spell out longhand:
 
 ```caddy
 example.com {

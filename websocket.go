@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf16"
@@ -215,8 +216,12 @@ func (rd *wsReader) next() (wsMessage, error) {
 		if _, err := io.ReadFull(rd.src, mask[:]); err != nil {
 			return wsMessage{}, err
 		}
-		payload := make([]byte, length)
-		if _, err := io.ReadFull(rd.src, payload); err != nil {
+		// allocated as the bytes arrive, not as declared: a header claiming
+		// a megabyte and sending nothing held a megabyte for the whole read
+		// deadline, per socket, for 14 bytes on the wire (found by the
+		// verifier of the phase)
+		payload, err := wsReadPayload(rd.src, length)
+		if err != nil {
 			return wsMessage{}, err
 		}
 		for i := range payload {
@@ -248,6 +253,25 @@ func (rd *wsReader) next() (wsMessage, error) {
 			return wsMessage{}, wsProtocolError(fmt.Sprintf("opcode %#x is not defined", opcode))
 		}
 	}
+}
+
+// wsReadChunk is how much a frame's payload is allocated ahead of its bytes
+const wsReadChunk = 64 << 10
+
+// wsReadPayload reads length bytes, growing the buffer as they arrive: a
+// declared length is a claim, and the memory follows the bytes, not the
+// claim. A message under the chunk is one allocation, as before
+func wsReadPayload(src io.Reader, length uint64) ([]byte, error) {
+	buf := make([]byte, 0, min(length, wsReadChunk))
+	for uint64(len(buf)) < length {
+		n := int(min(uint64(wsReadChunk), length-uint64(len(buf))))
+		start := len(buf)
+		buf = slices.Grow(buf, n)[:start+n]
+		if _, err := io.ReadFull(src, buf[start:]); err != nil {
+			return nil, err
+		}
+	}
+	return buf, nil
 }
 
 func wsComplete(opcode byte, payload []byte) (wsMessage, error) {
@@ -493,7 +517,7 @@ func wsOriginRefusal(r *http.Request, trusted []*net.IPNet, allowNoOrigin bool) 
 		if allowNoOrigin {
 			return ""
 		}
-		return "no Origin header on the handshake: a non-browser client needs BORGO_WS_ALLOW_NO_ORIGIN=1 (wsAllowNoOrigin)"
+		return "no Origin header on the handshake: a non-browser client needs BORGO_WS_ALLOW_NO_ORIGIN=1"
 	}
 	// two Origin lines read as one value, as fetch's Headers.get joins them,
 	// and no single origin is that

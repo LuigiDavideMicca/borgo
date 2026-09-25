@@ -128,7 +128,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `Revalidate(path string) error` | Drops the cached copy of one page (query variants included; a trailing `*` drops a prefix). Under `borgo start` a call into the cache in the same process; in `borgo dev`, where nothing is cached, it changes nothing. An empty or blank path, or one not starting with `/`, is an error. | provisional |
 | `RevalidateTag(tag string) error` | Drops every cached page whose `tags` export named the tag, compared without surrounding spaces. An empty or blank tag is an error. | provisional |
 
-Both refuse an empty name. Under `borgo start` the cache is in the process the call runs in, and the call drops the copies there directly; under `borgo dev`, where nothing is cached, it travels the way `Push` does and changes nothing. See [cached pages](pages-and-routing.md#cached-pages).
+Both refuse an empty name. Under `borgo start` the cache is in the process the call runs in, and the call drops the copies there directly; under `borgo dev`, where nothing is cached, it changes nothing. See [cached pages](pages-and-routing.md#cached-pages).
 
 ### Not exported, but worth knowing
 

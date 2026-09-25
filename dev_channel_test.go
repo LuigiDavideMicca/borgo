@@ -267,6 +267,10 @@ func TestDevChannelPokesNeedTheKeyAndAShape(t *testing.T) {
 		// valid json under the cut and over the limit: the size is the refusal
 		{"/__borgo/dev/js", `{"files":[],"chunks":{},"stamp":5}` + strings.Repeat(" ", devPokeMaxBody), 400},
 		{"/__borgo/dev/js", `{"files":[],"chunks":{},"stamp":5}`, 204},
+		// the browser imports what the map names: nothing outside this app's assets
+		{"/__borgo/dev/js", `{"files":[],"chunks":{"p":"https://evil.test/x.js"},"stamp":5}`, 400},
+		{"/__borgo/dev/js", `{"files":[],"chunks":{"p":"//evil.test/x.js"},"stamp":5}`, 400},
+		{"/__borgo/dev/js", `{"files":[],"chunks":{"p":"/assets/p-abc.js"},"stamp":5}`, 204},
 	} {
 		if code := devPoke(t, internal.URL, testInternalKey, tc.path, tc.body); code != tc.want {
 			t.Errorf("%s %q: %d, want %d", tc.path, tc.body[:min(len(tc.body), 40)], code, tc.want)
