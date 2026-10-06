@@ -2,7 +2,9 @@ package borgo
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -286,7 +288,11 @@ func TestBindMultipartFilesLiveAsLongAsTheHandler(t *testing.T) {
 	type form struct {
 		Doc File `json:"doc"`
 	}
-	var kept File
+	type spilled struct {
+		doc  File
+		path string
+	}
+	kept := make(chan spilled, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f, err := BindMultipartMax[form](r, 64<<20)
 		if err != nil {
@@ -299,8 +305,14 @@ func TestBindMultipartFilesLiveAsLongAsTheHandler(t *testing.T) {
 			return
 		}
 		io.Copy(io.Discard, rc)
+		file, ok := rc.(*os.File)
 		rc.Close()
-		kept = f.Doc
+		if !ok {
+			t.Error("a 9 MiB part was not spilled to a file")
+			kept <- spilled{}
+			return
+		}
+		kept <- spilled{f.Doc, file.Name()}
 	}))
 	defer srv.Close()
 	// over the in-memory threshold, so it is spilled to a temporary file
@@ -313,7 +325,16 @@ func TestBindMultipartFilesLiveAsLongAsTheHandler(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("answered %d", res.StatusCode)
 	}
-	if rc, err := kept.Open(); err == nil {
+	// net/http removes the spilled files after the handler returns, which
+	// can be just after the client has its response: wait for it, bounded,
+	// looking without opening - on windows an open handle is what stops a
+	// removal, and net/http does not try twice
+	got := <-kept
+	waitFor(t, func() bool {
+		_, err := os.Stat(got.path)
+		return errors.Is(err, fs.ErrNotExist)
+	}, "the spilled file removed once its handler returned")
+	if rc, err := got.doc.Open(); err == nil {
 		rc.Close()
 		t.Error("a spilled file opened after its handler returned")
 	}

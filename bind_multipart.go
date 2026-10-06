@@ -32,7 +32,7 @@ type File struct {
 // returns, so copy what must outlive the request.
 func (f *File) Open() (io.ReadCloser, error) {
 	if f == nil || f.header == nil {
-		return nil, errors.New("borgo.File: no file was uploaded for this field")
+		return nil, ErrNoUpload
 	}
 	return f.header.Open()
 }

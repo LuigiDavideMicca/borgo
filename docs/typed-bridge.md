@@ -193,10 +193,7 @@ type AttachmentForm struct {
 	File borgo.File `json:"file"`
 }
 
-type Stored struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-}
+var uploads = &borgo.Uploads{Dir: "uploads"}
 
 //borgo:route POST /api/attachments
 func UploadAttachment(w http.ResponseWriter, r *http.Request) {
@@ -205,14 +202,18 @@ func UploadAttachment(w http.ResponseWriter, r *http.Request) {
 		borgo.BindError(w, err)
 		return
 	}
-	src, err := form.File.Open()
-	if err != nil {
+	stored, err := uploads.Save(form.File)
+	if errors.Is(err, borgo.ErrNoUpload) {
 		http.Error(w, "a file is required", http.StatusBadRequest)
 		return
 	}
-	defer src.Close()
-	// sniff the bytes, store under a name of your own - see below
-	borgo.JSON(w, http.StatusCreated, Stored{Name: form.File.Name, Size: form.File.Size})
+	if err != nil {
+		log.Printf("storing an upload: %v", err)
+		http.Error(w, "storage failed", http.StatusInternalServerError)
+		return
+	}
+	// keep stored beside who owns it - see "Storing and serving" below
+	borgo.JSON(w, http.StatusCreated, stored)
 }
 ```
 
@@ -229,7 +230,44 @@ The fields a form can fill are string, bool, the integers, the floats, `[]string
 
 The body is read at most 32 MiB (`BindMultipartMax` changes that, and `BORGO_MAX_BODY` on the public port is the same number by default). The parser has two limits of its own, and both are a 413 like the cap: at most 1000 parts, and text parts held in memory up to about 18 MiB in total. Files past 8 MiB are spilled to temporary files the server removes when the handler returns, so copy what must outlive the request. 415 is any other content type, 400 a part that does not parse as its field, 500 a file the server could not spill to its temporary directory (the path goes to the log, not to the client). A `borgo.File` in a type read with `Bind` or `BindMax` fails the generator: the client would send it as multipart to a route that only reads JSON.
 
-What the decoder does not do is the part every upload gets wrong, and it is yours on purpose: `Name` and `ContentType` are what the client said. Sniff the first bytes (`http.DetectContentType`) before trusting the type, store under a name you generate rather than the one sent, keep the storage outside the project directory, and authorize the download as carefully as the upload. `examples/tasks` has the working pair in `api/attachments.go` and `pages/attach.tsx`.
+`Name` and `ContentType` on a `borgo.File` are what the client said, nothing more. Storing the file is the next section's.
+
+### Storing and serving: borgo.Uploads
+
+An upload is the same few decisions in every app, and getting any one of them wrong is a vulnerability: what the bytes really are, the name they live under, where that is, and the headers a download goes out with. `borgo.Uploads` makes them; who may download what stays yours, because only the app knows who owns a file.
+
+- **`Save(file)`** sniffs the first 512 bytes (`http.DetectContentType`) and stores the file under a random 32-character key, never the name the client sent. With `Types` set, a file that sniffs as anything else is refused with `ErrUploadType` and nothing is written. A field left empty is `ErrNoUpload`, and a write that fails halfway leaves nothing behind. The `Stored` it returns holds the key, the sniffed type, the size and the client's name with any path and control characters removed, for showing back. Keep it beside the file's owner.
+- **`Serve(w, r, stored)`** answers with the file once your handler has decided this request may have it. It goes out as the sniffed type with `X-Content-Type-Options: nosniff`, `Cache-Control: private` so no shared cache holds a file authorized per request, and a `Content-Security-Policy` sandbox in case it is opened as a page. PNG, JPEG, GIF and WebP are `inline`; everything else, HTML and SVG among it, downloads as an attachment under its cleaned name. Ranges and conditional requests work. A key that is not one `Save` makes, or names no file, is a 404.
+- **`Remove(key)`** deletes the file; one already gone is not an error.
+
+```go
+type Attachment struct {
+	OwnerID uint
+	borgo.Stored
+}
+
+func findAttachment(owner uint, key string) (Attachment, bool) {
+	// your database: the row whose key and owner both match
+	return Attachment{}, false
+}
+
+func DownloadAttachment(w http.ResponseWriter, r *http.Request) {
+	user, ok := borgo.GetSession[struct{ ID uint }](r)
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	a, ok := findAttachment(user.ID, r.PathValue("key"))
+	if !ok {
+		// someone else's file is a 404 too: a 403 would confirm the key
+		http.NotFound(w, r)
+		return
+	}
+	uploads.Serve(w, r, a.Stored)
+}
+```
+
+Where `Dir` lives matters twice. In development, a directory inside the app must be in `.gitignore`, which the dev watcher honours; otherwise every upload rebuilds the app. In a container, the scaffolded Dockerfile creates `/data/uploads` owned by the app's user, so `Dir: "/data/uploads"` on a volume mounted at `/data`, or at `/data/uploads` itself, is writable. A volume mounted at a path the image does not have is created root-owned, and `Save` says so when it cannot write. `examples/tasks` has the whole story in `api/attachments.go` and `pages/attach.tsx`: upload, owner-only download, and the oldest files pruned past twenty per user.
 
 ## The request side: what the decoder accepts
 

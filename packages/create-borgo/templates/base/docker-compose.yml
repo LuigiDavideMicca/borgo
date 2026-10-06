@@ -17,9 +17,11 @@ services:
 #     DB_PATH: /data/app.db
 #   volumes:
 #     - data:/data
-# mount AT /data, never below it: the Dockerfile creates /data owned by the
-# image user, and a named volume mounted at a path the image does not have
-# (say /data/uploads) is created root-owned, so the app cannot write there
+# mount AT /data: the Dockerfile creates /data owned by the image user, and
+# a named volume takes the owner of the directory it lands on. The image also
+# has /data/uploads, borgo.Uploads' usual home, so a volume of its own there
+# works too - but a volume at any path the image does not have is created
+# root-owned, and the app cannot write there
 # volumes:
 #   data:
 #

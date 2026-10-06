@@ -6,3 +6,6 @@ dist
 public/assets
 *.db
 .DS_Store
+# borgo.Uploads in development: ignored here, so the dev watcher never
+# rebuilds on an upload
+uploads/

@@ -9,7 +9,8 @@ export interface AttachmentForm$Request {
   file?: Blob | null;
 }
 
-export interface Attachment {
+export interface AttachmentView {
+  key: string;
   note: string;
   name: string;
   size: number;
@@ -75,7 +76,8 @@ export interface SignedOut {
 
 declare module "borgo-framework" {
   interface ApiRoutes {
-    "POST /api/attachments": { response: Attachment; request: AttachmentForm$Request; multipart: true };
+    "POST /api/attachments": { response: AttachmentView; request: AttachmentForm$Request; multipart: true };
+    "GET /api/attachments/{key}": { response: unknown };
     "GET /api/events": { response: unknown };
     "POST /api/login": { response: unknown };
     "POST /api/logout": { response: unknown };

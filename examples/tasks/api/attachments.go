@@ -1,16 +1,15 @@
 package api
 
 import (
-	"cmp"
-	"crypto/rand"
-	"encoding/hex"
-	"io"
+	"errors"
+	"log"
 	"net/http"
 	"os"
-	"path/filepath"
-	"slices"
 
 	"github.com/LuigiDavideMicca/borgo"
+	"gorm.io/gorm"
+
+	"tasks/db"
 )
 
 // the form of an upload: a note and a file, read with borgo.BindMultipart,
@@ -20,96 +19,108 @@ type AttachmentForm struct {
 	File borgo.File `json:"file"`
 }
 
+// what the app keeps about a file: its owner, which decides who may download
+// it, and what borgo.Uploads learned when it stored it
 type Attachment struct {
+	gorm.Model
+	OwnerID uint   `gorm:"index"`
+	Note    string `json:"note"`
+	borgo.Stored
+}
+
+// what the page is told about a stored file
+type AttachmentView struct {
+	Key  string `json:"key"`
 	Note string `json:"note"`
-	// the name the client gave, shown back to it; never a path
 	Name string `json:"name"`
 	Size int64  `json:"size"`
-	// what the bytes are, sniffed here: the client's Content-Type is a claim
 	Type string `json:"type"`
 }
 
-// where uploads land: outside the project, so a dev watcher never sees them
-// and a deploy never ships them. A real app puts this on a volume or a bucket,
-// gives each file an owner and a lifetime; this one keeps the newest few, so
-// a signed-in user can fill no more than keptAttachments times the cap
-var attachmentsDir = filepath.Join(os.TempDir(), "borgo-tasks-attachments")
+// gitignored in development, so the dev watcher never rebuilds on an upload;
+// in a container, a volume at /data (see the Dockerfile)
+var uploads = &borgo.Uploads{Dir: uploadsDir()}
 
+func uploadsDir() string {
+	if dir := os.Getenv("UPLOADS_DIR"); dir != "" {
+		return dir
+	}
+	return "uploads"
+}
+
+// how many files one user keeps: the oldest go when an upload passes it
 const keptAttachments = 20
 
 func init() {
-	// writing to the server's disk is for signed-in users only
+	// writing to the server's disk is for signed-in users only, and a file
+	// is downloaded by its owner only
 	borgo.Handle("POST /api/attachments", borgo.Authed(UploadAttachment))
+	borgo.Handle("GET /api/attachments/{key}", borgo.Authed(DownloadAttachment))
 }
 
 func UploadAttachment(w http.ResponseWriter, r *http.Request) {
+	me, ok := borgo.GetSession[Me](r)
+	if !ok {
+		// unreachable behind Authed; plain text keeps the generated type clean
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
 	form, err := borgo.BindMultipart[AttachmentForm](r)
 	if err != nil {
 		borgo.BindError(w, err)
 		return
 	}
-	src, err := form.File.Open()
-	if err != nil {
-		// plain text keeps the generated response type to the 201's
+	stored, err := uploads.Save(form.File)
+	switch {
+	case errors.Is(err, borgo.ErrNoUpload):
 		http.Error(w, "a file is required", http.StatusBadRequest)
 		return
-	}
-	defer src.Close()
-	// the first 512 bytes decide what this is, not the header
-	head := make([]byte, 512)
-	n, _ := io.ReadFull(src, head)
-	kind := http.DetectContentType(head[:n])
-
-	// a name of our own: the client's is a path traversal waiting to happen
-	key := make([]byte, 16)
-	rand.Read(key)
-	if err := os.MkdirAll(attachmentsDir, 0o700); err != nil {
-		http.Error(w, "storage unavailable", http.StatusInternalServerError)
-		return
-	}
-	path := filepath.Join(attachmentsDir, hex.EncodeToString(key))
-	dst, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		http.Error(w, "storage unavailable", http.StatusInternalServerError)
-		return
-	}
-	_, err = dst.Write(head[:n])
-	if err == nil {
-		_, err = io.Copy(dst, src)
-	}
-	// a close that fails is a write that failed: the bytes may not be there
-	if closeErr := dst.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		// a half-written file is not an attachment: it goes
-		os.Remove(path)
+	case err != nil:
+		log.Printf("storing an attachment: %v", err)
 		http.Error(w, "storage failed", http.StatusInternalServerError)
 		return
 	}
-	pruneAttachments()
-	borgo.JSON(w, http.StatusCreated, Attachment{Note: form.Note, Name: form.File.Name, Size: form.File.Size, Type: kind})
-}
-
-// pruneAttachments removes all but the newest keptAttachments files. Two
-// uploads pruning at once may both try a file: a failed remove is no error
-func pruneAttachments() {
-	entries, err := os.ReadDir(attachmentsDir)
-	if err != nil || len(entries) <= keptAttachments {
+	row := Attachment{OwnerID: me.ID, Note: form.Note, Stored: stored}
+	if err := db.DB.Create(&row).Error; err != nil {
+		uploads.Remove(stored.Key)
+		log.Printf("recording an attachment: %v", err)
+		http.Error(w, "storage failed", http.StatusInternalServerError)
 		return
 	}
-	type stored struct {
-		path string
-		mod  int64
+	pruneAttachments(me.ID)
+	borgo.JSON(w, http.StatusCreated, viewOf(row))
+}
+
+// the owner's file, or 404 for anyone else's: a 403 would confirm the key
+func DownloadAttachment(w http.ResponseWriter, r *http.Request) {
+	me, ok := borgo.GetSession[Me](r)
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
 	}
-	files := make([]stored, 0, len(entries))
-	for _, e := range entries {
-		if info, err := e.Info(); err == nil && info.Mode().IsRegular() {
-			files = append(files, stored{filepath.Join(attachmentsDir, e.Name()), info.ModTime().UnixNano()})
+	var row Attachment
+	if err := db.DB.Where("`key` = ? AND owner_id = ?", r.PathValue("key"), me.ID).First(&row).Error; err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	uploads.Serve(w, r, row.Stored)
+}
+
+func viewOf(a Attachment) AttachmentView {
+	return AttachmentView{Key: a.Key, Note: a.Note, Name: a.Name, Size: a.Size, Type: a.Type}
+}
+
+// pruneAttachments removes the owner's attachments past the newest
+// keptAttachments, rows and files. A file that will not go is logged and
+// its row kept, so it is tried again on the next upload
+func pruneAttachments(owner uint) {
+	var old []Attachment
+	db.DB.Where("owner_id = ?", owner).Order("id desc").Offset(keptAttachments).Find(&old)
+	for _, a := range old {
+		if err := uploads.Remove(a.Key); err != nil {
+			log.Printf("pruning an attachment: %v", err)
+			continue
 		}
-	}
-	slices.SortFunc(files, func(a, b stored) int { return cmp.Compare(b.mod, a.mod) })
-	for _, f := range files[min(keptAttachments, len(files)):] {
-		os.Remove(f.path)
+		db.DB.Unscoped().Delete(&a)
 	}
 }

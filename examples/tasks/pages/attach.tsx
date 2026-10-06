@@ -1,10 +1,11 @@
 import { CsrfField, type ActionContext } from "borgo-framework";
-import type { Attachment } from "@/.borgo/api-types";
+import type { AttachmentView } from "@/.borgo/api-types";
 
 export const head = { title: "Attach · borgo tasks" };
 
 // the form posts multipart to this action, which hands the file to the api
-// route as it is: api/attachments.go reads it with borgo.BindMultipart, so
+// route as it is: api/attachments.go reads it with borgo.BindMultipart and
+// stores it with borgo.Uploads, so
 // the body below is typed - a misspelled field, or a string where the file
 // goes, fails tsc - and the client sends it as a FormData. The file is
 // optional to the type (a form may leave it out, and then goes as JSON), so
@@ -20,7 +21,7 @@ export async function action({ request, api }: ActionContext) {
   return { attached };
 }
 
-export default function Attach({ actionData }: { actionData?: { error?: string; attached?: Attachment } }) {
+export default function Attach({ actionData }: { actionData?: { error?: string; attached?: AttachmentView } }) {
   return (
     <main>
       <h1>Attach a file</h1>
@@ -33,7 +34,10 @@ export default function Attach({ actionData }: { actionData?: { error?: string; 
       {actionData?.error && <p className="error">{actionData.error}</p>}
       {actionData?.attached && (
         <p data-testid="attached">
-          {actionData.attached.name} · {actionData.attached.size} bytes · {actionData.attached.type}
+          {/* served by borgo.Uploads to its owner only: an image opens in the
+              page, anything else downloads */}
+          <a href={`/api/attachments/${actionData.attached.key}`}>{actionData.attached.name}</a> · {actionData.attached.size}{" "}
+          bytes · {actionData.attached.type}
           {actionData.attached.note && ` · ${actionData.attached.note}`}
         </p>
       )}

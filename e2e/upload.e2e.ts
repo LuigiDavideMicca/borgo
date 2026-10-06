@@ -24,7 +24,7 @@ test("the upload page and its route turn away a visitor with no session", async 
 // a file from the browser to a go handler: a multipart form posted to the
 // page's action, handed to the api through the typed client as a FormData,
 // read there with borgo.BindMultipart, and its type sniffed from the bytes
-test("a file uploaded through a form reaches the go route, typed by its bytes", async ({ page }) => {
+test("a file uploaded through a form is stored, typed by its bytes, and served to its owner alone", async ({ page, browser }) => {
   await signUp(page);
   await page.goto("/attach");
   await page.fill('input[name="note"]', "a screenshot");
@@ -33,6 +33,35 @@ test("a file uploaded through a form reaches the go route, typed by its bytes", 
   await page.setInputFiles('input[name="file"]', { name: "notes.txt", mimeType: "text/plain", buffer: png });
   await page.click("form button");
   await expect(page.getByTestId("attached")).toHaveText("notes.txt · 12 bytes · image/png · a screenshot");
+
+  // stored by borgo.Uploads and served back to its owner as what the bytes
+  // are, with the headers a download needs
+  const href = await page.getByTestId("attached").locator("a").getAttribute("href");
+  expect(href).toMatch(/^\/api\/attachments\/[0-9a-f]{32}$/);
+  const res = await page.request.get(href!);
+  expect(res.status()).toBe(200);
+  expect(Buffer.from(await res.body()).equals(png)).toBe(true);
+  expect(res.headers()["content-type"]).toBe("image/png");
+  expect(res.headers()["content-disposition"]).toBe("inline; filename=notes.txt");
+  expect(res.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(res.headers()["cache-control"]).toBe("private, no-cache");
+
+  // nobody else: another user gets 404, as for a key that does not exist,
+  // and a visitor with no session 401
+  const other = await browser.newContext();
+  try {
+    const stranger = await other.newPage();
+    await signUp(stranger);
+    expect((await stranger.request.get(href!)).status()).toBe(404);
+  } finally {
+    await other.close();
+  }
+  const anonymous = await browser.newContext();
+  try {
+    expect((await anonymous.request.get(href!)).status()).toBe(401);
+  } finally {
+    await anonymous.close();
+  }
 });
 
 test("a form posted with no file is answered by the action, not the api", async ({ page }) => {

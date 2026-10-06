@@ -196,6 +196,7 @@ const GO_IMPORTS = `import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"path"
@@ -209,6 +210,7 @@ var (
 	_ = context.Background
 	_ = json.Marshal
 	_ = errors.New
+	_ = log.Printf
 	_ = net.SplitHostPort
 	_ = http.StatusOK
 	_ = path.Clean
