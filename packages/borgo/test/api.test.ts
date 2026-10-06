@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { API_RETRIES, ApiError, makeApiClient } from "../src/api";
+import { API_RETRIES, ApiError, makeApiClient, multipartBody } from "../src/api";
 
 type Call = { url: string; init: RequestInit };
 
@@ -61,6 +61,55 @@ describe("makeApiClient", () => {
     expect((calls[0].init.headers as Record<string, string>)["Content-Type"]).toBe(
       "application/json",
     );
+  });
+
+  // borgo.BindMultipart reads multipart/form-data: a body holding a file is
+  // sent as a FormData, with no content-type of ours so fetch writes the
+  // boundary; a FormData is sent as it is; anything else stays JSON
+  test("a body holding a file goes as multipart/form-data", async () => {
+    stubFetch(() => Response.json({}));
+    const api = makeApiClient("http://api:1");
+    const file = new File(["PNGBYTES"], "shot.png", { type: "image/png" });
+    const extra = new File(["two"], "2.txt", { type: "text/plain" });
+    await api("POST /api/attachments", {
+      body: { note: "hi", count: 3, file, extras: [file, extra], cover: null, skipped: undefined },
+    });
+    const body = calls[0].init.body as FormData;
+    expect(body).toBeInstanceOf(FormData);
+    expect(body.get("note")).toBe("hi");
+    expect(body.get("count")).toBe("3");
+    expect((body.get("file") as File).name).toBe("shot.png");
+    expect(await (body.get("file") as File).text()).toBe("PNGBYTES");
+    expect(body.getAll("extras").map((f) => (f as File).name)).toEqual(["shot.png", "2.txt"]);
+    expect(body.has("cover")).toBe(false);
+    expect(body.has("skipped")).toBe(false);
+    expect((calls[0].init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
+  });
+
+  test("an array of files alone is a multipart body, and what no part carries is refused", async () => {
+    stubFetch(() => Response.json({}));
+    const api = makeApiClient("http://api:1");
+    const file = new File(["one"], "1.txt", { type: "text/plain" });
+    await api("POST /api/attachments", { body: { extras: [file] } });
+    expect((calls[0].init.body as FormData).getAll("extras").length).toBe(1);
+    expect(multipartBody(null)).toBeNull();
+    expect(multipartBody([file])).toBeNull();
+    expect(() => multipartBody({ when: new Date(0), file })).toThrow(/"when" holds \[object Date\]/);
+    expect(() => multipartBody({ meta: { inner: file }, file })).toThrow(/"meta" holds \[object Object\]/);
+    expect(calls.length).toBe(1);
+  });
+
+  test("a FormData is sent as it is, and an object with no file stays JSON", async () => {
+    stubFetch(() => Response.json({}));
+    const api = makeApiClient("http://api:1");
+    const form = new FormData();
+    form.append("note", "mine");
+    await api("POST /api/attachments", { body: form });
+    expect(calls[0].init.body).toBe(form);
+    expect((calls[0].init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
+    await api("POST /api/tasks", { body: { title: "x", tags: ["a"] } });
+    expect(calls[1].init.body).toBe('{"title":"x","tags":["a"]}');
+    expect((calls[1].init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
   });
 
   test("merges default headers under per-call headers", async () => {

@@ -163,13 +163,12 @@ func BindMax[T any](r *http.Request, limit int64) (T, error) {
 // BindError answers a Bind error: 413 when the body exceeded the limit,
 // 415 for a non-JSON content type, 400 for anything else, as JSON.
 func BindError(w http.ResponseWriter, err error) {
-	status := http.StatusBadRequest
-	var tooLarge *http.MaxBytesError
-	switch {
-	case errors.As(err, &tooLarge):
-		status = http.StatusRequestEntityTooLarge
-	case errors.Is(err, errContentType):
-		status = http.StatusUnsupportedMediaType
+	status := bindErrorStatus(err)
+	if status == http.StatusInternalServerError {
+		// the app's mistake, already logged with the field named: the client
+		// is told nothing about the server's types
+		WriteJSON(w, status, map[string]string{"error": "the server cannot read this form"})
+		return
 	}
 	WriteJSON(w, status, map[string]string{"error": err.Error()})
 }

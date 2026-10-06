@@ -182,6 +182,7 @@ func run(root string) (err error) {
 		}
 		first[r.pattern] = r.pos
 		hpkg, hdecls, body := handlerBody(pkg, decls, r, loader)
+		gen.multipart = false
 		resp, req := gen.bridgeTypes(hpkg, hdecls, body, loader)
 		if r.signup != nil {
 			// decoded by Bind inside Signup: addressable, inbound
@@ -192,6 +193,10 @@ func run(root string) (err error) {
 		entry := "{ response: " + resp
 		if req != "" {
 			entry += "; request: " + req
+		}
+		if gen.multipart {
+			// the client builds a FormData for this route instead of JSON
+			entry += "; multipart: true"
 		}
 		entries[r.pattern] = entry + " }"
 		patterns = append(patterns, r.pattern)
@@ -1354,6 +1359,9 @@ type tsGen struct {
 	defs      []string
 	apiPkg    *types.Package
 	overrides *overrideSet
+	// set by bridgeTypes when the route's request was read with
+	// borgo.BindMultipart: the client sends a FormData for it
+	multipart bool
 }
 
 // overrideSet holds the "//borgo:type Go TS" directives of a run, resolved to
@@ -1837,8 +1845,11 @@ func (g *tsGen) bridgeTypes(pkg *packages.Package, decls map[*types.Func]*ast.Fu
 				return true
 			}
 			switch name, sel := borgoFunc(pkg.TypesInfo, call); name {
-			case "JSON", "Bind", "BindMax":
+			case "JSON", "Bind", "BindMax", "BindMultipart", "BindMultipartMax":
 				if inst, ok := pkg.TypesInfo.Instances[sel]; ok && inst.TypeArgs.Len() == 1 {
+					if strings.HasPrefix(name, "BindMultipart") {
+						g.multipart = true
+					}
 					if name != "JSON" {
 						// Bind declares its own value and decodes into &v, so
 						// the decoder holds the address of everything in it
@@ -2077,6 +2088,13 @@ func (g *tsGen) tsType(t types.Type, s site) tsRef {
 		obj := t.Obj()
 		if ts, ok := g.override(obj); ok {
 			return overrideRef(t, ts)
+		}
+		// a file part of a multipart form: a Blob to the client, which a
+		// File is one of, and appended to the FormData as a file. Inbound
+		// only: a File written into a response is the plain struct
+		// encoding/json makes of it (found by the verifier of the step)
+		if s.w == in && obj.Pkg() != nil && obj.Pkg().Path() == borgoPath && obj.Name() == "File" {
+			return tsRef{ts: "Blob"}
 		}
 		// time.Time and json.Number cross the same way in both directions, so
 		// neither of these two needs to know which one it is on

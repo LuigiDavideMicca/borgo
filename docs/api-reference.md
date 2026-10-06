@@ -41,7 +41,10 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `WriteJSON(w, status int, v any)` | Same behaviour, untyped parameter. Also the framework's own internal JSON writer. | provisional |
 | `Bind[T any](r) (T, error)` | Decodes the request body as JSON into `T`, capped at 1 MB. Requires `Content-Type: application/json` — a missing header is rejected like a wrong one. Types the route's request body for TypeScript. | stable |
 | `BindMax[T any](r, limit int64) (T, error)` | `Bind` with an explicit byte cap; `limit <= 0` disables it. | stable |
-| `BindError(w, err error)` | Answers a `Bind` error with the right status: 413 oversized, 415 missing or non-JSON content type, 400 otherwise. | stable |
+| `BindError(w, err error)` | Answers a `Bind` error with the right status: 413 oversized, 415 missing or non-JSON content type, 400 otherwise. The same for `BindMultipart`, where 413 also covers the parser's limits (1000 parts, about 18 MiB of text), 415 is a content type that is neither `multipart/form-data` nor JSON, and 500 is a form type no part can fill. | stable |
+| `BindMultipart[T any](r) (T, error)` | Decodes a `multipart/form-data` body into a struct, capped at 32 MiB: text parts into string, bool, integer, float and `[]string` fields by their json name, files into `File`, `*File` or `[]File`. A JSON body is read too, with every `File` zero: the client sends one when the form holds no file. Types the route's request body with the files as `Blob`. A field type no part can fill is a 500 on every request, named in the log. | provisional |
+| `BindMultipartMax[T any](r, limit int64) (T, error)` | `BindMultipart` with an explicit byte cap; `limit <= 0` disables it. | provisional |
+| `File` | One uploaded file: `Name` and `ContentType` as the client sent them (claims, not evidence), `Size`, and `Open()` for the bytes, valid until the handler returns. | provisional |
 | `Cache(w, maxAge time.Duration, staleWhileRevalidate ...time.Duration)` | Marks the response publicly cacheable; downgrades to `private` if the response already carries `Set-Cookie`. | provisional |
 | `NoCache(w)` | Marks the response `no-store`. | stable |
 

@@ -14,6 +14,9 @@ export type ApiRouteKey = [Registered] extends [never] ? string : Registered;
 type Entry<K extends string> = K extends keyof ApiRoutes ? ApiRoutes[K] : unknown;
 export type ApiResponse<K extends string> = Entry<K> extends { response: infer R } ? R : Entry<K>;
 export type ApiRequest<K extends string> = Entry<K> extends { request: infer B } ? B : never;
+// a route decoded with borgo.BindMultipart: its body goes as multipart/form-data,
+// built from the object, or handed over as a FormData of the caller's own
+export type ApiMultipart<K extends string> = Entry<K> extends { multipart: true } ? true : false;
 
 type ParamNames<S extends string> = S extends `${string}{${infer P}}${infer Rest}`
   ? P | ParamNames<Rest>
@@ -28,7 +31,11 @@ export type ApiOptions<K extends string> = {
   // crud route wants this set - a hung go handler otherwise holds the ssr
   // render (and the browser tab) open forever
   timeout?: number;
-} & ([ApiRequest<K>] extends [never] ? { body?: unknown } : { body: ApiRequest<K> }) &
+} & ([ApiRequest<K>] extends [never]
+    ? { body?: unknown }
+    : ApiMultipart<K> extends true
+      ? { body: ApiRequest<K> | FormData }
+      : { body: ApiRequest<K> }) &
   ([ParamNames<K>] extends [never]
     ? { params?: Record<string, string | number> }
     : { params: Record<ParamNames<K>, string | number> });
@@ -43,6 +50,31 @@ export type ApiClient = <K extends ApiRouteKey>(
   route: K,
   ...opts: OptsRequired<K> extends true ? [ApiOptions<K>] : [ApiOptions<K>?]
 ) => Promise<ApiResponse<K>>;
+
+// the multipart form for a body, or null when the body is JSON's: a FormData
+// as given; an object whose values hold a Blob (a File is one) appended
+// part by part, an array as repeated parts, a string, number or boolean as
+// its text. A form with no file in it goes as JSON, which BindMultipart reads
+// too. Anything else - a nested object, a Date - is not something a form
+// part carries, so it is refused by name rather than sent as "[object
+// Object]": borgo.BindMultipart has no field type it would fill
+export function multipartBody(body: unknown): FormData | null {
+  if (body instanceof FormData) return body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const entries = Object.entries(body as Record<string, unknown>);
+  const holdsBlob = entries.some(([, v]) => v instanceof Blob || (Array.isArray(v) && v.some((x) => x instanceof Blob)));
+  if (!holdsBlob) return null;
+  const form = new FormData();
+  for (const [key, value] of entries) {
+    for (const one of Array.isArray(value) ? value : [value]) {
+      if (one === undefined || one === null) continue;
+      if (one instanceof Blob) form.append(key, one, (one as File).name ?? "blob");
+      else if (typeof one === "string" || typeof one === "number" || typeof one === "boolean") form.append(key, String(one));
+      else throw new TypeError(`multipart body: "${key}" holds ${Object.prototype.toString.call(one)}, which no form part carries - send its fields, a string, or a file`);
+    }
+  }
+  return form;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -125,14 +157,21 @@ export function makeApiClient(
       url.searchParams.set(key, String(value));
     }
 
+    // a body holding a file goes as multipart/form-data, which is how
+    // borgo.BindMultipart reads it: a FormData is sent as it is, an object
+    // with a Blob among its values is turned into one, and everything else
+    // is JSON, as before. The route's type says which shape it takes; the
+    // wire is decided by the value, since types are gone at runtime
+    const form = multipartBody(opts.body);
     const init = {
       method,
       headers: {
         ...defaults,
-        ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        // fetch writes the multipart boundary itself
+        ...(opts.body !== undefined && !form ? { "Content-Type": "application/json" } : {}),
         ...opts.headers,
       },
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      body: form ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined),
     };
     // loaders and actions run while the go api may be mid-restart in dev; a
     // refused connection never reached it, so a short retry is always safe.

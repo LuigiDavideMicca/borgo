@@ -1485,6 +1485,24 @@ func TestTopicDirectiveTypesAComputedTopic(t *testing.T) {
 	}
 }
 
+// a form read with borgo.BindMultipart is the route's request type, its
+// files Blobs, and the route is marked so the client sends a FormData; a
+// JSON route beside it is untouched
+func TestMultipartFormIsTheRouteRequestType(t *testing.T) {
+	wants(t, generateFresh(t, "multipart"),
+		"export interface AttachmentForm$Request {\n  note?: string | null;\n  count?: number | null;\n  file?: Blob | null;\n  cover?: Blob | null;\n  extras?: Array<Blob> | null;\n}",
+		`"POST /api/attachments": { response: Attachment; request: AttachmentForm$Request; multipart: true };`,
+		`"POST /api/big": { response: Attachment; request: AttachmentForm$Request; multipart: true };`,
+		`"POST /api/rename": { response: Attachment; request: Rename$Request };`,
+		// borgo.File is a Blob going in, and in a response the plain struct
+		// encoding/json writes; an app's own type named File is not borgo's
+		"export interface File {\n  Name: string;\n  ContentType: string;\n  Size: number;\n}",
+		"export interface Echo {\n  upload: File;\n}",
+		`"POST /api/files": { response: ApiFile; request: File$Request };`,
+		`"GET /api/echo": { response: Echo };`,
+	)
+}
+
 func TestPushBeyondTheHopCapWarns(t *testing.T) {
 	marshals(t, deeph3.PThree{}, `{"n":0}`)
 	marshals(t, deeph4.PFour{}, `{"n":0}`)

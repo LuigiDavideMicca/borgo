@@ -183,6 +183,54 @@ export interface Outer$Addressable {
 
 This also means the two positions can run *different methods*. A type with `MarshalJSON` on the pointer receiver and `MarshalText` on the value one is `unknown` where it is addressable and `string` where it is not, because that is the order `encoding/json` resolves them in. Give a marshaler a value receiver and all of this collapses: one shape, one interface, everywhere.
 
+### Uploads: borgo.BindMultipart
+
+A body with a file in it is not JSON, and `borgo.BindMultipart[T](r)` is `Bind` for it: a `multipart/form-data` body decoded into a struct, text parts into string, bool, integer, float and `[]string` fields by their json name, files into `borgo.File`, `*borgo.File` or `[]borgo.File`. The route's request is typed like any other, with the files as `Blob` — which a `File` from an `<input type="file">` or a `FormData` is — and the generated entry carries `multipart: true`, which lets the body be a `FormData` of your own too:
+
+```go
+type AttachmentForm struct {
+	Note string     `json:"note"`
+	File borgo.File `json:"file"`
+}
+
+type Stored struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+//borgo:route POST /api/attachments
+func UploadAttachment(w http.ResponseWriter, r *http.Request) {
+	form, err := borgo.BindMultipart[AttachmentForm](r)
+	if err != nil {
+		borgo.BindError(w, err)
+		return
+	}
+	src, err := form.File.Open()
+	if err != nil {
+		http.Error(w, "a file is required", http.StatusBadRequest)
+		return
+	}
+	defer src.Close()
+	// sniff the bytes, store under a name of your own - see below
+	borgo.JSON(w, http.StatusCreated, Stored{Name: form.File.Name, Size: form.File.Size})
+}
+```
+
+```ts no-check
+"POST /api/attachments": { response: Stored; request: AttachmentForm$Request; multipart: true };
+
+// in an action: the File from the posted form goes as it is
+await api("POST /api/attachments", { body: { note, file } });
+```
+
+The wire is decided by the value, since the route's type is gone at runtime: a body holding a file goes as a `FormData` the client builds — a `Blob` appended as a file, an array as repeated parts, a string, number or boolean as its text, and anything else (a nested object, a `Date`) refused by name — and a body holding none goes as JSON, which `BindMultipart` reads too, with every `File` left zero. So a form whose file is optional works whether or not the user picked one, and a file never arrives any way but as a part. A JSON route refuses a `FormData` at `tsc`, and a multipart route refuses a string where a file belongs.
+
+The fields a form can fill are string, bool, the integers, the floats, `[]string` for a repeated part, and `File`, `*File`, `[]File`, named as `encoding/json` names them — the json tag, or the Go name; an untagged embedded struct or pointer to one gives up its fields — and matched exactly, as the typed client sends them. The first of a repeated part fills a scalar; a number outside its field's width is refused. A field of any other type, an embedded `File`, or two fields answering one name is the app's mistake, not the client's: `BindMultipart` refuses every request to that form and `BindError` answers 500, with the field named in the log and nothing about your types in the response.
+
+The body is read at most 32 MiB (`BindMultipartMax` changes that, and `BORGO_MAX_BODY` on the public port is the same number by default). The parser has two limits of its own, and both are a 413 like the cap: at most 1000 parts, and text parts held in memory up to about 18 MiB in total. Files past 8 MiB are spilled to temporary files the server removes when the handler returns, so copy what must outlive the request. 415 is any other content type, 400 a part that does not parse as its field.
+
+What the decoder does not do is the part every upload gets wrong, and it is yours on purpose: `Name` and `ContentType` are what the client said. Sniff the first bytes (`http.DetectContentType`) before trusting the type, store under a name you generate rather than the one sent, keep the storage outside the project directory, and authorize the download as carefully as the upload. `examples/tasks` has the working pair in `api/attachments.go` and `pages/attach.tsx`.
+
 ## The request side: what the decoder accepts
 
 A struct handed to `borgo.Bind[T]` is rendered a second time, under `<Name>$Request`, as `encoding/json` *reads* it rather than as it writes it. The two are not mirror images, and the difference was measured one field per kind against the decoder rather than read off its documentation:

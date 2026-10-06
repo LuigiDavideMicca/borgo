@@ -9,5 +9,6 @@ func init() {
 	borgo.Handle("GET /api/ping", PingHandler)
 	borgo.Handle("GET /api/tasks", ListTasks)
 	borgo.Handle("GET /api/tasks/{id}", GetTask)
+	borgo.Handle("POST /api/attachments", UploadAttachment)
 	borgo.Handle("POST /api/tasks", CreateTask)
 }
