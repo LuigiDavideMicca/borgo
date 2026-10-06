@@ -144,6 +144,10 @@ export type ResolvedPageMiddleware = {
   covers: (pathname: string) => Record<string, string> | null;
   // whether a page of this route pattern can be reached under the guard
   guardsRoute: (routePattern: string) => boolean;
+  // whether some path no route answers is under the guard, so the 404 page
+  // renders behind it. Conservative: a param or a catch-all in an entry can
+  // name a path no page has, a static entry only when no route matches it
+  guardsUnknown: (routePatterns: string[]) => boolean;
 };
 
 // the module middleware.ts compiled to, checked once at boot: every mistake
@@ -178,6 +182,9 @@ export function resolvePageMiddleware(module: unknown): ResolvedPageMiddleware |
       return null;
     },
     guardsRoute: (routePattern) => !compiled || compiled.some((c) => patternsOverlap(routePattern, c.entry)),
+    guardsUnknown: (routePatterns) =>
+      !compiled ||
+      compiled.some((c) => c.entry.includes(":") || !routePatterns.some((p) => patternsOverlap(p, c.entry))),
   };
 }
 

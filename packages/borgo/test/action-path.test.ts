@@ -627,8 +627,10 @@ describe("runAction: the post-action loader sees the new jar", () => {
     expect(await cookieSeenBy("borgo_session=old", ["borgo_session=; Max-Age=0"])).toBeNull();
   });
 
-  test("an ambiguous pair is dropped, exactly as go would refuse it", async () => {
-    expect(await cookieSeenBy("a=1; a=2; b=ok", ["z=9"])).toBe("b=ok; z=9");
+  // go judges a duplicated name itself: junk beside a valid session is
+  // skipped, two valid ones are no session, so the pair passes as sent
+  test("a duplicated name go did not set reaches it as the browser sent it", async () => {
+    expect(await cookieSeenBy("a=1; a=2; b=ok", ["z=9"])).toBe("a=1; a=2; b=ok; z=9");
   });
 
   test("a Set-Cookie settles a name the browser sent ambiguously", async () => {

@@ -29,6 +29,70 @@ type ptrForm struct {
 
 type aliasForm = Credentials
 
+type avatarForm struct {
+	Credentials
+	Avatar File `json:"avatar"`
+}
+
+type galleryForm struct {
+	Credentials
+	Albums map[string][]*File `json:"albums"`
+}
+
+type avatarPart struct {
+	Avatar File `json:"avatar"`
+}
+
+// an unexported embedded pointer to a struct: encoding/json reads the
+// exported fields it promotes, the File among them
+type promotedFileForm struct {
+	Credentials
+	*avatarPart
+}
+
+type skippedFileForm struct {
+	Credentials
+	Avatar File `json:"-"`
+	avatar File
+	files
+}
+
+// an unexported embedded non-struct: encoding/json never reads it
+type files []File
+
+// a File in a signup form is one JSON never fills, while the typed client
+// sends the form as multipart and gets 415 (found by the verifier of phase 5)
+func TestSignupRefusesAFormHoldingAFile(t *testing.T) {
+	auth := &Auth[signedUp]{}
+	refused := func(name string, build func()) {
+		t.Helper()
+		defer func() {
+			r := recover()
+			if r == nil || !strings.Contains(fmt.Sprint(r), "holds a borgo.File") {
+				t.Errorf("%s: want a refusal naming the file, got %v", name, r)
+			}
+		}()
+		build()
+	}
+	refused("a File field", func() {
+		Signup(auth, func(context.Context, avatarForm, string) (signedUp, error) { return signedUp{}, nil })
+	})
+	refused("a File promoted through an unexported embedded pointer", func() {
+		Signup(auth, func(context.Context, promotedFileForm, string) (signedUp, error) { return signedUp{}, nil })
+	})
+	refused("files in a map of slices of pointers", func() {
+		Signup(auth, func(context.Context, galleryForm, string) (signedUp, error) { return signedUp{}, nil })
+	})
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("a File json never reads was refused: %v", r)
+		}
+	}()
+	h := Signup(auth, func(context.Context, skippedFileForm, string) (signedUp, error) { return signedUp{}, nil })
+	_ = skippedFileForm{}.avatar
+	_ = h
+}
+
 // the compiler admits a form whose promoted method runs through a pointer a
 // body of null leaves nil - and the first request would panic. Signup says
 // no where it is built, by name; embedding by value at any depth is fine

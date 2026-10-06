@@ -130,6 +130,11 @@ async function errorBody(res: Response, max = 2048): Promise<string> {
 // number: whoever wants to wait has to say so.
 export const API_RETRIES = 3;
 
+function withoutContentType(headers: Record<string, string> | undefined) {
+  if (!headers) return headers;
+  return Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== "content-type"));
+}
+
 // onSetCookie receives every Set-Cookie header an api response carries, so
 // the front server can forward go's cookies (login, logout) to the browser
 export function makeApiClient(
@@ -169,7 +174,10 @@ export function makeApiClient(
         ...defaults,
         // fetch writes the multipart boundary itself
         ...(opts.body !== undefined && !form ? { "Content-Type": "application/json" } : {}),
-        ...opts.headers,
+        // so a type of the caller's would replace it with one that has none,
+        // and the server could not split the parts (found by the verifier of
+        // phase 5)
+        ...(form ? withoutContentType(opts.headers) : opts.headers),
       },
       body: form ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined),
     };

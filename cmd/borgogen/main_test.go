@@ -398,8 +398,14 @@ func TestGenerateErrors(t *testing.T) {
 		{"topic directive with trailing tokens", "topictokens", "malformed //borgo:topic"},
 		{"topic directive with a space after the slashes", "topicloose", "malformed //borgo:topic"},
 		{"topic pattern with a non-ascii space", "topicnbsp", "contains whitespace"},
-		{"literal topic a pattern admits with another payload", "topiccollide", "would fail tsc on the index signature"},
+		{"literal topic a pattern admits with another payload", "topiccollide", "would type the event two ways at once"},
+		{"literal topic an empty placeholder admits", "topicempty", "would type the event two ways at once"},
 		{"two patterns that nest with different payloads", "topicoverlap", "overlap on event"},
+		// a borgo.File the client would send as a FormData to a route that
+		// reads JSON: 415 on every call that carries one
+		{"file in a Bind form", "filejson", "borgo.Bind decodes JSON"},
+		{"file nested in a BindMax form", "filejsonnested", "borgo.BindMax decodes JSON"},
+		{"file in a Signup form", "filesignup", "borgo.Signup decodes JSON"},
 		// a directive that can never apply is a mistake, and used to be silent
 		{"type directive naming nothing", "badtypename", "not a type this api package can refer to"},
 		{"type directive with a typo in an imported name", "badtypepath", "not a type this api package can refer to"},
@@ -1035,6 +1041,10 @@ func TestExcludedRouteFileWarns(t *testing.T) {
 	if !strings.Contains(out, "plan9.go:11") || !strings.Contains(out, "this build excludes") {
 		t.Errorf("want a warning pointing at the excluded directive, got:\n%s", out)
 	}
+	// a computed topic's directive there is as invisible as a route's
+	if !strings.Contains(out, "plan9push.go:8") || !strings.Contains(out, "//borgo:topic in a file this build excludes") {
+		t.Errorf("want a warning pointing at the excluded topic directive, got:\n%s", out)
+	}
 	types := read(t, filepath.Join(root, ".borgo", "api-types.d.ts"))
 	if strings.Contains(types, "plan9") {
 		t.Errorf("the excluded route must not be typed:\n%s", types)
@@ -1500,6 +1510,14 @@ func TestMultipartFormIsTheRouteRequestType(t *testing.T) {
 		"export interface Echo {\n  upload: File;\n}",
 		`"POST /api/files": { response: ApiFile; request: File$Request };`,
 		`"GET /api/echo": { response: Echo };`,
+	)
+}
+
+// a File field encoding/json skips is no reason to refuse a JSON route
+func TestASkippedFileFieldKeepsAJSONRoute(t *testing.T) {
+	wants(t, generateFresh(t, "fileskipped"),
+		"export interface Profile$Request {\n  name?: string | null;\n}",
+		`"POST /api/profile": { response: string; request: Profile$Request };`,
 	)
 }
 

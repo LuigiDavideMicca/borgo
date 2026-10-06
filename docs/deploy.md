@@ -156,7 +156,7 @@ export const prerenderPaths = async ({ api }: PrerenderContext) => {
 };
 ```
 
-Pages with `hydrate = false` export with zero JavaScript; hydrated pages carry their chunks and hydrate against the exported props (client-side navigation falls back to plain page loads — there is no server to ask for props). A `pages/_404.tsx` exports as `dist/site/404.html` — the filename most static hosts pick up as their error page automatically. Everything else is skipped, with the reason printed.
+Pages with `hydrate = false` export with zero JavaScript; hydrated pages carry their chunks and hydrate against the exported props (client-side navigation falls back to plain page loads — there is no server to ask for props). A `pages/_404.tsx` exports as `dist/site/404.html` — the filename most static hosts pick up as their error page automatically. A page `middleware.ts` can reach is skipped, since a static host would serve it without the guard, and so is `404.html` when the matcher can reach a path no page answers. Everything else is skipped, with the reason printed.
 
 Any static file server can host the result — for nginx the one-liner is `try_files`, plus `error_page` for the exported 404:
 

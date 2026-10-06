@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -27,9 +28,17 @@ type Signup struct {
 	Email string `json:"email"`
 }
 
-// the session stores only the username - the minimal principal
+// the session stores the id and the username - the minimal principal. The
+// id names the user's own topic: a username may hold what a topic cannot
 type Me struct {
+	ID       uint   `json:"id"`
 	Username string `json:"username"`
+}
+
+// userTopic is the topic of one user's sockets. A session issued before Me
+// carried an id reads 0, which names no user and so no topic
+func userTopic(id uint) string {
+	return "user:" + strconv.FormatUint(uint64(id), 10)
 }
 
 // what the other devices of a user are told when one of them logs out
@@ -46,7 +55,7 @@ var auth = borgo.Auth[User]{
 		}
 		return user, user.Hash, nil
 	},
-	Principal: func(u User) any { return Me{Username: u.Username} },
+	Principal: func(u User) any { return Me{ID: u.ID, Username: u.Username} },
 }
 
 // register creates the user from the form and the hash of its password;
@@ -101,8 +110,10 @@ func logoutEverywhere(w http.ResponseWriter, r *http.Request) {
 	// the user's other tabs are told on their own topic - one per user, its
 	// shape named by the directive so the payload is typed on the page, and
 	// held only by that user's sockets (api/realtime.go)
-	//borgo:topic user:{username}
-	go borgo.Push("user:"+me.Username, "signed-out", SignedOut{At: now.Unix()})
+	if me.ID != 0 {
+		//borgo:topic user:{id}
+		go borgo.Push(userTopic(me.ID), "signed-out", SignedOut{At: now.Unix()})
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

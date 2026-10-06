@@ -267,6 +267,7 @@ type front struct {
 	health   http.Handler
 	metrics  http.Handler
 	dev      bool
+	csrf     bool
 	// serveGuarded behind the app's middleware
 	guarded http.Handler
 }
@@ -365,11 +366,20 @@ func (f *front) serveGuarded(w http.ResponseWriter, r *http.Request) {
 	}
 	if f.isr != nil {
 		if policy, ok := f.policies.lookup(cleaned); ok && policy != nil {
-			switch f.isr.handle(w, r, policy) {
-			case isrServed:
-				return
-			case isrBypass:
+			// a session whose csrf cookie has ended with the browser
+			// session: a shared copy mints no token, and the page's next
+			// form post to /api would be refused. Its own render mints one,
+			// and the copy serves it from the next request on (found by the
+			// verifier of phase 5)
+			if f.csrf && needsCsrfToken(r) {
 				r = markBypass(r)
+			} else {
+				switch f.isr.handle(w, r, policy) {
+				case isrServed:
+					return
+				case isrBypass:
+					r = markBypass(r)
+				}
 			}
 		}
 	}
@@ -499,7 +509,7 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 		FlushInterval: -1,
 		ErrorHandler:  renderUnavailable,
 	}
-	f := &front{api: api, ws: opts.ws, devCh: opts.devCh, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev}
+	f := &front{api: api, ws: opts.ws, devCh: opts.devCh, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev, csrf: opts.csrf}
 	// api/middleware.go in front of everything the front does not answer
 	// itself; middleware.go says why each position is where it is
 	f.guarded = withAppMiddleware(opts.app, http.HandlerFunc(f.serveGuarded))

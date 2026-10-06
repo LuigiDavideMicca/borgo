@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { API_RETRIES, makeApiClient } from "./api";
+import { API_RETRIES } from "./api";
 import {
   buildAssets,
   buildReasons,
@@ -29,6 +29,7 @@ import { answerForDoor, decidePage, resolvePageMiddleware } from "./page-middlew
 import { canonicalPath, matchRoute, safeDecode, type Route } from "./router";
 import {
   csrfRejects,
+  requestApiClient,
   decodeChanged,
   headResponse,
   prepareShell,
@@ -368,10 +369,8 @@ export async function serve({
 
   // the browser's cookies go to go, so handlers see the session during ssr
   // and actions; set-cookie headers coming back are forwarded to the browser
-  const apiFor = (req: Request, onSetCookie?: (cookies: string[]) => void) => {
-    const cookie = req.headers.get("cookie");
-    return makeApiClient(api, cookie ? { ...apiDefaults, cookie } : apiDefaults, onSetCookie, apiRetries);
-  };
+  const apiFor = (req: Request, onSetCookie?: (cookies: string[]) => void) =>
+    requestApiClient(api, apiDefaults, req.headers.get("cookie"), onSetCookie, apiRetries);
 
   const runLoader = (
     req: Request,

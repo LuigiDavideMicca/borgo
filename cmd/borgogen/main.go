@@ -186,6 +186,7 @@ func run(root string) (err error) {
 		resp, req := gen.bridgeTypes(hpkg, hdecls, body, loader)
 		if r.signup != nil {
 			// decoded by Bind inside Signup: addressable, inbound
+			refuseJSONFile(r.signup, r.pos, "borgo.Signup")
 			var form union
 			form.add(gen.tsType(r.signup, inbound()))
 			req = form.String()
@@ -587,6 +588,55 @@ func collectExports(pkg *packages.Package, decls map[*types.Func]*ast.FuncDecl) 
 		}
 	}
 	return out
+}
+
+// isBorgoFile reports whether t is borgo.File itself.
+func isBorgoFile(t types.Type) bool {
+	named, ok := types.Unalias(t).(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj.Pkg() != nil && obj.Pkg().Path() == borgoPath && obj.Name() == "File"
+}
+
+// holdsFile reports whether a borgo.File reaches the wire from t: typed as a
+// Blob, it is a body the client sends as a FormData, which only
+// BindMultipart reads. A field encoding/json skips is not looked at.
+func holdsFile(t types.Type, seen map[types.Type]bool) bool {
+	if isBorgoFile(t) {
+		return true
+	}
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		return holdsFile(u.Elem(), seen)
+	case *types.Slice:
+		return holdsFile(u.Elem(), seen)
+	case *types.Array:
+		return holdsFile(u.Elem(), seen)
+	case *types.Map:
+		return holdsFile(u.Elem(), seen)
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if !planField(u, i).skip && holdsFile(u.Field(i).Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// refuseJSONFile fails the run when a request read as JSON holds a
+// borgo.File: the client would send it as a FormData and the route answer
+// 415 to every call that carries one (found by the verifier of phase 5)
+func refuseJSONFile(t types.Type, pos token.Position, reader string) {
+	if holdsFile(t, map[types.Type]bool{}) {
+		fail("%s: %s decodes JSON, where a borgo.File carries no upload - only the fields the client wrote - and the typed client sends a body holding one as a FormData; read the form with borgo.BindMultipart", pos, reader)
+	}
 }
 
 // wireRefusal names what encoding/json cannot carry, or "" when it can. A
@@ -1080,7 +1130,7 @@ func refuseTopicCollisions(keys []string, unions map[string]*union, patterns map
 					continue
 				}
 				if unions[k].String() != unions[p].String() {
-					fail("%s: //borgo:topic %q and %s: //borgo:topic %q overlap on event %q with different payloads (%s and %s): the generated WsEvents would fail tsc on the index signatures - give them one payload, or topics that do not nest", firstPos[p], pattern, firstPos[k], rawPatterns[k], event, unions[p].String(), unions[k].String())
+					fail("%s: //borgo:topic %q and %s: //borgo:topic %q overlap on event %q with different payloads (%s and %s): the generated WsEvents would type the event two ways at once, which tsc resolves in silence to never, a type no handler can read - give them one payload, or topics that do not nest", firstPos[p], pattern, firstPos[k], rawPatterns[k], event, unions[p].String(), unions[k].String())
 				}
 				continue
 			}
@@ -1088,7 +1138,7 @@ func refuseTopicCollisions(keys []string, unions map[string]*union, patterns map
 				continue
 			}
 			if !unions[p].holds(unions[k]) {
-				fail("%s: borgo.Push on the literal topic %q carries %s for event %q, and %s: //borgo:topic %q admits that topic with %s: the generated WsEvents would fail tsc on the index signature - push the same payload, or a topic the pattern does not admit", firstPos[k], other, unions[k].String(), event, firstPos[p], pattern, unions[p].String())
+				fail("%s: borgo.Push on the literal topic %q carries %s for event %q, and %s: //borgo:topic %q admits that topic with %s: the generated WsEvents would type the event two ways at once, and tsc lets the literal win in silence, so the pattern's payload is a lie on that topic - push the same payload, or a topic the pattern does not admit", firstPos[k], other, unions[k].String(), event, firstPos[p], pattern, unions[p].String())
 			}
 		}
 	}
@@ -1849,6 +1899,8 @@ func (g *tsGen) bridgeTypes(pkg *packages.Package, decls map[*types.Func]*ast.Fu
 				if inst, ok := pkg.TypesInfo.Instances[sel]; ok && inst.TypeArgs.Len() == 1 {
 					if strings.HasPrefix(name, "BindMultipart") {
 						g.multipart = true
+					} else if name != "JSON" {
+						refuseJSONFile(inst.TypeArgs.At(0), pkg.Fset.Position(call.Pos()), "borgo."+name)
 					}
 					if name != "JSON" {
 						// Bind declares its own value and decodes into &v, so
@@ -2093,7 +2145,7 @@ func (g *tsGen) tsType(t types.Type, s site) tsRef {
 		// File is one of, and appended to the FormData as a file. Inbound
 		// only: a File written into a response is the plain struct
 		// encoding/json makes of it (found by the verifier of the step)
-		if s.w == in && obj.Pkg() != nil && obj.Pkg().Path() == borgoPath && obj.Name() == "File" {
+		if s.w == in && isBorgoFile(t) {
 			return tsRef{ts: "Blob"}
 		}
 		// time.Time and json.Number cross the same way in both directions, so

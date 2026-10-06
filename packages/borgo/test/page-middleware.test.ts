@@ -118,6 +118,20 @@ describe("resolvePageMiddleware refuses what would guard nothing", () => {
     const mw = resolvePageMiddleware({ middleware: () => next() })!;
     expect(mw.covers("/anything")).toEqual({});
     expect(mw.guardsRoute("/posts/:slug")).toBe(true);
+    expect(mw.guardsUnknown(["/", "/posts/:slug"])).toBe(true);
+  });
+
+  // the 404 page renders behind the guard for a covered path no page has
+  test("a matcher reaches an unknown path through a param, a catch-all, or a static path no page has", () => {
+    const mw = (matcher: string[]) => resolvePageMiddleware({ middleware: () => next(), matcher })!;
+    const routes = ["/", "/account", "/posts/:slug"];
+    expect(mw(["/account"]).guardsUnknown(routes)).toBe(false);
+    expect(mw(["/posts/featured"]).guardsUnknown(routes)).toBe(false);
+    expect(mw(["/account", "/billing"]).guardsUnknown(routes)).toBe(true);
+    expect(mw(["/w/:slug"]).guardsUnknown(routes)).toBe(true);
+    // a param entry over a dynamic page: its loader may still answer 404
+    expect(mw(["/posts/:slug"]).guardsUnknown(routes)).toBe(true);
+    expect(mw(["/app/:path*"]).guardsUnknown(routes)).toBe(true);
   });
 });
 

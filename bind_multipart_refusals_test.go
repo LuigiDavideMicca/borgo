@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -201,6 +202,27 @@ func TestBindMultipartRefusesAFormItCannotFill(t *testing.T) {
 
 // names as encoding/json gives them: an embedded pointer to a struct is
 // flattened and allocated only when filled, json:"-," names the field "-",
+// a file behind an embedded pointer, on the JSON wire: zeroed when JSON
+// allocated the pointer, and no panic when it left it nil (found by the
+// verifier of phase 5)
+func TestBindMultipartJSONZeroesAFileBehindAnEmbeddedPointer(t *testing.T) {
+	type Scan struct {
+		Doc File `json:"doc"`
+	}
+	type form struct {
+		*Scan
+		Note string `json:"note"`
+	}
+	f, err := bindMultipartRequest[form](t, "application/json", []byte(`{"note":"n"}`), 0)
+	if err != nil || f.Scan != nil || f.Note != "n" {
+		t.Errorf("nil: %+v %v", f, err)
+	}
+	f, err = bindMultipartRequest[form](t, "application/json", []byte(`{"doc":{"Name":"forged","Size":9}}`), 0)
+	if err != nil || f.Scan == nil || f.Doc != (File{}) {
+		t.Errorf("allocated: %+v %v", f, err)
+	}
+}
+
 // an unexported embedded struct gives up its exported fields
 func TestBindMultipartNamesFieldsAsJSONDoes(t *testing.T) {
 	type Inner struct {
@@ -230,6 +252,31 @@ func TestBindMultipartNamesFieldsAsJSONDoes(t *testing.T) {
 	// and the JSON wire leaves a nil embedded pointer nil
 	if f, err := bindMultipartRequest[form](t, "application/json", []byte(`{"shallow":"s"}`), 0); err != nil || f.Inner != nil || f.Shallow != "s" {
 		t.Errorf("json: %+v %v", f, err)
+	}
+}
+
+// a temp dir the server cannot write is the server's failure, answered 500
+// with the path in the log and not in the body
+func TestBindMultipartAnUnwritableTempDirIsTheServers(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone")
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, missing)
+	}
+	type form struct {
+		Doc File `json:"doc"`
+	}
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+	ct, body := multipartBody(t, part{name: "doc", filename: "big.bin", contentType: "application/octet-stream", value: strings.Repeat("x", 9<<20)})
+	_, err := bindMultipartRequest[form](t, ct, body, 64<<20)
+	w := httptest.NewRecorder()
+	BindError(w, err)
+	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "gone") {
+		t.Errorf("answered %d %s", w.Code, w.Body)
+	}
+	if !strings.Contains(logged.String(), "gone") {
+		t.Errorf("the log does not name the path: %q", logged.String())
 	}
 }
 

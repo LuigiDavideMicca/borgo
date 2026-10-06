@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { connect, createServer } from "node:net";
+import { makeApiClient, type ApiClient } from "./api";
 import { c, g } from "./colors";
 import { documentStream, gzipStream, pickEncoding } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD, csrfCookieValue } from "./index";
@@ -165,38 +166,70 @@ export const scriptJson = (value: unknown) =>
     .replaceAll("\u2028", "\\u2028")
     .replaceAll("\u2029", "\\u2029");
 
-// the loader after a login/logout action needs the jar as it is now. same-name
-// cookies that disagree are dropped, not last-wins: go refuses them as
-// ambiguous, and a rebuilt jar must not hand it a winner it would have refused
+// the api client of one page request: the browser's cookies go to go, so
+// handlers see the session during ssr and actions, and what go sets on the
+// way back is forwarded to the browser AND carried by the next call of the
+// same request - register then upload in one action is one session, not a
+// signed-in call followed by an anonymous one (found by the verifier of
+// phase 5)
+export function requestApiClient(
+  base: string,
+  defaults: Record<string, string>,
+  cookie: string | null,
+  onSetCookie: ((cookies: string[]) => void) | undefined,
+  retries: number,
+): ApiClient {
+  const headers: Record<string, string> = cookie ? { ...defaults, cookie } : { ...defaults };
+  const set: string[] = [];
+  return makeApiClient(
+    base,
+    headers,
+    (cookies) => {
+      set.push(...cookies);
+      const fresh = freshCookieHeader(cookie, set);
+      if (fresh) headers.cookie = fresh;
+      else delete headers.cookie;
+      onSetCookie?.(cookies);
+    },
+    retries,
+  );
+}
+
+// the cookie header for the next call to go after it answered with
+// set-cookie: a name go set takes its new value, or goes when go expired it,
+// and every other part of the browser's header passes as it was sent. Go
+// judges duplicates itself - junk beside a valid session is skipped, two
+// valid ones are no session - so a rebuilt jar must neither pick a winner
+// nor drop a pair go would have accepted (found by the verifier of phase 5)
 export function freshCookieHeader(cookieHeader: string | null, setCookies: string[]): string {
-  const AMBIGUOUS = null;
-  const jar = new Map<string, string | null>();
-  for (const part of (cookieHeader ?? "").split(";")) {
+  const nameOf = (part: string) => {
     const eq = part.indexOf("=");
-    if (eq === -1) continue;
-    const name = part.slice(0, eq).trim();
-    const value = part.slice(eq + 1).trim();
-    if (jar.has(name)) {
-      if (jar.get(name) !== value) jar.set(name, AMBIGUOUS);
-    } else {
-      jar.set(name, value);
-    }
-  }
+    return (eq === -1 ? part : part.slice(0, eq)).trim();
+  };
+  let parts = (cookieHeader ?? "")
+    .split(";")
+    .map((p) => p.trim())
+    .filter(Boolean);
   for (const sc of setCookies) {
-    const pair = sc.split(";")[0];
+    const pair = sc.split(";")[0]!;
     const eq = pair.indexOf("=");
     if (eq === -1) continue;
     const name = pair.slice(0, eq).trim();
-    // go writes Max-Age=0 for any non-positive MaxAge, so this covers the
-    // ClearSession(-1) that a logout action sends
-    if (/;\s*max-age=0\b/i.test(sc)) jar.delete(name);
-    else jar.set(name, pair.slice(eq + 1).trim());
+    const at = parts.findIndex((p) => nameOf(p) === name);
+    const fresh = cookieExpired(sc) ? [] : [`${name}=${pair.slice(eq + 1).trim()}`];
+    const rest = parts.filter((p) => nameOf(p) !== name);
+    parts = at === -1 ? [...rest, ...fresh] : [...rest.slice(0, at), ...fresh, ...rest.slice(at)];
   }
-  const out: string[] = [];
-  for (const [name, value] of jar) {
-    if (value !== AMBIGUOUS) out.push(`${name}=${value}`);
-  }
-  return out.join("; ");
+  return parts.join("; ");
+}
+
+// a set-cookie that deletes: Max-Age zero or less (go writes 0 for any
+// non-positive MaxAge), or, with no Max-Age, an Expires in the past
+function cookieExpired(setCookie: string): boolean {
+  const maxAge = /;\s*max-age=(-?\d+)/i.exec(setCookie);
+  if (maxAge) return Number(maxAge[1]) <= 0;
+  const expires = /;\s*expires=([^;]+)/i.exec(setCookie);
+  return expires ? Date.parse(expires[1]!) <= Date.now() : false;
 }
 
 // presence regardless of value: a check that switches itself off on an

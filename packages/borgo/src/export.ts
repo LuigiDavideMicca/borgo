@@ -6,6 +6,7 @@ import { buildAssets, reportBuildFailure } from "./build";
 import { banner, c, fmtMs, g } from "./colors";
 import { inHiddenDirectory, isHiddenAsset } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD } from "./index";
+import { resolvePageMiddleware } from "./page-middleware";
 import type { Route } from "./router";
 import { freePorts, frontTopology, goBinName, INTERNAL_KEY_HEADER, renderEnv, runBorgogen, withoutRenderEnv } from "./util";
 
@@ -19,11 +20,24 @@ export type ExportPlan = {
 };
 
 // a _404 page exports as 404.html even when no regular page is exportable
-export function planExport(routes: Route[], notFound: Route | null = null): ExportPlan {
+// guarded: whether middleware.ts can run for a page of the pattern;
+// guarded404: whether it can run for a path no page answers
+export function planExport(
+  routes: Route[],
+  notFound: Route | null = null,
+  guarded: (pattern: string) => boolean = () => false,
+  guarded404 = false,
+): ExportPlan {
   const plan: ExportPlan = { plans: [], skipped: [], needApi: false, export404: false };
   for (const route of routes) {
     const module = route.module as ExportModule;
     const dynamic = route.pattern.includes(":");
+    // a static host runs no middleware: the frozen copy would be served to
+    // everyone the guard was there to turn away
+    if (guarded(route.pattern)) {
+      plan.skipped.push({ pattern: route.pattern, reason: "guarded by middleware.ts - serve it with borgo start" });
+      continue;
+    }
     // a page that asked to be re-rendered on a clock or on invalidation is
     // asking for a server; a frozen copy would honour neither
     if ((module as { revalidate?: unknown }).revalidate !== undefined) {
@@ -42,7 +56,9 @@ export function planExport(routes: Route[], notFound: Route | null = null): Expo
     plan.plans.push({ route, dynamic });
   }
   const notFoundModule = notFound?.module as ExportModule | undefined;
-  if (notFoundModule) {
+  if (notFoundModule && guarded404) {
+    plan.skipped.push({ pattern: "404", reason: "guarded by middleware.ts - serve it with borgo start" });
+  } else if (notFoundModule) {
     plan.export404 = !notFoundModule.loader || notFoundModule.prerender === true;
     if (!plan.export404) {
       plan.skipped.push({ pattern: "404", reason: "has a loader without `export const prerender = true`" });
@@ -254,11 +270,18 @@ export async function exportSite(): Promise<number> {
   }
 
   const manifest = pathToFileURL(join(process.cwd(), ".borgo/routes.gen.tsx")).href;
-  const { routes, notFound } = (await import(manifest)) as {
+  const { routes, notFound, pageMiddleware } = (await import(manifest)) as {
     routes: Route[];
     notFound: Route | null;
+    pageMiddleware?: unknown;
   };
-  const { plans, skipped, needApi, export404 } = planExport(routes, notFound);
+  const pageMw = resolvePageMiddleware(pageMiddleware ?? null);
+  const { plans, skipped, needApi, export404 } = planExport(
+    routes,
+    notFound,
+    (pattern) => pageMw?.guardsRoute(pattern) ?? false,
+    pageMw?.guardsUnknown(routes.map((r) => r.pattern)) ?? false,
+  );
 
   if (plans.length === 0 && !export404) {
     for (const s of skipped) {

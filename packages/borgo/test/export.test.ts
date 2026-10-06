@@ -60,6 +60,34 @@ describe("planExport", () => {
     ]);
   });
 
+  // a static host runs no middleware, so a guarded page frozen into a file
+  // would reach everyone the guard turns away - loader or not, prerender or not
+  test("a page middleware.ts guards skips with the reason", () => {
+    const guarded = (p: string) => p === "/attach" || p === "/account";
+    const { plans, skipped } = planExport(
+      [
+        route("/attach", { default: page }),
+        route("/account", { default: page, loader: async () => ({}), prerender: true }),
+        route("/about", { default: page }),
+      ],
+      null,
+      guarded,
+    );
+    expect(plans.map((p) => p.route.pattern)).toEqual(["/about"]);
+    expect(skipped).toEqual([
+      { pattern: "/attach", reason: "guarded by middleware.ts - serve it with borgo start" },
+      { pattern: "/account", reason: "guarded by middleware.ts - serve it with borgo start" },
+    ]);
+  });
+
+  test("a 404 page the guard can reach skips, and exports otherwise", () => {
+    const notFound = route("/_404", { default: page });
+    const guarded = planExport([route("/about", { default: page })], notFound, () => false, true);
+    expect(guarded.export404).toBe(false);
+    expect(guarded.skipped).toEqual([{ pattern: "404", reason: "guarded by middleware.ts - serve it with borgo start" }]);
+    expect(planExport([route("/about", { default: page })], notFound, () => false, false).export404).toBe(true);
+  });
+
   test("a loader without prerender skips with the reason", () => {
     const { plans, skipped } = planExport([route("/", { default: page, loader: async () => ({}) })]);
     expect(plans).toEqual([]);

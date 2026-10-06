@@ -23,11 +23,23 @@ export default function Account({ me }: { me: Me }) {
   // in api/users.go: "signed-out" carries { at }, and a wrong reading fails
   // tsc. Only this user's sockets may hold it (api/realtime.go)
   useEffect(() => {
-    const ch = subscribe(`user:${me.username}`, (event, data) => {
-      if (event === "signed-out") location.assign("/login?signed-out=" + data.at);
-    });
+    const ch = subscribe(
+      `user:${me.id}`,
+      (event, data) => {
+        if (event === "signed-out") location.assign("/login?signed-out=" + data.at);
+      },
+      // a socket that was down when the event went out redials with the
+      // revoked session, and the relay refuses the topic for good. Leave only
+      // if the session is really over: a refused origin is a misconfigured
+      // server, and /login would send a live session straight back here
+      {
+        onRefused: async () => {
+          if ((await fetch("/api/me")).status === 401) location.assign("/login");
+        },
+      },
+    );
     return () => ch.close();
-  }, [me.username]);
+  }, [me.id]);
   return (
     <main>
       <h1>Account</h1>

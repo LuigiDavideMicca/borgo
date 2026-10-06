@@ -174,6 +174,36 @@ func TestFrontServesSharedPagesFromItsCache(t *testing.T) {
 
 // a guard's redirect is the render's answer, never a place the cache goes:
 // the visitor gets their own render, and no other host ever sees the key
+// a session whose csrf cookie ended with the browser session: a shared copy
+// mints no token, and the /api guard arms for that browser's next form post.
+// Its own render mints one; with the token held, the copy serves it again.
+// With csrf off there is no guard to arm, and the copy serves everyone
+func TestFrontRendersASessionWithoutATokenItsOwnPage(t *testing.T) {
+	svc := &fakeRenderService{boot: 1}
+	renderer := httptest.NewServer(svc.handler())
+	defer renderer.Close()
+	u, _ := url.Parse(renderer.URL)
+	for _, csrf := range []bool{true, false} {
+		front := newFrontHandler(apiUnderTest(), frontOptions{trusted: trustAll, isr: newIsr(nil, nil, func(string) {}), csrf: csrf}, u, testInternalKey, time.Second)
+		get := func(cookie string) string {
+			req := httptest.NewRequest("GET", "http://app.example/news", nil)
+			req.Header.Set("Cookie", cookie)
+			w := httptest.NewRecorder()
+			front.ServeHTTP(w, req)
+			return w.Header().Get(cacheStateHeader)
+		}
+		if got := get("borgo_session=abc"); csrf && got != "bypass" || !csrf && got != "miss" {
+			t.Errorf("csrf=%v session, no token: %q", csrf, got)
+		}
+		if got := get("borgo_session=abc; borgo_csrf=t"); got == "bypass" {
+			t.Errorf("csrf=%v session and token: %q", csrf, got)
+		}
+		if got := get(""); got != "hit" {
+			t.Errorf("csrf=%v anonymous: %q", csrf, got)
+		}
+	}
+}
+
 func TestFrontNeverFollowsARedirectFromTheRenderService(t *testing.T) {
 	var foreign http.Header
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

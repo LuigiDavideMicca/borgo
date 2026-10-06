@@ -9,7 +9,7 @@ import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 async function signIn(page: Page, path: "/register" | "/login", username: string) {
   await page.goto(path);
   await page.fill('input[name="username"]', username);
-  if (path === "/register") await page.fill('input[name="email"]', username + "@example.test");
+  if (path === "/register") await page.fill('input[name="email"]', username.replace(/[^a-z0-9]/gi, "") + "@example.test");
   await page.fill('input[name="password"]', "pw123456");
   await page.click("form button");
   await expect(page).toHaveURL(/\/account$/);
@@ -22,7 +22,9 @@ async function csrfToken(context: BrowserContext) {
 }
 
 test("logging out everywhere ends the other device's session on its next request", async ({ browser }) => {
-  const username = `revoked${Date.now()}`;
+  // a comma, a slash and a space: none of them may sit in a topic, and the
+  // user's topic is keyed by id so the name never has to
+  const username = `revoked ${Date.now()}, a/b`;
   const laptop = await browser.newContext();
   const phone = await browser.newContext();
   try {
@@ -33,7 +35,7 @@ test("logging out everywhere ends the other device's session on its next request
     expect((await onPhone.request.get("/api/me")).status()).toBe(200);
 
     // the phone's tab sits on /account, holding the user's own topic
-    // (user:<username>, admitted by CanSubscribe for this session alone)
+    // (user:<id>, admitted by CanSubscribe for this session alone)
     await expect(onPhone).toHaveURL(/\/account$/);
     const res = await onLaptop.request.post("/api/logout-everywhere", {
       headers: { "X-CSRF-Token": await csrfToken(laptop) },
@@ -56,6 +58,37 @@ test("logging out everywhere ends the other device's session on its next request
     // signing in again issues a session after the cutoff, and it works
     await signIn(onPhone, "/login", username);
     expect((await onPhone.request.get("/api/me")).status()).toBe(200);
+  } finally {
+    await laptop.close();
+    await phone.close();
+  }
+});
+
+// the device whose socket was down when the event went out: its redial
+// carries the revoked session, the relay refuses the topic for good, and the
+// page leaves on that refusal instead of sitting on a dead account
+test("a device that missed the signed-out event leaves when its redial is refused", async ({ browser }) => {
+  // the redial backs off, doubling from a second: room for a slow runner
+  test.setTimeout(60_000);
+  const username = `missed${Date.now()}`;
+  const laptop = await browser.newContext();
+  const phone = await browser.newContext();
+  try {
+    const onLaptop = await laptop.newPage();
+    const onPhone = await phone.newPage();
+    await signIn(onLaptop, "/register", username);
+    let down = true;
+    await onPhone.routeWebSocket(/\/ws\?/, (ws) => {
+      if (down) ws.close();
+      else ws.connectToServer();
+    });
+    await signIn(onPhone, "/login", username);
+    const res = await onLaptop.request.post("/api/logout-everywhere", {
+      headers: { "X-CSRF-Token": await csrfToken(laptop) },
+    });
+    expect(res.status()).toBe(204);
+    down = false;
+    await expect(onPhone).toHaveURL(/\/login$/, { timeout: 40_000 });
   } finally {
     await laptop.close();
     await phone.close();

@@ -1,12 +1,14 @@
 package api
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/LuigiDavideMicca/borgo"
 )
@@ -28,10 +30,18 @@ type Attachment struct {
 }
 
 // where uploads land: outside the project, so a dev watcher never sees them
-// and a deploy never ships them. A real app puts this on a volume or a bucket
+// and a deploy never ships them. A real app puts this on a volume or a bucket,
+// gives each file an owner and a lifetime; this one keeps the newest few, so
+// a signed-in user can fill no more than keptAttachments times the cap
 var attachmentsDir = filepath.Join(os.TempDir(), "borgo-tasks-attachments")
 
-//borgo:route POST /api/attachments
+const keptAttachments = 20
+
+func init() {
+	// writing to the server's disk is for signed-in users only
+	borgo.Handle("POST /api/attachments", borgo.Authed(UploadAttachment))
+}
+
 func UploadAttachment(w http.ResponseWriter, r *http.Request) {
 	form, err := borgo.BindMultipart[AttachmentForm](r)
 	if err != nil {
@@ -77,5 +87,29 @@ func UploadAttachment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "storage failed", http.StatusInternalServerError)
 		return
 	}
+	pruneAttachments()
 	borgo.JSON(w, http.StatusCreated, Attachment{Note: form.Note, Name: form.File.Name, Size: form.File.Size, Type: kind})
+}
+
+// pruneAttachments removes all but the newest keptAttachments files. Two
+// uploads pruning at once may both try a file: a failed remove is no error
+func pruneAttachments() {
+	entries, err := os.ReadDir(attachmentsDir)
+	if err != nil || len(entries) <= keptAttachments {
+		return
+	}
+	type stored struct {
+		path string
+		mod  int64
+	}
+	files := make([]stored, 0, len(entries))
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && info.Mode().IsRegular() {
+			files = append(files, stored{filepath.Join(attachmentsDir, e.Name()), info.ModTime().UnixNano()})
+		}
+	}
+	slices.SortFunc(files, func(a, b stored) int { return cmp.Compare(b.mod, a.mod) })
+	for _, f := range files[min(keptAttachments, len(files)):] {
+		os.Remove(f.path)
+	}
 }

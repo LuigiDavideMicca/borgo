@@ -41,31 +41,38 @@ describe("freshCookieHeader", () => {
     expect(freshCookieHeader("borgo_session=old", [`${SESSION}=; Path=/; MAX-AGE=0; HttpOnly`])).toBe("");
   });
 
-  test("junk + valid duplicates are ambiguous: neither reaches the loader", () => {
-    // last-wins used to hand go the junk alone, logging the victim out; go
-    // itself skips the junk and would have kept the session, so neither
-    // single winner is the answer - the pair is
-    const jar = freshCookieHeader(`${SESSION}=${valid}; ${SESSION}=!!junk!!`, ["other=1"]);
-    expect(jar).not.toContain(SESSION);
-    expect(jar).toBe("other=1");
-    const reversed = freshCookieHeader(`${SESSION}=!!junk!!; ${SESSION}=${valid}`, ["other=1"]);
-    expect(reversed).toBe("other=1");
-  });
-
-  test("valid + valid is the session swap go refuses, so the jar refuses it too", () => {
-    // cookie tossing: a sibling subdomain drops its own signed session in.
-    // rebuilding last-wins would hand go one unambiguous cookie - the
-    // attacker's - and the post-action page would render their account
-    const jar = freshCookieHeader(`${SESSION}=${valid}; a=1; ${SESSION}=${attacker}`, ["a=2"]);
-    expect(jar).not.toContain(valid);
-    expect(jar).not.toContain(attacker);
-    expect(jar).toBe("a=2");
-  });
-
-  test("identical duplicates are one cookie, not a conflict", () => {
-    expect(freshCookieHeader(`${SESSION}=${valid}; ${SESSION}=${valid}`, ["a=1"])).toBe(
-      `borgo_session=${valid}; a=1`,
+  // duplicates of a name go did not set pass as the browser sent them: go
+  // skips junk beside a valid session and refuses two valid ones, so the
+  // pair is the answer, and a single winner either way is wrong. Last-wins
+  // once handed go the junk alone (a logout) or the attacker's cookie alone
+  // (a session swap); dropping the pair logged the victim out (found by the
+  // verifier of phase 5)
+  test("junk + valid duplicates reach go as the pair, in either order", () => {
+    expect(freshCookieHeader(`${SESSION}=${valid}; ${SESSION}=!!junk!!`, ["other=1"])).toBe(
+      `${SESSION}=${valid}; ${SESSION}=!!junk!!; other=1`,
     );
+    expect(freshCookieHeader(`${SESSION}=!!junk!!; ${SESSION}=${valid}`, ["other=1"])).toBe(
+      `${SESSION}=!!junk!!; ${SESSION}=${valid}; other=1`,
+    );
+  });
+
+  test("valid + valid reaches go as the pair it refuses, never as one winner", () => {
+    const jar = freshCookieHeader(`${SESSION}=${valid}; a=1; ${SESSION}=${attacker}`, ["a=2"]);
+    expect(jar).toBe(`${SESSION}=${valid}; a=2; ${SESSION}=${attacker}`);
+  });
+
+  test("identical duplicates pass as sent", () => {
+    expect(freshCookieHeader(`${SESSION}=${valid}; ${SESSION}=${valid}`, ["a=1"])).toBe(
+      `borgo_session=${valid}; borgo_session=${valid}; a=1`,
+    );
+  });
+
+  test("a cookie expired by Expires or a negative Max-Age goes, a future one stays", () => {
+    expect(freshCookieHeader("t=1; a=1", ["t=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT"])).toBe("a=1");
+    expect(freshCookieHeader("t=1; a=1", ["t=; Max-Age=-1"])).toBe("a=1");
+    expect(freshCookieHeader("a=1", ["t=2; Expires=Fri, 01 Jan 2100 00:00:00 GMT"])).toBe("a=1; t=2");
+    // Max-Age decides over Expires, as RFC 6265 has it
+    expect(freshCookieHeader("a=1", ["t=2; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=60"])).toBe("a=1; t=2");
   });
 
   test("refreshed by the action: a set-cookie settles a name the browser made ambiguous", () => {
@@ -86,10 +93,10 @@ describe("freshCookieHeader", () => {
     ).toBe("a=1");
   });
 
-  test("ambiguity is per name: the rest of the jar still reaches the loader", () => {
+  test("a name go set replaces every duplicate at the first one's place", () => {
     expect(
-      freshCookieHeader(`a=1; ${SESSION}=${valid}; b=2; ${SESSION}=${attacker}; c=3`, ["d=4"]),
-    ).toBe("a=1; b=2; c=3; d=4");
+      freshCookieHeader(`a=1; ${SESSION}=${valid}; b=2; ${SESSION}=${attacker}; c=3`, [`${SESSION}=n`]),
+    ).toBe(`a=1; ${SESSION}=n; b=2; c=3`);
   });
 
   test("values keep their own = signs and the order of first appearance", () => {
@@ -99,6 +106,11 @@ describe("freshCookieHeader", () => {
   test("no cookies in, only what the action set out", () => {
     expect(freshCookieHeader(null, [`${SESSION}=new; Path=/`])).toBe("borgo_session=new");
     expect(freshCookieHeader("", [`${SESSION}=new`])).toBe("borgo_session=new");
+  });
+
+  test("a browser part with no = is a name of its own, kept as sent", () => {
+    expect(freshCookieHeader("flag; a=1", ["fla=2"])).toBe("flag; a=1; fla=2");
+    expect(freshCookieHeader("flag; a=1", ["flag=; Max-Age=0"])).toBe("a=1");
   });
 
   test("a set-cookie with no = is skipped rather than poisoning the jar", () => {

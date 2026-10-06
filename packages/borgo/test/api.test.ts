@@ -86,6 +86,30 @@ describe("makeApiClient", () => {
     expect((calls[0].init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
   });
 
+  // go reads a part with no filename as text, never as a file: a File goes
+  // under its own name, and a plain Blob - which bun would send with an empty
+  // one - under "blob"
+  test("every file part carries a filename", async () => {
+    const form = multipartBody({ shot: new File(["a"], "shot.png"), raw: new Blob(["b"]) })!;
+    const wire = await new Response(form).text();
+    expect(wire).toContain('name="shot"; filename="shot.png"');
+    expect(wire).toContain('name="raw"; filename="blob"');
+  });
+
+  // a content type of the caller's would replace the one fetch writes with
+  // the boundary in it, and go could not split the parts
+  test("a caller's content-type is dropped from a multipart body and kept on json", async () => {
+    stubFetch(() => Response.json({}));
+    const api = makeApiClient("http://api:1");
+    const file = new File(["x"], "x.txt");
+    await api("POST /api/attachments", { body: { file }, headers: { "Content-Type": "text/plain", "X-Other": "kept" } });
+    const sent = calls[0].init.headers as Record<string, string>;
+    expect(Object.keys(sent).map((k) => k.toLowerCase())).not.toContain("content-type");
+    expect(sent["X-Other"]).toBe("kept");
+    await api("POST /api/tasks", { body: { title: "t" }, headers: { "Content-Type": "application/merge-patch+json" } });
+    expect((calls[1].init.headers as Record<string, string>)["Content-Type"]).toBe("application/merge-patch+json");
+  });
+
   test("an array of files alone is a multipart body, and what no part carries is refused", async () => {
     stubFetch(() => Response.json({}));
     const api = makeApiClient("http://api:1");
@@ -267,7 +291,7 @@ describe("connection-refused retries", () => {
   test("the render service hands its one hop that number", () => {
     const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
     expect(src).toContain("const apiRetries = dev ? 15 : API_RETRIES;");
-    expect(src).toContain("makeApiClient(api, cookie ? { ...apiDefaults, cookie } : apiDefaults, onSetCookie, apiRetries)");
+    expect(src).toContain(`requestApiClient(api, apiDefaults, req.headers.get("cookie"), onSetCookie, apiRetries)`);
     expect(src).not.toContain("proxyRequest");
   });
 });

@@ -2,17 +2,18 @@ package borgo
 
 import (
 	"fmt"
+	"mime"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 )
 
-// The /api half of borgo's csrf check, on the go side. The bun front server
-// has always run it before proxying (apiCsrfRejects in util.ts); in front
-// mode /api never passes through bun, so the same check runs here, before
-// the handler. Mirrored line for line rather than shared: the two must agree
-// while both exist, and the test suite says so.
+// The /api half of borgo's csrf check. The bun front server used to run it
+// before proxying; since the go front serves /api in process it runs here,
+// before the handler. The action half stays in bun (csrfRejects in util.ts),
+// which refuses a session without a readable token outright: a server action
+// is only ever posted by a page borgo rendered.
 //
 // One double-submit token: a cookie minted on rendered pages, echoed in the
 // X-CSRF-Token header by a call a page's script makes. A form cannot set the
@@ -90,13 +91,42 @@ func apiCsrfRejects(r *http.Request) bool {
 	}
 	expected, present := csrfCookieValue(r)
 	if !present {
-		return false // a cookie-less client is not a browser this page armed
+		// a cookie-less client is not a browser this page armed - unless it
+		// carries a session and a body a plain <form> can send: the csrf
+		// cookie dies with the browser session while the session cookie
+		// lives on, and since BindMultipart a form post reaches a handler
+		// that reads it. A sibling subdomain posting one is the attacker
+		// this file exists for (found by the verifier of phase 5)
+		return r.Method == http.MethodPost && hasSessionCookie(r) && formSendable(r)
 	}
 	if expected == "" {
 		return true
 	}
 	given := r.Header.Get(csrfHeader)
 	return given == "" || !keysEqual(given, expected)
+}
+
+// needsCsrfToken: a session the /api guard arms for, holding no token to
+// echo
+func needsCsrfToken(r *http.Request) bool {
+	_, present := csrfCookieValue(r)
+	return !present && hasSessionCookie(r)
+}
+
+func hasSessionCookie(r *http.Request) bool {
+	return len(r.CookiesNamed(sessionCookie)) > 0
+}
+
+// formSendable reports whether the body is one an HTML form can send
+// cross-site without a preflight: the three CORS-safelisted types, and no
+// type at all
+func formSendable(r *http.Request) bool {
+	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	switch ct {
+	case "", "multipart/form-data", "application/x-www-form-urlencoded", "text/plain":
+		return true
+	}
+	return false
 }
 
 // csrfMiddleware guards the public /api path in front mode.

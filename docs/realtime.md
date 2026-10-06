@@ -105,7 +105,7 @@ borgo.Push("live", "task-created", task.Title)
 `borgo.CanSubscribe` registers the check every topic a socket asks for must pass. It runs once per topic at the handshake, before the socket is upgraded, with the request the socket came in on — so it reads the session with `GetSession` as a handler would, the front having verified it, and a `CheckSession` you registered is consulted once for the whole handshake. A refused topic closes the socket with `4403` and a reason naming the topic; `__count` is a subscription like any other, so a refused topic's count is never seen either.
 
 ```go
-type User struct{ Name string }
+type User struct{ ID, Name string }
 
 func init() {
 	borgo.CanSubscribe(func(r *http.Request, topic string) bool {
@@ -113,10 +113,12 @@ func init() {
 			return true
 		}
 		user, ok := borgo.GetSession[User](r)
-		return ok && topic == "user:"+user.Name
+		return ok && topic == "user:"+user.ID
 	})
 }
 ```
+
+Key a per-user topic by an id the app assigns, not by a name the user chose: a topic cannot hold a `,`, is at most 128 characters and loses the whitespace around it, so a chosen name can leave its owner with a channel the relay will not open. `examples/tasks` keys `user:<id>` for this reason.
 
 A socket is judged once, at its handshake, and keeps its topics until it ends: a session revoked or expired afterwards is refused at its next handshake, not cut mid-socket. A check that panics refuses — failing open would hand a private topic to whoever hits the panic — and its stack is logged once per process. `borgo.CanPublish` decides a browser's publish separately, per message, for the topic it names; without one, publishing follows `CanSubscribe` — a socket may publish to what it may hold. A refused message is dropped, the socket stays open, and the refusal is logged once per socket. Go's own `Push` is never asked: it is your code publishing. And a subscriber cannot tell the two apart: a browser's publish reaches the others as the same `{event, data}` a `Push` would, so without a `CanPublish` any socket a topic admits may emit any event name declared for it, typed or not, with whatever data it likes — the type map is a compile-time promise about your code, not a wire check.
 
@@ -138,14 +140,14 @@ Topics with no declared events keep the untyped `(event: string, data: unknown)`
 
 ### Computed topics: //borgo:topic
 
-Every realtime app has per-entity topics — `"channel:"+id`, `"user:"+name` — and a computed name has no literal for borgogen to read. Name its shape on the call instead, and the generator keys the map by the pattern and keeps owning the payload type:
+Every realtime app has per-entity topics — `"channel:"+id`, `"user:"+id` — and a computed name has no literal for borgogen to read. Name its shape on the call instead, and the generator keys the map by the pattern and keeps owning the payload type:
 
 ```go no-check
 //borgo:topic channel:{id}
 borgo.Push("channel:"+id, "message", msg)
 ```
 
-The directive sits on the line above the call, or at the end of the line the call starts on, and names that one call; literal text and `{name}` placeholders, no `/`, no `,`, no whitespace, at most 128 characters of literal text (counted as the relay counts, in UTF-16 units). It becomes a template-literal key, `\`channel:${string}/message\``, and `subscribe("channel:42", ...)` or `subscribe(\`channel:${id}\`, ...)` narrows `data` exactly as a literal topic does; `channel.publish` is held to it too. A pattern with no placeholder says the topic is exactly that name. Every mistake fails the run and names the line: a directive on a `Push` whose topic is already a literal, one on no `Push` at all, one claimed by two calls, one with a computed event name, a comment that looks like the directive but is not one, a malformed pattern — and a collision, where a literal `Push` names a topic the pattern admits with a payload the pattern does not carry, or two patterns nest with different payloads, since the generated file would then fail `tsc` on its index signatures with no Go line to point at. A typing that silently did not happen is the drift this exists to end. `Push` still accepts a computed topic with no directive — nothing is recorded, the subscriber keeps the untyped callback, and borgogen says nothing about it. A hand-written key for the same pattern in the app's `.d.ts` is a duplicate index signature `tsc` refuses, so the directive and the escape hatch cannot disagree; the escape hatch is for browser-published events, which have no Go source to read. One consequence on the client: `subscribe(topic)` with a `topic` that is any `string` is untyped, since there is no name to narrow on — it used to see every event of every literal topic at once.
+The directive sits on the line above the call, or at the end of the line the call starts on, and names that one call; literal text and `{name}` placeholders, no `/`, no `,`, no whitespace, at most 128 characters of literal text (counted as the relay counts, in UTF-16 units). It becomes a template-literal key, `\`channel:${string}/message\``, and `subscribe("channel:42", ...)` or `subscribe(\`channel:${id}\`, ...)` narrows `data` exactly as a literal topic does; `channel.publish` is held to it too. A pattern with no placeholder says the topic is exactly that name. Every mistake fails the run and names the line: a directive on a `Push` whose topic is already a literal, one on no `Push` at all, one claimed by two calls, one with a computed event name, a comment that looks like the directive but is not one, a malformed pattern — and a collision, where a literal `Push` names a topic the pattern admits with a payload the pattern does not carry, or two patterns nest with different payloads, since the generated file would then type one event two ways, and `tsc` settles it in silence with no Go line to point at: the literal topic keeps its own payload whatever the pattern says, and two nested patterns type the event `never`, which no handler can read. A typing that silently did not happen is the drift this exists to end. `Push` still accepts a computed topic with no directive — nothing is recorded, the subscriber keeps the untyped callback, and borgogen says nothing about it. Do not hand-write a key for the same pattern in the app's `.d.ts`: that is the same duplicate index signature, and under `skipLibCheck` nothing reports it. The escape hatch is for browser-published events, which have no Go source to read. One consequence on the client: `subscribe(topic)` with a `topic` that is any `string` is untyped, since there is no name to narrow on — it used to see every event of every literal topic at once.
 
 One naming rule: a topic cannot contain `/`, which would make the `"topic/event"` key ambiguous and subscribe the browser to the part before the slash. Such a push still delivers — refusing to generate would break a working app over a typing detail — so borgogen warns, names the file and line, and leaves that event untyped.
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"mime"
 	"mime/multipart"
@@ -272,6 +273,54 @@ func fieldFor(rv reflect.Value, index []int) reflect.Value {
 
 // zeroFiles clears every file field of a value decoded from JSON: a file
 // never arrives that way, whatever the body claims about one
+// jsonReads is encoding/json's rule for which fields it reads: exported
+// ones, and an unexported embedded struct (or pointer to one) for the
+// exported fields it promotes; never one tagged "-"
+func jsonReads(f reflect.StructField) bool {
+	if f.Tag.Get("json") == "-" {
+		return false
+	}
+	if f.IsExported() {
+		return true
+	}
+	if !f.Anonymous {
+		return false
+	}
+	t := f.Type
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Struct
+}
+
+// holdsFile reports whether a File is reachable from t through what
+// encoding/json reads: exported or embedded fields not tagged "-", pointers,
+// slices, arrays and map values.
+func holdsFile(t reflect.Type, seen map[reflect.Type]bool) bool {
+	if t == fileType {
+		return true
+	}
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+		return holdsFile(t.Elem(), seen)
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !jsonReads(f) {
+				continue
+			}
+			if holdsFile(f.Type, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func zeroFiles(rv reflect.Value) {
 	for _, f := range multipartFields(rv.Type(), nil) {
 		if !fileTypes[f.typ] {
@@ -343,9 +392,16 @@ func setTextField(field reflect.Value, name string, values []string) error {
 func bindErrorStatus(err error) int {
 	var tooLarge *http.MaxBytesError
 	var shape *multipartTypeError
+	var disk *fs.PathError
 	switch {
 	case errors.As(err, &shape):
 		log.Printf("borgo: %v", err)
+		return http.StatusInternalServerError
+	case errors.As(err, &disk):
+		// a file spilled past the memory threshold could not be written: the
+		// server's disk, not the client's form, and its path is not theirs
+		// to read (found by the verifier of phase 5)
+		log.Printf("borgo: storing an upload: %v", err)
 		return http.StatusInternalServerError
 	case errors.As(err, &tooLarge), errors.Is(err, multipart.ErrMessageTooLarge):
 		return http.StatusRequestEntityTooLarge

@@ -17,6 +17,7 @@ export interface Attachment {
 }
 
 export interface Me {
+  id: number;
   username: string;
 }
 

@@ -381,6 +381,12 @@ func Signup[U any, S SignupForm](a *Auth[U], register func(ctx context.Context, 
 	if t := reflect.TypeFor[S](); !embedsCredentialsByValue(t) {
 		panic("borgo.Signup: the form " + t.String() + " must be a struct embedding borgo.Credentials by value, not through a pointer or an interface")
 	}
+	// Signup reads JSON, which carries no upload - a File would hold only
+	// what the client wrote into its fields - and the typed client
+	// sends a form holding one as multipart (found by the verifier of phase 5)
+	if t := reflect.TypeFor[S](); holdsFile(t, map[reflect.Type]bool{}) {
+		panic("borgo.Signup: the form " + t.String() + " holds a borgo.File, and a JSON body carries no upload - only the fields the client wrote; take the upload in a route of its own that reads it with borgo.BindMultipart")
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		form, err := Bind[S](r)
 		if err != nil {
