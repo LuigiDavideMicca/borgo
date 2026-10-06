@@ -45,11 +45,15 @@ export type SubscribeOptions = { onRefused?: (reason: string) => void };
 const CLOSE_ORIGIN_REFUSED = 4403;
 
 // "topic/event" -> payload. borgogen fills this in from borgo.Push calls;
-// browser-published events are declared the same way in any app .d.ts
+// browser-published events are declared the same way in any app .d.ts. A
+// computed topic named by a //borgo:topic directive lands here as a template
+// literal key, `channel:${string}/message`, which EventsFor matches too
 export interface WsEvents {}
 
+// a key's topic may be a pattern: infer both halves of the key, then ask
+// whether the topic subscribed is one the key's topic admits
 type EventsFor<T extends string> = {
-  [K in keyof WsEvents & string as K extends `${T}/${infer E}` ? E : never]: WsEvents[K];
+  [K in keyof WsEvents & string as K extends `${infer Topic}/${infer E}` ? (T extends Topic ? E : never) : never]: WsEvents[K];
 };
 
 type EventPairs<M> = {

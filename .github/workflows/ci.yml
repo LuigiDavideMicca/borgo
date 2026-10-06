@@ -144,6 +144,49 @@ jobs:
           if bunx tsc --noEmit; then echo "wrong publish payload was accepted" && exit 1; fi
           rm pages/__wrong-publish.tsx
 
+      - name: typed ws events on a computed topic reject a wrong payload
+        working-directory: examples/tasks
+        run: |
+          printf '%s\n' \
+            'import { subscribe } from "borgo-framework";' \
+            'export function wrong(who: string) {' \
+            '  subscribe(`user:${who}`, (event, data) => {' \
+            '    if (event === "signed-out") data.toUpperCase();' \
+            '  });' \
+            '}' \
+            'export default function Wrong() { return null; }' \
+            > pages/__wrong-topic.tsx
+          if bunx tsc --noEmit; then echo "wrong payload on a pattern topic was accepted" && exit 1; fi
+          rm pages/__wrong-topic.tsx
+          # a literal spelling of a pattern topic is matched by the pattern too:
+          # refused with the wrong reading, and accepted with the right one -
+          # the positive file is what tells "typed" apart from "unknown"
+          printf '%s\n' \
+            'import { subscribe } from "borgo-framework";' \
+            'export function wrong() {' \
+            '  subscribe("user:bob", (event, data) => {' \
+            '    if (event === "signed-out") data.toUpperCase();' \
+            '  });' \
+            '}' \
+            'export default function Wrong() { return null; }' \
+            > pages/__wrong-literal-topic.tsx
+          if bunx tsc --noEmit; then echo "wrong payload on a literal spelling of a pattern topic was accepted" && exit 1; fi
+          rm pages/__wrong-literal-topic.tsx
+          printf '%s\n' \
+            'import { subscribe } from "borgo-framework";' \
+            'export function right(who: string) {' \
+            '  subscribe("user:bob", (event, data) => {' \
+            '    if (event === "signed-out") data.at.toFixed(0);' \
+            '  });' \
+            '  subscribe(`user:${who}`, (event, data) => {' \
+            '    if (event === "signed-out") data.at.toFixed(0);' \
+            '  });' \
+            '}' \
+            'export default function Right() { return null; }' \
+            > pages/__right-topic.tsx
+          bunx tsc --noEmit
+          rm pages/__right-topic.tsx
+
       - name: server-only code stays out of client assets
         working-directory: examples/tasks
         run: |

@@ -134,7 +134,18 @@ declare module "borgo-framework" {
 }
 ```
 
-Topics with no declared events keep the untyped `(event: string, data: unknown)` callback. `Push` also accepts computed topic and event names — there is nothing to record statically, so those calls stay out of the map and their subscribers keep the untyped callback. That is a choice, not a mistake, and borgogen says nothing about it.
+Topics with no declared events keep the untyped `(event: string, data: unknown)` callback.
+
+### Computed topics: //borgo:topic
+
+Every realtime app has per-entity topics — `"channel:"+id`, `"user:"+name` — and a computed name has no literal for borgogen to read. Name its shape on the call instead, and the generator keys the map by the pattern and keeps owning the payload type:
+
+```go no-check
+//borgo:topic channel:{id}
+borgo.Push("channel:"+id, "message", msg)
+```
+
+The directive sits on the line above the call, or at the end of the line the call starts on, and names that one call; literal text and `{name}` placeholders, no `/`, no `,`, no whitespace, at most 128 characters of literal text (counted as the relay counts, in UTF-16 units). It becomes a template-literal key, `\`channel:${string}/message\``, and `subscribe("channel:42", ...)` or `subscribe(\`channel:${id}\`, ...)` narrows `data` exactly as a literal topic does; `channel.publish` is held to it too. A pattern with no placeholder says the topic is exactly that name. Every mistake fails the run and names the line: a directive on a `Push` whose topic is already a literal, one on no `Push` at all, one claimed by two calls, one with a computed event name, a comment that looks like the directive but is not one, a malformed pattern — and a collision, where a literal `Push` names a topic the pattern admits with a payload the pattern does not carry, or two patterns nest with different payloads, since the generated file would then fail `tsc` on its index signatures with no Go line to point at. A typing that silently did not happen is the drift this exists to end. `Push` still accepts a computed topic with no directive — nothing is recorded, the subscriber keeps the untyped callback, and borgogen says nothing about it. A hand-written key for the same pattern in the app's `.d.ts` is a duplicate index signature `tsc` refuses, so the directive and the escape hatch cannot disagree; the escape hatch is for browser-published events, which have no Go source to read. One consequence on the client: `subscribe(topic)` with a `topic` that is any `string` is untyped, since there is no name to narrow on — it used to see every event of every literal topic at once.
 
 One naming rule: a topic cannot contain `/`, which would make the `"topic/event"` key ambiguous and subscribe the browser to the part before the slash. Such a push still delivers — refusing to generate would break a working app over a typing detail — so borgogen warns, names the file and line, and leaves that event untyped.
 

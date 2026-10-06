@@ -31,6 +31,7 @@ import (
 	signupapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/signup/api"
 	stringoptapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/stringopt/api"
 	textapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/textmarshal/api"
+	topicapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/topic/api"
 	wireapi "github.com/LuigiDavideMicca/borgo/cmd/borgogen/testdata/wire/api"
 )
 
@@ -379,6 +380,26 @@ func TestGenerateErrors(t *testing.T) {
 	cases := []struct{ name, dir, want string }{
 		{"duplicate pattern", "dup", "already registered"},
 		{"malformed type directive", "badtype", "malformed directive"},
+		// //borgo:topic: a typing that silently did not happen is the drift
+		// the directive exists to end, so every mistake stops the run
+		{"topic directive on a literal push", "topicliteral", "the literal is the shape"},
+		{"topic directive on no push", "topicorphan", "not on a borgo.Push call with a computed topic"},
+		{"topic pattern with a slash", "topicslash", "separates the topic from the event"},
+		{"topic pattern with a stray brace", "topicbrace", "not a {name} placeholder"},
+		{"topic directive on a computed event", "topicevent", "event name is computed"},
+		// the verifier's cases: a directive claimed twice, and every grammar
+		// mistake said by name rather than typed wrong in silence
+		{"end-of-line topic directive inherited by the next line", "topicbetween", "already names the borgo.Push at"},
+		{"one topic directive for two calls on a line", "topictwoline", "already names the borgo.Push at"},
+		{"topic pattern with a comma", "topiccomma", "separates topics on the wire"},
+		{"topic placeholder that is not an identifier", "topicbadname", "not a {name} placeholder"},
+		{"topic pattern with a stray closing brace", "topicbrace2", "not a {name} placeholder"},
+		{"topic pattern over the relay's cap", "topiclong", "over the 128"},
+		{"topic directive with trailing tokens", "topictokens", "malformed //borgo:topic"},
+		{"topic directive with a space after the slashes", "topicloose", "malformed //borgo:topic"},
+		{"topic pattern with a non-ascii space", "topicnbsp", "contains whitespace"},
+		{"literal topic a pattern admits with another payload", "topiccollide", "would fail tsc on the index signature"},
+		{"two patterns that nest with different payloads", "topicoverlap", "overlap on event"},
 		// a directive that can never apply is a mistake, and used to be silent
 		{"type directive naming nothing", "badtypename", "not a type this api package can refer to"},
 		{"type directive with a typo in an imported name", "badtypepath", "not a type this api package can refer to"},
@@ -1427,6 +1448,40 @@ func TestSignupFormIsTheRouteRequestType(t *testing.T) {
 	)
 	if strings.Contains(out, "stay unknown") {
 		t.Errorf("a Signup handler must not read as an unresolvable registration:\n%s", out)
+	}
+}
+
+// a computed topic named by //borgo:topic: keyed by its shape, the payload
+// still the generator's, on the line above or on the call's own line, with
+// a placeholder-less pattern reading as a literal key
+func TestTopicDirectiveTypesAComputedTopic(t *testing.T) {
+	marshals(t, topicapi.Msg{ID: 1, Text: "t"}, `{"id":1,"text":"t"}`)
+	var types string
+	out := captureStderr(t, func() { types = generateFresh(t, "topic") })
+	wants(t, types,
+		"export interface Msg {\n  id: number;\n  text: string;\n}",
+		"[k: `channel:${string}/message`]: Msg | string;",
+		"[k: `channel:${string}/typing`]: boolean;",
+		"[k: `room:${string}:${string}/joined`]: number;",
+		`"live/created": number;`,
+		// each call its own directive at the end of its line
+		"[k: `chat:${string}/a`]: number;",
+		"[k: `room:${string}/b`]: string;",
+		// escaped in a template literal: a backtick, a backslash, a dollar-brace
+		"[k: `a\\`b:${string}/e`]: number;",
+		"[k: `a\\\\b:${string}/e`]: number;",
+		"[k: `\\$${string}:${string}/e`]: number;",
+		// and not escaped twice in a literal key (found by the verifier)
+		`"a`+"`"+`b/e": number;`,
+		`"a\\b/e": number;`,
+		// a literal the pattern admits, carrying what the pattern carries
+		`"channel:7/typing": boolean;`,
+		`"channel:9/message": string;`,
+		"[k: `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx${string}/e`]: number;",
+		`"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé/e": number;`,
+	)
+	if out != "" {
+		t.Errorf("a well-formed directive has nothing to warn about, got:\n%s", out)
 	}
 }
 

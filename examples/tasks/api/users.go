@@ -32,6 +32,12 @@ type Me struct {
 	Username string `json:"username"`
 }
 
+// what the other devices of a user are told when one of them logs out
+// everywhere: the moment, so a page can say how long ago
+type SignedOut struct {
+	At int64 `json:"at"`
+}
+
 var auth = borgo.Auth[User]{
 	Lookup: func(ctx context.Context, username string) (User, string, error) {
 		var user User
@@ -89,8 +95,14 @@ func logoutEverywhere(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
-	revokedBefore.Store(me.Username, time.Now())
+	now := time.Now()
+	revokedBefore.Store(me.Username, now)
 	borgo.ClearSession(w)
+	// the user's other tabs are told on their own topic - one per user, its
+	// shape named by the directive so the payload is typed on the page, and
+	// held only by that user's sockets (api/realtime.go)
+	//borgo:topic user:{username}
+	go borgo.Push("user:"+me.Username, "signed-out", SignedOut{At: now.Unix()})
 	w.WriteHeader(http.StatusNoContent)
 }
 

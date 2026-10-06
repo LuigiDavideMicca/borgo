@@ -32,10 +32,16 @@ test("logging out everywhere ends the other device's session on its next request
     await signIn(onPhone, "/login", username);
     expect((await onPhone.request.get("/api/me")).status()).toBe(200);
 
+    // the phone's tab sits on /account, holding the user's own topic
+    // (user:<username>, admitted by CanSubscribe for this session alone)
+    await expect(onPhone).toHaveURL(/\/account$/);
     const res = await onLaptop.request.post("/api/logout-everywhere", {
       headers: { "X-CSRF-Token": await csrfToken(laptop) },
     });
     expect(res.status()).toBe(204);
+    // ...and is told at once, over the typed "signed-out" event, before it
+    // makes any request of its own
+    await expect(onPhone).toHaveURL(/\/login\?signed-out=\d+$/, { timeout: 10_000 });
 
     // the phone did nothing and kept its cookie: the revocation is decided
     // when the session is read, not by rewriting anyone's cookie

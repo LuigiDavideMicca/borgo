@@ -52,6 +52,10 @@ export interface Deleted {
   deleted: boolean;
 }
 
+export interface SignedOut {
+  at: number;
+}
+
 declare module "borgo-framework" {
   interface ApiRoutes {
     "GET /api/events": { response: unknown };
@@ -69,6 +73,7 @@ declare module "borgo-framework" {
   }
   interface WsEvents {
     "live/task-created": string;
+    [k: `user:${string}/signed-out`]: SignedOut;
   }
 }
 

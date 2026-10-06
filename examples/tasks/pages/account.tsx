@@ -1,4 +1,5 @@
-import { CsrfField, redirect, type ActionContext, type LoaderContext } from "borgo-framework";
+import { useEffect } from "react";
+import { CsrfField, redirect, subscribe, type ActionContext, type LoaderContext } from "borgo-framework";
 import type { Me } from "@/.borgo/api-types";
 
 export const head = { title: "Account · borgo tasks" };
@@ -18,6 +19,15 @@ export async function action({ api }: ActionContext) {
 }
 
 export default function Account({ me }: { me: Me }) {
+  // the user's own topic, typed by the //borgo:topic directive on the push
+  // in api/users.go: "signed-out" carries { at }, and a wrong reading fails
+  // tsc. Only this user's sockets may hold it (api/realtime.go)
+  useEffect(() => {
+    const ch = subscribe(`user:${me.username}`, (event, data) => {
+      if (event === "signed-out") location.assign("/login?signed-out=" + data.at);
+    });
+    return () => ch.close();
+  }, [me.username]);
   return (
     <main>
       <h1>Account</h1>

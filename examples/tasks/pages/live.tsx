@@ -32,8 +32,8 @@ export default function Live() {
     <main>
       <h1>Live</h1>
       <p>
-        A WebSocket channel on the Bun front server. Open this page in two tabs: messages relay
-        between browsers, and creating a task on the home page arrives here from Go via{" "}
+        A WebSocket topic on the Go front. Open this page in two tabs: messages relay between
+        browsers, and creating a task on the home page arrives here from Go via{" "}
         <code>borgo.Push</code>.
       </p>
       <p data-testid="presence">

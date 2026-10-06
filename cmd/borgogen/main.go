@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf16"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -43,6 +44,9 @@ const (
 var (
 	directiveRe    = regexp.MustCompile(`^//borgo:route\s+(.+)$`)
 	typeRe         = regexp.MustCompile(`^//borgo:type\s+(\S+)\s+(.+)$`)
+	topicRe        = regexp.MustCompile(`^//borgo:topic\s+(\S+)\s*$`)
+	looseTopic     = regexp.MustCompile(`^//\s*borgo:topic\b`)
+	placeholderRe  = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 	patternRe      = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /\S*$`)
 	looseDirective = regexp.MustCompile(`^//\s*borgo:route\b`)
 )
@@ -193,7 +197,7 @@ func run(root string) (err error) {
 		patterns = append(patterns, r.pattern)
 	}
 
-	wsKeys, wsEntries := collectPushes(pushSources(pkg, loader), gen)
+	wsKeys, wsEntries, wsPatterns := collectPushes(pushSources(pkg, loader), gen)
 	// before the defs are written out: the export stubs add the types they
 	// name to the same api-types.d.ts that go.ts imports them from
 	goTS := gen.exportsTS(exportFns)
@@ -212,6 +216,12 @@ func run(root string) (err error) {
 	if len(wsKeys) > 0 {
 		out.WriteString("  interface WsEvents {\n")
 		for _, k := range wsKeys {
+			if wsPatterns[k] {
+				// a template literal index signature: the key of every topic
+				// the pattern admits, matched by EventsFor in index.ts
+				fmt.Fprintf(&out, "    [k: `%s`]: %s;\n", k, wsEntries[k])
+				continue
+			}
 			fmt.Fprintf(&out, "    %q: %s;\n", k, wsEntries[k])
 		}
 		out.WriteString("  }\n")
@@ -436,6 +446,10 @@ func warnExcludedRouteFiles(root string, pkg *packages.Package) {
 	scan:
 		for _, group := range file.Comments {
 			for _, comment := range group.List {
+				if looseTopic.MatchString(comment.Text) {
+					fmt.Fprintf(os.Stderr, "borgogen: warning: %s: //borgo:topic in a file this build excludes; the push was not read and its events have no type\n", fset.Position(comment.Pos()))
+					break scan
+				}
 				if !directiveRe.MatchString(comment.Text) {
 					continue
 				}
@@ -936,11 +950,15 @@ func constString(pkg *packages.Package, expr ast.Expr) (string, bool) {
 // itself: publishing from a service or domain package instead of from the http
 // handler is ordinary layering, and a push the generator never sees takes the
 // whole WsEvents block down with it.
-func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]string) {
+func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]string, map[string]bool) {
 	unions := map[string]*union{}
+	patterns := map[string]bool{}
+	rawPatterns := map[string]string{}
+	firstPos := map[string]token.Position{}
 	var keys []string
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Syntax {
+			directives := topicDirectives(pkg, file)
 			ast.Inspect(file, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -953,6 +971,36 @@ func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]s
 				pos := pkg.Fset.Position(call.Pos())
 				topic, topicOK := constString(pkg, call.Args[0])
 				event, eventOK := constString(pkg, call.Args[1])
+				// a //borgo:topic directive names the shape of a computed
+				// topic, so the generator can key the map by it and keep
+				// owning the payload type - the alternative, a key written
+				// by hand in the app's .d.ts, drifts from the Go struct
+				// with nothing to say so (piazza's F7)
+				// the call's own line first: a directive at the end of a
+				// line names that line's call, and the call on the next
+				// line must not inherit it (found by the verifier of this
+				// step: it was typed under the wrong pattern, in silence)
+				if d := directives[pos.Line]; d != nil || directives[pos.Line-1] != nil {
+					if d == nil {
+						d = directives[pos.Line-1]
+					}
+					if d.claimed.IsValid() {
+						fail("%s: //borgo:topic %q already names the borgo.Push at %s; a directive names one call, so give this one its own", d.pos, d.pattern, d.claimed)
+					}
+					d.claimed = pos
+					if topicOK {
+						fail("%s: //borgo:topic %q on a borgo.Push whose topic is the literal %q: the literal is the shape, drop the directive", d.pos, d.pattern, topic)
+					}
+					if !eventOK {
+						fail("%s: //borgo:topic %q on a borgo.Push whose event name is computed: the event must be a literal for the payload to be typed", d.pos, d.pattern)
+					}
+					topic, topicOK = d.pattern, true
+					if d.template {
+						topic = d.key
+						patterns[topic+"/"+event] = true
+						rawPatterns[topic+"/"+event] = d.pattern
+					}
+				}
 				// a computed topic or event is the documented way to publish
 				// something that cannot be typed: the push still happens, the
 				// event stays out of the map, and the browser keeps the untyped
@@ -975,6 +1023,7 @@ func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]s
 				if unions[key] == nil {
 					unions[key] = &union{}
 					keys = append(keys, key)
+					firstPos[key] = pos
 				}
 				// borgo.Push marshals the payload as a map value of type any:
 				// unaddressable twice over, so a pointer-receiver marshaler
@@ -982,6 +1031,13 @@ func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]s
 				unions[key].add(gen.tsType(inst.TypeArgs.At(0), site{}))
 				return true
 			})
+			for _, d := range directives {
+				if !d.claimed.IsValid() {
+					// a directive that names nothing is a typing that silently
+					// does not happen: said, like a route directive off a handler
+					fail("%s: //borgo:topic %q is not on a borgo.Push call with a computed topic: put it on the line above the call, or at the end of the line the call starts on", d.pos, d.pattern)
+				}
+			}
 		}
 	}
 	sort.Strings(keys)
@@ -989,7 +1045,138 @@ func collectPushes(pkgs []*packages.Package, gen *tsGen) ([]string, map[string]s
 	for _, k := range keys {
 		entries[k] = unions[k].String()
 	}
-	return keys, entries
+	refuseTopicCollisions(keys, unions, patterns, rawPatterns, firstPos)
+	return keys, entries, patterns
+}
+
+// refuseTopicCollisions fails the run when a pattern key admits a literal key
+// or another pattern for the same event with a payload it does not carry: the
+// generated file would then fail tsc on an index signature, naming no Go line
+// (found by the verifier of the step). A literal whose payload the pattern's
+// union already holds is fine - it is what the pattern would have said.
+func refuseTopicCollisions(keys []string, unions map[string]*union, patterns map[string]bool, rawPatterns map[string]string, firstPos map[string]token.Position) {
+	for _, p := range keys {
+		if !patterns[p] {
+			continue
+		}
+		pattern, event := rawPatterns[p], p[strings.LastIndex(p, "/")+1:]
+		admits := topicPatternRegexp(pattern)
+		for _, k := range keys {
+			if k == p || k[strings.LastIndex(k, "/")+1:] != event {
+				continue
+			}
+			other := k[:strings.LastIndex(k, "/")]
+			if patterns[k] {
+				// two patterns: p admits an instance of k when their literal
+				// text nests; then the payloads must agree exactly, since either
+				// may be the wider one for a given topic. The other direction is
+				// the same check with p and k swapped, which the outer loop makes
+				if !admits.MatchString(placeholderRe.ReplaceAllString(rawPatterns[k], "a")) {
+					continue
+				}
+				if unions[k].String() != unions[p].String() {
+					fail("%s: //borgo:topic %q and %s: //borgo:topic %q overlap on event %q with different payloads (%s and %s): the generated WsEvents would fail tsc on the index signatures - give them one payload, or topics that do not nest", firstPos[p], pattern, firstPos[k], rawPatterns[k], event, unions[p].String(), unions[k].String())
+				}
+				continue
+			}
+			if !admits.MatchString(other) {
+				continue
+			}
+			if !unions[p].holds(unions[k]) {
+				fail("%s: borgo.Push on the literal topic %q carries %s for event %q, and %s: //borgo:topic %q admits that topic with %s: the generated WsEvents would fail tsc on the index signature - push the same payload, or a topic the pattern does not admit", firstPos[k], other, unions[k].String(), event, firstPos[p], pattern, unions[p].String())
+			}
+		}
+	}
+}
+
+// topicPatternRegexp is what topics a pattern admits: its literal text
+// exactly, a placeholder anything
+func topicPatternRegexp(pattern string) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString("^")
+	last := 0
+	for _, m := range placeholderRe.FindAllStringIndex(pattern, -1) {
+		b.WriteString(regexp.QuoteMeta(pattern[last:m[0]]))
+		b.WriteString(".*")
+		last = m[1]
+	}
+	b.WriteString(regexp.QuoteMeta(pattern[last:]))
+	b.WriteString("$")
+	return regexp.MustCompile(b.String())
+}
+
+// topicDirective is one //borgo:topic comment: the pattern as written, the
+// TypeScript key it becomes when it holds a placeholder ({name} as ${string},
+// the rest escaped for a template literal), and the call that claimed it
+type topicDirective struct {
+	pattern  string
+	key      string
+	template bool
+	pos      token.Position
+	claimed  token.Position
+}
+
+// topicDirectives finds every //borgo:topic comment of a file, keyed by the
+// line it ends on: a Push on that line, or on the next, claims it. The
+// pattern is validated here, once, whatever claims it: literal text and
+// {name} placeholders, no "/" (the key's separator) and no "," (the wire's),
+// no whitespace of any alphabet, braces that open and close, and the relay's
+// length cap on the literal text. A comment that looks like the directive
+// but is not one stops the run too: a typing that silently did not happen is
+// what this exists to end.
+func topicDirectives(pkg *packages.Package, file *ast.File) map[int]*topicDirective {
+	out := map[int]*topicDirective{}
+	for _, group := range file.Comments {
+		for _, c := range group.List {
+			pos := pkg.Fset.Position(c.Pos())
+			m := topicRe.FindStringSubmatch(c.Text)
+			if m == nil {
+				if looseTopic.MatchString(c.Text) {
+					fail("%s: malformed //borgo:topic: want \"//borgo:topic <pattern>\", no space after //, one pattern with no whitespace", pos)
+				}
+				continue
+			}
+			pattern := m[1]
+			if why := topicPatternRefusal(pattern); why != "" {
+				fail("%s: //borgo:topic %q %s", pos, pattern, why)
+			}
+			d := &topicDirective{pattern: pattern, pos: pos, template: placeholderRe.MatchString(pattern)}
+			if d.template {
+				key := strings.ReplaceAll(strings.ReplaceAll(pattern, "\\", "\\\\"), "`", "\\`")
+				key = strings.ReplaceAll(key, "${", "\\${")
+				d.key = placeholderRe.ReplaceAllString(key, "$${string}")
+			}
+			out[pkg.Fset.Position(c.End()).Line] = d
+		}
+	}
+	return out
+}
+
+// the relay's cap on a topic name, copied from websocket.go and counted as
+// the relay and the browser count, in utf-16 units: a pattern whose literal
+// text alone is over it names topics the handshake refuses
+const topicMaxLength = 128
+
+func topicPatternRefusal(pattern string) string {
+	switch {
+	case strings.Contains(pattern, "/"):
+		return `contains "/", which separates the topic from the event in a WsEvents key`
+	case strings.Contains(pattern, ","):
+		return `contains ",", which separates topics on the wire (/ws?topics=a,b)`
+	}
+	for _, r := range pattern {
+		if unicode.IsSpace(r) || r == 0xFEFF {
+			return fmt.Sprintf("contains whitespace (U+%04X), which the relay strips from a topic and the client refuses", r)
+		}
+	}
+	literal := placeholderRe.ReplaceAllString(pattern, "")
+	if strings.ContainsAny(literal, "{}") {
+		return "has a brace that is not a {name} placeholder: placeholders are {name}, with a Go identifier inside"
+	}
+	if n := len(utf16.Encode([]rune(literal))); n > topicMaxLength {
+		return fmt.Sprintf("has %d characters of literal text, over the %d a topic may have", n, topicMaxLength)
+	}
+	return ""
 }
 
 // pushSources returns the api package followed by every same-module package it
@@ -1479,6 +1666,20 @@ func (u *union) add(r tsRef) {
 }
 
 func (u *union) empty() bool { return len(u.parts) == 0 && !u.null }
+
+// holds reports whether every alternative of o is one of u's: what o says a
+// value may be, u says too
+func (u *union) holds(o *union) bool {
+	if o.null && !u.null {
+		return false
+	}
+	for _, p := range o.parts {
+		if !u.seen[p] {
+			return false
+		}
+	}
+	return true
+}
 
 func (u *union) String() string {
 	if u.null {

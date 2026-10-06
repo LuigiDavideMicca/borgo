@@ -420,6 +420,7 @@ These are as much a public API as any function: an app depends on them, and chan
 | `//borgo:type <GoType> <TSType>` | Overrides the TypeScript type generated for a named Go type. May sit anywhere in the `api` package. | stable |
 | `//borgo:type <GoType>@<file.go>:<line> <TSType>` | The same, aimed at one specific declaration — for when a bare name is ambiguous. | stable |
 | `//borgo:export` | Makes the following package-level function callable from the render service as `go.<name>` in `.borgo/go.ts`. It must be exported, not generic, not variadic, take a `context.Context` first, return `(T, error)` or `error`, and use types that cross as JSON; borgogen refuses anything else with the file and line. | stable |
+| `//borgo:topic <pattern>` | Names the shape of a computed topic on the `borgo.Push` call below it, or on the line the call starts on, one call per directive: literal text and `{name}` placeholders, no `/`, `,` or whitespace, at most 128 characters of literal text. The event lands in `WsEvents` as a template-literal key the client narrows on. On a literal topic, on no call, claimed twice, with a computed event, malformed, or colliding with another key of the same event on a different payload: the run fails naming the line. | provisional |
 
 A comment that *looks* like a route directive but is not attached to a handler produces a warning rather than silence — as does a directive in a file the build excludes.
 
