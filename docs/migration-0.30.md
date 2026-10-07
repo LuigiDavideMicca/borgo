@@ -1,6 +1,6 @@
 # Upgrading to 0.30
 
-What this covers: the one structural change 0.30 makes, what it does to an app's code (almost nothing), and the five places it can break a deployment. If you run `borgo start` in a container and touch none of borgo's own environment variables, the upgrade is a version bump and this page is a five-minute read you can skip to the [checklist](#checklist).
+What this covers: the one structural change 0.30 makes, what it does to an app's code (almost nothing), the five places it can break a deployment, and the [smaller changes](#beyond-the-topology) the rest of the release makes that an upgrade can meet. If you run `borgo start` in a container and touch none of borgo's own environment variables, the upgrade is a version bump and this page is a five-minute read you can skip to the [checklist](#checklist).
 
 The version number jumps 0.22 → 0.30 rather than 0.23 to make the break visible. It is a topology change, not a rename.
 
@@ -79,6 +79,22 @@ Three smaller consequences:
 - `BORGO_WS_ALLOW_NO_ORIGIN` is read by Go now, with the grammar of every other boolean (`1`/`true`, `0`/`false`): a `yes` that the Bun relay once accepted refuses the boot by name.
 - `borgo dev`'s fast-refresh channel is an event stream served by the Go front rather than a websocket forwarded to the render service. Nothing to do; the page reloads and hot-applies as before, and reconnects on its own after a `.go` restart.
 
+## Beyond the topology
+
+The rest of 0.30 adds API rather than changing it - [page middleware](middleware-and-authorization.md), `borgo.CheckSession`, `borgo.Signup`, typed computed topics, [uploads](typed-bridge.md#uploads-borgobindmultipart), [the database page](database.md) and the Go half of [the environment](environment.md#the-go-half-reads-the-same-contract). An app that uses none of it meets the few changes below.
+
+**Two can stop a build, in an app with `go.mod` whose `env.ts` declares server variables.** The build now writes `env/env.gen.go` from `env.ts` - commit it, as you commit `api/borgo.gen.go` - and two things it cannot write refuse the build by name: a server variable whose name does not start with a capital letter (it becomes a Go field), and one server variable declared by two exported schemas. Rename the first, keep the second in one schema. And `env/` is now the generated package's directory: if your app has a Go package of its own there *and* server variables in `env.ts`, move the package, and the build says which files. An app without server variables meets neither.
+
+**Five are visible from outside.**
+
+- **A form-shaped `POST` to `/api` with a session but no CSRF cookie is refused.** The CSRF cookie ends with the browser session while the session cookie lives on, and a plain `<form>` posted from a sibling subdomain can reach a handler that reads one - since `borgo.BindMultipart`, one that reads files. The check now arms for a `POST` carrying a session and a `multipart/form-data`, `application/x-www-form-urlencoded` or `text/plain` body, or none; JSON is untouched. A non-browser client that holds a session cookie and posts forms has to send JSON, or the `X-CSRF-Token` header with a `borgo_csrf` cookie.
+- **`RemoteAddr` in `api/middleware.go` is the visitor's on a loader's or action's call.** It used to be the render service's loopback address, so a limiter keyed on it put every form-action login in one bucket. A rule written around that, allowing `127.0.0.1`, no longer matches those calls.
+- **A response that is a range, or accepts one, is not gzipped.** A `206`, anything with `Content-Range`, and a whole response with `Accept-Ranges: bytes` - what `http.ServeContent` sends - leave the server as they are, so a resumed download counts the bytes it received. A handler of yours that serves files that way sends more bytes than before.
+- **`borgo export` skips a page `middleware.ts` can reach**, and `404.html` when the matcher can reach a path no page answers: a static host runs no guard. A matcher-less `middleware.ts` therefore exports nothing.
+- **A page from the shared cache is rendered fresh for a signed-in visitor without a CSRF cookie**, so the page carries a token again. Invisible unless you watch the cache header: that one request reads `bypass`.
+
+**One in an image you built from a 0.2x template.** Those Dockerfiles copy `islands`, `components` and `lib` into the runtime image, and not `middleware.ts`, which 0.30 introduced: add one, and the image builds and exits at start with `Cannot find module '../middleware'`. Add `middleware.ts` to that `for d in ...` line, as the 0.30 templates do, or regenerate the Dockerfile from a fresh scaffold and diff.
+
 ## A new port to know about
 
 `BORGO_RENDER_PORT`, on `127.0.0.1`: a free port picked at every boot unless you name one, so two borgo apps on one machine - a zero-downtime redeploy, two projects - never meet on it. A named port that already answers refuses the boot rather than taking another app's traffic: on Windows a second process binds a port another one listens on without an error. `borgo start` resolves the whole topology in one place and configures both halves from it, so they cannot disagree. It needs no firewall rule, and it must not get one: a listener reachable from outside the box is exactly what the boot key exists to make useless.
@@ -92,3 +108,6 @@ Three smaller consequences:
 5. If you wrote your own compose or systemd file from the 0.2x docs, regenerate it (`borgo deploy init compose`, `borgo deploy init systemd`) and diff.
 6. Behind a reverse proxy, set `BORGO_TRUSTED_PROXIES`.
 7. `curl -si localhost:3000/healthz` reports both halves; a `503` with `Retry-After` on a page means the render service is not up, and the body says so.
+8. If `env.ts` declares server variables, run `borgo build` and commit the `env/env.gen.go` it writes.
+9. If your Dockerfile came from a 0.2x template and the app has, or will have, a `middleware.ts`, add it to the runtime stage's copy line.
+10. If something outside a browser posts forms to `/api` with a session cookie, make it send JSON or the CSRF header.
