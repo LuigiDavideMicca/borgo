@@ -298,4 +298,4 @@ You now have a server-rendered React app with a typed Go backend, client-side na
 
 What this walkthrough left out, each with the page that covers it: nested [layouts and error pages](pages-and-routing.md), [streaming SSR](pages-and-routing.md#streaming-ssr), [users and login](auth-and-sessions.md), [live updates over SSE and WebSockets](realtime.md), [prefetching and scroll restoration](client-navigation.md) (already working, worth knowing how), [static export](deploy.md#static-export), and the [dev loop](dev-experience.md) in detail — fast refresh, `borgo doctor`, and the Tailwind option.
 
-And the data is in a Go slice, so it disappears on restart. borgo imposes no database: reach for SQLite, Postgres, or whatever you like — it is a plain Go program.
+And the data is in a Go slice, so it disappears on restart. borgo imposes no database: reach for SQLite, Postgres, or whatever you like — it is a plain Go program. [The database](database.md) has a driver and a migration runner to start from, the one the `full` template scaffolds.

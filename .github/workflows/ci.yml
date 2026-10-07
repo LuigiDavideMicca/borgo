@@ -264,6 +264,8 @@ jobs:
             cp .borgo/api-types.d.ts "$tmp/shipped-$t.d.ts"
             go tool borgogen
             diff "$tmp/shipped-$t.d.ts" .borgo/api-types.d.ts
+            go vet ./...
+            go test ./...
             bunx tsc --noEmit
             bun run build
           done

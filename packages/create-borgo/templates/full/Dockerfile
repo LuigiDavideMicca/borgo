@@ -22,7 +22,9 @@ RUN mkdir /out \
 
 FROM oven/bun:1.4-slim
 WORKDIR /app
-ENV NODE_ENV=production
+# the database lives on /data, which the image owns: docker run works as it
+# is, and docker-compose.yml puts /data on a volume so it outlives the image
+ENV NODE_ENV=production DB_PATH=/data/app.db
 # bun's outbound fetch pool defaults to 256 requests, and the render
 # service holds one for the life of every api call a loader makes.
 # it must be set in the environment: bun reads it when the process starts

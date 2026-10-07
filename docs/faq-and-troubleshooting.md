@@ -17,7 +17,7 @@ Yes. Pages are server-rendered, forms post natively (the client runtime only *en
 No. borgo's model is one loader per page feeding plain components — simpler to reason about, and honest about where code runs. [Why, what it costs, and what would reopen the decision](why.md#why-no-react-server-components) is argued with the other design positions.
 
 **Which databases can I use?**
-Any — the API is plain Go, so every Go driver works. The examples use SQLite with a `/data` volume (`DB_PATH`); swap in Postgres or anything else without touching the framework.
+Any — the API is plain Go, so every Go driver works. The `full` template and the examples use SQLite with a `/data` volume (`DB_PATH`); [the database](database.md) has the driver, the migration runner the template scaffolds, and what changes for Postgres.
 
 **Can I deploy to Vercel, Netlify or Cloudflare?**
 No — borgo is self-hosted by design: any VPS, container host or bare-metal box. That is the point: no platform lock-in. See [deploy](deploy.md).

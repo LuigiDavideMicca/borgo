@@ -706,7 +706,8 @@ const layouts: Record<TemplateName, string> = {
     main.go     ${dim("go entrypoint: import api, borgo.Serve()")}
     index.html  ${dim("html shell")} ${dot} ${style} ${dim("global styles")}`,
   full: `    pages/      ${dim("notes crud, login/register, protected account, live ws")}
-    api/        ${dim("go: notes + auth (in-memory stores, swap for a real db)")}
+    api/        ${dim("go: notes + auth over sqlite")}
+    db/         ${dim("opens the database, migrations applied at boot")}
     main.go     ${dim("go entrypoint: import api, borgo.Serve()")}
     index.html  ${dim("html shell")} ${dot} ${style} ${dim("global styles")}`,
 };

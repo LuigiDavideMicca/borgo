@@ -252,6 +252,28 @@ describe("projectContext", () => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-deploy-"));
     expect(projectContext(dir).name).toBe("borgo-app");
   });
+
+  // the full template's database: db/migrations is what says the app keeps
+  // one (found by the verifier of phase 6)
+  test("an app with db/migrations keeps a database", () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-deploy-"));
+    expect(projectContext(dir).database).toBe(false);
+    mkdirSync(join(dir, "db", "migrations"), { recursive: true });
+    expect(projectContext(dir).database).toBe(true);
+  });
+});
+
+// a database the app migrates at boot belongs on a volume: written live, not
+// as advice, so the first container's data survives the second
+test("compose puts a database on a volume at /data", () => {
+  const ctx = { name: "app", port: "3000", apiPort: "3501", secret: null, database: true };
+  const parsed = Bun.YAML.parse(composeYml(ctx)) as {
+    services: { app: { environment: Record<string, string>; volumes?: string[] } };
+    volumes?: Record<string, unknown>;
+  };
+  expect(parsed.services.app.environment.DB_PATH).toBe("/data/app.db");
+  expect(parsed.services.app.volumes).toEqual(["data:/data"]);
+  expect(parsed.volumes).toHaveProperty("data");
 });
 
 describe("deployInit", () => {

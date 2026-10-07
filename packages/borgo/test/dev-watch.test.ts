@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createChangeBatcher, createContentDedup, gitignoredMatcher, readDevLock } from "../src/dev";
+import { createChangeBatcher, createContentDedup, gitignoredMatcher, readDevLock, watchedSide } from "../src/dev";
 import { propsPathEnabled } from "../src/runtime";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -204,4 +204,16 @@ describe("readDevLock", () => {
     expect(readDevLock("{not json", live, 99)).toBeNull();
     expect(readDevLock(JSON.stringify({ pid: "4321" }), live, 99)).toBeNull();
   });
+});
+
+// a migration is embedded into the go binary: a new or edited .sql must
+// rebuild the api, or it applies only after some .go file is saved
+test("a changed file asks for the rebuild of the side that embeds it", () => {
+  expect(watchedSide("db/migrations/0002_tags.sql")).toBe("api");
+  expect(watchedSide("api/notes.go")).toBe("api");
+  expect(watchedSide("style.scss")).toBe("css");
+  expect(watchedSide("pages/index.tsx")).toBe("app");
+  expect(watchedSide("index.html")).toBe("app");
+  expect(watchedSide("README.md")).toBeNull();
+  expect(watchedSide("notes.sqlite")).toBeNull();
 });

@@ -12,6 +12,9 @@ export type DeployContext = {
   // the app's own key from `.env`, `null` when none: the configs only need to
   // know whether a key is already supplied from somewhere they must not override
   secret?: string | null;
+  // the app keeps a database the way the full template does (db/migrations,
+  // DB_PATH): the compose file then puts it on a volume
+  database?: boolean;
 };
 
 // session.go refuses a SESSION_SECRET shorter than this at startup (an unset
@@ -264,7 +267,7 @@ export function systemdUnit({ name, port, apiPort }: DeployContext): string {
   ].join("\n");
 }
 
-export function composeYml({ port, secret }: DeployContext): string {
+export function composeYml({ port, secret, database }: DeployContext): string {
   // `:?` stops the deploy on a missing key instead of a 500 on every login;
   // an app with no key gets no line, or this file overrides a correct .env
   const session = secret
@@ -296,6 +299,7 @@ export function composeYml({ port, secret }: DeployContext): string {
     "      # flight. The api and the render service listen on loopback only,",
     "      # so the one port above is the whole public surface",
     '      BUN_CONFIG_MAX_HTTP_REQUESTS: "16384"',
+    ...(database ? ["      DB_PATH: /data/app.db"] : []),
     "    restart: unless-stopped",
     // /healthz answers 200 with the render service down - the state is in the
     // body, so a status-code probe never fires. docker marks unhealthy, never restarts
@@ -308,15 +312,28 @@ export function composeYml({ port, secret }: DeployContext): string {
     "      timeout: 5s",
     "      start_period: 20s",
     "      retries: 3",
-    "# nothing here persists yet, so there is no volume. swapping the in-memory",
-    "# stores for a real database? the scaffolded Dockerfile already creates",
-    "# /data owned by the image's user, so this is the whole change:",
-    "#   environment:",
-    "#     DB_PATH: /data/app.db",
-    "#   volumes:",
-    "#     - data:/data",
-    "# volumes:",
-    "#   data:",
+    ...(database
+      ? [
+          "    # the database (db/migrations, applied at boot) on a volume, so it",
+          "    # outlives the container. the Dockerfile creates /data owned by the",
+          "    # image's user; a volume at a path the image does not have is",
+          "    # created root-owned and the app cannot write there",
+          "    volumes:",
+          "      - data:/data",
+          "volumes:",
+          "  data:",
+        ]
+      : [
+          "# this app keeps nothing on disk yet, so there is no volume. once it",
+          "# does, the scaffolded Dockerfile already creates /data owned by the",
+          "# image's user, so this is the whole change:",
+          "#   environment:",
+          "#     DB_PATH: /data/app.db",
+          "#   volumes:",
+          "#     - data:/data",
+          "# volumes:",
+          "#   data:",
+        ]),
     "",
   ].join("\n");
 }
@@ -365,6 +382,7 @@ export function projectContext(dir = "."): DeployContext {
     port: portOf(env.PORT, "3000"),
     apiPort: portOf(env.API_PORT, "3501"),
     secret: secret && secret.length >= SESSION_SECRET_MIN ? secret : null,
+    database: existsSync(join(dir, "db", "migrations")),
   };
 }
 

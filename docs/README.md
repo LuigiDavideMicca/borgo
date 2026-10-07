@@ -15,6 +15,7 @@ CI compiles the examples on these pages against the real framework types — eve
 | [Realtime](realtime.md) | server-sent events, WebSocket topics and who may hold them (`borgo.CanSubscribe`), typed event payloads, `borgo.SSEHub` and `borgo.Push` |
 | [Auth and sessions](auth-and-sessions.md) | signed-cookie sessions, password hashing, `borgo.Auth`, guards on both sides of the bridge, revoking sessions |
 | [Middleware and authorization](middleware-and-authorization.md) | `api/middleware.go`, `middleware.ts`, `borgo.Forward` and `//borgo:export`: where each decision runs, what it stands in front of, and rate limiting |
+| [The database](database.md) | a driver, a migration runner the `full` template scaffolds, where it runs, several instances, tests |
 | [Environment](environment.md) | the app's variables declared once, typed reads, boot refusal, the server/client wall |
 | [Security](security.md) | the default posture: headers, CSP and nonces, CSRF, cookie rules, limits and timeouts, and what borgo leaves to you |
 | [Dev experience](dev-experience.md) | fast refresh and its contract, styling and Tailwind, the error overlay, `borgo doctor` |

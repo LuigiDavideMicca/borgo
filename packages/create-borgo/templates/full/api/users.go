@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"log"
 	"net/http"
-	"sync"
 
 	"github.com/LuigiDavideMicca/borgo"
+
+	"{{name}}/db"
 )
 
 type User struct {
@@ -27,20 +30,20 @@ type Me struct {
 	Username string `json:"username"`
 }
 
-// in-memory user store; replace Lookup/Register with real persistence and
-// everything else (sessions, csrf, the /api/me guard) keeps working
-var (
-	usersMu sync.RWMutex
-	users   = map[string]User{}
-)
-
+// the users table is db/migrations/0001_init.sql; borgo.Auth asks only for
+// a lookup and a register, and keeps sessions, csrf and the guards itself
 var auth = borgo.Auth[User]{
 	Lookup: func(ctx context.Context, username string) (User, string, error) {
-		usersMu.RLock()
-		user, ok := users[username]
-		usersMu.RUnlock()
-		if !ok {
-			return User{}, "", errors.New("user not found")
+		var user User
+		err := db.DB.QueryRowContext(ctx, `SELECT username, email, hash FROM users WHERE username = ?`, username).
+			Scan(&user.Username, &user.Email, &user.Hash)
+		if err != nil {
+			// login answers 401 to any error, so a database that is down
+			// would look like a wrong password: it is logged here instead
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("look up user: %v", err)
+			}
+			return User{}, "", err
 		}
 		return user, user.Hash, nil
 	},
@@ -51,13 +54,22 @@ var auth = borgo.Auth[User]{
 // what it validates beyond the framework's checks is this app's, and a
 // malformed email is refused in the page's action, where it can be shown
 func register(ctx context.Context, form Signup, hash string) (User, error) {
-	usersMu.Lock()
-	defer usersMu.Unlock()
-	if _, ok := users[form.Username]; ok {
+	user := User{Username: form.Username, Email: form.Email, Hash: hash}
+	// one statement, so two registrations of one name cannot both pass a
+	// check made before the insert
+	res, err := db.DB.ExecContext(ctx, `INSERT INTO users (username, email, hash) VALUES (?, ?, ?) ON CONFLICT (username) DO NOTHING`, user.Username, user.Email, user.Hash)
+	if err != nil {
+		log.Printf("register user: %v", err)
+		return User{}, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		log.Printf("register user: %v", err)
+		return User{}, err
+	}
+	if n == 0 {
 		return User{}, borgo.ErrUserExists
 	}
-	user := User{Username: form.Username, Email: form.Email, Hash: hash}
-	users[form.Username] = user
 	return user, nil
 }
 

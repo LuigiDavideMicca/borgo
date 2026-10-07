@@ -106,6 +106,16 @@ export function gitignoredMatcher(text: string): (file: string) => boolean {
   };
 }
 
+// which rebuild a changed file asks for. A .sql file is go's: migrations
+// are embedded into the binary, so a new one applies only once the api is
+// rebuilt (found by the verifier of phase 6)
+export function watchedSide(file: string): "api" | "css" | "app" | null {
+  if (/\.(go|sql)$/.test(file)) return "api";
+  if (/\.(scss|css)$/.test(file)) return "css";
+  if (/\.(tsx?|html)$/.test(file)) return "app";
+  return null;
+}
+
 // One dev session per directory. Two share public/assets and rename each
 // other's chunks mid-build; the loser reports ENOENT on a file that existed
 // a millisecond earlier, which reads as a bundler bug and is not one (found
@@ -457,14 +467,10 @@ export async function dev() {
       return;
     }
     const normalized = file.replaceAll("\\", "/");
-    if (file.endsWith(".go")) {
-      if (dedup.isUnchanged(file)) return;
-      schedule(normalized, "api");
-    } else if (/\.(scss|css)$/.test(file)) schedule(normalized, "css");
-    else if (/\.(tsx?|html)$/.test(file)) {
-      if (dedup.isUnchanged(file)) return;
-      schedule(normalized, "app");
-    }
+    const side = watchedSide(file);
+    if (!side) return;
+    if (side !== "css" && dedup.isUnchanged(file)) return;
+    schedule(normalized, side);
   });
 
   process.on("SIGINT", () => process.exit(0));

@@ -18,18 +18,15 @@ services:
       # serving over https? uncomment, and the session and csrf cookies get
       # the Secure attribute.
       # SESSION_SECURE: "1"
+      # users and notes live in this sqlite file, migrated at boot (db/)
+      DB_PATH: /data/app.db
+    volumes:
+      # mount AT /data: the Dockerfile creates /data owned by the image user,
+      # and a named volume takes the owner of the directory it lands on. The
+      # image also has /data/uploads, borgo.Uploads' usual home, so a volume
+      # of its own there works too - but a volume at any path the image does
+      # not have is created root-owned, and the app cannot write there
+      - data:/data
     restart: unless-stopped
-# users and notes live in memory in this template, so there is nothing to
-# persist yet and no volume here. swapping the stores in api/users.go and
-# api/notes.go for a real database? add one:
-#   environment:
-#     DB_PATH: /data/app.db
-#   volumes:
-#     - data:/data
-# mount AT /data: the Dockerfile creates /data owned by the image user, and
-# a named volume takes the owner of the directory it lands on. The image also
-# has /data/uploads, borgo.Uploads' usual home, so a volume of its own there
-# works too - but a volume at any path the image does not have is created
-# root-owned, and the app cannot write there
-# volumes:
-#   data:
+volumes:
+  data:

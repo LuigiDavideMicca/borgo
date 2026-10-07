@@ -39,7 +39,7 @@ func RecentTasks(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-The bridge does not care where your data came from — it reads the type you hand to `borgo.JSON`, so a route backed by GORM, `database/sql`, an HTTP call to another service or a hard-coded slice all type identically. `examples/tasks` in this repository uses GORM with SQLite; the `full` template uses in-memory maps so it has no dependencies to install.
+The bridge does not care where your data came from — it reads the type you hand to `borgo.JSON`, so a route backed by GORM, `database/sql`, an HTTP call to another service or a hard-coded slice all type identically. `examples/tasks` in this repository uses GORM with SQLite; the `full` template uses `database/sql` over SQLite, with the migrations [the database](database.md) describes.
 
 What has zero dependencies is the **framework**: `github.com/LuigiDavideMicca/borgo` pulls in nothing but the standard library, so the only third-party code in your binary is the code you chose. Types from a dependency reach TypeScript like any other — `time.Time` becomes a string, a type with `MarshalText` becomes a string, and one whose custom `MarshalJSON` runs where it is used maps to `unknown` until you point a [`//borgo:type` override](#type-overrides) at it, which is exactly what the GORM example does for `gorm.DeletedAt`. Whether a marshaler runs at all can depend on the value's position — see [addressability](#addressability-one-type-two-shapes).
 
