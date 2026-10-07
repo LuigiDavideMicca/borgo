@@ -179,9 +179,17 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 	// compressed path
 	g.declared = declaredLength(h)
 	g.bodyless = g.bodyless || bodylessStatus(status)
-	if g.bodyless || declaresEventStream(h) || declaresEncoding(h) {
+	if g.bodyless || declaresEventStream(h) || declaresEncoding(h) || declaresRange(status, h) {
 		g.startPassthrough(0)
 	}
+}
+
+// a part of a representation: Content-Range counts the bytes of the body
+// as sent, so compressing it would make the range lie and a resumed download
+// stitch together the wrong bytes. net/http's transport never asks for gzip
+// on a range for the same reason (found by the verifier of phase 6)
+func declaresRange(status int, h http.Header) bool {
+	return status == http.StatusPartialContent || firstFieldValue(h, "Content-Range") != ""
 }
 
 // the field's first value on the wire, under whatever spelling of the key

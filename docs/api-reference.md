@@ -46,7 +46,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `BindMultipartMax[T any](r, limit int64) (T, error)` | `BindMultipart` with an explicit byte cap; `limit <= 0` disables it. | provisional |
 | `Uploads{Dir, Types}` | Stores uploaded files in `Dir` (created 0700) and serves them back. `Types` lists the sniffed media types accepted; empty accepts any. | provisional |
 | `(*Uploads).Save(f File) (Stored, error)` | Sniffs the bytes, stores the file under a random key, returns what it learned. `ErrNoUpload` for an empty field, `ErrUploadType` for a type `Types` does not list; a failed write leaves nothing. | provisional |
-| `(*Uploads).Serve(w, r, s Stored)` | Answers with the file after the caller's authorization: sniffed type, `nosniff`, `Cache-Control: private`, a sandboxing CSP, inline only for PNG, JPEG, GIF and WebP. Ranges and conditionals work; an unknown key is a 404. | provisional |
+| `(*Uploads).Serve(w, r, s Stored)` | Answers with the file after the caller's authorization: sniffed type, `nosniff`, `Cache-Control: private, no-cache`, a sandboxing CSP, inline only for PNG, JPEG, GIF and WebP. Ranges and conditionals work, never compressed; an unknown key, or one naming a link, is a 404. | provisional |
 | `(*Uploads).Remove(key string) error` | Deletes a stored file; a missing one is not an error, a key `Save` could not have made is. | provisional |
 | `Stored{Key, Name, Type, Size}` | What `Save` returns and `Serve` takes: keep it beside the file's owner. `Name` is the client's, cleaned for display; `Type` is sniffed. | provisional |
 | `ErrNoUpload`, `ErrUploadType` | The two refusals of `Save` a handler answers itself, usually 400 and 415. | provisional |

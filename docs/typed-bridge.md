@@ -236,8 +236,8 @@ The body is read at most 32 MiB (`BindMultipartMax` changes that, and `BORGO_MAX
 
 An upload is the same few decisions in every app, and getting any one of them wrong is a vulnerability: what the bytes really are, the name they live under, where that is, and the headers a download goes out with. `borgo.Uploads` makes them; who may download what stays yours, because only the app knows who owns a file.
 
-- **`Save(file)`** sniffs the first 512 bytes (`http.DetectContentType`) and stores the file under a random 32-character key, never the name the client sent. With `Types` set, a file that sniffs as anything else is refused with `ErrUploadType` and nothing is written. A field left empty is `ErrNoUpload`, and a write that fails halfway leaves nothing behind. The `Stored` it returns holds the key, the sniffed type, the size and the client's name with any path and control characters removed, for showing back. Keep it beside the file's owner.
-- **`Serve(w, r, stored)`** answers with the file once your handler has decided this request may have it. It goes out as the sniffed type with `X-Content-Type-Options: nosniff`, `Cache-Control: private` so no shared cache holds a file authorized per request, and a `Content-Security-Policy` sandbox in case it is opened as a page. PNG, JPEG, GIF and WebP are `inline`; everything else, HTML and SVG among it, downloads as an attachment under its cleaned name. Ranges and conditional requests work. A key that is not one `Save` makes, or names no file, is a 404.
+- **`Save(file)`** sniffs the first 512 bytes (`http.DetectContentType`) and stores the file under a random 32-character key, never the name the client sent. With `Types` set (media types, case and parameters ignored), a file that sniffs as anything else is refused with `ErrUploadType` and nothing is written. A field left empty is `ErrNoUpload`, and a write that fails halfway leaves nothing behind. The `Stored` it returns holds the key, the sniffed type, the size and the client's name with any path, control and invisible format characters removed, for showing back. Keep it beside the file's owner.
+- **`Serve(w, r, stored)`** answers with the file once your handler has decided this request may have it. It goes out as the sniffed type with `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache` so no shared cache holds a file authorized per request and a browser revalidates it by `Last-Modified`, and a `Content-Security-Policy` sandbox in case it is opened as a page. PNG, JPEG, GIF and WebP are `inline`; everything else, HTML and SVG among it, downloads as an attachment under its cleaned name. Ranges and conditional requests work. A key that is not one `Save` makes, names no file, or names a link rather than a file, is a 404.
 - **`Remove(key)`** deletes the file; one already gone is not an error.
 
 ```go
@@ -253,7 +253,9 @@ func findAttachment(owner uint, key string) (Attachment, bool) {
 
 func DownloadAttachment(w http.ResponseWriter, r *http.Request) {
 	user, ok := borgo.GetSession[struct{ ID uint }](r)
-	if !ok {
+	// a zero id is no owner: a session from before the id was stored would
+	// share it with every other such session
+	if !ok || user.ID == 0 {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}

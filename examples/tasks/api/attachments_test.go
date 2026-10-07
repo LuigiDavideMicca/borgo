@@ -2,9 +2,12 @@ package api
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/LuigiDavideMicca/borgo"
 	"github.com/glebarez/sqlite"
@@ -98,5 +101,34 @@ func TestPruneAttachmentsKeepsTheRowOfAFileItCannotRemove(t *testing.T) {
 	db.DB.Model(&Attachment{}).Count(&n)
 	if n != keptAttachments+1 {
 		t.Errorf("%d rows, want %d", n, keptAttachments+1)
+	}
+}
+
+func requestAs(t *testing.T, me Me) *http.Request {
+	t.Helper()
+	w := httptest.NewRecorder()
+	if err := borgo.SetSession(w, me, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "/api/attachments/x", nil)
+	for _, c := range w.Result().Cookies() {
+		r.AddCookie(c)
+	}
+	return r
+}
+
+// a session from before Me carried an id is no owner: every such session
+// would share owner 0 (found by the verifier of phase 6)
+func TestAttachmentsRefuseASessionWithoutAnID(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "attachments-test-secret-0123456789abcdef")
+	for _, c := range []struct {
+		me   Me
+		want bool
+	}{{Me{Username: "old"}, false}, {Me{ID: 7, Username: "new"}, true}} {
+		w := httptest.NewRecorder()
+		_, ok := signedInWithID(w, requestAs(t, c.me))
+		if ok != c.want || !ok && w.Code != http.StatusUnauthorized {
+			t.Errorf("%+v: ok=%v code=%d", c.me, ok, w.Code)
+		}
 	}
 }

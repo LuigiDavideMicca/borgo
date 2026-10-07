@@ -310,3 +310,68 @@ func TestCleanUploadNameKeepsOnlyAName(t *testing.T) {
 		}
 	}
 }
+
+// invisible format characters go too: a right-to-left override makes a name
+// read as another (found by the verifier of phase 6)
+func TestCleanUploadNameDropsFormatCharacters(t *testing.T) {
+	rlo, bom, zwsp := string(rune(0x202e)), string(rune(0xfeff)), string(rune(0x200b))
+	for in, want := range map[string]string{
+		"invoice" + rlo + "gnp.exe": "invoicegnp.exe",
+		bom + "a" + zwsp + "b.txt":  "ab.txt",
+		rlo:                         "file",
+	} {
+		if got := cleanUploadName(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Types is written by hand: case and a parameter do not refuse what it names
+func TestUploadsTypesIgnoreCaseAndParameters(t *testing.T) {
+	for _, types := range [][]string{{"IMAGE/PNG"}, {"image/png; q=1"}, {" image/png "}} {
+		u := &Uploads{Dir: t.TempDir(), Types: types}
+		if _, err := u.Save(uploadedFile(t, "a.png", "image/png", pngBytes)); err != nil {
+			t.Errorf("%q: %v", types, err)
+		}
+	}
+	u := &Uploads{Dir: t.TempDir(), Types: []string{"image/png;;", "image"}}
+	if _, err := u.Save(uploadedFile(t, "a.png", "image/png", pngBytes)); !errors.Is(err, ErrUploadType) {
+		t.Errorf("entries that name no media type accepted a png: %v", err)
+	}
+}
+
+// a link in Dir pointing out of it is not a file Save made
+func TestUploadsServeRefusesALinkOutOfDir(t *testing.T) {
+	dir := t.TempDir()
+	u := &Uploads{Dir: filepath.Join(dir, "uploads")}
+	os.MkdirAll(u.Dir, 0o700)
+	secret := filepath.Join(dir, "secret")
+	os.WriteFile(secret, []byte("SECRET"), 0o600)
+	key := "0123456789abcdef0123456789abcdef"
+	if err := os.Symlink(secret, filepath.Join(u.Dir, key)); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if w := serveUpload(u, Stored{Key: key, Type: "text/plain"}, "GET", nil); w.Code != 404 || strings.Contains(w.Body.String(), "SECRET") {
+		t.Errorf("served through a link: %d %q", w.Code, w.Body.String())
+	}
+}
+
+// through the middleware every route gets: a range goes out as the bytes it
+// counts, never gzipped under a Content-Range of the uncompressed ones
+func TestUploadsServeARangeUncompressedBehindTheMiddleware(t *testing.T) {
+	u := &Uploads{Dir: t.TempDir()}
+	content := []byte(strings.Repeat("compressible text ", 2000))
+	s, err := u.Save(uploadedFile(t, "a.txt", "text/plain", content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { u.Serve(w, r, s) }))
+	r := httptest.NewRequest("GET", "/f", nil)
+	r.Header.Set("Range", "bytes=0-4999")
+	r.Header.Set("Accept-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusPartialContent || w.Header().Get("Content-Encoding") != "" || !bytes.Equal(w.Body.Bytes(), content[:5000]) {
+		t.Errorf("%d %q %d bytes", w.Code, w.Header().Get("Content-Encoding"), w.Body.Len())
+	}
+}

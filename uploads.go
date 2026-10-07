@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -27,8 +28,8 @@ type Uploads struct {
 	// rebuilds it; in a container, a volume mounted at the directory the
 	// image owns - not below it.
 	Dir string
-	// Types lists the media types a file may sniff as, without parameters
-	// ("image/png"); empty accepts any.
+	// Types lists the media types a file may sniff as ("image/png"; case and
+	// parameters are ignored); empty accepts any.
 	Types []string
 }
 
@@ -77,7 +78,7 @@ func (u *Uploads) save(src io.Reader, name string) (Stored, error) {
 	kind := http.DetectContentType(head[:n])
 	if len(u.Types) > 0 {
 		media, _, _ := mime.ParseMediaType(kind)
-		if !slices.Contains(u.Types, media) {
+		if !slices.ContainsFunc(u.Types, func(t string) bool { return sameMediaType(t, media) }) {
 			return Stored{}, fmt.Errorf("%w: %s", ErrUploadType, media)
 		}
 	}
@@ -116,14 +117,22 @@ func (u *Uploads) Serve(w http.ResponseWriter, r *http.Request, s Stored) {
 		http.NotFound(w, r)
 		return
 	}
-	file, err := os.Open(filepath.Join(u.Dir, s.Key))
+	// only a file Save could have written: a link in Dir pointing out of it
+	// is not one
+	path := filepath.Join(u.Dir, s.Key)
+	link, err := os.Lstat(path)
+	if err != nil || !link.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 	defer file.Close()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -164,6 +173,13 @@ var newUploadKey = func() string {
 	return hex.EncodeToString(key)
 }
 
+// sameMediaType compares an entry of Types, written by hand with any case
+// and perhaps a parameter, to a sniffed media type
+func sameMediaType(entry, media string) bool {
+	want, _, err := mime.ParseMediaType(entry)
+	return err == nil && want == media
+}
+
 func validUploadKey(key string) bool {
 	if len(key) != 32 {
 		return false
@@ -185,7 +201,10 @@ func cleanUploadName(name string) string {
 	}
 	var b strings.Builder
 	for _, r := range strings.ToValidUTF8(name, "") {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+		// control characters, and the invisible format ones - a right-to-left
+		// override shows invoice<U+202E>gnp.exe as invoiceexe.png (found by the
+		// verifier of phase 6)
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || unicode.Is(unicode.Cf, r) {
 			continue
 		}
 		if b.Len()+utf8.RuneLen(r) > 255 {

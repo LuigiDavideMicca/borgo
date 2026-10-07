@@ -59,10 +59,8 @@ func init() {
 }
 
 func UploadAttachment(w http.ResponseWriter, r *http.Request) {
-	me, ok := borgo.GetSession[Me](r)
+	me, ok := signedInWithID(w, r)
 	if !ok {
-		// unreachable behind Authed; plain text keeps the generated type clean
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 	form, err := borgo.BindMultipart[AttachmentForm](r)
@@ -93,9 +91,8 @@ func UploadAttachment(w http.ResponseWriter, r *http.Request) {
 
 // the owner's file, or 404 for anyone else's: a 403 would confirm the key
 func DownloadAttachment(w http.ResponseWriter, r *http.Request) {
-	me, ok := borgo.GetSession[Me](r)
+	me, ok := signedInWithID(w, r)
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 	var row Attachment
@@ -104,6 +101,19 @@ func DownloadAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uploads.Serve(w, r, row.Stored)
+}
+
+// signedInWithID is the session a file can be owned by. A session issued
+// before Me carried an id reads ID 0, and every such session would share
+// one owner - one user reading and pruning another's files (found by the
+// verifier of phase 6): it signs in again instead
+func signedInWithID(w http.ResponseWriter, r *http.Request) (Me, bool) {
+	me, ok := borgo.GetSession[Me](r)
+	if !ok || me.ID == 0 {
+		http.Error(w, "sign in again", http.StatusUnauthorized)
+		return Me{}, false
+	}
+	return me, true
 }
 
 func viewOf(a Attachment) AttachmentView {

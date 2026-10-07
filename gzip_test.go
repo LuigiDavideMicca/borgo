@@ -506,6 +506,38 @@ func TestGzipSniffsOnTheSameGateAsNetHTTP(t *testing.T) {
 	}
 }
 
+func TestGzipPassesThroughAPartOfARepresentation(t *testing.T) {
+	body := strings.Repeat("compressible range ", 400)
+	for _, c := range []struct {
+		name   string
+		status int
+		rng    string
+	}{
+		{"206", http.StatusPartialContent, "bytes 0-99/7600"},
+		{"206 without a range header of its own", http.StatusPartialContent, ""},
+		{"416 naming the length", http.StatusRequestedRangeNotSatisfiable, "bytes */7600"},
+	} {
+		rec := serveGzip(t, "gzip", func(w http.ResponseWriter, r *http.Request) {
+			if c.rng != "" {
+				w.Header().Set("Content-Range", c.rng)
+			}
+			w.WriteHeader(c.status)
+			w.Write([]byte(body))
+		})
+		if got := rec.Header().Get("Content-Encoding"); got != "" || rec.Body.String() != body {
+			t.Errorf("%s: Content-Encoding %q, body of %d bytes", c.name, got, rec.Body.Len())
+		}
+	}
+	// a whole representation still compresses
+	rec := serveGzip(t, "gzip", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Write([]byte(body))
+	})
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Error("a 200 that merely accepts ranges was left identity")
+	}
+}
+
 func TestGzipMiddlewarePassesThroughPreEncoded(t *testing.T) {
 	rec := serveGzip(t, "gzip", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Encoding", "br")
