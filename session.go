@@ -223,8 +223,8 @@ func verifiedEnvelope(r *http.Request) (sessionEnvelope, bool) {
 	if err != nil {
 		return sessionEnvelope{}, false
 	}
-	var envelope sessionEnvelope
-	if json.Unmarshal(raw, &envelope) != nil || time.Now().Unix() > envelope.Exp {
+	envelope, ok := decodeEnvelope(raw)
+	if !ok || time.Now().Unix() > envelope.Exp {
 		return sessionEnvelope{}, false
 	}
 	return envelope, true
@@ -278,4 +278,76 @@ func ClearSession(w http.ResponseWriter) {
 	http.SetCookie(w, cookie)
 	// best effort, as in SetSession
 	privateIfCookies(w.Header())
+}
+
+// decodeEnvelope reads the envelope SetSession writes, which reached here
+// only through a signature that verified: json.Marshal of sessionEnvelope,
+// always {"exp":N,"iat":N,"data":...} in that order. Read by hand, it costs
+// a fraction of encoding/json's reflection on every session read. Any other
+// shape - an envelope from before iat, or one a later version writes
+// differently - goes to encoding/json, which reads whatever it is.
+func decodeEnvelope(raw []byte) (sessionEnvelope, bool) {
+	if e, ok := fastEnvelope(raw); ok {
+		return e, true
+	}
+	var e sessionEnvelope
+	if json.Unmarshal(raw, &e) != nil {
+		return sessionEnvelope{}, false
+	}
+	return e, true
+}
+
+func fastEnvelope(raw []byte) (sessionEnvelope, bool) {
+	var e sessionEnvelope
+	rest, ok := envelopeInt(raw, `{"exp":`, &e.Exp)
+	if !ok {
+		return e, false
+	}
+	rest, ok = envelopeInt(rest, `,"iat":`, &e.Iat)
+	if !ok {
+		return e, false
+	}
+	const data = `,"data":`
+	if len(rest) < len(data)+2 || string(rest[:len(data)]) != data || rest[len(rest)-1] != '}' {
+		return e, false
+	}
+	// valid on its own: a field written after data would make it invalid
+	// here, and the slow path would read the envelope instead
+	e.Data = json.RawMessage(rest[len(data) : len(rest)-1])
+	// and bare: encoding/json hands over the value without the space
+	// around it, which json.Marshal never writes
+	if isJSONSpace(e.Data[0]) || isJSONSpace(e.Data[len(e.Data)-1]) || !json.Valid(e.Data) {
+		return sessionEnvelope{}, false
+	}
+	return e, true
+}
+
+// envelopeInt reads prefix, then an integer as json.Marshal writes one
+func envelopeInt(b []byte, prefix string, into *int64) ([]byte, bool) {
+	if len(b) < len(prefix) || string(b[:len(prefix)]) != prefix {
+		return nil, false
+	}
+	b = b[len(prefix):]
+	end := 0
+	if end < len(b) && b[end] == '-' {
+		end++
+	}
+	digits := end
+	for end < len(b) && b[end] >= '0' && b[end] <= '9' {
+		end++
+	}
+	// json has no leading zeros: 0 alone, never 00 or 01
+	if end == digits || (b[digits] == '0' && end-digits > 1) {
+		return nil, false
+	}
+	n, err := strconv.ParseInt(string(b[:end]), 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	*into = n
+	return b[end:], true
+}
+
+func isJSONSpace(c byte) bool {
+	return c == 0x20 || c == 0x09 || c == 0x0a || c == 0x0d
 }
