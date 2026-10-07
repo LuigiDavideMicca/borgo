@@ -1,0 +1,44 @@
+package api
+
+import (
+	"net/http"
+
+	"github.com/LuigiDavideMicca/borgo"
+)
+
+type Row struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	Done bool   `json:"done"`
+}
+
+type Rows struct {
+	Rows []Row `json:"rows"`
+}
+
+var big = func() Rows {
+	rows := make([]Row, 600000)
+	for i := range rows {
+		rows[i] = Row{ID: i, Name: "row number with some text", Done: i%2 == 0}
+	}
+	return Rows{Rows: rows}
+}()
+
+var hub = borgo.NewSSEHub()
+
+type Fired struct {
+	Ok bool `json:"ok"`
+}
+
+//borgo:route GET /api/rows
+func BigRows(w http.ResponseWriter, r *http.Request) { borgo.JSON(w, http.StatusOK, big) }
+
+//borgo:route POST /api/fire
+func Fire(w http.ResponseWriter, r *http.Request) {
+	hub.Publish("fired", "late")
+	borgo.JSON(w, http.StatusOK, Fired{Ok: true})
+}
+
+func init() {
+	borgo.Handle("GET /api/silent", hub.ServeHTTP)
+}

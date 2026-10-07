@@ -1,0 +1,22 @@
+import { Suspense, use } from "react";
+
+export const hydrate = false;
+
+export async function loader() {
+  return { late: new Promise<{ total: number }>((resolve) => setTimeout(() => resolve({ total: 45 }), 45_000)) };
+}
+
+function Late({ late }: { late: Promise<{ total: number }> }) {
+  return <p id="late">{use(late).total} seconds later</p>;
+}
+
+export default function LatePage({ late }: { late: Promise<{ total: number }> }) {
+  return (
+    <main>
+      <h1>early</h1>
+      <Suspense fallback={<p>waiting</p>}>
+        <Late late={late} />
+      </Suspense>
+    </main>
+  );
+}

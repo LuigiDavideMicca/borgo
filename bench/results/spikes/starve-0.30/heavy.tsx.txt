@@ -1,0 +1,9 @@
+import type { LoaderContext } from "borgo-framework";
+
+export async function loader({ api }: LoaderContext) {
+  return await api("GET /api/rows");
+}
+
+export default function Heavy({ rows }: { rows: { id: number }[] }) {
+  return <main>{rows.length} rows</main>;
+}
