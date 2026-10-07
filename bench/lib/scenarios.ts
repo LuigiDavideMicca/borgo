@@ -50,7 +50,7 @@ export const SCENARIOS: Scenario[] = [
     },
     description:
       "A realistic API response: 100 deterministic objects, generated per request (no cache), " +
-      "about 15 kB of JSON. Measures serialisation and body writing.",
+      "about 9 kB of JSON. Measures serialisation and body writing.",
   },
   {
     id: "ssr-page",

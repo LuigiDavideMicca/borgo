@@ -20,11 +20,11 @@ File-based React pages server-rendered by Bun, API routes written in Go. You get
 
 ## Why borgo?
 
-- **The backend is Go.** Not Node pretending to be a backend — a static binary on `net/http` with zero dependencies, real concurrency, and tens of megabytes of memory instead of hundreds. The process that pages you at 3 a.m. is the boring one.
+- **The backend is Go.** Not Node pretending to be a backend — a static binary on `net/http` with zero dependencies and real concurrency, whose footprint you can [measure against the others yourself](#benchmarks). The process that pages you at 3 a.m. is the boring one.
 - **The API types are generated from Go source.** `borgogen` reads your handlers with `go/types` and writes the TypeScript bridge — routes, response types, request bodies, WebSocket payloads. Rename a Go field and `tsc` fails on the page that read it. No OpenAPI spec to keep honest, because there is no spec: the code is the spec.
 - **React, unmodified. Bun, one toolchain.** The ecosystem you already know — no fork, no compiler magic, no proprietary component model — with the dev loop of a modern meta-framework and no bundler config to own.
 - **Self-hosted, by conviction.** Any VPS, container host or bare-metal box. React, SSR, typed APIs, WebSockets, streaming and Docker — without depending on Vercel, Cloudflare or Netlify.
-- **You can read the whole thing.** Roughly twelve thousand lines of TypeScript and Go, with the reasoning threaded through them — a comment line for every four of code, saying why rather than what. Most of what makes Next-style frameworks pleasant is conventions, not machinery — and conventions are cheap.
+- **You can read the whole thing.** Roughly twenty-five thousand lines of TypeScript and Go, comments included, with the reasoning threaded through them — a comment line for every three or four of code, saying why rather than what. Most of what makes Next-style frameworks pleasant is conventions, not machinery — and conventions are cheap.
 
 Every position above is argued, with its bill attached, in [why borgo works this way](docs/why.md). Everything else you expect is here and is a file convention — layouts, streaming SSR, form actions that work with JavaScript off, typed SSE and WebSockets, sessions and auth, a typed environment schema, PWA plumbing, a nonced CSP by default, health checks and metrics — each with a paragraph below and a deep-dive page in [docs/](docs/README.md).
 
@@ -40,9 +40,9 @@ go mod tidy   # fetches the borgo go module
 bun run dev
 ```
 
-Three templates: `base` (default — a tour of loaders, actions, islands and SSE), `minimal` (one page, one route) and `full` (notes CRUD + auth + typed WebSockets) — pick with `--template`, or let the interactive prompt ask.
+Three templates: `base` (default — a tour of loaders, actions, islands and SSE), `minimal` (one page, one route) and `full` (notes on SQLite with migrations, auth with page and API middleware, a cached page, typed WebSockets) — pick with `--template`, or let the interactive prompt ask.
 
-Open http://localhost:3000 — edit a page and watch fast refresh keep your state. For a guided build instead of a tour, [getting started](docs/getting-started.md) takes you from here to a working feature in about twenty minutes. When it's time to ship: `docker compose up -d` (the scaffold includes the Dockerfile), or see the [deploy guide](docs/deploy.md).
+Open http://localhost:3000 — edit a page and watch fast refresh keep your state. For a guided build instead of a tour, [getting started](docs/getting-started.md) takes you from here to a working feature in about half an hour. When it's time to ship: `docker compose up -d` (the scaffold includes the Dockerfile), or see the [deploy guide](docs/deploy.md).
 
 To poke at the full demo instead, clone this repo and run `bun install`, then `cd examples/tasks && bun run dev`.
 
@@ -138,7 +138,7 @@ Deep dive: [realtime](docs/realtime.md).
 
 ### Sessions and auth
 
-Mechanics, not policy: signed-cookie sessions (`borgo.SetSession`/`GetSession`/`ClearSession`, HMAC with `SESSION_SECRET`, expiry signed in), stdlib PBKDF2 password hashing behind a swappable interface, and `borgo.Auth[U]` — you supply a `Lookup` (and optionally `Register`) over *your* user store, it provides the login/logout/register handlers. `borgo.Authed` guards api routes with a JSON 401; `middleware.ts` guards pages - document, client navigation and form action alike - and a loader can redirect too, though that covers the loader only; one double-submit token covers both unsafe paths for any browser that has been issued it — a hidden field on form actions (`<CsrfField />`), an `X-CSRF-Token` header on browser `POST`/`PUT`/`PATCH`/`DELETE` to `/api/*` (`apiFetch`) — login included. Deep dive: [auth and sessions](docs/auth-and-sessions.md).
+Mechanics, not policy: signed-cookie sessions (`borgo.SetSession`/`GetSession`/`ClearSession`, HMAC with `SESSION_SECRET`, expiry signed in), stdlib PBKDF2 password hashing behind a swappable interface, and `borgo.Auth[U]` — you supply a `Lookup` (and optionally `Register`) over *your* user store, it provides the login/logout/register handlers. `borgo.Authed` guards api routes with a JSON 401; `middleware.ts` guards pages - document, client navigation and form action alike - and a loader can redirect too, though that covers the loader only; one double-submit token covers both unsafe paths for any browser that has been issued it — a hidden field on form actions (`<CsrfField />`), an `X-CSRF-Token` header on any unsafe browser request to `/api/*` (`apiFetch`), and a form-shaped post carrying a session but no token is refused outright — login included. `borgo.Signup` turns a typed form into a register handler, and `borgo.CheckSession` revokes sessions. Deep dive: [auth and sessions](docs/auth-and-sessions.md).
 
 ```go
 // Principal: what the session and the login response hold - never the user
@@ -157,7 +157,7 @@ func init() {
 
 ### Static export
 
-`borgo export` prerenders every statically exportable page into `dist/site/` — plain HTML next to the built assets, servable by nginx, a CDN, anything. Pages with loaders opt in with `export const prerender = true`; dynamic routes list their param sets with `prerenderPaths`. `hydrate = false` pages export with zero JavaScript. Deep dive: [static export](docs/deploy.md#static-export).
+`borgo export` prerenders every statically exportable page into `dist/site/` — plain HTML next to the built assets, servable by nginx, a CDN, anything. Pages with loaders opt in with `export const prerender = true`; dynamic routes list their param sets with `prerenderPaths`. `hydrate = false` pages export with zero JavaScript, and a page `middleware.ts` guards is skipped, since a static host runs no guard. Deep dive: [static export](docs/deploy.md#static-export).
 
 ### Dev experience
 
@@ -169,13 +169,13 @@ A locked-down default posture, not a checklist you assemble: security headers an
 
 ### Health checks and metrics
 
-The Go front answers `/healthz` with `{status, uptime, render}` — `render` is `"reachable"` or `"down"`, from a probe of the render service behind it, and `status` turns `"degraded"` while it is down. It answers `200` either way, so a monitor matches `"status":"ok"` in the body. Set `BORGO_METRICS=1` and `/metrics` serves Prometheus text: request counts and a duration histogram by route pattern and status, hand-rolled, zero dependencies. Deep dive: [deploy guide](docs/deploy.md#health-and-metrics).
+The Go front answers `/healthz` with `{status, uptime, render}` — `render` is `"reachable"` or `"down"`, from a probe of the render service behind it, and `status` turns `"degraded"` while it is down. It answers `200` either way, so a monitor matches `"status":"ok"` in the body. Set `BORGO_METRICS=1` and `/metrics` serves Prometheus text: request counts by route pattern and status, a duration histogram by route pattern, and the process uptime, hand-rolled, zero dependencies. Deep dive: [deploy guide](docs/deploy.md#health-and-metrics).
 
 ## Architecture
 
 Two processes, one front door:
 
-- **Go front and API** — answers the public port: plain `net/http` with method patterns for `/api/*`, in its own process; the static assets; the cache for pages that export `revalidate`; the WebSocket relay on `/ws`; and a reverse proxy to the render service for the pages.
+- **Go front and API** — answers the public port: plain `net/http` with method patterns for `/api/*`, answered in the same process that owns the port; the static assets; the cache for pages that export `revalidate`; the WebSocket relay on `/ws`; and a reverse proxy to the render service for the pages.
 - **Bun render service** — on loopback, behind a key minted for each boot: server-renders pages with `react-dom/server` and runs loaders and actions, which call the Go API on its internal listener during SSR; props are serialized into the HTML and the client bundle hydrates the same tree.
 
 `borgo dev` and `borgo start` launch both. Compression is built-in: `borgo build` precompresses assets to `.gz`/`.br` (hashed chunks served immutable), SSR HTML and API JSON are gzipped at runtime.
@@ -183,17 +183,19 @@ Two processes, one front door:
 ```
 packages/borgo          npm: the bun/typescript core (cli, ssr server, router, build, runtime, typed api client)
 packages/create-borgo   npm: project scaffolder (three templates: base, minimal, full)
-*.go                    go module github.com/LuigiDavideMicca/borgo: route registry, server bootstrap,
-                        sse, websocket push, sessions, cache helpers (standard library only)
+*.go                    go module github.com/LuigiDavideMicca/borgo: the public front (static files,
+                        page cache, render proxy, health, metrics), route registry, sse, websocket
+                        relay and push, sessions, middleware, uploads (standard library only)
 cmd/borgogen            go: static analysis codegen for the typed bridge and route mounting. same module,
                         so go.mod requires golang.org/x/tools - a build-time tool that never links into
                         your api binary, which is why "zero deps" means zero *runtime* deps
 examples/tasks          demo app: tasks crud with gorm + sqlite, sse, websockets, islands, deferred hydration
 docs/                   getting started, then deep dives: pages, typed bridge, client nav, realtime,
-                        auth, security, dev experience, pwa, deploy, faq
+                        auth, middleware, database, environment, security, dev experience, pwa,
+                        deploy, performance, faq; api reference and the 0.30 upgrade guide
 ```
 
-Commands (in an app): `borgo dev` (both servers, watch, fast refresh), `borgo build` (client assets in `public/assets/`, Go binary in `dist/`), `borgo start` (run from build output, supervising both processes; `--front-only` for split deployments with `API_URL`), `borgo export` (static site in `dist/site/`), `borgo deploy init <caddy|nginx|systemd|compose>` (deploy configs), `borgo pwa init` (manifest and service worker), `borgo doctor` (environment diagnosis). Ports via `PORT` (front, 3000) and `API_PORT` (Go, 3501).
+Commands (in an app): `borgo dev` (both servers, watch, fast refresh), `borgo build` (client assets in `public/assets/`, Go binary in `dist/`), `borgo start` (run from build output, supervising both processes on one host), `borgo export` (static site in `dist/site/`), `borgo deploy init <caddy|nginx|systemd|compose>` (deploy configs), `borgo pwa init` (manifest and service worker), `borgo doctor` (environment diagnosis). Ports via `PORT` (the public port the Go binary answers, 3000) and `API_PORT` (Go's loopback-only internal listener, 3501); the render service takes a free loopback port each boot (`BORGO_RENDER_PORT` pins one).
 
 ### Deploying
 
@@ -218,21 +220,21 @@ ssh box "cd /srv/my-app && docker compose up -d"
 ssh box "cp /srv/my-app/Caddyfile /etc/caddy/Caddyfile && systemctl reload caddy"
 ```
 
-That is the whole first deploy; every one after it is the same `rsync` followed by `docker compose up -d --build`. Caddy handles the certificate from there, the container answers `/healthz` about [330 ms after `docker run`](docs/deploy.md#cold-start-measured--and-the-serverless-question) — measured, not estimated — and the `full` template's compose file *requires* `SESSION_SECRET` from that `.env`, so a forgotten key stops the deploy with a message instead of shipping an app whose every login fails.
+That is the whole first deploy; every one after it is the same `rsync` followed by `docker compose up -d --build`. Caddy handles the certificate from there, the container answers `/healthz` about [400 ms after `docker run`](docs/deploy.md#cold-start-measured--and-the-serverless-question) — measured on 0.30, not estimated — and the `full` template's compose file *requires* `SESSION_SECRET` from that `.env`, so a forgotten key stops the deploy with a message instead of shipping an app whose every login fails.
 
-The honest bill: backups, monitoring, OS updates and the box itself are yours now — that part no guide takes off your hands. What the [deploy guide](docs/deploy.md) does cover is everything borgo-shaped: single-container and two-service layouts, nginx as the Caddy alternative (WebSockets and SSE included), a systemd unit for bare metal, static export hosting, and the full environment reference. `borgo deploy init <caddy|nginx|systemd|compose>` writes every one of those configs into your project, templated with your app's name and ports.
+The honest bill: backups, monitoring, OS updates and the box itself are yours now — that part no guide takes off your hands. What the [deploy guide](docs/deploy.md) does cover is everything borgo-shaped: the single-container layout (and why two containers are not supported yet), nginx as the Caddy alternative (WebSockets and SSE included), a systemd unit for bare metal, static export hosting, and the full environment reference. `borgo deploy init <caddy|nginx|systemd|compose>` writes every one of those configs into your project, templated with your app's name and ports.
 
 ## Tests
 
 Three layers, all run by CI on every pull request and on every push to `main`:
 
-- **Go** (`go test ./...`) — table-driven tests for the route registry, sessions (sign/verify/tamper/expiry), password hashing and the `borgo.Auth` handlers (login/register/logout, timing-safe 401s, `Authed`), cache headers, the `/healthz` handler, SSE stream framing and hub broadcast/slow-client behavior, `borgo.Push`, and borgogen against a committed fixture app: route discovery (directives + `Handle` calls), helper following, `WriteJSON`, `Bind`, type overrides, `Push` event extraction, snapshot freshness, and the error paths (duplicate patterns, malformed directives) — while a computed push topic generates in silence, because a name decided at runtime is a choice, not a mistake.
-- **TypeScript** (`bun test packages/borgo/test`) — the router (patterns, matching, params), the api client (URL building, headers, `ApiError`, typed bodies plumbing), hydrate/refresh source parsing, manifest generation against a temp fixture (islands flags, client-route exclusion, precedence), every `borgo doctor` check against a fake environment, the export planner (loader/prerender/dynamic partitioning, path filling), the deploy config templates (ports, names, refuse-overwrite), and the Prometheus exposition format.
-- **End-to-end** (`npx playwright test`) — against a production build of `examples/tasks`: client navigation, hover/viewport prefetching, scroll restoration, islands, hydration modes, form actions (enhanced in-place submits, crash surfacing, anonymous-post CSRF), the auth round trip (register, loader guard, logout, login, forged-post CSRF rejection), the precache manifest, SSE, two-tab WebSockets with Go push, streaming SSR, error pages, `/healthz` on both servers, `/metrics` series, a `borgo doctor` smoke — plus a dev-server project asserting fast refresh preserves component state (including five consecutive rapid edits), hook add/remove remounts without a reload, custom hook edits hot-apply, Go edits reload exactly once and only after the api answers, CSS hot-swaps, and layouts fall back to a reload — and an export project that runs `borgo export` and serves `dist/site` from a plain static file server, asserting content, hydration against exported props, and the zero-JS page — plus an isr project asserting cached pages replay one render, carry a fresh CSP nonce per response, drop on `borgo.RevalidateTag` from the Go handler that wrote the data, and come back warm from disk after a restart.
+- **Go** (`go test ./...`) — table-driven tests for the route registry, sessions (sign/verify/tamper/expiry), password hashing and the `borgo.Auth` handlers (login/register/logout, timing-safe 401s, `Authed`), cache headers, the Go front (static files, page cache, CSRF, body limit, health), the WebSocket relay and its `CanSubscribe`/`CanPublish` checks, `api/middleware.go`, `BindMultipart` and `Uploads`, `Signup` and `CheckSession`, SSE stream framing and hub broadcast/slow-client behavior, `borgo.Push`, and borgogen against a committed fixture app: route discovery (directives + `Handle` calls), helper following, `WriteJSON`, `Bind`, type overrides, `Push` event extraction, snapshot freshness, the middleware, `//borgo:export` and `//borgo:topic` directives, and the error paths (duplicate patterns, malformed directives) — while a computed push topic generates in silence, because a name decided at runtime is a choice, not a mistake.
+- **TypeScript** (`bun run test`: `packages/borgo/test`, `packages/create-borgo/test` and the e2e helpers) — the router (patterns, matching, params), the api client (URL building, headers, `ApiError`, typed bodies plumbing), hydrate/refresh source parsing, manifest generation against a temp fixture (islands flags, client-route exclusion, precedence), every `borgo doctor` check against a fake environment, the export planner (loader/prerender/dynamic partitioning, path filling), the deploy config templates (ports, names, refuse-overwrite), page middleware, `//borgo:export` calls, the generated Go env package and its parity with `env.ts`, render-port resolution and the typed WebSocket events.
+- **End-to-end** (`npx playwright test`) — against a production build of `examples/tasks`: client navigation, hover/viewport prefetching, scroll restoration, islands, hydration modes, form actions (enhanced in-place submits, crash surfacing, anonymous-post CSRF), the auth round trip (register, middleware-guarded page, logout, login, forged-post CSRF rejection), page middleware on all three doors, uploads, session revocation across devices, the precache manifest, SSE, two-tab WebSockets with Go push, streaming SSR, error pages, `/healthz` reporting the render service, the internal listener refusing a request without the boot key, `/metrics` series, a `borgo doctor` smoke — plus a dev-server project asserting fast refresh preserves component state (including five consecutive rapid edits), hook add/remove remounts without a reload, custom hook edits hot-apply, Go edits reload exactly once and only after the api answers, CSS hot-swaps, and layouts fall back to a reload — and an export project that runs `borgo export` and serves `dist/site` from a plain static file server, asserting content, hydration against exported props, and the zero-JS page — plus an isr project asserting cached pages replay one render, carry a fresh CSP nonce per response, drop on `borgo.RevalidateTag` from the Go handler that wrote the data, and come back warm from disk after a restart.
 
 ## Versioning and releases
 
-[release-please](https://github.com/googleapis/release-please) maintains a release PR from conventional commits; merging it tags `vX.Y.Z` and publishes both npm packages (`borgo-framework`, `create-borgo`) with linked versions via npm trusted publishing, provenance attached. The Go module `github.com/LuigiDavideMicca/borgo` lives at the repo root and resolves the **same** `vX.Y.Z` tag — one version number across all four artifacts that have to agree: the Go module, the two npm packages, and the `borgo` CLI that ships as `borgo-framework`'s `bin`. See [api stability](docs/api-stability.md#one-version-number-four-artifacts). Upgrading? The borgo-framework README lists every behaviour that changed, one line each — [from 0.21](packages/borgo/README.md#upgrading-from-021) and [from 0.20](packages/borgo/README.md#upgrading-from-020) — and [the environment reference](docs/api-reference.md#environment-variables) has every variable with its grammar.
+[release-please](https://github.com/googleapis/release-please) maintains a release PR from conventional commits; merging it tags `vX.Y.Z` and publishes both npm packages (`borgo-framework`, `create-borgo`) with linked versions via npm trusted publishing, provenance attached. The Go module `github.com/LuigiDavideMicca/borgo` lives at the repo root and resolves the **same** `vX.Y.Z` tag — one version number across all four artifacts that have to agree: the Go module, the two npm packages, and the `borgo` CLI that ships as `borgo-framework`'s `bin`. See [api stability](docs/api-stability.md#one-version-number-four-artifacts). Upgrading? [Upgrading to 0.30](docs/migration-0.30.md) covers the topology change and everything else an upgrade can meet; the borgo-framework README lists the earlier ones, one line each — [from 0.21](packages/borgo/README.md#upgrading-from-021) and [from 0.20](packages/borgo/README.md#upgrading-from-020) — and [the environment reference](docs/api-reference.md#environment-variables) has every variable with its grammar.
 
 ## How it compares
 
@@ -260,18 +262,18 @@ Honest comparison with the frameworks a borgo adopter would otherwise pick. ✓ 
 | Image/font optimization | — | ✓ | ✓ | — |
 | Plugin ecosystem | — | ✓ | ✓ | ✓ |
 | Deploy story | one box: Docker/compose/systemd, generated configs | Vercel or DIY | many presets | many presets |
-| Framework size | small enough to read: the whole thing, codegen and cli tooling included, is about twelve thousand lines of Go and TypeScript | large | large | medium |
+| Framework size | small enough to read: the whole thing, codegen and cli tooling included, is about twenty-five thousand lines of Go and TypeScript | large | large | medium |
 
 ## Benchmarks
 
 There is a benchmark harness in [bench/](bench/), and it is built backwards from every benchmark you have learned to distrust: **the method is written before any result, and the biases are declared before the table.** "We wrote the harness and one of the subjects" is bias #1 on that list, stated in [bench/README.md](bench/README.md#the-biases-stated-first) before any number appears, with four more after it.
 
-- **Five scenarios**, pinned by a [contract](bench/CONTRACT.md): JSON floor, 15 kB serialisation, a server-rendered page, a static asset byte-identical across implementations, and memory per held SSE connection. Every implementation serves the same paths on one port, so nothing can quietly answer a cheaper route.
-- **Six implementations** beside borgo's: Next.js, Astro, Hono, Elysia, Express, Fastify — and a Fresh stub left deliberately empty, because a competitor we could not run would be a guess wearing a number.
-- **Correctness before speed**: every response is checked against the contract — exact bodies, key order on the wire, sha256 for the asset — before any load is generated. A fast wrong answer is not a result. A median success rate below 99% fails the scenario.
-- **The machine testifies**: every result file records CPU idle before and after, free memory, versions, the commit, and whether the tree was dirty. A run on a busy machine opens with a contamination warning instead of hiding it.
+- **Five scenarios**, pinned by a [contract](bench/CONTRACT.md): JSON floor, ~9 kB serialisation, a server-rendered page, a static asset byte-identical across implementations, and memory per held SSE connection. Every implementation serves the same paths on one port, so nothing can quietly answer a cheaper route.
+- **Six implementations** beside borgo's: Next.js, Astro, Hono, Elysia, Express, Fastify — plus a plain Go `net/http` floor (`go-raw`) and a Fresh stub left deliberately empty, because a competitor we could not run would be a guess wearing a number.
+- **Correctness before speed**: every response is checked against the contract — exact bodies, key order on the wire, sha256 for the asset — before any load is generated. A fast wrong answer is not a result. A worst run below 99% transport success, or above 0.1% non-2xx responses, fails the scenario.
+- **The machine testifies**: every result file since schema 2 records CPU idle before and after, free memory, versions, the commit, and whether the tree was dirty. A run on a busy machine opens with a contamination warning instead of hiding it.
 
-The committed run in [bench/results/](bench/results/) is deliberately a **single-implementation proof run of borgo alone, labelled "not a comparison"** — it demonstrates the pipeline end to end on a machine that was never verified idle, and we would rather commit no comparative table than one nobody attested was clean. The harness runs all seven; the numbers worth citing are the ones you make:
+The committed runs in [bench/results/](bench/results/) are a **single-implementation proof run of borgo alone, labelled "not a comparison"**, and one full campaign whose own report opens with a warning that the machine was not idle - so neither is a clean comparison, and we would rather say so than let a table imply otherwise. The harness runs all eight that are implemented; the numbers worth citing are the ones you make:
 
 ```bash
 bun bench/run.ts --list          # implementations and scenarios, run nothing

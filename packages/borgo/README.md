@@ -35,6 +35,16 @@ This package is the Bun/TypeScript core: SSR render service, file-based router, 
 
 Run the CLI through Bun (`bun run dev` in an app). If you hit `error: bun is not installed in %PATH%`, the bin shim was spawned without Bun on `PATH` (e.g. by `npm run`) — see the [troubleshooting section](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/faq-and-troubleshooting.md).
 
+## Upgrading from 0.22
+
+0.30 inverts the topology: the Go binary answers the public port and serves `/api` in its own process, and the Bun process is a render service behind it on loopback. App code mostly does not change; deployments can. [Upgrading to 0.30](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/migration-0.30.md) has every case. The ones most apps meet:
+
+- **WebSocket topics need a rule.** Register `borgo.CanSubscribe` in `api/`, or `borgo start` refuses every subscription. `borgo.Push` is a call inside the Go process; `BORGO_PUSH_KEY` and `BORGO_PUSH_INSECURE` refuse the boot by name if still set.
+- **One host, one container.** `--front-only` is refused, and `API_PORT` is a loopback-only listener: anything that dialed the API directly goes through the public port.
+- **`BORGO_FRONT_READ_TIMEOUT` and `BORGO_API_TIMEOUT` are gone**, for `BORGO_READ_TIMEOUT` and `BORGO_RENDER_TIMEOUT`.
+- **`env/env.gen.go`** is written from `env.ts` when it declares server variables: commit it.
+- **A Dockerfile from a 0.2x template** does not copy `middleware.ts` into the runtime image: add it to the copy line before adding one.
+
 ## Upgrading from 0.21
 
 Most of 0.22 arrives without touching existing code — cached pages (`revalidate`/`tags` + `borgo.RevalidateTag` from Go), the typed environment schema (`env.ts`), `@/` imports — but a few behaviours changed on purpose:
@@ -60,7 +70,6 @@ Every line below is a behaviour that changed on purpose between 0.20.1 and 0.21.
 - `SSEStream.Send` and `Ping` return `borgo.ErrStreamClosed` once the client has gone; `borgo.SSE` flushes a comment on open so the browser's `fetch()` resolves before the first event.
 - The gzip layer reads every `Content-Encoding` value, so a handler that produced `["", "br"]` (an `Add("")` before `Add("br")`) is left alone instead of recompressed.
 - A `SESSION_SECRET` under 32 bytes is refused at startup, not warned about. An unsigned cookie never authenticates.
-- `borgo.Push` is a call inside the Go process, which answers `/ws` itself since 0.30: no endpoint, no key. `BORGO_PUSH_KEY` and `BORGO_PUSH_INSECURE` refuse the boot by name if still set, and a production relay with no `borgo.CanSubscribe` refuses every subscription.
 - `subscribe(topic, handler, { onRefused })`: a WebSocket closed for its origin (code `4403`) is final — no redial — and the reason reaches `onRefused` once, or the console.
 - A comma, an empty string or padding in a subscribe topic throws at the call site.
 - `borgo deploy init caddy` writes `tls internal` (a local CA, no ACME order against a domain you may not own — delete the line to go live); `deploy init systemd` reads secrets from `EnvironmentFile=-/srv/<app>/.env` and carries hardening; `deploy init nginx` sets the forwarding headers a WebSocket `Origin` is judged against behind TLS.

@@ -67,7 +67,7 @@ mapping can quietly point a scenario at a cheaper route.
 | scenario | request | what it is for |
 | --- | --- | --- |
 | `hello-json` | `GET /api/hello` | the floor: request plumbing with almost no work attached |
-| `api-list` | `GET /api/items?n=100` | ~15 kB of JSON, generated per request; serialisation and body writing |
+| `api-list` | `GET /api/items?n=100` | ~9 kB of JSON, generated per request; serialisation and body writing |
 | `ssr-page` | `GET /page` | a page with a layout, nav, 20 rendered rows and one hydrated component, server-rendered per request |
 | `static-asset` | `GET /static/payload.json` | a 31,607-byte file from disk, byte-identical for every implementation |
 | `memory-conn` | `GET /api/events` | RSS at rest, RSS holding N open SSE connections, and the delta per connection |
