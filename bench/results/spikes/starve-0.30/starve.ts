@@ -39,8 +39,9 @@ while (at() < 44_000) {
 }
 const wait = 45_000 - at();
 if (wait > 0) await Bun.sleep(wait);
+const firedAt = at();
 const fired = await fetch(`${base}/api/fire`, { method: "POST" }).then((r) => r.status).catch(() => 0);
 const [s, p] = await Promise.all([sse, Promise.race([page, Bun.sleep(30_000).then(() => ({ timeout: true }))])]);
 heavy.sort((a, b) => a - b);
-console.log(JSON.stringify({ sse: s, page: p, fired, heavyRenders: heavy.length, statuses, heavyMs: { min: heavy[0], median: heavy[heavy.length >> 1], max: heavy[heavy.length - 1] } }));
+console.log(JSON.stringify({ sse: s, page: p, fired, firedAt, heavyRenders: heavy.length, statuses, heavyMs: { min: heavy[0], median: heavy[heavy.length >> 1], max: heavy[heavy.length - 1] } }));
 process.exit(0);

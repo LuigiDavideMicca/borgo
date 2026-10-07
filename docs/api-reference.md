@@ -289,7 +289,7 @@ Read at runtime unless noted. Defaults in parentheses.
 
 `BORGO_METRICS` was `METRICS` before 0.21. The old name is not honoured, and not honouring it is the point: a bare `METRICS` is the most collidable variable borgo ever read, and an alias kept for compatibility would keep the collision alive.
 
-`BUN_CONFIG_MAX_HTTP_REQUESTS` is bun's, not borgo's, but borgo is why you would set it. A process cannot raise it for itself once bun has booted, so `borgo start` re-execs itself with `16384` when nothing set it, and `borgo dev` sets it, as do the two `borgo deploy init` targets that launch the app — the systemd unit and the compose file. The `caddy` and `nginx` targets are reverse-proxy configs and set no environment. Setting it yourself is still honoured: `start` sees a value and runs in one process rather than two.
+`BUN_CONFIG_MAX_HTTP_REQUESTS` is bun's, not borgo's, but borgo is why you would set it. A process cannot raise it for itself once bun has booted, so `borgo start` re-execs itself with `16384` when nothing set it - or with `NODE_ENV=production` when that is unset - and `borgo dev` sets it, as do the two `borgo deploy init` targets that launch the app — the systemd unit and the compose file. The `caddy` and `nginx` targets are reverse-proxy configs and set no environment. Setting it yourself is still honoured: `start` keeps the value, and runs in one process rather than two when `NODE_ENV` is set too.
 
 ### The front (Go) only
 
@@ -318,7 +318,7 @@ The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` i
 | --- | --- | --- |
 | `BORGO_TAILWIND` | Set to `1` by `--tailwind` for child processes. Use the flag, not the variable. | internal |
 | `BORGO_PARENT_PID` | How the CLI tells a child process whose death to exit with. The Go server refuses a value that is not a positive integer, and refuses to start at all if that process is already gone — silently running unwatched is the orphaned api this variable exists to prevent. | internal |
-| `BORGO_SUPERVISOR_PID` | Set by `borgo start` on the copy of itself it re-execs to raise `BUN_CONFIG_MAX_HTTP_REQUESTS`; the child polls it and exits when the supervisor does. | internal |
+| `BORGO_SUPERVISOR_PID` | Set by `borgo start` on the copy of itself it re-execs to raise `BUN_CONFIG_MAX_HTTP_REQUESTS` or set `NODE_ENV`; the child polls it and exits when the supervisor does. | internal |
 | `BORGO_RELOAD` | Marks a restart so the banner prints the short form. | internal |
 | `BORGO_CHANGED` | Carries the changed file **set** into the dev fallback server — newline-separated, because a path may contain a comma or a space but not a newline. Two saves inside one debounce window announce both; carrying only the first meant the browser, which ignores an update naming a page other than the one on screen, could apply nothing at all. | internal |
 | `BORGO_STATIC` | Set to `1` by `borgo export` for the build it drives, and substituted into the client bundle as a `define` rather than read at runtime — it is what compiles the `?__borgo=props` navigation path out of an exported site, where there is no server to ask for props. Not something to set by hand. | internal |

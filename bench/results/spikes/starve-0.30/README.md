@@ -20,6 +20,9 @@ Run on 2026-10-07, Windows 11, i7-1165G7, default timeouts:
 | 48 | 144 | 14717-15387-15846 | event at +2.9 s | whole, +0.4 s |
 
 "Whole" is the 1519-byte document an idle server sends, ending in
-`</html>` with the late content in it; times are after the event
-published at 45 s. The first three page results were judged by length:
+`</html>` with the late content in it. Times are counted from 45 s, not
+from the publish: the event goes out only when the last wave has ended,
+so a "+6.2 s" includes renders still running. The script now prints
+`firedAt` too; an instrumented rerun at 48 saw the event 8 ms after it
+was published. The first three page results were judged by length:
 the script's text check then had a bug, fixed since.

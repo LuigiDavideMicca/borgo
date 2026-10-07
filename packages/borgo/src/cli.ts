@@ -103,7 +103,8 @@ switch (command) {
   case "start": {
     // two values only the LAUNCH environment can carry, so a missing one
     // re-execs with both set. bun sizes its fetch pool at boot (default 256)
-    // and a proxied event stream holds a slot for hours; NODE_ENV picks the
+    // and every loader call in flight holds a slot - measured to halve the
+    // throughput of pages that wait on a slow route; NODE_ENV picks the
     // react build AND the jsx transform, and assigning it from module code is
     // too late for the transform - the mismatch renders as a crash, not as a
     // warning. The deployments borgo writes already set both.
