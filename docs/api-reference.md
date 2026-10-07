@@ -49,6 +49,8 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `(*Uploads).Serve(w, r, s Stored)` | Answers with the file after the caller's authorization: sniffed type, `nosniff`, `Cache-Control: private, no-cache`, a sandboxing CSP, inline only for PNG, JPEG, GIF and WebP. Ranges and conditionals work, never compressed; an unknown key, or one naming a link, is a 404. | provisional |
 | `(*Uploads).Remove(key string) error` | Deletes a stored file; a missing one is not an error, a key `Save` could not have made is. | provisional |
 | `Stored{Key, Name, Type, Size}` | What `Save` returns and `Serve` takes: keep it beside the file's owner. `Name` is the client's, cleaned for display; `Type` is sniffed. | provisional |
+| `ReadEnv(vars []EnvVar) (map[string]any, error)` | Reads the app's server variables with `env.ts`'s rules and messages, for the generated `env/env.gen.go`; not written by hand. See [the Go half](environment.md#the-go-half-reads-the-same-contract). | provisional |
+| `EnvVar{Name, Type, Optional, Default, Validated}` | One server variable of `env.ts`, as the generated package declares it. | provisional |
 | `ErrNoUpload`, `ErrUploadType` | The two refusals of `Save` a handler answers itself, usually 400 and 415. | provisional |
 | `File` | One uploaded file: `Name` and `ContentType` as the client sent them (claims, not evidence), `Size`, and `Open()` for the bytes, valid until the handler returns. | provisional |
 | `Cache(w, maxAge time.Duration, staleWhileRevalidate ...time.Duration)` | Marks the response publicly cacheable; downgrades to `private` if the response already carries `Set-Cookie`. | provisional |
@@ -400,6 +402,7 @@ These are as much a public API as any function: an app depends on them, and chan
 | `middleware.ts` | The pages' middleware, at the app root: exports `middleware` and an optional `matcher`. A malformed one refuses the boot; a matcher naming `/api` or `/__borgo` refuses the build too. | stable |
 | `.borgo/go.ts` | Generated when the api package declares a `//borgo:export`: `export const go = { ... }`, one typed stub per export; removed when there are none. | stable |
 | `env.ts` | The app's [typed environment](environment.md), when it declares one: checked at boot, client values shipped by the build. | provisional |
+| `env/env.gen.go` | Generated from `env.ts` by `borgo build` and `borgo dev` when it declares a server variable: package `env`, a typed `Server`, `Load()` and `Must()`. Committed; removed when no server variable is left. See [the Go half](environment.md#the-go-half-reads-the-same-contract). | provisional |
 | `public/` | Served as-is. `public/assets/` is build output. | stable |
 | `index.html` | The SSR shell. | stable |
 | `style.scss` | Compiled to `public/assets/style.css` when present. | stable |

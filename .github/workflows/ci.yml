@@ -86,7 +86,11 @@ jobs:
       # that, which is the guard; this ordering is what makes it pass.
       - name: build example app
         working-directory: examples/tasks
-        run: bun run build
+        run: |
+          bun run build
+          # the build writes the go env package from env.ts: what is
+          # committed must be what it writes
+          git diff --exit-code -- env/env.gen.go
 
       - name: typecheck
         run: bun run typecheck
@@ -267,7 +271,10 @@ jobs:
             go vet ./...
             go test ./...
             bunx tsc --noEmit
+            [ -f env/env.gen.go ] && cp env/env.gen.go "$tmp/shipped-env-$t.go"
             bun run build
+            # the shipped go env package is the one the build writes from env.ts
+            if [ -f "$tmp/shipped-env-$t.go" ]; then diff "$tmp/shipped-env-$t.go" env/env.gen.go; else [ ! -e env/env.gen.go ]; fi
           done
 
           # the tailwind-wired scaffold must also build day zero: utilities

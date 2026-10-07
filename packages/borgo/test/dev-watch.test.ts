@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createChangeBatcher, createContentDedup, gitignoredMatcher, readDevLock, watchedSide } from "../src/dev";
+import { createChangeBatcher, createContentDedup, gitignoredMatcher, ignored, readDevLock, watchedSide } from "../src/dev";
 import { propsPathEnabled } from "../src/runtime";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -216,4 +216,12 @@ test("a changed file asks for the rebuild of the side that embeds it", () => {
   expect(watchedSide("index.html")).toBe("app");
   expect(watchedSide("README.md")).toBeNull();
   expect(watchedSide("notes.sqlite")).toBeNull();
+});
+
+// what the build writes itself never rebuilds anything: env/env.gen.go is
+// written from env.ts, whose own change already rebuilt the api
+test("generated go files are not watched", () => {
+  expect(ignored.test("api/borgo.gen.go")).toBe(true);
+  expect(ignored.test("env/env.gen.go")).toBe(true);
+  expect(ignored.test("env/settings.go")).toBe(false);
 });

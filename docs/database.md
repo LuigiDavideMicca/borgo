@@ -186,11 +186,9 @@ In `main.go`, before `borgo.Serve`, so nothing is answered on a schema that is n
 
 ```go no-check
 func main() {
-	path := os.Getenv("DB_PATH")
-	if path == "" {
-		path = "app.db" // the default env.ts declares
-	}
-	if err := db.Open(context.Background(), path); err != nil {
+	// DB_PATH and its default are declared once, in env.ts: env/env.gen.go
+	// reads them with the same rules (see the environment page)
+	if err := db.Open(context.Background(), env.Must().DB_PATH); err != nil {
 		log.Fatal(err)
 	}
 	borgo.Serve()

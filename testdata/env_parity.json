@@ -1,0 +1,4736 @@
+[
+ {
+  "type": "number",
+  "raw": "1",
+  "ok": true,
+  "value": 1
+ },
+ {
+  "type": "number",
+  "raw": "  12 ",
+  "ok": true,
+  "value": 12
+ },
+ {
+  "type": "number",
+  "raw": "1.5",
+  "ok": true,
+  "value": 1.5
+ },
+ {
+  "type": "number",
+  "raw": ".5",
+  "ok": true,
+  "value": 0.5
+ },
+ {
+  "type": "number",
+  "raw": "5.",
+  "ok": true,
+  "value": 5
+ },
+ {
+  "type": "number",
+  "raw": "+3",
+  "ok": true,
+  "value": 3
+ },
+ {
+  "type": "number",
+  "raw": "-2",
+  "ok": true,
+  "value": -2
+ },
+ {
+  "type": "number",
+  "raw": "1e3",
+  "ok": true,
+  "value": 1000
+ },
+ {
+  "type": "number",
+  "raw": "1E-2",
+  "ok": true,
+  "value": 0.01
+ },
+ {
+  "type": "number",
+  "raw": "0x1F",
+  "ok": true,
+  "value": 31
+ },
+ {
+  "type": "number",
+  "raw": "0X1f",
+  "ok": true,
+  "value": 31
+ },
+ {
+  "type": "number",
+  "raw": "0o17",
+  "ok": true,
+  "value": 15
+ },
+ {
+  "type": "number",
+  "raw": "0b101",
+  "ok": true,
+  "value": 5
+ },
+ {
+  "type": "number",
+  "raw": "-0x10",
+  "ok": false,
+  "error": "V: expected a number, got \"-0x10\""
+ },
+ {
+  "type": "number",
+  "raw": "0x",
+  "ok": false,
+  "error": "V: expected a number, got \"0x\""
+ },
+ {
+  "type": "number",
+  "raw": "0xg",
+  "ok": false,
+  "error": "V: expected a number, got \"0xg\""
+ },
+ {
+  "type": "number",
+  "raw": "Infinity",
+  "ok": false,
+  "error": "V: expected a number, got \"Infinity\""
+ },
+ {
+  "type": "number",
+  "raw": "-Infinity",
+  "ok": false,
+  "error": "V: expected a number, got \"-Infinity\""
+ },
+ {
+  "type": "number",
+  "raw": "inf",
+  "ok": false,
+  "error": "V: expected a number, got \"inf\""
+ },
+ {
+  "type": "number",
+  "raw": "NaN",
+  "ok": false,
+  "error": "V: expected a number, got \"NaN\""
+ },
+ {
+  "type": "number",
+  "raw": "1_000",
+  "ok": false,
+  "error": "V: expected a number, got \"1_000\""
+ },
+ {
+  "type": "number",
+  "raw": "12px",
+  "ok": false,
+  "error": "V: expected a number, got \"12px\""
+ },
+ {
+  "type": "number",
+  "raw": "1e400",
+  "ok": false,
+  "error": "V: expected a number, got \"1e400\""
+ },
+ {
+  "type": "number",
+  "raw": "--1",
+  "ok": false,
+  "error": "V: expected a number, got \"--1\""
+ },
+ {
+  "type": "number",
+  "raw": " ",
+  "ok": false,
+  "error": "V: expected a number, got \" \""
+ },
+ {
+  "type": "number",
+  "raw": "\t3\n",
+  "ok": true,
+  "value": 3
+ },
+ {
+  "type": "number",
+  "raw": " 5",
+  "ok": true,
+  "value": 5
+ },
+ {
+  "type": "number",
+  "raw": "﻿7",
+  "ok": true,
+  "value": 7
+ },
+ {
+  "type": "number",
+  "raw": "7",
+  "ok": false,
+  "error": "V: expected a number, got \"7\""
+ },
+ {
+  "type": "number",
+  "raw": "0xffffffffffffffffffffffffffffffffffffffff",
+  "ok": true,
+  "value": 1.461501637330903e+48
+ },
+ {
+  "type": "number",
+  "raw": "1.",
+  "ok": true,
+  "value": 1
+ },
+ {
+  "type": "number",
+  "raw": "+.5",
+  "ok": true,
+  "value": 0.5
+ },
+ {
+  "type": "number",
+  "raw": "e3",
+  "ok": false,
+  "error": "V: expected a number, got \"e3\""
+ },
+ {
+  "type": "number",
+  "raw": "1e",
+  "ok": false,
+  "error": "V: expected a number, got \"1e\""
+ },
+ {
+  "type": "number",
+  "raw": "0.0000001",
+  "ok": true,
+  "value": 1e-7
+ },
+ {
+  "type": "number",
+  "raw": "00012",
+  "ok": true,
+  "value": 12
+ },
+ {
+  "type": "number",
+  "raw": "0x1",
+  "ok": true,
+  "value": 1
+ },
+ {
+  "type": "number",
+  "raw": "0b1",
+  "ok": true,
+  "value": 1
+ },
+ {
+  "type": "number",
+  "raw": "0o7",
+  "ok": true,
+  "value": 7
+ },
+ {
+  "type": "number",
+  "raw": "1e-400",
+  "ok": true,
+  "value": 0
+ },
+ {
+  "type": "number",
+  "raw": "-1e-400",
+  "ok": true,
+  "value": 0
+ },
+ {
+  "type": "number",
+  "raw": "+Infinity",
+  "ok": false,
+  "error": "V: expected a number, got \"+Infinity\""
+ },
+ {
+  "type": "number",
+  "raw": "0x-1",
+  "ok": false,
+  "error": "V: expected a number, got \"0x-1\""
+ },
+ {
+  "type": "number",
+  "raw": "0x+1",
+  "ok": false,
+  "error": "V: expected a number, got \"0x+1\""
+ },
+ {
+  "type": "number",
+  "raw": "0b-1",
+  "ok": false,
+  "error": "V: expected a number, got \"0b-1\""
+ },
+ {
+  "type": "number",
+  "raw": "0o+7",
+  "ok": false,
+  "error": "V: expected a number, got \"0o+7\""
+ },
+ {
+  "type": "number",
+  "raw": "0x-0",
+  "ok": false,
+  "error": "V: expected a number, got \"0x-0\""
+ },
+ {
+  "type": "number",
+  "raw": "0b2",
+  "ok": false,
+  "error": "V: expected a number, got \"0b2\""
+ },
+ {
+  "type": "number",
+  "raw": "0o8",
+  "ok": false,
+  "error": "V: expected a number, got \"0o8\""
+ },
+ {
+  "type": "boolean",
+  "raw": "1",
+  "ok": true,
+  "value": true
+ },
+ {
+  "type": "boolean",
+  "raw": "0",
+  "ok": true,
+  "value": false
+ },
+ {
+  "type": "boolean",
+  "raw": "t",
+  "ok": true,
+  "value": true
+ },
+ {
+  "type": "boolean",
+  "raw": "T",
+  "ok": true,
+  "value": true
+ },
+ {
+  "type": "boolean",
+  "raw": "TRUE",
+  "ok": true,
+  "value": true
+ },
+ {
+  "type": "boolean",
+  "raw": "true",
+  "ok": true,
+  "value": true
+ },
+ {
+  "type": "boolean",
+  "raw": "True",
+  "ok": true,
+  "value": true
+ },
+ {
+  "type": "boolean",
+  "raw": "f",
+  "ok": true,
+  "value": false
+ },
+ {
+  "type": "boolean",
+  "raw": "F",
+  "ok": true,
+  "value": false
+ },
+ {
+  "type": "boolean",
+  "raw": "FALSE",
+  "ok": true,
+  "value": false
+ },
+ {
+  "type": "boolean",
+  "raw": "false",
+  "ok": true,
+  "value": false
+ },
+ {
+  "type": "boolean",
+  "raw": "False",
+  "ok": true,
+  "value": false
+ },
+ {
+  "type": "boolean",
+  "raw": "yes",
+  "ok": false,
+  "error": "V: expected a boolean (1/0, true/false, t/f), got \"yes\""
+ },
+ {
+  "type": "boolean",
+  "raw": "TRUE ",
+  "ok": false,
+  "error": "V: expected a boolean (1/0, true/false, t/f), got \"TRUE \""
+ },
+ {
+  "type": "boolean",
+  "raw": "tRUE",
+  "ok": false,
+  "error": "V: expected a boolean (1/0, true/false, t/f), got \"tRUE\""
+ },
+ {
+  "type": "boolean",
+  "raw": "__proto__",
+  "ok": false,
+  "error": "V: expected a boolean (1/0, true/false, t/f), got \"__proto__\""
+ },
+ {
+  "type": "boolean",
+  "raw": "constructor",
+  "ok": false,
+  "error": "V: expected a boolean (1/0, true/false, t/f), got \"constructor\""
+ },
+ {
+  "type": "port",
+  "raw": "0",
+  "ok": true,
+  "value": 0
+ },
+ {
+  "type": "port",
+  "raw": "80",
+  "ok": true,
+  "value": 80
+ },
+ {
+  "type": "port",
+  "raw": "080",
+  "ok": true,
+  "value": 80
+ },
+ {
+  "type": "port",
+  "raw": "65535",
+  "ok": true,
+  "value": 65535
+ },
+ {
+  "type": "port",
+  "raw": "65536",
+  "ok": false,
+  "error": "V: expected a port (an integer 0-65535), got \"65536\""
+ },
+ {
+  "type": "port",
+  "raw": "-1",
+  "ok": false,
+  "error": "V: expected a port (an integer 0-65535), got \"-1\""
+ },
+ {
+  "type": "port",
+  "raw": "+80",
+  "ok": false,
+  "error": "V: expected a port (an integer 0-65535), got \"+80\""
+ },
+ {
+  "type": "port",
+  "raw": " 80 ",
+  "ok": true,
+  "value": 80
+ },
+ {
+  "type": "port",
+  "raw": "8.0",
+  "ok": false,
+  "error": "V: expected a port (an integer 0-65535), got \"8.0\""
+ },
+ {
+  "type": "port",
+  "raw": "1e3",
+  "ok": false,
+  "error": "V: expected a port (an integer 0-65535), got \"1e3\""
+ },
+ {
+  "type": "port",
+  "raw": "99999999999999999999",
+  "ok": false,
+  "error": "V: expected a port (an integer 0-65535), got \"99999999999999999999\""
+ },
+ {
+  "type": "port",
+  "raw": "0x50",
+  "ok": false,
+  "error": "V: expected a port (an integer 0-65535), got \"0x50\""
+ },
+ {
+  "type": "port",
+  "raw": "\t443",
+  "ok": true,
+  "value": 443
+ },
+ {
+  "type": "url",
+  "raw": "http://x",
+  "ok": true,
+  "value": "http://x"
+ },
+ {
+  "type": "url",
+  "raw": "https://a.b/c",
+  "ok": true,
+  "value": "https://a.b/c"
+ },
+ {
+  "type": "url",
+  "raw": "http://",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://\""
+ },
+ {
+  "type": "url",
+  "raw": "mailto:a@b",
+  "ok": true,
+  "value": "mailto:a@b"
+ },
+ {
+  "type": "url",
+  "raw": "a:b",
+  "ok": true,
+  "value": "a:b"
+ },
+ {
+  "type": "url",
+  "raw": "/path",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"/path\""
+ },
+ {
+  "type": "url",
+  "raw": "x",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"x\""
+ },
+ {
+  "type": "url",
+  "raw": " http://x ",
+  "ok": true,
+  "value": " http://x "
+ },
+ {
+  "type": "url",
+  "raw": "file:///tmp",
+  "ok": true,
+  "value": "file:///tmp"
+ },
+ {
+  "type": "url",
+  "raw": "ws://h",
+  "ok": true,
+  "value": "ws://h"
+ },
+ {
+  "type": "url",
+  "raw": "1http://x",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1http://x\""
+ },
+ {
+  "type": "url",
+  "raw": "http:x",
+  "ok": true,
+  "value": "http:x"
+ },
+ {
+  "type": "url",
+  "raw": "https:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://X",
+  "ok": true,
+  "value": "HTTP://X"
+ },
+ {
+  "type": "url",
+  "raw": "postgres://u:p@h:5432/db",
+  "ok": true,
+  "value": "postgres://u:p@h:5432/db"
+ },
+ {
+  "type": "url",
+  "raw": "http://a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a b\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[::1]:80",
+  "ok": true,
+  "value": "http://[::1]:80"
+ },
+ {
+  "type": "url",
+  "raw": "javascript:alert(1)",
+  "ok": true,
+  "value": "javascript:alert(1)"
+ },
+ {
+  "type": "url",
+  "raw": "\u0001http://x",
+  "ok": true,
+  "value": "\u0001http://x"
+ },
+ {
+  "type": "url",
+  "raw": "HTTPS:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTPS:\""
+ },
+ {
+  "type": "url",
+  "raw": "Http:x",
+  "ok": true,
+  "value": "Http:x"
+ },
+ {
+  "type": "url",
+  "raw": "https://ex%41mple.com",
+  "ok": true,
+  "value": "https://ex%41mple.com"
+ },
+ {
+  "type": "url",
+  "raw": "https://h/p%zz",
+  "ok": true,
+  "value": "https://h/p%zz"
+ },
+ {
+  "type": "url",
+  "raw": "http://h/?q=100%",
+  "ok": true,
+  "value": "http://h/?q=100%"
+ },
+ {
+  "type": "url",
+  "raw": "http://:8080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://:8080\""
+ },
+ {
+  "type": "url",
+  "raw": "http://user@:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://user@:80\""
+ },
+ {
+  "type": "url",
+  "raw": "http://localhost:70000",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://localhost:70000\""
+ },
+ {
+  "type": "url",
+  "raw": "http://localhost:65535",
+  "ok": true,
+  "value": "http://localhost:65535"
+ },
+ {
+  "type": "url",
+  "raw": "http://h:",
+  "ok": true,
+  "value": "http://h:"
+ },
+ {
+  "type": "url",
+  "raw": "http://999999999999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://999999999999\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[fe80::1%25eth0]/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://[fe80::1%25eth0]/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[::1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://[::1\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--a\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--r8jz45g.jp",
+  "ok": true,
+  "value": "http://xn--r8jz45g.jp"
+ },
+ {
+  "type": "url",
+  "raw": "http://1.2.3",
+  "ok": true,
+  "value": "http://1.2.3"
+ },
+ {
+  "type": "url",
+  "raw": "http://256.1.1.1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://256.1.1.1\""
+ },
+ {
+  "type": "url",
+  "raw": "http://1.2.3.4.5",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://1.2.3.4.5\""
+ },
+ {
+  "type": "url",
+  "raw": "http://0x7f.1",
+  "ok": true,
+  "value": "http://0x7f.1"
+ },
+ {
+  "type": "url",
+  "raw": "http://h%2fx",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://h%2fx\""
+ },
+ {
+  "type": "url",
+  "raw": "file://h:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://h:80\""
+ },
+ {
+  "type": "url",
+  "raw": "file:///x",
+  "ok": true,
+  "value": "file:///x"
+ },
+ {
+  "type": "url",
+  "raw": "file:x",
+  "ok": true,
+  "value": "file:x"
+ },
+ {
+  "type": "url",
+  "raw": "postgres://a b@h",
+  "ok": true,
+  "value": "postgres://a b@h"
+ },
+ {
+  "type": "url",
+  "raw": "postgres://u@h:99999/db",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"postgres://u@h:99999/db\""
+ },
+ {
+  "type": "url",
+  "raw": "postgres:///db",
+  "ok": true,
+  "value": "postgres:///db"
+ },
+ {
+  "type": "url",
+  "raw": "redis://[::1]:6379",
+  "ok": true,
+  "value": "redis://[::1]:6379"
+ },
+ {
+  "type": "url",
+  "raw": "http://a\tb.com",
+  "ok": true,
+  "value": "http://a\tb.com"
+ },
+ {
+  "type": "url",
+  "raw": "http:/h",
+  "ok": true,
+  "value": "http:/h"
+ },
+ {
+  "type": "string",
+  "raw": "anything",
+  "ok": true,
+  "value": "anything"
+ },
+ {
+  "type": "string",
+  "raw": " spaced ",
+  "ok": true,
+  "value": " spaced "
+ },
+ {
+  "type": "string",
+  "raw": "<&> ",
+  "ok": true,
+  "value": "<&> "
+ },
+ {
+  "type": "url",
+  "raw": "file://~/?",
+  "ok": true,
+  "value": "file://~/?"
+ },
+ {
+  "type": "url",
+  "raw": "http://'_:65535",
+  "ok": true,
+  "value": "http://'_:65535"
+ },
+ {
+  "type": "url",
+  "raw": "foo:.//80$-/a b",
+  "ok": true,
+  "value": "foo:.//80$-/a b"
+ },
+ {
+  "type": "url",
+  "raw": "foo:@?",
+  "ok": true,
+  "value": "foo:@?"
+ },
+ {
+  "type": "url",
+  "raw": "https://z,9%41$",
+  "ok": true,
+  "value": "https://z,9%41$"
+ },
+ {
+  "type": "url",
+  "raw": "http:_:",
+  "ok": true,
+  "value": "http:_:"
+ },
+ {
+  "type": "url",
+  "raw": "ws://9",
+  "ok": true,
+  "value": "ws://9"
+ },
+ {
+  "type": "url",
+  "raw": "https:///p",
+  "ok": true,
+  "value": "https:///p"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:z",
+  "ok": true,
+  "value": "x+y:z"
+ },
+ {
+  "type": "url",
+  "raw": "foo:65536,,`",
+  "ok": true,
+  "value": "foo:65536,,`"
+ },
+ {
+  "type": "url",
+  "raw": "data:@<^<0",
+  "ok": true,
+  "value": "data:@<^<0"
+ },
+ {
+  "type": "url",
+  "raw": "https://`%41",
+  "ok": true,
+  "value": "https://`%41"
+ },
+ {
+  "type": "url",
+  "raw": "ftp://`080:",
+  "ok": true,
+  "value": "ftp://`080:"
+ },
+ {
+  "type": "url",
+  "raw": "foo:\"_%#f",
+  "ok": true,
+  "value": "foo:\"_%#f"
+ },
+ {
+  "type": "url",
+  "raw": "https://65536\\",
+  "ok": true,
+  "value": "https://65536\\"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:80\"%:a",
+  "ok": true,
+  "value": "x+y:80\"%:a"
+ },
+ {
+  "type": "url",
+  "raw": "x+y: #>]:a?q",
+  "ok": true,
+  "value": "x+y: #>]:a?q"
+ },
+ {
+  "type": "url",
+  "raw": "https://api.example.com/v1/",
+  "ok": true,
+  "value": "https://api.example.com/v1/"
+ },
+ {
+  "type": "url",
+  "raw": "mailto::/a b",
+  "ok": true,
+  "value": "mailto::/a b"
+ },
+ {
+  "type": "url",
+  "raw": "mongodb+srv://u:p@cluster0.x.mongodb.net/?retryWrites=true",
+  "ok": true,
+  "value": "mongodb+srv://u:p@cluster0.x.mongodb.net/?retryWrites=true"
+ },
+ {
+  "type": "url",
+  "raw": "foo:@b/a b",
+  "ok": true,
+  "value": "foo:@b/a b"
+ },
+ {
+  "type": "url",
+  "raw": "data:@%]>",
+  "ok": true,
+  "value": "data:@%]>"
+ },
+ {
+  "type": "url",
+  "raw": "mailto::65535",
+  "ok": true,
+  "value": "mailto::65535"
+ },
+ {
+  "type": "url",
+  "raw": "ws://-",
+  "ok": true,
+  "value": "ws://-"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://`",
+  "ok": true,
+  "value": "HTTP://`"
+ },
+ {
+  "type": "url",
+  "raw": "x+y: [",
+  "ok": true,
+  "value": "x+y: ["
+ },
+ {
+  "type": "url",
+  "raw": "https://-`,/:65535",
+  "ok": true,
+  "value": "https://-`,/:65535"
+ },
+ {
+  "type": "url",
+  "raw": "foo: xn--xn--",
+  "ok": true,
+  "value": "foo: xn--xn--"
+ },
+ {
+  "type": "url",
+  "raw": "foo:$:99999",
+  "ok": true,
+  "value": "foo:$:99999"
+ },
+ {
+  "type": "url",
+  "raw": "foo:z:",
+  "ok": true,
+  "value": "foo:z:"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:!@\":65535",
+  "ok": true,
+  "value": "mailto:!@\":65535"
+ },
+ {
+  "type": "url",
+  "raw": "foo:0{:80",
+  "ok": true,
+  "value": "foo:0{:80"
+ },
+ {
+  "type": "url",
+  "raw": "foo:[:-1",
+  "ok": true,
+  "value": "foo:[:-1"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:!~",
+  "ok": true,
+  "value": "mailto:!~"
+ },
+ {
+  "type": "url",
+  "raw": "foo:bar",
+  "ok": true,
+  "value": "foo:bar"
+ },
+ {
+  "type": "url",
+  "raw": "http://a..b",
+  "ok": true,
+  "value": "http://a..b"
+ },
+ {
+  "type": "url",
+  "raw": "http:65536,a99999*?q",
+  "ok": true,
+  "value": "http:65536,a99999*?q"
+ },
+ {
+  "type": "url",
+  "raw": "data:9:80",
+  "ok": true,
+  "value": "data:9:80"
+ },
+ {
+  "type": "url",
+  "raw": "foo::",
+  "ok": true,
+  "value": "foo::"
+ },
+ {
+  "type": "url",
+  "raw": "http:99999",
+  "ok": true,
+  "value": "http:99999"
+ },
+ {
+  "type": "url",
+  "raw": "data:/p",
+  "ok": true,
+  "value": "data:/p"
+ },
+ {
+  "type": "url",
+  "raw": "http:@'",
+  "ok": true,
+  "value": "http:@'"
+ },
+ {
+  "type": "url",
+  "raw": "https:/65536?b?q",
+  "ok": true,
+  "value": "https:/65536?b?q"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:80>:-1?q",
+  "ok": true,
+  "value": "mailto:80>:-1?q"
+ },
+ {
+  "type": "url",
+  "raw": "x+y: {:a",
+  "ok": true,
+  "value": "x+y: {:a"
+ },
+ {
+  "type": "url",
+  "raw": "data:{.99999\t",
+  "ok": true,
+  "value": "data:{.99999\t"
+ },
+ {
+  "type": "url",
+  "raw": "http:80",
+  "ok": true,
+  "value": "http:80"
+ },
+ {
+  "type": "url",
+  "raw": "http:!:0080",
+  "ok": true,
+  "value": "http:!:0080"
+ },
+ {
+  "type": "url",
+  "raw": "data:]0~/a b",
+  "ok": true,
+  "value": "data:]0~/a b"
+ },
+ {
+  "type": "url",
+  "raw": "http://0://'$",
+  "ok": true,
+  "value": "http://0://'$"
+ },
+ {
+  "type": "url",
+  "raw": "file:///C:/x",
+  "ok": true,
+  "value": "file:///C:/x"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:b",
+  "ok": true,
+  "value": "mailto:b"
+ },
+ {
+  "type": "url",
+  "raw": "https:\\x",
+  "ok": true,
+  "value": "https:\\x"
+ },
+ {
+  "type": "url",
+  "raw": "http://[::1]:8080",
+  "ok": true,
+  "value": "http://[::1]:8080"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:xn--*",
+  "ok": true,
+  "value": "x+y:xn--*"
+ },
+ {
+  "type": "url",
+  "raw": "foo:::a",
+  "ok": true,
+  "value": "foo:::a"
+ },
+ {
+  "type": "url",
+  "raw": "https:/,b~_?q",
+  "ok": true,
+  "value": "https:/,b~_?q"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:099999#f",
+  "ok": true,
+  "value": "mailto:099999#f"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:%00^a65536-#f",
+  "ok": true,
+  "value": "mailto:%00^a65536-#f"
+ },
+ {
+  "type": "url",
+  "raw": "https:/65536-/p",
+  "ok": true,
+  "value": "https:/65536-/p"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:0|80999999",
+  "ok": true,
+  "value": "x+y:0|80999999"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://a.a//",
+  "ok": true,
+  "value": "HTTP://a.a//"
+ },
+ {
+  "type": "url",
+  "raw": "https://example.com/path with space",
+  "ok": true,
+  "value": "https://example.com/path with space"
+ },
+ {
+  "type": "url",
+  "raw": "foo:>#",
+  "ok": true,
+  "value": "foo:>#"
+ },
+ {
+  "type": "url",
+  "raw": "https:/$?q",
+  "ok": true,
+  "value": "https:/$?q"
+ },
+ {
+  "type": "url",
+  "raw": "mailto://\t/:80",
+  "ok": true,
+  "value": "mailto://\t/:80"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:6553680,",
+  "ok": true,
+  "value": "mailto:6553680,"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:99999?q",
+  "ok": true,
+  "value": "x+y:99999?q"
+ },
+ {
+  "type": "url",
+  "raw": "foo:`:65535",
+  "ok": true,
+  "value": "foo:`:65535"
+ },
+ {
+  "type": "url",
+  "raw": "file:///*%00\\:80",
+  "ok": true,
+  "value": "file:///*%00\\:80"
+ },
+ {
+  "type": "url",
+  "raw": "data:9/p",
+  "ok": true,
+  "value": "data:9/p"
+ },
+ {
+  "type": "url",
+  "raw": "http://$",
+  "ok": true,
+  "value": "http://$"
+ },
+ {
+  "type": "url",
+  "raw": "http:z/a b",
+  "ok": true,
+  "value": "http:z/a b"
+ },
+ {
+  "type": "url",
+  "raw": "C:/data/x.db",
+  "ok": true,
+  "value": "C:/data/x.db"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:$65536 :",
+  "ok": true,
+  "value": "mailto:$65536 :"
+ },
+ {
+  "type": "url",
+  "raw": "data:^80",
+  "ok": true,
+  "value": "data:^80"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:\tb!/a b",
+  "ok": true,
+  "value": "x+y:\tb!/a b"
+ },
+ {
+  "type": "url",
+  "raw": "http://host:8080/a?b=c#d",
+  "ok": true,
+  "value": "http://host:8080/a?b=c#d"
+ },
+ {
+  "type": "url",
+  "raw": "wss://a65536?@/p",
+  "ok": true,
+  "value": "wss://a65536?@/p"
+ },
+ {
+  "type": "url",
+  "raw": "http://%41",
+  "ok": true,
+  "value": "http://%41"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:a@b.c",
+  "ok": true,
+  "value": "mailto:a@b.c"
+ },
+ {
+  "type": "url",
+  "raw": "ws://*a?q",
+  "ok": true,
+  "value": "ws://*a?q"
+ },
+ {
+  "type": "url",
+  "raw": "http://-host.com",
+  "ok": true,
+  "value": "http://-host.com"
+ },
+ {
+  "type": "url",
+  "raw": "file://80",
+  "ok": true,
+  "value": "file://80"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:99999:0080#f",
+  "ok": true,
+  "value": "x+y:99999:0080#f"
+ },
+ {
+  "type": "url",
+  "raw": "data::a",
+  "ok": true,
+  "value": "data::a"
+ },
+ {
+  "type": "url",
+  "raw": "http://127.1",
+  "ok": true,
+  "value": "http://127.1"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://-\t",
+  "ok": true,
+  "value": "HTTP://-\t"
+ },
+ {
+  "type": "url",
+  "raw": "data:@:65536",
+  "ok": true,
+  "value": "data:@:65536"
+ },
+ {
+  "type": "url",
+  "raw": "data:~%_0/a b",
+  "ok": true,
+  "value": "data:~%_0/a b"
+ },
+ {
+  "type": "url",
+  "raw": "foo:,",
+  "ok": true,
+  "value": "foo:,"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:b",
+  "ok": true,
+  "value": "x+y:b"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:'\"[:80",
+  "ok": true,
+  "value": "mailto:'\"[:80"
+ },
+ {
+  "type": "url",
+  "raw": "https://$80\t",
+  "ok": true,
+  "value": "https://$80\t"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:*:99999",
+  "ok": true,
+  "value": "x+y:*:99999"
+ },
+ {
+  "type": "url",
+  "raw": "data:#f",
+  "ok": true,
+  "value": "data:#f"
+ },
+ {
+  "type": "url",
+  "raw": "http:/x",
+  "ok": true,
+  "value": "http:/x"
+ },
+ {
+  "type": "url",
+  "raw": "HTTPS://EXAMPLE.COM",
+  "ok": true,
+  "value": "HTTPS://EXAMPLE.COM"
+ },
+ {
+  "type": "url",
+  "raw": "wss://b\\^>%41:80",
+  "ok": true,
+  "value": "wss://b\\^>%41:80"
+ },
+ {
+  "type": "url",
+  "raw": "data:,0",
+  "ok": true,
+  "value": "data:,0"
+ },
+ {
+  "type": "url",
+  "raw": "data:]\\\"'#",
+  "ok": true,
+  "value": "data:]\\\"'#"
+ },
+ {
+  "type": "url",
+  "raw": "http:////_a:",
+  "ok": true,
+  "value": "http:////_a:"
+ },
+ {
+  "type": "url",
+  "raw": "foo:*~z##f",
+  "ok": true,
+  "value": "foo:*~z##f"
+ },
+ {
+  "type": "url",
+  "raw": "foo:b::199999%",
+  "ok": true,
+  "value": "foo:b::199999%"
+ },
+ {
+  "type": "url",
+  "raw": "data:[//%4199999",
+  "ok": true,
+  "value": "data:[//%4199999"
+ },
+ {
+  "type": "url",
+  "raw": "foo::?%zz99999:80",
+  "ok": true,
+  "value": "foo::?%zz99999:80"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:80|",
+  "ok": true,
+  "value": "x+y:80|"
+ },
+ {
+  "type": "url",
+  "raw": "foo:%>%41~",
+  "ok": true,
+  "value": "foo:%>%41~"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://z_?0~:99999",
+  "ok": true,
+  "value": "HTTP://z_?0~:99999"
+ },
+ {
+  "type": "url",
+  "raw": "a:",
+  "ok": true,
+  "value": "a:"
+ },
+ {
+  "type": "url",
+  "raw": "ftp:////b0~",
+  "ok": true,
+  "value": "ftp:////b0~"
+ },
+ {
+  "type": "url",
+  "raw": "https://a/<80",
+  "ok": true,
+  "value": "https://a/<80"
+ },
+ {
+  "type": "url",
+  "raw": "mailto://z!0",
+  "ok": true,
+  "value": "mailto://z!0"
+ },
+ {
+  "type": "url",
+  "raw": "file://`#f",
+  "ok": true,
+  "value": "file://`#f"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:%0099999#",
+  "ok": true,
+  "value": "mailto:%0099999#"
+ },
+ {
+  "type": "url",
+  "raw": "wss://@z#f",
+  "ok": true,
+  "value": "wss://@z#f"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:9@9~%00",
+  "ok": true,
+  "value": "x+y:9@9~%00"
+ },
+ {
+  "type": "url",
+  "raw": "http://a#b c",
+  "ok": true,
+  "value": "http://a#b c"
+ },
+ {
+  "type": "url",
+  "raw": "ws://_80",
+  "ok": true,
+  "value": "ws://_80"
+ },
+ {
+  "type": "url",
+  "raw": "file://#*xn--:~",
+  "ok": true,
+  "value": "file://#*xn--:~"
+ },
+ {
+  "type": "url",
+  "raw": "foo:%00\t%00':65536",
+  "ok": true,
+  "value": "foo:%00\t%00':65536"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:]%|*%00:80#f",
+  "ok": true,
+  "value": "mailto:]%|*%00:80#f"
+ },
+ {
+  "type": "url",
+  "raw": "mailto: `%41!<",
+  "ok": true,
+  "value": "mailto: `%41!<"
+ },
+ {
+  "type": "url",
+  "raw": "ws:///p",
+  "ok": true,
+  "value": "ws:///p"
+ },
+ {
+  "type": "url",
+  "raw": "data:~?z.!",
+  "ok": true,
+  "value": "data:~?z.!"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:@:-1",
+  "ok": true,
+  "value": "x+y:@:-1"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://*",
+  "ok": true,
+  "value": "HTTP://*"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:::1:",
+  "ok": true,
+  "value": "mailto:::1:"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://'?",
+  "ok": true,
+  "value": "HTTP://'?"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:::180:0080",
+  "ok": true,
+  "value": "mailto:::180:0080"
+ },
+ {
+  "type": "url",
+  "raw": "http://~",
+  "ok": true,
+  "value": "http://~"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:~80:-1",
+  "ok": true,
+  "value": "x+y:~80:-1"
+ },
+ {
+  "type": "url",
+  "raw": "http://${HOST}:8080",
+  "ok": true,
+  "value": "http://${HOST}:8080"
+ },
+ {
+  "type": "url",
+  "raw": "https:/a_xn--\t",
+  "ok": true,
+  "value": "https:/a_xn--\t"
+ },
+ {
+  "type": "url",
+  "raw": "C:\\path",
+  "ok": true,
+  "value": "C:\\path"
+ },
+ {
+  "type": "url",
+  "raw": "wss://$_",
+  "ok": true,
+  "value": "wss://$_"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:'$~?\t/a b",
+  "ok": true,
+  "value": "x+y:'$~?\t/a b"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:b`",
+  "ok": true,
+  "value": "x+y:b`"
+ },
+ {
+  "type": "url",
+  "raw": "x+y::`\"!",
+  "ok": true,
+  "value": "x+y::`\"!"
+ },
+ {
+  "type": "url",
+  "raw": "https:/\"",
+  "ok": true,
+  "value": "https:/\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://\t{:",
+  "ok": true,
+  "value": "HTTP://\t{:"
+ },
+ {
+  "type": "url",
+  "raw": "foo:800?80]:65535",
+  "ok": true,
+  "value": "foo:800?80]:65535"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:[:-1",
+  "ok": true,
+  "value": "x+y:[:-1"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:_\\[zz:",
+  "ok": true,
+  "value": "x+y:_\\[zz:"
+ },
+ {
+  "type": "url",
+  "raw": "data:9?<@-?q",
+  "ok": true,
+  "value": "data:9?<@-?q"
+ },
+ {
+  "type": "url",
+  "raw": "http://[::ffff:1.2.3.4]",
+  "ok": true,
+  "value": "http://[::ffff:1.2.3.4]"
+ },
+ {
+  "type": "url",
+  "raw": "foo:?",
+  "ok": true,
+  "value": "foo:?"
+ },
+ {
+  "type": "url",
+  "raw": "http:b",
+  "ok": true,
+  "value": "http:b"
+ },
+ {
+  "type": "url",
+  "raw": "data:%zz^|",
+  "ok": true,
+  "value": "data:%zz^|"
+ },
+ {
+  "type": "url",
+  "raw": "file://{",
+  "ok": true,
+  "value": "file://{"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:#",
+  "ok": true,
+  "value": "x+y:#"
+ },
+ {
+  "type": "url",
+  "raw": "mailto://%41",
+  "ok": true,
+  "value": "mailto://%41"
+ },
+ {
+  "type": "url",
+  "raw": "postgres://u:p%40ss@h/db",
+  "ok": true,
+  "value": "postgres://u:p%40ss@h/db"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:80a",
+  "ok": true,
+  "value": "mailto:80a"
+ },
+ {
+  "type": "url",
+  "raw": "http:a:/p",
+  "ok": true,
+  "value": "http:a:/p"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:#\t::1#%zz/p",
+  "ok": true,
+  "value": "x+y:#\t::1#%zz/p"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:<?q",
+  "ok": true,
+  "value": "mailto:<?q"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:9]%zz[xn--",
+  "ok": true,
+  "value": "mailto:9]%zz[xn--"
+ },
+ {
+  "type": "url",
+  "raw": "sqlite:app.db",
+  "ok": true,
+  "value": "sqlite:app.db"
+ },
+ {
+  "type": "url",
+  "raw": "file://65536xn--",
+  "ok": true,
+  "value": "file://65536xn--"
+ },
+ {
+  "type": "url",
+  "raw": "ftp://99999?//",
+  "ok": true,
+  "value": "ftp://99999?//"
+ },
+ {
+  "type": "url",
+  "raw": "http://a/%zz",
+  "ok": true,
+  "value": "http://a/%zz"
+ },
+ {
+  "type": "url",
+  "raw": "foo:\\::1'",
+  "ok": true,
+  "value": "foo:\\::1'"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:#bb-",
+  "ok": true,
+  "value": "x+y:#bb-"
+ },
+ {
+  "type": "url",
+  "raw": "redis://:password@host:6379/0",
+  "ok": true,
+  "value": "redis://:password@host:6379/0"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:/^",
+  "ok": true,
+  "value": "mailto:/^"
+ },
+ {
+  "type": "url",
+  "raw": "http://^,@$",
+  "ok": true,
+  "value": "http://^,@$"
+ },
+ {
+  "type": "url",
+  "raw": "https://a65536~",
+  "ok": true,
+  "value": "https://a65536~"
+ },
+ {
+  "type": "url",
+  "raw": "data:!.!",
+  "ok": true,
+  "value": "data:!.!"
+ },
+ {
+  "type": "url",
+  "raw": "ftp://_?",
+  "ok": true,
+  "value": "ftp://_?"
+ },
+ {
+  "type": "url",
+  "raw": "foo:$@",
+  "ok": true,
+  "value": "foo:$@"
+ },
+ {
+  "type": "url",
+  "raw": "data:0$%zz$:-1",
+  "ok": true,
+  "value": "data:0$%zz$:-1"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:\t@z",
+  "ok": true,
+  "value": "mailto:\t@z"
+ },
+ {
+  "type": "url",
+  "raw": "wss://,!`/a b",
+  "ok": true,
+  "value": "wss://,!`/a b"
+ },
+ {
+  "type": "url",
+  "raw": "foo:%/''",
+  "ok": true,
+  "value": "foo:%/''"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:::1^:65535",
+  "ok": true,
+  "value": "mailto:::1^:65535"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:]\t:65536/p",
+  "ok": true,
+  "value": "mailto:]\t:65536/p"
+ },
+ {
+  "type": "url",
+  "raw": "foo:",
+  "ok": true,
+  "value": "foo:"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:[xn--` ::1",
+  "ok": true,
+  "value": "x+y:[xn--` ::1"
+ },
+ {
+  "type": "url",
+  "raw": "ftp:///p",
+  "ok": true,
+  "value": "ftp:///p"
+ },
+ {
+  "type": "url",
+  "raw": "foo:z'b#f",
+  "ok": true,
+  "value": "foo:z'b#f"
+ },
+ {
+  "type": "url",
+  "raw": "ws://'*//",
+  "ok": true,
+  "value": "ws://'*//"
+ },
+ {
+  "type": "url",
+  "raw": "data:'zbxn--b/a b",
+  "ok": true,
+  "value": "data:'zbxn--b/a b"
+ },
+ {
+  "type": "url",
+  "raw": "wss://65536xn--9/%00#f",
+  "ok": true,
+  "value": "wss://65536xn--9/%00#f"
+ },
+ {
+  "type": "url",
+  "raw": "foo:^@@`",
+  "ok": true,
+  "value": "foo:^@@`"
+ },
+ {
+  "type": "url",
+  "raw": "http://.",
+  "ok": true,
+  "value": "http://."
+ },
+ {
+  "type": "url",
+  "raw": "mailto::a",
+  "ok": true,
+  "value": "mailto::a"
+ },
+ {
+  "type": "url",
+  "raw": "http://0300.0250.0.1",
+  "ok": true,
+  "value": "http://0300.0250.0.1"
+ },
+ {
+  "type": "url",
+  "raw": "data:a~80^80/a b",
+  "ok": true,
+  "value": "data:a~80^80/a b"
+ },
+ {
+  "type": "url",
+  "raw": "https://99999",
+  "ok": true,
+  "value": "https://99999"
+ },
+ {
+  "type": "url",
+  "raw": "file://?",
+  "ok": true,
+  "value": "file://?"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:99999\t~65536",
+  "ok": true,
+  "value": "mailto:99999\t~65536"
+ },
+ {
+  "type": "url",
+  "raw": "https://user:p@ss@host",
+  "ok": true,
+  "value": "https://user:p@ss@host"
+ },
+ {
+  "type": "url",
+  "raw": "foo:.:-1?q",
+  "ok": true,
+  "value": "foo:.:-1?q"
+ },
+ {
+  "type": "url",
+  "raw": "data:99999",
+  "ok": true,
+  "value": "data:99999"
+ },
+ {
+  "type": "url",
+  "raw": "x+y://_",
+  "ok": true,
+  "value": "x+y://_"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://*:65535?q",
+  "ok": true,
+  "value": "HTTP://*:65535?q"
+ },
+ {
+  "type": "url",
+  "raw": "http://80//%zza:80",
+  "ok": true,
+  "value": "http://80//%zza:80"
+ },
+ {
+  "type": "url",
+  "raw": "file:////>#f",
+  "ok": true,
+  "value": "file:////>#f"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:",
+  "ok": true,
+  "value": "mailto:"
+ },
+ {
+  "type": "url",
+  "raw": "data:[9 65536?q",
+  "ok": true,
+  "value": "data:[9 65536?q"
+ },
+ {
+  "type": "url",
+  "raw": "ws://localhost:3000/ws",
+  "ok": true,
+  "value": "ws://localhost:3000/ws"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://.",
+  "ok": true,
+  "value": "HTTP://."
+ },
+ {
+  "type": "url",
+  "raw": "mailto:%> \":-1",
+  "ok": true,
+  "value": "mailto:%> \":-1"
+ },
+ {
+  "type": "url",
+  "raw": "mailto::.b%41",
+  "ok": true,
+  "value": "mailto::.b%41"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:z",
+  "ok": true,
+  "value": "mailto:z"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://a",
+  "ok": true,
+  "value": "HTTP://a"
+ },
+ {
+  "type": "url",
+  "raw": "https://\\ab$/p",
+  "ok": true,
+  "value": "https://\\ab$/p"
+ },
+ {
+  "type": "url",
+  "raw": "wss://%41b~/a b",
+  "ok": true,
+  "value": "wss://%41b~/a b"
+ },
+ {
+  "type": "url",
+  "raw": "https:/%41_*99999",
+  "ok": true,
+  "value": "https:/%41_*99999"
+ },
+ {
+  "type": "url",
+  "raw": "http://a99999",
+  "ok": true,
+  "value": "http://a99999"
+ },
+ {
+  "type": "url",
+  "raw": "data:",
+  "ok": true,
+  "value": "data:"
+ },
+ {
+  "type": "url",
+  "raw": "ftp://~~/",
+  "ok": true,
+  "value": "ftp://~~/"
+ },
+ {
+  "type": "url",
+  "raw": "http://a\b",
+  "ok": true,
+  "value": "http://a\b"
+ },
+ {
+  "type": "url",
+  "raw": "http://a..b.com",
+  "ok": true,
+  "value": "http://a..b.com"
+ },
+ {
+  "type": "url",
+  "raw": "data:%80",
+  "ok": true,
+  "value": "data:%80"
+ },
+ {
+  "type": "url",
+  "raw": "http://localhost:3000",
+  "ok": true,
+  "value": "http://localhost:3000"
+ },
+ {
+  "type": "url",
+  "raw": "x+y::",
+  "ok": true,
+  "value": "x+y::"
+ },
+ {
+  "type": "url",
+  "raw": "wss://\"",
+  "ok": true,
+  "value": "wss://\""
+ },
+ {
+  "type": "url",
+  "raw": "x+y:9999965536/\\:99999/a b",
+  "ok": true,
+  "value": "x+y:9999965536/\\:99999/a b"
+ },
+ {
+  "type": "url",
+  "raw": "foo:%zz[/`/p",
+  "ok": true,
+  "value": "foo:%zz[/`/p"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:80",
+  "ok": true,
+  "value": "x+y:80"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:\\_[ :-1",
+  "ok": true,
+  "value": "x+y:\\_[ :-1"
+ },
+ {
+  "type": "url",
+  "raw": "mailto::[9:80?q",
+  "ok": true,
+  "value": "mailto::[9:80?q"
+ },
+ {
+  "type": "url",
+  "raw": "ftp://\"",
+  "ok": true,
+  "value": "ftp://\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/*",
+  "ok": true,
+  "value": "https:/*"
+ },
+ {
+  "type": "url",
+  "raw": "https://example.com:443",
+  "ok": true,
+  "value": "https://example.com:443"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:]?::1-:a",
+  "ok": true,
+  "value": "x+y:]?::1-:a"
+ },
+ {
+  "type": "url",
+  "raw": "amqp://guest:guest@rabbit:5672/",
+  "ok": true,
+  "value": "amqp://guest:guest@rabbit:5672/"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://\":/a b",
+  "ok": true,
+  "value": "HTTP://\":/a b"
+ },
+ {
+  "type": "url",
+  "raw": "https://,",
+  "ok": true,
+  "value": "https://,"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:_$.a/p",
+  "ok": true,
+  "value": "x+y:_$.a/p"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:!:%41-|",
+  "ok": true,
+  "value": "mailto:!:%41-|"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:",
+  "ok": true,
+  "value": "x+y:"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:|",
+  "ok": true,
+  "value": "x+y:|"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:/99999 #f",
+  "ok": true,
+  "value": "x+y:/99999 #f"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:]",
+  "ok": true,
+  "value": "mailto:]"
+ },
+ {
+  "type": "url",
+  "raw": "data:`#",
+  "ok": true,
+  "value": "data:`#"
+ },
+ {
+  "type": "url",
+  "raw": "http://host_name:80",
+  "ok": true,
+  "value": "http://host_name:80"
+ },
+ {
+  "type": "url",
+  "raw": "data:{b!_",
+  "ok": true,
+  "value": "data:{b!_"
+ },
+ {
+  "type": "url",
+  "raw": "http://a.com:08080",
+  "ok": true,
+  "value": "http://a.com:08080"
+ },
+ {
+  "type": "url",
+  "raw": "data:%00%41'\\?",
+  "ok": true,
+  "value": "data:%00%41'\\?"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://{#f",
+  "ok": true,
+  "value": "HTTP://{#f"
+ },
+ {
+  "type": "url",
+  "raw": "foo:>#$'#f",
+  "ok": true,
+  "value": "foo:>#$'#f"
+ },
+ {
+  "type": "url",
+  "raw": "foo:%41.",
+  "ok": true,
+  "value": "foo:%41."
+ },
+ {
+  "type": "url",
+  "raw": "file://",
+  "ok": true,
+  "value": "file://"
+ },
+ {
+  "type": "url",
+  "raw": "http://host:/",
+  "ok": true,
+  "value": "http://host:/"
+ },
+ {
+  "type": "url",
+  "raw": "data:'[#f",
+  "ok": true,
+  "value": "data:'[#f"
+ },
+ {
+  "type": "url",
+  "raw": "https:/6553699999{_'",
+  "ok": true,
+  "value": "https:/6553699999{_'"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://`9b9999999999",
+  "ok": true,
+  "value": "HTTP://`9b9999999999"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:{^#\"~",
+  "ok": true,
+  "value": "x+y:{^#\"~"
+ },
+ {
+  "type": "url",
+  "raw": "postgres://u:p@host:5432/db?sslmode=disable",
+  "ok": true,
+  "value": "postgres://u:p@host:5432/db?sslmode=disable"
+ },
+ {
+  "type": "url",
+  "raw": "https://xn--nxasmq6b.com",
+  "ok": true,
+  "value": "https://xn--nxasmq6b.com"
+ },
+ {
+  "type": "url",
+  "raw": "https://exa_mple.com",
+  "ok": true,
+  "value": "https://exa_mple.com"
+ },
+ {
+  "type": "url",
+  "raw": "http://~~'/p",
+  "ok": true,
+  "value": "http://~~'/p"
+ },
+ {
+  "type": "url",
+  "raw": "https:/65536",
+  "ok": true,
+  "value": "https:/65536"
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--zz-qqq",
+  "ok": true,
+  "value": "http://xn--zz-qqq"
+ },
+ {
+  "type": "url",
+  "raw": "data:.%41%00'",
+  "ok": true,
+  "value": "data:.%41%00'"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:$?#f",
+  "ok": true,
+  "value": "x+y:$?#f"
+ },
+ {
+  "type": "url",
+  "raw": "file://?#0z{:65536",
+  "ok": true,
+  "value": "file://?#0z{:65536"
+ },
+ {
+  "type": "url",
+  "raw": "foo:<",
+  "ok": true,
+  "value": "foo:<"
+ },
+ {
+  "type": "url",
+  "raw": "http://a:0080",
+  "ok": true,
+  "value": "http://a:0080"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:%zz9{#:65535",
+  "ok": true,
+  "value": "x+y:%zz9{#:65535"
+ },
+ {
+  "type": "url",
+  "raw": "foo:_",
+  "ok": true,
+  "value": "foo:_"
+ },
+ {
+  "type": "url",
+  "raw": "foo:]\\\\\t%",
+  "ok": true,
+  "value": "foo:]\\\\\t%"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:::1$",
+  "ok": true,
+  "value": "x+y:::1$"
+ },
+ {
+  "type": "url",
+  "raw": "file://`%41a?:65536/p",
+  "ok": true,
+  "value": "file://`%41a?:65536/p"
+ },
+ {
+  "type": "url",
+  "raw": "ftp://{:",
+  "ok": true,
+  "value": "ftp://{:"
+ },
+ {
+  "type": "url",
+  "raw": "data:>%00z*[:99999",
+  "ok": true,
+  "value": "data:>%00z*[:99999"
+ },
+ {
+  "type": "url",
+  "raw": "data:@ :80",
+  "ok": true,
+  "value": "data:@ :80"
+ },
+ {
+  "type": "url",
+  "raw": "s3://bucket/key",
+  "ok": true,
+  "value": "s3://bucket/key"
+ },
+ {
+  "type": "url",
+  "raw": "http://\t%41:/a b",
+  "ok": true,
+  "value": "http://\t%41:/a b"
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://-",
+  "ok": true,
+  "value": "HTTP://-"
+ },
+ {
+  "type": "url",
+  "raw": "foo:[<?:99999",
+  "ok": true,
+  "value": "foo:[<?:99999"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:\t",
+  "ok": true,
+  "value": "x+y:\t"
+ },
+ {
+  "type": "url",
+  "raw": "data:%<?q",
+  "ok": true,
+  "value": "data:%<?q"
+ },
+ {
+  "type": "url",
+  "raw": "http://80",
+  "ok": true,
+  "value": "http://80"
+ },
+ {
+  "type": "url",
+  "raw": "https:/8080",
+  "ok": true,
+  "value": "https:/8080"
+ },
+ {
+  "type": "url",
+  "raw": "ws://z?b0~",
+  "ok": true,
+  "value": "ws://z?b0~"
+ },
+ {
+  "type": "url",
+  "raw": "foo:_>%00-/a b",
+  "ok": true,
+  "value": "foo:_>%00-/a b"
+ },
+ {
+  "type": "url",
+  "raw": "x+y:?a?q",
+  "ok": true,
+  "value": "x+y:?a?q"
+ },
+ {
+  "type": "url",
+  "raw": "mailto:/a:a/p",
+  "ok": true,
+  "value": "mailto:/a:a/p"
+ },
+ {
+  "type": "url",
+  "raw": "foo: ^9%zz:",
+  "ok": true,
+  "value": "foo: ^9%zz:"
+ },
+ {
+  "type": "url",
+  "raw": "https://[-65536]':80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://[-65536]':80\""
+ },
+ {
+  "type": "url",
+  "raw": "http://exa%00mple",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://exa%00mple\""
+ },
+ {
+  "type": "url",
+  "raw": "http: %00<",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http: %00<\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://>.",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://>.\""
+ },
+ {
+  "type": "url",
+  "raw": "http:.%zz",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:.%zz\""
+ },
+ {
+  "type": "url",
+  "raw": "https:// ?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:// ?q\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://[[xn--:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://[[xn--:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:>",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:>\""
+ },
+ {
+  "type": "url",
+  "raw": "https://a>:65536?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://a>:65536?q\""
+ },
+ {
+  "type": "url",
+  "raw": "`%41%00",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"`%41%00\""
+ },
+ {
+  "type": "url",
+  "raw": "http://:0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://:0080\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/?bb^!",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/?bb^!\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://?q\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://:a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://:a\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:,80a%00%41/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:,80a%00%41/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "https://<>",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://<>\""
+ },
+ {
+  "type": "url",
+  "raw": "http:%00~99999bxn--:0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:%00~99999bxn--:0080\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:#`/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:#`/p\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://%41<^\t#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://%41<^\\t#f\""
+ },
+ {
+  "type": "url",
+  "raw": "b//xn--^a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"b//xn--^a\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://.]*|%zz",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://.]*|%zz\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://%zz~/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://%zz~/\""
+ },
+ {
+  "type": "url",
+  "raw": "http:0%00:|",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:0%00:|\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:z-:-b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:z-:-b\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://xn--:>",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://xn--:>\""
+ },
+ {
+  "type": "url",
+  "raw": "]",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"]\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/[/<\t",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/[/<\\t\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://a:80\"xn--",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://a:80\\\"xn--\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[0:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://[0:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "file://'%/%zz\\:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://'%/%zz\\\\:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://]$0*0",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://]$0*0\""
+ },
+ {
+  "type": "url",
+  "raw": "file://~65536<:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://~65536<:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--%zz",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--%zz\""
+ },
+ {
+  "type": "url",
+  "raw": "*$9:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"*$9:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://% !:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://% !:\""
+ },
+ {
+  "type": "url",
+  "raw": "file://-65536]%",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://-65536]%\""
+ },
+ {
+  "type": "url",
+  "raw": "http://:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://:80\""
+ },
+ {
+  "type": "url",
+  "raw": "file://99999%{",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://99999%{\""
+ },
+ {
+  "type": "url",
+  "raw": "http:a:99999?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:a:99999?q\""
+ },
+ {
+  "type": "url",
+  "raw": "%{`:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"%{`:80\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://a%zz#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://a%zz#f\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:\""
+ },
+ {
+  "type": "url",
+  "raw": "https://<]$",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://<]$\""
+ },
+ {
+  "type": "url",
+  "raw": "http://<:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://<:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://65536\".:z?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://65536\\\".:z?q\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:%41a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:%41a\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "http:\t",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:\\t\""
+ },
+ {
+  "type": "url",
+  "raw": "file://\t%/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://\\t%/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"a\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:#",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:#\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://#!*:a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://#!*:a\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/b:a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/b:a\""
+ },
+ {
+  "type": "url",
+  "raw": "[//:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"[//:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://%00%4199999\\<:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://%00%4199999\\\\<:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "?99999:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"?99999:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "http::80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http::80\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:>080:65535?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:>080:65535?q\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:xn--%[:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:xn--%[:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "http:@?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:@?q\""
+ },
+ {
+  "type": "url",
+  "raw": "http://host%20name",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://host%20name\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/<:65536?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/<:65536?q\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:a$!$",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:a$!$\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://a:-1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://a:-1\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/65536z65536{::",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/65536z65536{::\""
+ },
+ {
+  "type": "url",
+  "raw": "file://65536]\\",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://65536]\\\\\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:b\""
+ },
+ {
+  "type": "url",
+  "raw": "file://:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://:65535\""
+ },
+ {
+  "type": "url",
+  "raw": ":a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \":a\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://80^:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://80^:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "http:///a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:///a b\""
+ },
+ {
+  "type": "url",
+  "raw": " //",
+  "ok": false,
+  "error": "V: expected an absolute url, got \" //\""
+ },
+ {
+  "type": "url",
+  "raw": "http://|:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://|:\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:%00",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:%00\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://:0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://:0080\""
+ },
+ {
+  "type": "url",
+  "raw": "http://{@:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://{@:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://>^._%00",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://>^._%00\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://?@",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://?@\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://<#a0 ",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://<#a0 \""
+ },
+ {
+  "type": "url",
+  "raw": "https:/>#/<",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/>#/<\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:80@",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:80@\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://%zz#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://%zz#f\""
+ },
+ {
+  "type": "url",
+  "raw": "~{!",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"~{!\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/@:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/@:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "http:@::1:-1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:@::1:-1\""
+ },
+ {
+  "type": "url",
+  "raw": "file://:80/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://:80/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://::165536?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://::165536?q\""
+ },
+ {
+  "type": "url",
+  "raw": "///",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"///\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:?q\""
+ },
+ {
+  "type": "url",
+  "raw": "file://`@:0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://`@:0080\""
+ },
+ {
+  "type": "url",
+  "raw": "file://@%",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://@%\""
+ },
+ {
+  "type": "url",
+  "raw": "https:///%@:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:///%@:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://]65536a0",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://]65536a0\""
+ },
+ {
+  "type": "url",
+  "raw": "wss:// \\*/\"",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss:// \\\\*/\\\"\""
+ },
+ {
+  "type": "url",
+  "raw": "http://$%00>*/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://$%00>*/p\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:80//",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:80//\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/<{0:a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/<{0:a\""
+ },
+ {
+  "type": "url",
+  "raw": "https://^||\t::0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://^||\\t::0080\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/:\"$ :",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/:\\\"$ :\""
+ },
+ {
+  "type": "url",
+  "raw": "https://[$#//%zz",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://[$#//%zz\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://~a@:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://~a@:80\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://]|<",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://]|<\""
+ },
+ {
+  "type": "url",
+  "raw": "https://:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:'\\]%zz:0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:'\\\\]%zz:0080\""
+ },
+ {
+  "type": "url",
+  "raw": "z\"*:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"z\\\"*:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "*\"b?",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"*\\\"b?\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://#xn--/#",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://#xn--/#\""
+ },
+ {
+  "type": "url",
+  "raw": "<%[",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"<%[\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:#%41':65536?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:#%41':65536?q\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://::1/$_0",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://::1/$_0\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:^%00",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:^%00\""
+ },
+ {
+  "type": "url",
+  "raw": "/:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"/:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://:\""
+ },
+ {
+  "type": "url",
+  "raw": "http://_::-1/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://_::-1/p\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://.%00#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://.%00#f\""
+ },
+ {
+  "type": "url",
+  "raw": "http://\"^?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://\\\"^?q\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://90 :0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://90 :0080\""
+ },
+ {
+  "type": "url",
+  "raw": "file://\t%zz",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://\\t%zz\""
+ },
+ {
+  "type": "url",
+  "raw": "http://@::1::1:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://@::1::1:80\""
+ },
+ {
+  "type": "url",
+  "raw": "%41",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"%41\""
+ },
+ {
+  "type": "url",
+  "raw": ":",
+  "ok": false,
+  "error": "V: expected an absolute url, got \":\""
+ },
+ {
+  "type": "url",
+  "raw": "http::65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http::65536\""
+ },
+ {
+  "type": "url",
+  "raw": "http://0x100000000",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://0x100000000\""
+ },
+ {
+  "type": "url",
+  "raw": "/z",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"/z\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:@^xn-- ",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:@^xn-- \""
+ },
+ {
+  "type": "url",
+  "raw": "http:%zz:-1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:%zz:-1\""
+ },
+ {
+  "type": "url",
+  "raw": "http:%00$ ^/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:%00$ ^/p\""
+ },
+ {
+  "type": "url",
+  "raw": "https://",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://\""
+ },
+ {
+  "type": "url",
+  "raw": "wss:// :99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss:// :99999\""
+ },
+ {
+  "type": "url",
+  "raw": "https://|{#/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://|{#/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "\"$%",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"\\\"$%\""
+ },
+ {
+  "type": "url",
+  "raw": "https://>",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://>\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://]^:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://]^:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:0'>\":65536?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:0'>\\\":65536?q\""
+ },
+ {
+  "type": "url",
+  "raw": "file://'^.>@",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://'^.>@\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/~-|%00#",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/~-|%00#\""
+ },
+ {
+  "type": "url",
+  "raw": "file://9.<",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://9.<\""
+ },
+ {
+  "type": "url",
+  "raw": "http:!65536!]:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:!65536!]:65535\""
+ },
+ {
+  "type": "url",
+  "raw": ":0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \":0080\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://>#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://>#f\""
+ },
+ {
+  "type": "url",
+  "raw": "[![@|",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"[![@|\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://%*::1/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://%*::1/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "|b!0::1:0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"|b!0::1:0080\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/%00\"z`/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/%00\\\"z`/p\""
+ },
+ {
+  "type": "url",
+  "raw": "1a::",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a::\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://.@%00<\t:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://.@%00<\\t:80\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[::1]:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://[::1]:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://a{>",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://a{>\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://^::-1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://^::-1\""
+ },
+ {
+  "type": "url",
+  "raw": "http:]\"//_0",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:]\\\"//_0\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://_<[80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://_<[80\""
+ },
+ {
+  "type": "url",
+  "raw": "*~/<b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"*~/<b\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a<b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a<b\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:%00\"",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:%00\\\"\""
+ },
+ {
+  "type": "url",
+  "raw": ",@b:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \",@b:\""
+ },
+ {
+  "type": "url",
+  "raw": "http:80^<[,?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:80^<[,?q\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "https://^",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://^\""
+ },
+ {
+  "type": "url",
+  "raw": "http:/65536[# :99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:/65536[# :99999\""
+ },
+ {
+  "type": "url",
+  "raw": "http:%",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:%\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://:-1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://:-1\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/?q\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:$#\t{?",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:$#\\t{?\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:0`b//::1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:0`b//::1\""
+ },
+ {
+  "type": "url",
+  "raw": "file://%zz65536*'",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://%zz65536*'\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[::g]",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://[::g]\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:%41$80:<",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:%41$80:<\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://[%{$",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://[%{$\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://xn-- `[b?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://xn-- `[b?q\""
+ },
+ {
+  "type": "url",
+  "raw": "https://::99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://::99999\""
+ },
+ {
+  "type": "url",
+  "raw": "http:////|@?!:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:////|@?!:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "\"@~>:a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"\\\"@~>:a\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://%zz",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://%zz\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://?q\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/9 ]%:-1/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/9 ]%:-1/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/xn--/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/xn--/p\""
+ },
+ {
+  "type": "url",
+  "raw": "http:?|%zz*.#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:?|%zz*.#f\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP:////^",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP:////^\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://%41]%zz']",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://%41]%zz']\""
+ },
+ {
+  "type": "url",
+  "raw": "https://%41::1?:\t",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://%41::1?:\\t\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:`",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:`\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://9[:0080/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://9[:0080/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://|'",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://|'\""
+ },
+ {
+  "type": "url",
+  "raw": "`|9/:-1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"`|9/:-1\""
+ },
+ {
+  "type": "url",
+  "raw": "http:0-^<`",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:0-^<`\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://%00",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://%00\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:a#/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:a#/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "http://%00\"b'",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://%00\\\"b'\""
+ },
+ {
+  "type": "url",
+  "raw": "http://|'",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://|'\""
+ },
+ {
+  "type": "url",
+  "raw": "http:/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "http://~$:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://~$:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://@:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://@:80\""
+ },
+ {
+  "type": "url",
+  "raw": "http://<^99999xn--{",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://<^99999xn--{\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:z //!",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:z //!\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://[]?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://[]?q\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a%2",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a%2\""
+ },
+ {
+  "type": "url",
+  "raw": "http:%41%%zz!-",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:%41%%zz!-\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://~|>/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://~|>/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "file://%zz`80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://%zz`80\""
+ },
+ {
+  "type": "url",
+  "raw": "ws:///a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws:///a b\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://^\"a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://^\\\"a\""
+ },
+ {
+  "type": "url",
+  "raw": "https:///",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:///\""
+ },
+ {
+  "type": "url",
+  "raw": "http:80:]",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:80:]\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://<\"?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://<\\\"?q\""
+ },
+ {
+  "type": "url",
+  "raw": "?a\">99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"?a\\\">99999\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a%2Fb",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a%2Fb\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:\"??:a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:\\\"??:a\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://\\[<::1:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://\\\\[<::1:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:9/z^%:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:9/z^%:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://\":99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://\\\":99999\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/$\t-65536:-1#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/$\\t-65536:-1#f\""
+ },
+ {
+  "type": "url",
+  "raw": "https://$.%",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://$.%\""
+ },
+ {
+  "type": "url",
+  "raw": "http:*! :",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:*! :\""
+ },
+ {
+  "type": "url",
+  "raw": "https://|{:{",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://|{:{\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/%:99999/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/%:99999/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://^/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://^/\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:$-",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:$-\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://~%~:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://~%~:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:'/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:'/p\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--'%00<::1/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--'%00<::1/p\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp:////.%zz:-1/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp:////.%zz:-1/p\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:{|#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:{|#f\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://<%00",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://<%00\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://[!a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://[!a\""
+ },
+ {
+  "type": "url",
+  "raw": "http:<?",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:<?\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://\"%zz|-!:65536/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://\\\"%zz|-!:65536/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://#$.`",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://#$.`\""
+ },
+ {
+  "type": "url",
+  "raw": "file://::1xn--99999!b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://::1xn--99999!b\""
+ },
+ {
+  "type": "url",
+  "raw": "https://%zz",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://%zz\""
+ },
+ {
+  "type": "url",
+  "raw": "https://\\~%zz|:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://\\\\~%zz|:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a%",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a%\""
+ },
+ {
+  "type": "url",
+  "raw": "$:0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"$:0080\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://,^\\",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://,^\\\\\""
+ },
+ {
+  "type": "url",
+  "raw": "https://\"%00*:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://\\\"%00*:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "http:80::1//",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:80::1//\""
+ },
+ {
+  "type": "url",
+  "raw": "https://80bb|",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://80bb|\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:0~!//#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:0~!//#f\""
+ },
+ {
+  "type": "url",
+  "raw": "~{~'80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"~{~'80\""
+ },
+ {
+  "type": "url",
+  "raw": "https://ex ample.com",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://ex ample.com\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://\\^-[",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://\\\\^-[\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "http:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:\""
+ },
+ {
+  "type": "url",
+  "raw": "https://%00\"<:99999",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://%00\\\"<:99999\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a:b@",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a:b@\""
+ },
+ {
+  "type": "url",
+  "raw": "file://800@-",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://800@-\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://[",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://[\""
+ },
+ {
+  "type": "url",
+  "raw": "http:#80\\",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:#80\\\\\""
+ },
+ {
+  "type": "url",
+  "raw": "file://~|?%%41",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://~|?%%41\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://|::1[",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://|::1[\""
+ },
+ {
+  "type": "url",
+  "raw": "$^^-:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"$^^-:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://%00z",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://%00z\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/_\t^",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/_\\t^\""
+ },
+ {
+  "type": "url",
+  "raw": "http:']%00!:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:']%00!:80\""
+ },
+ {
+  "type": "url",
+  "raw": "file://>",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://>\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://~9>",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://~9>\""
+ },
+ {
+  "type": "url",
+  "raw": "http://z::1`\"-:99999/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://z::1`\\\"-:99999/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP:// ",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP:// \""
+ },
+ {
+  "type": "url",
+  "raw": "^,~%00",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"^,~%00\""
+ },
+ {
+  "type": "url",
+  "raw": "http://^%xn--z*:#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://^%xn--z*:#f\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/z::1::1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/z::1::1\""
+ },
+ {
+  "type": "url",
+  "raw": "_]:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"_]:80\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:/p\""
+ },
+ {
+  "type": "url",
+  "raw": "https://::1//!9!",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://::1//!9!\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://?9999965536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://?9999965536\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:\t[",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:\\t[\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://:]<|:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://:]<|:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "http://ex|ample",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://ex|ample\""
+ },
+ {
+  "type": "url",
+  "raw": "file://aa@",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://aa@\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://\t\t?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://\\t\\t?q\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://%,-:0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://%,-:0080\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://80|::1 _",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://80|::1 _\""
+ },
+ {
+  "type": "url",
+  "raw": "https://9-%zz//\t:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://9-%zz//\\t:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://{|::1.>",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://{|::1.>\""
+ },
+ {
+  "type": "url",
+  "raw": "https://^::a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://^::a\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://:?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://:?q\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:b65536<b@:0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:b65536<b@:0080\""
+ },
+ {
+  "type": "url",
+  "raw": "file://:#%009:99999/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://:#%009:99999/p\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a:80x",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a:80x\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/'`>::1%",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/'`>::1%\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://:80\""
+ },
+ {
+  "type": "url",
+  "raw": "////>^",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"////>^\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:a<^",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:a<^\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp:// \\",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp:// \\\\\""
+ },
+ {
+  "type": "url",
+  "raw": "http://:%41<::1?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://:%41<::1?q\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://\"%#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://\\\"%#f\""
+ },
+ {
+  "type": "url",
+  "raw": "file://~[%zz:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://~[%zz:80\""
+ },
+ {
+  "type": "url",
+  "raw": "/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"/p\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://-[",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://-[\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://@:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://@:\""
+ },
+ {
+  "type": "url",
+  "raw": "https://@",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://@\""
+ },
+ {
+  "type": "url",
+  "raw": "9%00{:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"9%00{:\""
+ },
+ {
+  "type": "url",
+  "raw": "http://@",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://@\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:*a~]::1:-1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:*a~]::1:-1\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://$\t<\t%41",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://$\\t<\\t%41\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://%80>>xn--",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://%80>>xn--\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://| 9{",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://| 9{\""
+ },
+ {
+  "type": "url",
+  "raw": "file://.%zz/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://.%zz/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "file://xn--@:/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://xn--@:/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "file://~|-~//",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://~|-~//\""
+ },
+ {
+  "type": "url",
+  "raw": "https://\"<:?::80/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://\\\"<:?::80/p\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/^>b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/^>b\""
+ },
+ {
+  "type": "url",
+  "raw": "http:xn--:#",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:xn--:#\""
+ },
+ {
+  "type": "url",
+  "raw": "https://~9b::1xn--",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://~9b::1xn--\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://]xn--!",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://]xn--!\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://%%00%/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://%%00%/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "http://'`:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://'`:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/<65536b]",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/<65536b]\""
+ },
+ {
+  "type": "url",
+  "raw": "[",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"[\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://\"%%#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://\\\"%%#f\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:0",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:0\""
+ },
+ {
+  "type": "url",
+  "raw": "file://xn--,",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://xn--,\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://?9a,[",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://?9a,[\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[1:2:3:4:5:6:7:8:9]",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://[1:2:3:4:5:6:7:8:9]\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP:// >:",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP:// >:\""
+ },
+ {
+  "type": "url",
+  "raw": "https://>^\"#65536:a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://>^\\\"#65536:a\""
+ },
+ {
+  "type": "url",
+  "raw": "https://,%00xn--:0080#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://,%00xn--:0080#f\""
+ },
+ {
+  "type": "url",
+  "raw": "%00##f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"%00##f\""
+ },
+ {
+  "type": "url",
+  "raw": "http:%!:-1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:%!:-1\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://80[\"`%41",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://80[\\\"`%41\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://'%zz\ta'/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://'%zz\\ta'/p\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:`!/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:`!/p\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://%",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://%\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "ftp://#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ftp://#f\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://a]\\/^",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://a]\\\\/^\""
+ },
+ {
+  "type": "url",
+  "raw": "http://-%41~%:65535",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://-%41~%:65535\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a%20b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a%20b\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://@xn--",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://@xn--\""
+ },
+ {
+  "type": "url",
+  "raw": "HTTP://\"@:65536",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"HTTP://\\\"@:65536\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:%zz",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:%zz\""
+ },
+ {
+  "type": "url",
+  "raw": "file://.[a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://.[a\""
+ },
+ {
+  "type": "url",
+  "raw": "http::0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http::0080\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a^b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a^b\""
+ },
+ {
+  "type": "url",
+  "raw": "file://>~%zz",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://>~%zz\""
+ },
+ {
+  "type": "url",
+  "raw": "https://:!'%00{:65536?q",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https://:!'%00{:65536?q\""
+ },
+ {
+  "type": "url",
+  "raw": "wss://]",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"wss://]\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:] :",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:] :\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a@",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a@\""
+ },
+ {
+  "type": "url",
+  "raw": "file://z%00#f",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://z%00#f\""
+ },
+ {
+  "type": "url",
+  "raw": "::1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"::1\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:z:a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:z:a\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://_[",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://_[\""
+ },
+ {
+  "type": "url",
+  "raw": "https:/%zz^^$:a",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"https:/%zz^^$:a\""
+ },
+ {
+  "type": "url",
+  "raw": "1a:/a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"1a:/a b\""
+ },
+ {
+  "type": "url",
+  "raw": "http://::0080",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://::0080\""
+ },
+ {
+  "type": "url",
+  "raw": "file://\t-|z",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://\\t-|z\""
+ },
+ {
+  "type": "url",
+  "raw": "http://%zz::1~:80",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://%zz::1~:80\""
+ },
+ {
+  "type": "url",
+  "raw": "file://::1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"file://::1\""
+ },
+ {
+  "type": "url",
+  "raw": "http:'<[-%",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http:'<[-%\""
+ },
+ {
+  "type": "url",
+  "raw": "_99999:-1/p",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"_99999:-1/p\""
+ },
+ {
+  "type": "url",
+  "raw": "redis://a<b/x",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"redis://a<b/x\""
+ },
+ {
+  "type": "url",
+  "raw": "redis://a b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"redis://a b\""
+ },
+ {
+  "type": "url",
+  "raw": "redis://a^b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"redis://a^b\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[::1]x",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://[::1]x\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[::1]:80x",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://[::1]:80x\""
+ },
+ {
+  "type": "url",
+  "raw": "http://[1.2.3.4]",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://[1.2.3.4]\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a%01b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a%01b\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a%25b",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a%25b\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a%7fb",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a%7fb\""
+ },
+ {
+  "type": "url",
+  "raw": "http://1.2.3.4.0",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://1.2.3.4.0\""
+ },
+ {
+  "type": "url",
+  "raw": "http://1.2.3.4.",
+  "ok": true,
+  "value": "http://1.2.3.4."
+ },
+ {
+  "type": "url",
+  "raw": "http://0300.1",
+  "ok": true,
+  "value": "http://0300.1"
+ },
+ {
+  "type": "url",
+  "raw": "http://09.1",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://09.1\""
+ },
+ {
+  "type": "url",
+  "raw": "http://0x.1",
+  "ok": true,
+  "value": "http://0x.1"
+ },
+ {
+  "type": "url",
+  "raw": "http://1.0x",
+  "ok": true,
+  "value": "http://1.0x"
+ },
+ {
+  "type": "url",
+  "raw": "http://a.0x1g",
+  "ok": true,
+  "value": "http://a.0x1g"
+ },
+ {
+  "type": "url",
+  "raw": "http://x",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://x\""
+ }
+]

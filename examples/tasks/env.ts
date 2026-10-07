@@ -8,6 +8,9 @@ export const env = defineEnv({
     // the sqlite file the go api opens - declared so a malformed environment
     // is a named boot refusal, not a first-request surprise
     DB_PATH: { default: "tasks.db" },
+    // where borgo.Uploads keeps attachments: gitignored in development, a
+    // volume in a container (the Dockerfile sets /data/uploads)
+    UPLOADS_DIR: { default: "uploads" },
     HTTP_TIMEOUT_MS: { type: "number", default: 30_000 },
     // ci plants a value here and greps the built assets for it: a server
     // variable must never reach the browser

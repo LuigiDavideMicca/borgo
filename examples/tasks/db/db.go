@@ -2,22 +2,20 @@ package db
 
 import (
 	"log"
-	"os"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+
+	"tasks/env"
 )
 
 var DB *gorm.DB
 
 func Connect() {
-	path := os.Getenv("DB_PATH")
-	if path == "" {
-		path = "tasks.db"
-	}
-
+	// env.ts declares DB_PATH and its default; env/env.gen.go reads it
+	// with the same rules, so the default lives in one place
 	var err error
-	DB, err = gorm.Open(sqlite.Open(path), &gorm.Config{})
+	DB, err = gorm.Open(sqlite.Open(env.Must().DB_PATH), &gorm.Config{})
 	if err != nil {
 		log.Fatal("can't open database: ", err)
 	}

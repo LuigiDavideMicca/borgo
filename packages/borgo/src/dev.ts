@@ -67,7 +67,7 @@ export function createContentDedup(read: (file: string) => Uint8Array | Buffer) 
   };
 }
 // output dirs are ignored only at the root: an app dir sharing a name stays watched
-const ignored = /(^|[\\/])(node_modules|\.git)([\\/]|$)|^(\.borgo|public|dist)([\\/]|$)|borgo\.gen\.go$/;
+export const ignored = /(^|[\\/])(node_modules|\.git)([\\/]|$)|^(\.borgo|public|dist)([\\/]|$)|(borgo|env)\.gen\.go$/;
 
 // The app's own write targets, read from .gitignore: an app that stores
 // uploads, a sqlite file or a cache inside its own directory storms this
@@ -290,8 +290,8 @@ export async function dev() {
     // a clean go build restarted the api with STALE types - the drift the
     // generator exists to make impossible. the api keeps serving; the types
     // wait for the fix, and the line says which of the two is stale
-    if (!(await runBorgogen())) {
-      console.error(`  ${c.red(g.err)} borgogen failed - the api restarts, but the generated types are stale until the next good save`);
+    if (!(await runBorgogen({ fresh: true }))) {
+      console.error(`  ${c.red(g.err)} code generation failed (api types or the go env package) - the api restarts, but generated code is stale until the next good save`);
     }
     const build = Bun.spawn(["go", "build", "-o", goNext, "."], {
       stdout: "inherit",
@@ -471,6 +471,8 @@ export async function dev() {
     if (!side) return;
     if (side !== "css" && dedup.isUnchanged(file)) return;
     schedule(normalized, side);
+    // the go side's env package is written from env.ts
+    if (normalized === "env.ts") schedule(normalized, "api");
   });
 
   process.on("SIGINT", () => process.exit(0));

@@ -129,15 +129,15 @@ describe("the two refusals", () => {
     expect(envRefusal([])).toBeNull();
     expect(
       envRefusal([
-        { failures: ["A: missing"], clientFailures: [], clientNames: [], clientValues: {} },
-        { failures: ["B: bad"], clientFailures: [], clientNames: [], clientValues: {} },
+        { failures: ["A: missing"], clientFailures: [], clientNames: [], clientValues: {}, serverSpecs: {} },
+        { failures: ["B: bad"], clientFailures: [], clientNames: [], clientValues: {}, serverSpecs: {} },
       ]),
     ).toContain("2 variables");
   });
 
   test("clientEnvRefusal fires only on client failures - the build does not own server secrets", () => {
     const serverBroken = [
-      { failures: ["SECRET: missing"], clientFailures: [], clientNames: [], clientValues: {} },
+      { failures: ["SECRET: missing"], clientFailures: [], clientNames: [], clientValues: {}, serverSpecs: {} },
     ];
     expect(clientEnvRefusal(serverBroken)).toBeNull();
     const clientBroken = [
@@ -146,6 +146,7 @@ describe("the two refusals", () => {
         clientFailures: ["BORGO_PUBLIC_X: missing"],
         clientNames: ["BORGO_PUBLIC_X"],
         clientValues: {},
+        serverSpecs: {},
       },
     ];
     expect(clientEnvRefusal(clientBroken)).toContain("BORGO_PUBLIC_X");
@@ -165,6 +166,7 @@ describe("the define the build ships", () => {
       clientFailures: [],
       clientNames: ["BORGO_PUBLIC_NAME"],
       clientValues: { BORGO_PUBLIC_NAME: value },
+      serverSpecs: {},
     });
     expect(() => clientEnvDefine([meta("first"), meta("second")])).toThrow(
       "one variable, one source of truth",
@@ -178,6 +180,7 @@ describe("the define the build ships", () => {
         clientFailures: [],
         clientNames: ["BORGO_PUBLIC_A", "BORGO_PUBLIC_B"],
         clientValues: { BORGO_PUBLIC_A: "x", BORGO_PUBLIC_B: undefined },
+        serverSpecs: {},
       },
     ]);
     expect(JSON.parse(define.__BORGO_CLIENT_ENV__)).toEqual({ BORGO_PUBLIC_A: "x" });

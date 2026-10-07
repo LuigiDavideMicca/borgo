@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { makeApiClient, type ApiClient } from "./api";
 import { c, g } from "./colors";
+import { writeGoEnv } from "./env-go";
 import { documentStream, gzipStream, pickEncoding } from "./compress";
 import { CSRF_COOKIE, CSRF_FIELD, csrfCookieValue } from "./index";
 import { withCsrf } from "./internal";
@@ -1259,7 +1260,15 @@ export async function runPropsRequest(
 
 // regenerates .borgo/api-types.d.ts via go.mod's `tool` directive; build and
 // export refuse on false, dev keeps serving
-export async function runBorgogen(): Promise<boolean> {
+export async function runBorgogen({ fresh = false }: { fresh?: boolean } = {}): Promise<boolean> {
+  // env/env.gen.go first: the go build that follows compiles it, and an
+  // app with no api/ still has a go side that may read the environment
+  try {
+    await writeGoEnv(process.cwd(), { fresh });
+  } catch (error) {
+    console.error(`  ${c.red(g.err)} ${(error as Error).message}`);
+    return false;
+  }
   if (!existsSync("api")) return true;
   const proc = Bun.spawn(["go", "tool", "borgogen"], { stdout: "ignore", stderr: "pipe" });
   if ((await proc.exited) !== 0) {

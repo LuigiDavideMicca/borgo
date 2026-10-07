@@ -4,12 +4,12 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/LuigiDavideMicca/borgo"
 	"gorm.io/gorm"
 
 	"tasks/db"
+	"tasks/env"
 )
 
 // the form of an upload: a note and a file, read with borgo.BindMultipart,
@@ -39,14 +39,7 @@ type AttachmentView struct {
 
 // gitignored in development, so the dev watcher never rebuilds on an upload;
 // in a container, a volume at /data (see the Dockerfile)
-var uploads = &borgo.Uploads{Dir: uploadsDir()}
-
-func uploadsDir() string {
-	if dir := os.Getenv("UPLOADS_DIR"); dir != "" {
-		return dir
-	}
-	return "uploads"
-}
+var uploads = &borgo.Uploads{Dir: env.Must().UPLOADS_DIR}
 
 // how many files one user keeps: the oldest go when an upload passes it
 const keptAttachments = 20

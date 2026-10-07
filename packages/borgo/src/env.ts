@@ -69,6 +69,18 @@ export type EnvMeta = {
   clientFailures: string[];
   clientNames: string[];
   clientValues: Record<string, unknown>;
+  // the server half's declarations, values left out: what the build writes
+  // the go side's env package from (env/env.gen.go), so both halves read one
+  // contract
+  serverSpecs: Record<string, ServerSpec>;
+};
+
+export type ServerSpec = {
+  type: EnvType;
+  optional: boolean;
+  default?: string | number | boolean;
+  // a validate spec: javascript the go side cannot run, so it reads the raw string
+  validated: boolean;
 };
 
 export const ENV_META = Symbol.for("borgo.env");
@@ -310,7 +322,16 @@ export function defineEnv<const S extends EnvSchema>(
         failures.map((f) => `  - ${f}`).join("\n"),
     );
 
-  const meta: EnvMeta = { failures, clientFailures, clientNames: Object.keys(client), clientValues };
+  const serverSpecs: Record<string, ServerSpec> = {};
+  for (const [name, spec] of Object.entries(server)) {
+    serverSpecs[name] = {
+      type: spec.type ?? "string",
+      optional: spec.optional === true,
+      ...(spec.default !== undefined ? { default: spec.default } : {}),
+      validated: typeof spec.validate === "function",
+    };
+  }
+  const meta: EnvMeta = { failures, clientFailures, clientNames: Object.keys(client), clientValues, serverSpecs };
 
   // a proxy rather than a frozen object, for the two reads that must fail by
   // name: a server variable asked for in the browser, and any variable asked

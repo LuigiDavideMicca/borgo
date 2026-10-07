@@ -129,6 +129,7 @@ export async function appEnvMetas(
     meta.failures ??= [];
     meta.clientFailures ??= [];
     meta.clientNames ??= [];
+    meta.serverSpecs ??= {};
   }
   memo.set(key, app);
   return app;

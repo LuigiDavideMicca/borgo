@@ -3,22 +3,19 @@ package main
 import (
 	"context"
 	"log"
-	"os"
 
 	"github.com/LuigiDavideMicca/borgo"
 
 	_ "{{name}}/api"
 	"{{name}}/db"
+	"{{name}}/env"
 )
 
 func main() {
-	// DB_PATH is declared in env.ts with its default; the schema is current
+	// env/env.gen.go is written from env.ts by borgo build and borgo dev:
+	// DB_PATH and its default are declared there once. The schema is current
 	// before anything is served
-	path := os.Getenv("DB_PATH")
-	if path == "" {
-		path = "app.db"
-	}
-	if err := db.Open(context.Background(), path); err != nil {
+	if err := db.Open(context.Background(), env.Must().DB_PATH); err != nil {
 		log.Fatal(err)
 	}
 
