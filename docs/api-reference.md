@@ -326,7 +326,7 @@ The five `BORGO_*_TIMEOUT` entries are Go duration strings; `BORGO_HASH_SLOTS` i
 | `BORGO_DEBUG` | `1` is the `--debug` flag for a build that has no command line. Read by the build alone, and only `1` — it is not one of the boolean switches above. | internal |
 | `BORGO_FORCE_PROMPT` | Test hook: forces `create-borgo`'s interactive path. | internal |
 | `BORGO_SPAWN_TIMEOUT_MS` | Test hook: overrides the deadlines `create-borgo` gives the tools it spawns. | internal |
-| `NODE_ENV` | Not read at runtime — it is a build-time `define` substituted into client bundles. | internal |
+| `NODE_ENV` | A build-time `define` in client bundles; on the server, React picks its production or development build by it when first loaded, so `borgo start` sets `production` when it is unset, re-execing to do it. | internal |
 
 `DB_PATH`, which appears in the deploy samples and the example app, is the *application's* variable, not borgo's.
 
@@ -340,7 +340,7 @@ Run from an app root — the directory holding `pages/`.
 | --- | --- | --- |
 | `borgo dev` | Starts both servers, watches, fast-refreshes. | stable |
 | `borgo build` | Runs `borgogen`, builds client assets into `public/assets/`, compiles the Go binary into `dist/`. | stable |
-| `borgo start` | Runs from build output, supervising both processes. Rebuilds automatically if `public/assets` holds a dev build. Re-execs itself once with `BUN_CONFIG_MAX_HTTP_REQUESTS=16384` when nothing set it — the supervisor forwards signals and exits with the child's code. | stable |
+| `borgo start` | Runs from build output, supervising both processes. Rebuilds automatically if `public/assets` holds a dev build. Re-execs itself once with `BUN_CONFIG_MAX_HTTP_REQUESTS=16384` and `NODE_ENV=production` when either is unset, keeping a value that was given — the supervisor forwards signals and exits with the child's code. | stable |
 | `borgo export` | Static site into `dist/site/`. | stable |
 | `borgo deploy init <caddy\|nginx\|systemd\|compose>` | Writes a deploy config. | stable |
 | `borgo pwa init` | Writes `public/manifest.webmanifest` and a service worker. | stable |
