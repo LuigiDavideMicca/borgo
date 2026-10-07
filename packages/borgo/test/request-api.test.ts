@@ -55,3 +55,15 @@ test("a request with no cookie gains them call by call, and loses one with no he
   expect(sent).toEqual([undefined, "borgo_session=s", "borgo_session=s; theme=dark", "theme=dark", undefined]);
   expect(defaults).toEqual({});
 });
+
+// the client a page request came from travels with its api calls, but only
+// when the go front wrote it: anywhere else it is whatever the client typed
+test("forwardedClient restates what the front saw, in render mode only", async () => {
+  const { forwardedClient, PEER_HEADER } = await import("../src/util");
+  const req = new Request("http://app/login", {
+    headers: { [PEER_HEADER]: "203.0.113.7:5151", "X-Forwarded-For": "203.0.113.7", "X-Forwarded-Proto": "https", cookie: "a=1" },
+  });
+  expect(forwardedClient(req, true)).toEqual({ [PEER_HEADER]: "203.0.113.7:5151", "X-Forwarded-For": "203.0.113.7", "X-Forwarded-Proto": "https" });
+  expect(forwardedClient(req, false)).toEqual({});
+  expect(forwardedClient(new Request("http://app/"), true)).toEqual({});
+});

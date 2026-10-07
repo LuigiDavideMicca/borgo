@@ -401,6 +401,23 @@ export type Switches = {
 export const INTERNAL_KEY_HEADER = "X-Borgo-Internal";
 export const SESSION_HEADER = "X-Borgo-Session";
 export const LOCALS_HEADER = "X-Borgo-Locals";
+// the address the go front saw the page request come from, restated on the
+// api calls a loader or action makes so the api sees that client, not this
+// process (front.go, peerHeader)
+export const PEER_HEADER = "X-Borgo-Peer";
+
+// what a page request's api calls carry about its client: the peer the
+// front saw and the forwarded chain - only in render mode, where the front
+// wrote them; anywhere else they are whatever the client typed
+export function forwardedClient(req: Request, render: boolean): Record<string, string> {
+  if (!render) return {};
+  const out: Record<string, string> = {};
+  for (const name of [PEER_HEADER, "X-Forwarded-For", "X-Forwarded-Proto"]) {
+    const value = req.headers.get(name);
+    if (value) out[name] = value;
+  }
+  return out;
+}
 
 // What api/middleware.go forwarded with borgo.Forward, under the same rule as
 // the session and for the same reason: believed only in render mode, where

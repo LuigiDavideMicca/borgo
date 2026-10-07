@@ -29,6 +29,7 @@ import { answerForDoor, decidePage, resolvePageMiddleware } from "./page-middlew
 import { canonicalPath, matchRoute, safeDecode, type Route } from "./router";
 import {
   csrfRejects,
+  forwardedClient,
   requestApiClient,
   decodeChanged,
   headResponse,
@@ -370,7 +371,7 @@ export async function serve({
   // the browser's cookies go to go, so handlers see the session during ssr
   // and actions; set-cookie headers coming back are forwarded to the browser
   const apiFor = (req: Request, onSetCookie?: (cookies: string[]) => void) =>
-    requestApiClient(api, apiDefaults, req.headers.get("cookie"), onSetCookie, apiRetries);
+    requestApiClient(api, { ...apiDefaults, ...forwardedClient(req, render) }, req.headers.get("cookie"), onSetCookie, apiRetries);
 
   const runLoader = (
     req: Request,

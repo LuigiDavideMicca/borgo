@@ -46,6 +46,14 @@ const (
 	// client forwards it to the internal listener, where this side verifies
 	// it - so the claim is about the KEY, not about the credential
 	sessionHeader = "X-Borgo-Session"
+	// the address the front saw the page request come from. A loader's or
+	// an action's call to the api reaches the internal listener from the
+	// render service on loopback, so api/middleware.go - a rate limiter
+	// keyed on RemoteAddr, say - saw 127.0.0.1 for every form-action login
+	// (found by the audit of phase 7). The render service hands this back
+	// on its api calls, and the internal listener, once the boot key
+	// checked out, makes it the request's RemoteAddr
+	peerHeader = "X-Borgo-Peer"
 	// the hmac keys the session with 32 bytes; the key that guards the
 	// listener carrying that session is held to the same floor
 	internalKeyMinLen = 32
@@ -204,6 +212,15 @@ func requireInternalKey(key string, next http.Handler) http.Handler {
 			log.Printf("borgo: internal listener refused %s %s from %s: missing or wrong %s", r.Method, r.URL.Path, r.RemoteAddr, internalKeyHeader)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
+		}
+		// believed only past the key: the render service is restating what
+		// the front saw, and nobody without the key gets this far
+		if peer := r.Header.Get(peerHeader); peer != "" {
+			r.Header.Del(peerHeader)
+			if _, _, err := net.SplitHostPort(peer); err == nil {
+				r = r.WithContext(r.Context())
+				r.RemoteAddr = peer
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -455,6 +472,7 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 			pr.Out.Header.Del(sessionHeader)
 			pr.Out.Header.Del(sharedRenderHeader)
 			pr.Out.Header.Set(internalKeyHeader, key)
+			pr.Out.Header.Set(peerHeader, pr.In.RemoteAddr)
 			if data, ok := sessionData(pr.In); ok {
 				pr.Out.Header.Set(sessionHeader, base64.RawURLEncoding.EncodeToString(data))
 			}

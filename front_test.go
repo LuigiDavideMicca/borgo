@@ -830,3 +830,52 @@ func TestASharedRenderNoticesTheRenderServiceRestarting(t *testing.T) {
 		t.Errorf("the policy table was read %d times: a restart under a live front went unnoticed", tables)
 	}
 }
+
+// a page request's api calls reach the internal listener from the render
+// service on loopback: the front hands the render service the address it
+// saw, whatever a client claimed, and the internal listener - past the key,
+// never before - makes it the api's RemoteAddr (found by the audit of phase 7)
+func TestTheAPISeesThePageRequestsClientThroughTheRenderService(t *testing.T) {
+	var seen http.Header
+	renderer := fakeRenderer(t, &seen)
+	defer renderer.Close()
+	front := frontUnderTest(t, renderer, false)
+	req := httptest.NewRequest("GET", "/login", nil)
+	req.RemoteAddr = "203.0.113.7:5151"
+	req.Header.Set(peerHeader, "6.6.6.6:1")
+	front.ServeHTTP(httptest.NewRecorder(), req)
+	if got := seen.Get(peerHeader); got != "203.0.113.7:5151" {
+		t.Errorf("render service told %q, want the connection's own address", got)
+	}
+
+	var remote string
+	var leaked string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remote, leaked = r.RemoteAddr, r.Header.Get(peerHeader)
+		w.WriteHeader(204)
+	})
+	guarded := requireInternalKey(testInternalKey, inner)
+	for _, tc := range []struct {
+		key, peer, want string
+		code            int
+	}{
+		{testInternalKey, "203.0.113.7:5151", "203.0.113.7:5151", 204},
+		{testInternalKey, "[2001:db8::1]:443", "[2001:db8::1]:443", 204},
+		{testInternalKey, "not an address", "127.0.0.1:9", 204},
+		{testInternalKey, "", "127.0.0.1:9", 204},
+		{"wrong", "203.0.113.7:5151", "", 403},
+	} {
+		remote, leaked = "", ""
+		r := httptest.NewRequest("POST", "/api/login", nil)
+		r.RemoteAddr = "127.0.0.1:9"
+		r.Header.Set(internalKeyHeader, tc.key)
+		if tc.peer != "" {
+			r.Header.Set(peerHeader, tc.peer)
+		}
+		w := httptest.NewRecorder()
+		guarded.ServeHTTP(w, r)
+		if w.Code != tc.code || remote != tc.want || leaked != "" {
+			t.Errorf("key %q peer %q: %d, RemoteAddr %q, header left %q", tc.key, tc.peer, w.Code, remote, leaked)
+		}
+	}
+}

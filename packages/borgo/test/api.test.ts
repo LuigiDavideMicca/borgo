@@ -291,7 +291,7 @@ describe("connection-refused retries", () => {
   test("the render service hands its one hop that number", () => {
     const src = readFileSync(join(import.meta.dir, "../src/server.ts"), "utf8");
     expect(src).toContain("const apiRetries = dev ? 15 : API_RETRIES;");
-    expect(src).toContain(`requestApiClient(api, apiDefaults, req.headers.get("cookie"), onSetCookie, apiRetries)`);
+    expect(src).toContain(`requestApiClient(api, { ...apiDefaults, ...forwardedClient(req, render) }, req.headers.get("cookie"), onSetCookie, apiRetries)`);
     expect(src).not.toContain("proxyRequest");
   });
 });
