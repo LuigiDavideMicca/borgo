@@ -28,7 +28,7 @@ Four behaviors worth knowing before you design around them:
 
 ### Revoking sessions
 
-A signed cookie is valid until it expires, unless the app says otherwise. `borgo.CheckSession` registers one check that Go runs on every session whose signature and expiry verified, before anything reads it: `GetSession`, `borgo.Authed`, and the session the front hands the render service for loaders and `middleware.ts`. Answer `false` and the request has no session. The cookie is not rewritten, so a revocation takes effect on the next request — and so does lifting one.
+A signed cookie is valid until it expires, unless the app says otherwise. `borgo.CheckSession` registers one check that Go runs on every session whose signature and expiry verified, before anything reads it: `GetSession`, `borgo.Authed`, and the session the front hands the render service for loaders and `middleware.ts`. Answer `false` and the request has no session. The cookie is not rewritten, so a revocation takes effect on the next request — and so does lifting one. A WebSocket or an event stream already open is not a request: it was judged at its handshake and keeps its topics until it closes, so tell it to go yourself if that is too late, as `examples/tasks` does with a push on the user's own topic.
 
 The cheapest revocation needs no session store, because every session records when it was issued: "log me out everywhere" is one timestamp per user.
 
@@ -113,16 +113,21 @@ func init() {
 }
 ```
 
-- `LoginHandler` decodes `{username, password}` (`borgo.Credentials`), verifies against the stored hash, starts the session and responds with the principal as JSON. Empty fields are a 400 before any lookup; wrong password and unknown user are both a 401 `{"error": "invalid credentials"}` — and a failed lookup still runs a hash verification, so usernames cannot be enumerated by timing.
+- `LoginHandler` decodes `{username, password}` (`borgo.Credentials`), verifies against the stored hash, starts the session and responds with the principal as JSON. Empty fields are a 400 before any lookup; wrong password and unknown user are both a 401 `{"error": "invalid credentials"}` — and a failed lookup still runs a hash verification, so usernames cannot be enumerated by timing. It does not slow down repeated attempts on its own: put a limiter in front of `/api/login`, as [rate limiting](middleware-and-authorization.md#rate-limiting) shows.
 - `RegisterHandler` hashes the password, calls `Register`, starts the session, responds 201. `borgo.ErrUserExists` becomes a 409; with no `Register` configured the route answers 404.
 - `LogoutHandler` clears the cookie, responds 204.
 
 ### A signup form of your own shape: borgo.Signup
 
-`RegisterHandler` takes `{username, password}` and nothing else, and no signup form anybody ships stops there. `borgo.Signup` is the same handler over a body of your own: any struct that embeds `borgo.Credentials`, so the framework finds the username and the password, and the rest is yours. It is decoded as `borgo.Bind` decodes it, and handed to your function beside the hash of its password:
+`RegisterHandler` takes `{username, password}` and nothing else, and no signup form anybody ships stops there. `borgo.Signup` is the same handler over a body of your own: any struct that embeds `borgo.Credentials`, so the framework finds the username and the password, and the rest is yours. It is decoded as `borgo.Bind` decodes it, and handed to your function beside the hash of its password. Set `Principal`: without it the whole user is the session and the body of the login and register responses, hash included - signed, not encrypted, and readable by the browser:
 
 ```go
 type Account struct{ Username, Email, Hash string }
+
+// what the session holds and the login answers with: never the hash
+type AccountSession struct {
+	Username string `json:"username"`
+}
 
 type SignupBody struct {
 	borgo.Credentials
@@ -134,6 +139,7 @@ var accounts = borgo.Auth[Account]{
 		a, err := findAccount(ctx, username)
 		return a, a.Hash, err
 	},
+	Principal: func(a Account) any { return AccountSession{Username: a.Username} },
 }
 
 // the form reaches register whole; the password reaches it hashed
@@ -245,7 +251,7 @@ export default function NewTask() {
 
 The render service issues a `borgo_csrf` cookie with the page, the field carries the same token back, and a mismatch is answered `403` before the action runs — a cross-site form cannot read the cookie, so it cannot produce the field. The check arms for any browser that holds the token, which is what closes login-CSRF; cookie-less clients are unaffected.
 
-That covers forms. The other half of the obligation is browser calls to `/api/*` that change something — `POST`, `PUT`, `PATCH`, `DELETE` — which carry the same token in an `X-CSRF-Token` header instead of a field, because an api body is JSON and has no field to put it in. Use `apiFetch` and it is attached for you:
+That covers forms. The other half of the obligation is browser calls to `/api/*` that change something — `POST`, `PUT`, `PATCH`, `DELETE` — which carry the same token in an `X-CSRF-Token` header instead of a field, because an api body is JSON and has no field to put it in. Use `apiFetch` and it is attached for you - and use it from the start: the check is off under `borgo dev` unless `BORGO_CSRF=1`, so a bare `fetch` works until the first deploy:
 
 ```ts
 import { apiFetch } from "borgo-framework";

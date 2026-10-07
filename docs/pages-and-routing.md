@@ -41,7 +41,7 @@ export default function TaskDetail({ task }: { task: Task }) {
 
 The loader receives `{ request, params, api, apiUrl, session, locals }`. `params` is `Record<string, string>` — every value is a string, decoded, exactly as it appeared in the URL. `api` is the [typed client](typed-bridge.md#the-generated-client); `apiUrl` is the raw base URL for anything it does not model. `session` is the session Go verified, or `null`, and `locals` holds what `api/middleware.go` forwarded — both covered in [middleware and authorization](middleware-and-authorization.md).
 
-Loader code is stripped from client bundles at build time, so server-only imports, database handles and secrets used there never reach the browser.
+Loader code is stripped from client bundles at build time, so server-only imports, database handles and secrets used there never reach the browser. What the loader *returns* does: it is serialized into the page as JSON and readable by the visitor whether the component renders it or not, so return what the page shows, not the whole row.
 
 The loader runs on the initial server render *and* on client-side navigations to that page — in the second case the client fetches its result as JSON rather than re-rendering the document. You do not write anything different for the two cases.
 
@@ -62,7 +62,7 @@ export async function loader({ api }: LoaderContext) {
 }
 ```
 
-This works identically on a full page load and on a client-side navigation: the runtime receives the redirect as data and follows it as a client navigation, so the guard cannot be bypassed by arriving through a link. See [auth and sessions](auth-and-sessions.md) for the full pattern.
+This works identically on a full page load and on a client-side navigation: the runtime receives the redirect as data and follows it as a client navigation, so the guard cannot be bypassed by arriving through a link. It guards the loader only: a `POST` to the page runs its action with no loader in front of it. To guard every door of a page at once - document, props and action - use [`middleware.ts`](middleware-and-authorization.md). See [auth and sessions](auth-and-sessions.md) for the full pattern.
 
 ## Layouts
 
@@ -201,7 +201,7 @@ export const hydrate = "visible";  // hydrate when the marked section scrolls in
 
 ## Cached pages
 
-A page that is the same for every visitor can say so, and stop rendering per request:
+A page that is the same for every visitor can say so, and stop rendering per request. Two things decide whether it really is cached: the copy is rendered as nobody - no session, no cookies - so a loader that reads `session` serves everyone the logged-out page; and a page `middleware.ts` can reach is never cached, so a matcher-less `middleware.ts` turns caching off for every page:
 
 ```tsx
 import type { LoaderContext } from "borgo-framework";

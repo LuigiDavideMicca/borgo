@@ -10,7 +10,7 @@ The template uses SQLite through [`modernc.org/sqlite`](https://pkg.go.dev/moder
 conn, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 ```
 
-For Postgres, import a driver such as `github.com/jackc/pgx/v5/stdlib` and open `sql.Open("pgx", url)` - declare the URL in `env.ts` with `type: "url"` so a malformed one refuses the boot by name. The handlers do not change, with one exception every database/sql user meets: SQLite writes placeholders as `?`, Postgres as `$1`, `$2`.
+The migration runner below is SQLite's - `?` placeholders and `PRAGMA foreign_keys` - and needs both adapted before it runs against another database. For Postgres, import a driver such as `github.com/jackc/pgx/v5/stdlib` and open `sql.Open("pgx", url)` - declare the URL in `env.ts` with `type: "url"` so a malformed one refuses the boot by name. The handlers do not change, with one exception every database/sql user meets: SQLite writes placeholders as `?`, Postgres as `$1`, `$2`.
 
 ## Migrations
 

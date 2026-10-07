@@ -199,9 +199,9 @@ func limited(next http.Handler) http.Handler {
 }
 ```
 
-- **The `Matcher` has to cover `/api/login`** for this to run at all.
+- **The `Matcher` has to cover `/api/login`** for this to run at all - and every concern composed in this file runs on every path the `Matcher` covers, so each one checks the path it is about, as `limited` does: an `admin` check composed beside it would otherwise stand in front of every login.
 - **The map starts over every minute**, so it cannot grow past one minute of distinct clients.
-- **`r.RemoteAddr` is the peer that connected**, and borgo does not rewrite it. Behind a reverse proxy that peer is the proxy, and every client would share one budget: key on the address the proxy states, and only when the peer is that proxy — or limit at the proxy, as [security](security.md#what-borgo-does-not-do) suggests.
+- **`r.RemoteAddr` is the peer that connected to the Go front.** A login posted through a page's form action reaches Go from the render service, and the front restates the address it saw on that call, so the action's api call carries the same `RemoteAddr` a direct call would. Behind a reverse proxy that peer is the proxy, and every client would share one budget: key on the address the proxy states, and only when the peer is that proxy — or limit at the proxy, as [security](security.md#what-borgo-does-not-do) suggests.
 - **It is per process.** Several instances behind a load balancer each keep their own count.
 
 ## Honest limits

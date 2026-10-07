@@ -138,10 +138,16 @@ Deep dive: [realtime](docs/realtime.md).
 
 ### Sessions and auth
 
-Mechanics, not policy: signed-cookie sessions (`borgo.SetSession`/`GetSession`/`ClearSession`, HMAC with `SESSION_SECRET`, expiry signed in), stdlib PBKDF2 password hashing behind a swappable interface, and `borgo.Auth[U]` — you supply a `Lookup` (and optionally `Register`) over *your* user store, it provides the login/logout/register handlers. `borgo.Authed` guards api routes with a JSON 401; loaders guard pages by returning `redirect()`; one double-submit token covers both unsafe paths for any browser that has been issued it — a hidden field on form actions (`<CsrfField />`), an `X-CSRF-Token` header on browser `POST`/`PUT`/`PATCH`/`DELETE` to `/api/*` (`apiFetch`) — login included. Deep dive: [auth and sessions](docs/auth-and-sessions.md).
+Mechanics, not policy: signed-cookie sessions (`borgo.SetSession`/`GetSession`/`ClearSession`, HMAC with `SESSION_SECRET`, expiry signed in), stdlib PBKDF2 password hashing behind a swappable interface, and `borgo.Auth[U]` — you supply a `Lookup` (and optionally `Register`) over *your* user store, it provides the login/logout/register handlers. `borgo.Authed` guards api routes with a JSON 401; `middleware.ts` guards pages - document, client navigation and form action alike - and a loader can redirect too, though that covers the loader only; one double-submit token covers both unsafe paths for any browser that has been issued it — a hidden field on form actions (`<CsrfField />`), an `X-CSRF-Token` header on browser `POST`/`PUT`/`PATCH`/`DELETE` to `/api/*` (`apiFetch`) — login included. Deep dive: [auth and sessions](docs/auth-and-sessions.md).
 
 ```go
-var auth = borgo.Auth[User]{Lookup: lookupUser, Register: createUser}
+// Principal: what the session and the login response hold - never the user
+// whole, whose password hash would go to the browser
+var auth = borgo.Auth[User]{
+    Lookup:    lookupUser,
+    Register:  createUser,
+    Principal: func(u User) any { return map[string]string{"username": u.Username} },
+}
 
 func init() {
     borgo.Handle("POST /api/login", auth.LoginHandler)
@@ -163,7 +169,7 @@ A locked-down default posture, not a checklist you assemble: security headers an
 
 ### Health checks and metrics
 
-The Go front answers `/healthz` with `{status, uptime, render}` — `render` is `"reachable"` or `"down"`, from a probe of the render service behind it, and `status` turns `"degraded"` while it is down. Set `BORGO_METRICS=1` and `/metrics` serves Prometheus text: request counts and a duration histogram by route pattern and status, hand-rolled, zero dependencies. Deep dive: [deploy guide](docs/deploy.md#health-and-metrics).
+The Go front answers `/healthz` with `{status, uptime, render}` — `render` is `"reachable"` or `"down"`, from a probe of the render service behind it, and `status` turns `"degraded"` while it is down. It answers `200` either way, so a monitor matches `"status":"ok"` in the body. Set `BORGO_METRICS=1` and `/metrics` serves Prometheus text: request counts and a duration histogram by route pattern and status, hand-rolled, zero dependencies. Deep dive: [deploy guide](docs/deploy.md#health-and-metrics).
 
 ## Architecture
 
@@ -203,6 +209,9 @@ bunx borgo deploy init caddy
 # ship the app, then its one secret file (.env is gitignored - it travels by hand, once)
 rsync -a --exclude node_modules --exclude .env . box:/srv/my-app/
 scp .env box:/srv/my-app/.env
+
+# behind https, uncomment SESSION_SECURE="1" in docker-compose.yml first: without it the
+# session and csrf cookies would also travel over plain http
 
 # on the box: build and run - the scaffolded Dockerfile compiles Go static and the client assets
 ssh box "cd /srv/my-app && docker compose up -d"

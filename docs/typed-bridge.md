@@ -193,6 +193,7 @@ type AttachmentForm struct {
 	File borgo.File `json:"file"`
 }
 
+// gitignored in development, /data/uploads in a container - see below
 var uploads = &borgo.Uploads{Dir: "uploads"}
 
 //borgo:route POST /api/attachments
@@ -228,7 +229,7 @@ The wire is decided by the value, since the route's type is gone at runtime: a b
 
 The fields a form can fill are string, bool, the integers, the floats, `[]string` for a repeated part, and `File`, `*File`, `[]File`, named as `encoding/json` names them — the json tag, or the Go name; an untagged embedded struct or pointer to one gives up its fields — and matched exactly, as the typed client sends them. The first of a repeated part fills a scalar; a number outside its field's width is refused. A field of any other type, an embedded `File`, or two fields answering one name is the app's mistake, not the client's: `BindMultipart` refuses every request to that form and `BindError` answers 500, with the field named in the log and nothing about your types in the response.
 
-The body is read at most 32 MiB (`BindMultipartMax` changes that, and `BORGO_MAX_BODY` on the public port is the same number by default). The parser has two limits of its own, and both are a 413 like the cap: at most 1000 parts, and text parts held in memory up to about 18 MiB in total. Files past 8 MiB are spilled to temporary files the server removes when the handler returns, so copy what must outlive the request. 415 is any other content type, 400 a part that does not parse as its field, 500 a file the server could not spill to its temporary directory (the path goes to the log, not to the client). A `borgo.File` in a type read with `Bind` or `BindMax` fails the generator: the client would send it as multipart to a route that only reads JSON.
+The body is read at most 32 MiB (`BindMultipartMax` changes that, and `BORGO_MAX_BODY` on the public port is the same number by default). A reverse proxy has a limit of its own: the Caddy and nginx configs `borgo deploy init` writes cap a body at 1 MiB, so raise that line for an upload route, or uploads that worked in development meet a 413 in production. The parser has two limits of its own, and both are a 413 like the cap: at most 1000 parts, and text parts held in memory up to about 18 MiB in total. Files past 8 MiB are spilled to temporary files the server removes when the handler returns, so copy what must outlive the request. 415 is any other content type, 400 a part that does not parse as its field, 500 a file the server could not spill to its temporary directory (the path goes to the log, not to the client). A `borgo.File` in a type read with `Bind` or `BindMax` fails the generator: the client would send it as multipart to a route that only reads JSON.
 
 `Name` and `ContentType` on a `borgo.File` are what the client said, nothing more. Storing the file is the next section's.
 

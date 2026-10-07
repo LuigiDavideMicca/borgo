@@ -25,7 +25,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | Symbol | What it is for | Stability |
 | --- | --- | --- |
 | `Handle(pattern string, h http.HandlerFunc)` | Registers a handler under a `"METHOD /path"` pattern. Panics on a malformed pattern, a nil handler, a duplicate, or a call after `Serve`. | stable |
-| `Serve()` | Mounts every registered route, adds `GET /healthz` unless an app route claims it, listens on `API_PORT`, handles signals and graceful shutdown. Blocks, and calls `log.Fatal` if the listener fails. | stable |
+| `Serve()` | Mounts every registered route, adds `GET /healthz` unless an app route claims it, listens on `PORT` (the public port, which since 0.30 Go answers) and the loopback `API_PORT`, handles signals and graceful shutdown. Blocks, and calls `log.Fatal` if the listener fails. | stable |
 | `ServeContext(ctx) error` | The same server, ended by cancelling `ctx` and returning the error instead of exiting. For embedding in a larger program, and for tests. | stable |
 | `Middleware(h http.Handler) http.Handler` | The chain `Serve` installs around its own routes — panic recovery, gzip, and the guard that makes a response carrying `Set-Cookie` say `Cache-Control: private` as its headers commit. For an app mounting borgo handlers on a mux of its own; `Serve` is defined in terms of it. | stable |
 | `CheckEnv() error` | The startup validation `Serve` and `ServeContext` run: `BORGO_HASH_SLOTS`, `SESSION_SECURE`, the push variables, and `SESSION_SECRET` length. For an embedder that never calls either and still wants a typo to fail at boot rather than on the first request. | stable |
@@ -76,7 +76,7 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 | `Auth[U any]` | Struct wiring an app's user store to ready-made login/logout/register handlers over the session. | stable |
 | `Auth.Lookup func(ctx, username) (U, string, error)` | Required. Returns the user and its stored password hash. Any error reads as invalid credentials. | stable |
 | `Auth.Register func(ctx, username, hash string) (U, error)` | Optional. Without it, `RegisterHandler` answers 404. Return `ErrUserExists` for a taken name. | stable |
-| `Auth.Principal func(u U) any` | Optional. Maps the user to what the session stores. | provisional |
+| `Auth.Principal func(u U) any` | Optional, and set it: maps the user to what the session stores and the login and register responses return. Without it the whole user is both, a password hash included. | provisional |
 | `Auth.MaxAge time.Duration` | Session lifetime; default 7 days. | stable |
 | `Auth.Hasher PasswordHasher` | Password hasher; default `DefaultHasher()`. | stable |
 | `(*Auth[U]).LoginHandler` | Verifies credentials, starts a session, responds with the principal. 503 + `Retry-After` when the hash queue is saturated. | stable |
@@ -126,10 +126,10 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 
 | Symbol | What it is for | Stability |
 | --- | --- | --- |
-| `Push[T any](topic, event string, data T) error` | Publishes to a WebSocket topic, in this process: since 0.30 the relay lives beside the handlers and a push is a call. An error names a topic no handshake could hold or a payload over the message limit; a topic nobody holds right now is delivered to nobody and is not an error. `borgogen` records `T` in the generated event map, typing the browser's `subscribe` callback. | stable |
+| `Push[T any](topic, event string, data T) error` | Publishes to a WebSocket topic, in this process - a subscriber connected to another instance never sees it: since 0.30 the relay lives beside the handlers and a push is a call. An error names a topic no handshake could hold or a payload over the message limit; a topic nobody holds right now is delivered to nobody and is not an error. `borgogen` records `T` in the generated event map, typing the browser's `subscribe` callback. | stable |
 | `TopicCheck` | `func(r *http.Request, topic string) bool`: one topic on one request, the session readable with `GetSession`. | provisional |
 | `CanSubscribe(check TopicCheck)` | The check every topic a socket asks for must pass, once per topic at the handshake. A refused topic closes the socket with `4403` naming it. Registered once, before `Serve`. Without one, `borgo dev` admits everything and `borgo start` refuses everything, each saying so at startup. A check that panics refuses. | provisional |
-| `CanPublish(check TopicCheck)` | The check a browser's publish must pass, per message; without one, publishing follows `CanSubscribe`. A refused message is dropped, the socket stays open. | provisional |
+| `CanPublish(check TopicCheck)` | The check a browser's publish must pass, per message; without one, publishing follows `CanSubscribe` - so every socket a topic admits may send any event on it, the ones `Push` sends included. A refused message is dropped, the socket stays open. | provisional |
 | `Realtime() http.Handler` | The relay as a handler, for an app that mounts borgo on a server of its own: mount it at `/ws`. One per process, configured from the environment; an environment it cannot read answers `500` with the reason. | provisional |
 
 `push.go` declares exactly one exported function for publishing. `PushT` was folded into it in 0.21 — see [finding 2](#duplicated-apis).
@@ -138,8 +138,8 @@ The module is the repository root. It has zero runtime dependencies; `golang.org
 
 | Symbol | What it is for | Stability |
 | --- | --- | --- |
-| `Revalidate(path string) error` | Drops the cached copy of one page (query variants included; a trailing `*` drops a prefix). Under `borgo start` a call into the cache in the same process; in `borgo dev`, where nothing is cached, it changes nothing. An empty or blank path, or one not starting with `/`, is an error. | provisional |
-| `RevalidateTag(tag string) error` | Drops every cached page whose `tags` export named the tag, compared without surrounding spaces. An empty or blank tag is an error. | provisional |
+| `Revalidate(path string) error` | Drops, in this process, the cached copy of one page (query variants included; a trailing `*` drops a prefix). Under `borgo start` a call into the cache in the same process; in `borgo dev`, where nothing is cached, it changes nothing. An empty or blank path, or one not starting with `/`, is an error. | provisional |
+| `RevalidateTag(tag string) error` | Drops, in this process, every cached page whose `tags` export named the tag, compared without surrounding spaces. An empty or blank tag is an error. | provisional |
 
 Both refuse an empty name. Under `borgo start` the cache is in the process the call runs in, and the call drops the copies there directly; under `borgo dev`, where nothing is cached, it changes nothing. See [cached pages](pages-and-routing.md#cached-pages).
 
@@ -421,7 +421,7 @@ These are as much a public API as any function: an app depends on them, and chan
 | `hydrate` | `true`, `false` or `"visible"`. **Must be a literal** — it is read from the source text without executing the module. | stable |
 | `prerender` | `true` opts a loader page into static export. | stable |
 | `prerenderPaths(ctx)` | Lists param sets for a dynamic route during export. | stable |
-| `revalidate` | Seconds a shared cached copy stays fresh, or `"manual"` for invalidation-only. Production only; a malformed value is named in the log and the page served fresh. | provisional |
+| `revalidate` | Seconds a shared cached copy stays fresh - rendered with no session, and never for a page `middleware.ts` can reach, or `"manual"` for invalidation-only. Production only; a malformed value is named in the log and the page served fresh. | provisional |
 | `tags` | Array of tag names `borgo.RevalidateTag` drops the page by. Read only beside `revalidate`. | provisional |
 
 ### Go directives

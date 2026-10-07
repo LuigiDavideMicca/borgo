@@ -98,7 +98,7 @@ async function logout() {
 }
 ```
 
-Everything else about it is `fetch`: same arguments, same return, safe methods passed straight through. A plain `fetch("/api/x", { method: "POST" })` from a page in a browser holding the cookie answers `403` — that is the check doing its job, and swapping the call for `apiFetch` is the fix. If you would rather roll it yourself, `csrfCookieValue(document.cookie)` reads the token and `CSRF_HEADER` is the header name.
+Everything else about it is `fetch`: same arguments, same return, safe methods passed straight through. Under `borgo dev` the check is off unless `BORGO_CSRF=1`, so a bare `fetch` that works through all of development meets it on the first deploy. A plain `fetch("/api/x", { method: "POST" })` from a page in a browser holding the cookie answers `403` — that is the check doing its job, and swapping the call for `apiFetch` is the fix. If you would rather roll it yourself, `csrfCookieValue(document.cookie)` reads the token and `CSRF_HEADER` is the header name.
 
 **Loaders and actions need none of this.** Their `api` client and `apiUrl` address the api's internal listener — loopback, behind the key minted for this boot — and the header check guards the public port, not that listener, so a server-side `api("POST /api/login", …)` is not checked here and cannot start failing because of it. The form action that called it already passed the field check on the way in.
 

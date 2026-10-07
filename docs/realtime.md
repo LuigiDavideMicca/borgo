@@ -47,6 +47,8 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
+An event stream is an ordinary `/api` route: everyone who can open it gets every event published on its hub, logged in or not. Wrap it in `borgo.Authed`, or cover it in [`api/middleware.go`](middleware-and-authorization.md), when the events are not public.
+
 And in the page:
 
 ```tsx
@@ -81,6 +83,10 @@ A publish never blocks on a slow subscriber — a subscriber whose buffer is ful
 > Through 0.22 nothing was asked: an anonymous client with no cookie read a
 > private channel by guessing its name, and `__count` told it how many
 > people were in the room. That is the hole the check closes.
+>
+> **And a payload is not proof it came from Go.** Without `borgo.CanPublish`,
+> every socket a topic admits may publish any event on it - the ones `Push`
+> sends included, with any data. See [who may hold a topic](#who-may-hold-a-topic).
 
 The Go process that answers the public port is also the WebSocket server: `/ws` is answered in-process, behind `api/middleware.go` and the same session verification as every page, by a relay written on `net/http` alone. Browsers join named topics with the `subscribe` helper; every `{event, data}` published on a topic reaches every subscriber, including the publisher's other tabs:
 
@@ -90,6 +96,24 @@ import { subscribe } from "borgo-framework";
 const channel = subscribe("live", (event, data) => { /* ... */ });
 channel.publish("message", "hello");   // browser -> everyone on the topic
 channel.close();
+```
+
+`subscribe` returns the channel, not a cleanup function, so `useEffect(() => subscribe(...))` is a type error - deliberately: the socket has to be closed when the component goes, or every navigation leaves one open. In a component, open it in the effect and close it in the effect's cleanup:
+
+```tsx
+import { useEffect, useState } from "react";
+import { subscribe } from "borgo-framework";
+
+export function Presence({ topic }: { topic: string }) {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const channel = subscribe(topic, (event, data) => {
+      if (event === "__count") setCount(data as number);
+    });
+    return () => channel.close();
+  }, [topic]);
+  return <p>{count} here</p>;
+}
 ```
 
 The built-in `__count` event reports the topic's subscriber count (presence for free), and the connection reconnects itself. One close is final: a socket the server refuses — the handshake's `Origin` is not the server's own, or there is no `Origin` and `BORGO_WS_ALLOW_NO_ORIGIN` is unset, or a topic `CanSubscribe` said no to — is closed with code `4403` and a reason naming the origin and the switch, or the topic; `subscribe` stops redialling, and reports the reason to an `onRefused` callback — `subscribe(topic, handler, { onRefused })` — or to `console.error` without one. Every other close keeps reconnecting with backoff.
@@ -161,6 +185,7 @@ The relay itself stays dumb by design: it forwards `{event, data}` between subsc
 
 ## Honest limits
 
+- **One process.** `Push`, the hubs and the relay reach the sockets of the process that holds them. Behind several instances, a subscriber connected to another one never sees the event; fan out through something the instances share - a database's notifications, a broker - and push from each.
 - **The relay is not a message broker.** There is no durability, no replay, no delivery guarantee and no ordering guarantee across topics. A subscriber that was offline missed what happened. If a client must not miss an event, give it a way to re-fetch state on reconnect — which is what the SSE example above does by refetching rather than applying a delta.
 - **Authorization is per topic and yours.** `CanSubscribe` is the whole rule: a topic it admits is public to everyone it admits, and a name is not a secret — scope by the session, not by an unguessable id. The check is taken once at the handshake, so a revocation reaches a socket at its next handshake and not before; cut the socket yourself if that is too late.
 - **Limits are enforced**: 32 topics per client, 128 characters per topic name, 1 MB per message, and a same-origin check on the upgrade — scheme *and* host, and an absent `Origin` is a refusal, not a pass. That changed in 0.21: skipping the check for a request with no `Origin` meant the one header an attacker can simply omit turned the check off. Browsers always send one, so this costs them nothing; a non-browser client — including bun's own `WebSocket` — is now refused, and `BORGO_WS_ALLOW_NO_ORIGIN=1` is how you take that back, along with every other originless caller (Go reads it since 0.30, with the grammar of every other boolean: `yes` refuses the boot). Behind a proxy that terminates TLS, `X-Forwarded-Proto` supplies the scheme from a peer in `BORGO_TRUSTED_PROXIES`; the nginx config `borgo deploy init` writes already sets it. See [security](security.md#realtime-surface).
