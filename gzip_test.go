@@ -528,13 +528,20 @@ func TestGzipPassesThroughAPartOfARepresentation(t *testing.T) {
 			t.Errorf("%s: Content-Encoding %q, body of %d bytes", c.name, got, rec.Body.Len())
 		}
 	}
-	// a whole representation still compresses
-	rec := serveGzip(t, "gzip", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Accept-Ranges", "bytes")
-		w.Write([]byte(body))
-	})
-	if rec.Header().Get("Content-Encoding") != "gzip" {
-		t.Error("a 200 that merely accepts ranges was left identity")
+	// a whole one that accepts ranges stays identity, so a resume asks for
+	// bytes of the body it received; one that refuses ranges compresses
+	for _, c := range []struct {
+		accepts, want string
+	}{{"bytes", ""}, {"none", "gzip"}, {"", "gzip"}} {
+		rec := serveGzip(t, "gzip", func(w http.ResponseWriter, r *http.Request) {
+			if c.accepts != "" {
+				w.Header().Set("Accept-Ranges", c.accepts)
+			}
+			w.Write([]byte(body))
+		})
+		if got := rec.Header().Get("Content-Encoding"); got != c.want {
+			t.Errorf("Accept-Ranges %q: Content-Encoding %q, want %q", c.accepts, got, c.want)
+		}
 	}
 }
 

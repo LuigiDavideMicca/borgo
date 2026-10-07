@@ -196,3 +196,24 @@ describe("writeGoEnv", () => {
     expect(existsSync(join(noGo, "env"))).toBe(false);
   });
 });
+
+// the build's own code generation writes the package: a run that stopped
+// calling writeGoEnv left every committed file in place and every diff
+// clean (found by the verifier of phase 6)
+test("runBorgogen writes the go env package before anything else", async () => {
+  const { runBorgogen } = await import("../src/util");
+  const dir = mkdtempSync(join(tmpdir(), "borgo-envgo-run-"));
+  writeFileSync(join(dir, "go.mod"), "module app\n");
+  writeFileSync(
+    join(dir, "env.ts"),
+    `export const env = { [Symbol.for("borgo.env")]: { failures: [], clientFailures: [], clientNames: [], clientValues: {}, serverSpecs: { DB_PATH: { type: "string", optional: false, default: "a.db", validated: false } } } };`,
+  );
+  const cwd = process.cwd();
+  process.chdir(dir);
+  try {
+    expect(await runBorgogen({ fresh: true })).toBe(true);
+  } finally {
+    process.chdir(cwd);
+  }
+  expect(readFileSync(join(dir, "env", "env.gen.go"), "utf8")).toContain("DB_PATH string");
+});

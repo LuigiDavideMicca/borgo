@@ -3,6 +3,9 @@ node_modules
 dist
 public/assets
 *.db
+*.db-*
+# borgo.Uploads in development: files of the developer's, never the image's
+uploads/
 .env
 .env.*
 .git

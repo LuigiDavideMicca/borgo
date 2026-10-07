@@ -15,7 +15,7 @@ RUN bun run build
 
 RUN mkdir /out \
  && cp -r package.json tsconfig.json env.ts index.html public pages .borgo dist /out/ \
- && for d in islands components lib; do [ -d "$d" ] && cp -r "$d" /out/; done; \
+ && for d in islands components lib middleware.ts; do [ -e "$d" ] && cp -r "$d" /out/; done; \
     cp -rL node_modules /out/node_modules \
  && rm -rf /out/node_modules/typescript /out/node_modules/@types /out/node_modules/.bin \
            /out/node_modules/borgo-framework/node_modules/typescript /out/node_modules/borgo-framework/node_modules/@types

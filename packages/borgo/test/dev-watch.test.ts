@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createChangeBatcher, createContentDedup, gitignoredMatcher, ignored, readDevLock, watchedSide } from "../src/dev";
+import { createChangeBatcher, createContentDedup, gitignoredMatcher, ignored, readDevLock, rebuildSides, watchedSide } from "../src/dev";
 import { propsPathEnabled } from "../src/runtime";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -224,4 +224,12 @@ test("generated go files are not watched", () => {
   expect(ignored.test("api/borgo.gen.go")).toBe(true);
   expect(ignored.test("env/env.gen.go")).toBe(true);
   expect(ignored.test("env/settings.go")).toBe(false);
+});
+
+// env.ts feeds both sides: the client define and the go env package
+test("env.ts rebuilds the pages and the api", () => {
+  expect(rebuildSides("env.ts")).toEqual(["app", "api"]);
+  expect(rebuildSides("pages/env.ts")).toEqual(["app"]);
+  expect(rebuildSides("api/x.go")).toEqual(["api"]);
+  expect(rebuildSides("notes.md")).toEqual([]);
 });

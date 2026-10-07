@@ -351,7 +351,17 @@ export async function exportSite(): Promise<number> {
       });
       const probe = `http://localhost:${apiPort}/`;
       const deadline = Date.now() + 30_000;
+      // an api that exits at boot - a database it cannot open, an
+      // environment env.gen.go refuses - has said why on stderr already:
+      // waiting out the deadline for it said nothing more, thirty seconds
+      // later (found by the verifier of phase 6)
+      let exited: number | null = null;
+      apiProc.exited.then((code) => (exited = code));
       for (;;) {
+        if (exited !== null) {
+          console.error(`  ${c.red(g.err)} the api exited at boot (${exited}) - its own error is above`);
+          return 1;
+        }
         try {
           await fetch(probe, { signal: AbortSignal.timeout(1_000) });
           break;

@@ -324,9 +324,10 @@ export function composeYml({ port, secret, database }: DeployContext): string {
           "  data:",
         ]
       : [
-          "# this app keeps nothing on disk yet, so there is no volume. once it",
-          "# does, the scaffolded Dockerfile already creates /data owned by the",
-          "# image's user, so this is the whole change:",
+          "# this app has no db/migrations, so no volume is written for it. one",
+          "# that keeps a database or files (borgo.Uploads) needs one, or they",
+          "# live in the container and go with it. the scaffolded Dockerfile",
+          "# creates /data owned by the image's user, so this is the change:",
           "#   environment:",
           "#     DB_PATH: /data/app.db",
           "#   volumes:",

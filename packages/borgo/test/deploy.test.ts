@@ -258,6 +258,9 @@ describe("projectContext", () => {
   test("an app with db/migrations keeps a database", () => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-deploy-"));
     expect(projectContext(dir).database).toBe(false);
+    // a db/ with no migrations is no database the app migrates
+    mkdirSync(join(dir, "db"));
+    expect(projectContext(dir).database).toBe(false);
     mkdirSync(join(dir, "db", "migrations"), { recursive: true });
     expect(projectContext(dir).database).toBe(true);
   });

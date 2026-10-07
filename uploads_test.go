@@ -374,4 +374,13 @@ func TestUploadsServeARangeUncompressedBehindTheMiddleware(t *testing.T) {
 	if w.Code != http.StatusPartialContent || w.Header().Get("Content-Encoding") != "" || !bytes.Equal(w.Body.Bytes(), content[:5000]) {
 		t.Errorf("%d %q %d bytes", w.Code, w.Header().Get("Content-Encoding"), w.Body.Len())
 	}
+	// and the whole file too: it accepts ranges, so a resume must find the
+	// identity bytes it counts
+	r = httptest.NewRequest("GET", "/f", nil)
+	r.Header.Set("Accept-Encoding", "gzip")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 200 || w.Header().Get("Content-Encoding") != "" || !bytes.Equal(w.Body.Bytes(), content) {
+		t.Errorf("whole: %d %q %d bytes", w.Code, w.Header().Get("Content-Encoding"), w.Body.Len())
+	}
 }

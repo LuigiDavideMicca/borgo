@@ -121,6 +121,9 @@ func parseEnvValue(v EnvVar, raw string) (any, string) {
 }
 
 func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
 			return false
@@ -310,7 +313,14 @@ func endsInANumber(host string) bool {
 		}
 		labels = labels[:len(labels)-1]
 	}
-	_, ok := ipv4Part(labels[len(labels)-1])
+	// all digits is a number even when it is no ipv4 part: 09 is a bad
+	// octal, and the host is refused rather than read as a name (found by
+	// the verifier of phase 6)
+	last := labels[len(labels)-1]
+	if allDigits(last) {
+		return true
+	}
+	_, ok := ipv4Part(last)
 	return ok
 }
 

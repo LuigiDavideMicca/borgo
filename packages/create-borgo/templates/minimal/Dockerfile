@@ -17,7 +17,7 @@ RUN bun run build
 
 RUN mkdir /out \
  && cp -r package.json bun.lock tsconfig.json index.html public pages .borgo dist /out/ \
- && for d in islands components lib; do [ -d "$d" ] && cp -r "$d" /out/; done; \
+ && for d in islands components lib middleware.ts; do [ -e "$d" ] && cp -r "$d" /out/; done; \
     cd /out && bun install --production
 
 FROM oven/bun:1.4-slim

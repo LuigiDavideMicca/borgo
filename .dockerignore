@@ -4,6 +4,8 @@ node_modules
 **/dist
 **/public/assets
 **/*.db
+**/*.db-*
+**/uploads/
 .git
 .github
 assets

@@ -87,9 +87,11 @@ jobs:
       - name: build example app
         working-directory: examples/tasks
         run: |
+          # the build writes the go env package from env.ts: removed first,
+          # so a build that stopped writing it cannot pass on the committed
+          # copy, and what is committed must be what it writes
+          rm env/env.gen.go
           bun run build
-          # the build writes the go env package from env.ts: what is
-          # committed must be what it writes
           git diff --exit-code -- env/env.gen.go
 
       - name: typecheck
@@ -271,7 +273,7 @@ jobs:
             go vet ./...
             go test ./...
             bunx tsc --noEmit
-            [ -f env/env.gen.go ] && cp env/env.gen.go "$tmp/shipped-env-$t.go"
+            if [ -f env/env.gen.go ]; then mv env/env.gen.go "$tmp/shipped-env-$t.go"; fi
             bun run build
             # the shipped go env package is the one the build writes from env.ts
             if [ -f "$tmp/shipped-env-$t.go" ]; then diff "$tmp/shipped-env-$t.go" env/env.gen.go; else [ ! -e env/env.gen.go ]; fi
@@ -356,3 +358,19 @@ jobs:
 
       - name: build example image
         run: docker build -f examples/tasks/Dockerfile -t borgo-tasks .
+
+      # built is not booted: the image once built clean and exited at start
+      # on a module the runtime stage never copied (found by the verifier of
+      # phase 6). It must answer, with the render service up
+      - name: run example image
+        run: |
+          docker run -d --name borgo-tasks -p 3000:3000 \
+            -e SESSION_SECRET=ci-docker-session-secret-0123456789abcdef borgo-tasks
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -fs http://localhost:3000/healthz | grep -q '"status":"ok"'; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then docker logs borgo-tasks; exit 1; fi
+          curl -fs http://localhost:3000/ > /dev/null
+          docker rm -f borgo-tasks

@@ -116,6 +116,14 @@ export function watchedSide(file: string): "api" | "css" | "app" | null {
   return null;
 }
 
+// every rebuild a changed file asks for: env.ts is the pages' environment
+// and the source of the go side's env package, so it rebuilds both
+export function rebuildSides(file: string): ("api" | "css" | "app")[] {
+  const side = watchedSide(file);
+  if (!side) return [];
+  return file === "env.ts" ? [side, "api"] : [side];
+}
+
 // One dev session per directory. Two share public/assets and rename each
 // other's chunks mid-build; the loser reports ENOENT on a file that existed
 // a millisecond earlier, which reads as a bundler bug and is not one (found
@@ -360,7 +368,7 @@ export async function dev() {
       dedup.forget();
       liveGoHash = "";
       console.error(
-        `  ${c.red(g.err)} the go front exited on its own (${code}) - the page is down until you save a .go file to rebuild and restart it`,
+        `  ${c.red(g.err)} the go front exited on its own (${code}) - the page is down until you save a file the api is built from (.go, .sql or env.ts) to rebuild and restart it`,
       );
     });
     const ready = await apiReady(proc);
@@ -467,12 +475,10 @@ export async function dev() {
       return;
     }
     const normalized = file.replaceAll("\\", "/");
-    const side = watchedSide(file);
-    if (!side) return;
-    if (side !== "css" && dedup.isUnchanged(file)) return;
-    schedule(normalized, side);
-    // the go side's env package is written from env.ts
-    if (normalized === "env.ts") schedule(normalized, "api");
+    const sides = rebuildSides(normalized);
+    if (sides.length === 0) return;
+    if (sides[0] !== "css" && dedup.isUnchanged(file)) return;
+    for (const side of sides) schedule(normalized, side);
   });
 
   process.on("SIGINT", () => process.exit(0));

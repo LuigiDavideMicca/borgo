@@ -4732,5 +4732,71 @@
   "raw": "http://x",
   "ok": false,
   "error": "V: expected an absolute url, got \"http://x\""
+ },
+ {
+  "type": "url",
+  "raw": "http://09/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://09/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://08/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://08/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://019/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://019/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a.09/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a.09/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://0.09/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://0.09/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://1.2.3.09/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://1.2.3.09/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://09./",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://09./\""
+ },
+ {
+  "type": "url",
+  "raw": "ws://099",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"ws://099\""
+ },
+ {
+  "type": "url",
+  "raw": "http://0./",
+  "ok": true,
+  "value": "http://0./"
+ },
+ {
+  "type": "url",
+  "raw": "http://./",
+  "ok": true,
+  "value": "http://./"
+ },
+ {
+  "type": "url",
+  "raw": "http://../",
+  "ok": true,
+  "value": "http://../"
  }
 ]
