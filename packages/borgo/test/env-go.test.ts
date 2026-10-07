@@ -185,6 +185,19 @@ describe("writeGoEnv", () => {
     await expect(writeGoEnv(fileDir, { fresh: true })).rejects.toThrow("env is a file");
   });
 
+  // an app upgraded from 0.2x with an env/ package of its own and no server
+  // variable in env.ts has nothing generated, so nothing to refuse
+  test("leaves an env/ of the app's own alone when there is nothing to write", async () => {
+    const dir = app(without);
+    mkdirSync(join(dir, "env"));
+    writeFileSync(join(dir, "env", "settings.go"), "package settings");
+    await writeGoEnv(dir, { fresh: true });
+    expect(readFileSync(join(dir, "env", "settings.go"), "utf8")).toBe("package settings");
+    const file = app(without);
+    writeFileSync(join(file, "env"), "x");
+    await writeGoEnv(file, { fresh: true });
+  });
+
   test("never removes a file of the app's own, and does nothing without go.mod", async () => {
     const dir = app(without);
     mkdirSync(join(dir, "env"));

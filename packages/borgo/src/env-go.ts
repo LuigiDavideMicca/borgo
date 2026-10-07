@@ -155,10 +155,17 @@ export async function writeGoEnv(root = process.cwd(), { fresh = false }: { fres
   if (!existsSync(join(root, "go.mod"))) return;
   const dir = join(root, GO_ENV_DIR);
   const file = join(dir, GO_ENV_FILE);
+  const source = goEnvSource(serverSpecs((await appEnvMetas(root, { fresh })).metas));
+  const current = existsSync(file) ? readFileSync(file, "utf8") : null;
+  if (source === null) {
+    if (current?.startsWith(HEADER)) rmSync(file);
+    return;
+  }
   // env/ is where the generated package lives: a file there of the app's
   // own would share its package, or be another package in its directory,
-  // and break the go build the moment this file appears (found by the
-  // verifier of phase 6)
+  // and break the go build (found by the verifier of phase 6). Asked only
+  // when there is a package to write: an app with an env/ of its own and no
+  // server variable never meets it (found writing the 0.30 migration guide)
   if (existsSync(dir)) {
     if (!statSync(dir).isDirectory()) {
       throw new Error(`borgo env: ${GO_ENV_DIR} is a file, and it is where the go side of env.ts is written - rename it`);
@@ -169,12 +176,6 @@ export async function writeGoEnv(root = process.cwd(), { fresh = false }: { fres
         `borgo env: ${GO_ENV_DIR}/ is where the go side of env.ts is written, and it holds ${own.join(", ")} - move ${own.length === 1 ? "it" : "them"} to a package of ${own.length === 1 ? "its" : "their"} own`,
       );
     }
-  }
-  const source = goEnvSource(serverSpecs((await appEnvMetas(root, { fresh })).metas));
-  const current = existsSync(file) ? readFileSync(file, "utf8") : null;
-  if (source === null) {
-    if (current?.startsWith(HEADER)) rmSync(file);
-    return;
   }
   if (current === source) return;
   mkdirSync(dir, { recursive: true });
