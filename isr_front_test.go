@@ -451,3 +451,101 @@ func TestAnAliasDoesNotTurnOffTheCacheForTheCanonicalPage(t *testing.T) {
 		}
 	}
 }
+
+// a shared render is about nobody: the address of whoever triggered it is
+// not handed on, whatever a client spelled, or the loaders' api calls would
+// carry an address the client chose (found by the verifier of phase 7)
+func TestASharedRenderCarriesNoPeer(t *testing.T) {
+	var sharedPeer, sharedChain atomic.Value
+	renderer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == routesPath {
+			json.NewEncoder(w).Encode(map[string]any{"boot": 1, "routes": []map[string]any{
+				{"pattern": "/news", "seconds": 60, "tags": []string{}},
+			}})
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.Header.Get(sharedRenderHeader) == "1" {
+			sharedPeer.Store(r.Header.Get(peerHeader))
+			sharedChain.Store(r.Header.Get("X-Forwarded-For"))
+		}
+		io.WriteString(w, "<html>news</html>")
+	}))
+	defer renderer.Close()
+	u, _ := url.Parse(renderer.URL)
+	front := newFrontHandler(apiUnderTest(), frontOptions{trusted: trustAll, isr: newIsr(nil, nil, func(string) {})}, u, testInternalKey, time.Second)
+	req := httptest.NewRequest("GET", "http://app.example/news", nil)
+	req.RemoteAddr = "203.0.113.7:5151"
+	req.Header.Set(peerHeader, "6.6.6.6:4")
+	req.Header.Set("X-Forwarded-For", "198.51.100.9")
+	w := httptest.NewRecorder()
+	front.ServeHTTP(w, req)
+	if got, _ := sharedPeer.Load().(string); w.Header().Get(cacheStateHeader) != "miss" || got != "" {
+		t.Errorf("shared render: state %q, peer %q", w.Header().Get(cacheStateHeader), got)
+	}
+	if chain, ok := sharedChain.Load().(string); !ok || chain != "" {
+		t.Errorf("shared render: forwarded for %q (rendered: %v)", chain, ok)
+	}
+}
+
+// what a client sends under the name is gone before anything reads it: the
+// app's middleware and handlers on the public port never see it
+func TestThePublicPortDropsAClientsPeerHeader(t *testing.T) {
+	var seen string
+	api := http.NewServeMux()
+	api.HandleFunc("GET /api/peer", func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get(peerHeader)
+		w.WriteHeader(204)
+	})
+	var rendered http.Header
+	renderer := fakeRenderer(t, &rendered)
+	defer renderer.Close()
+	u, _ := url.Parse(renderer.URL)
+	front := newFrontHandler(Middleware(api), frontOptions{trusted: trustAll}, u, testInternalKey, time.Second)
+	req := httptest.NewRequest("GET", "/api/peer", nil)
+	req.Header.Set(peerHeader, "6.6.6.6:4")
+	front.ServeHTTP(httptest.NewRecorder(), req)
+	if seen != "" {
+		t.Errorf("the api handler saw %q", seen)
+	}
+}
+
+// on its own, not only behind the front's own strip: a second caller of
+// anonymised inherits the property
+func TestAnonymisedDropsThePeer(t *testing.T) {
+	r := httptest.NewRequest("GET", "/news", nil)
+	r.Header.Set(peerHeader, "203.0.113.7:5151")
+	r.Header.Set("X-Real-IP", "203.0.113.7")
+	r.Header.Set("Forwarded", "for=203.0.113.7")
+	anon := anonymised(r)
+	for _, name := range []string{peerHeader, "X-Real-IP", "Forwarded"} {
+		if got := anon.Header.Get(name); got != "" {
+			t.Errorf("anonymised kept %s: %q", name, got)
+		}
+	}
+}
+
+// an api alone honours no peer, having no internal key, and drops it all the
+// same: the app reads the header alike in both shapes
+func TestAnApiAloneDropsAClientsPeerHeader(t *testing.T) {
+	seen := "unread"
+	api := http.NewServeMux()
+	api.HandleFunc("GET /api/peer", func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get(peerHeader)
+		w.WriteHeader(204)
+	})
+	// the app's own middleware is a reader too: api/middleware.go runs first
+	middlewareSaw := "unread"
+	app := &appMiddleware{wrap: func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			middlewareSaw = r.Header.Get(peerHeader)
+			next.ServeHTTP(w, r)
+		})
+	}}
+	req := httptest.NewRequest("GET", "/api/peer", nil)
+	req.Header.Set(peerHeader, "6.6.6.6:4")
+	apiOnlyHandler(nil, 1<<20, app, api, nil).ServeHTTP(httptest.NewRecorder(), req)
+	if seen != "" || middlewareSaw != "" {
+		t.Errorf("the api handler saw %q, the app's middleware %q", seen, middlewareSaw)
+	}
+}

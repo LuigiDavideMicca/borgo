@@ -212,6 +212,11 @@ func (c *renderClient) shared(anon *http.Request) (int, http.Header, string, err
 	}
 	req.Host = anon.Host
 	c.forward(anon, req.Header)
+	// the host and the scheme build the page's public url; the address
+	// chain is somebody's, and a shared render is about nobody - its loaders
+	// would hand it to the api, and the cached copy would replay it (found
+	// by the verifier of phase 7)
+	req.Header.Del("X-Forwarded-For")
 	req.Header.Set(internalKeyHeader, c.key)
 	req.Header.Set(sharedRenderHeader, "1")
 	res, err := c.client.Do(req)

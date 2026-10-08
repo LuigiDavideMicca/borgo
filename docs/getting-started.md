@@ -12,12 +12,13 @@ go mod tidy
 bun run dev
 ```
 
-`-t full` is the template with users, sessions and a database already in place; `--yes` takes every other default. In a terminal the scaffolder offers to run the last four commands itself. Either way, open http://localhost:3000 and register an account at `/register`: that is the app this guide builds on.
+`-t full` is the template with users, sessions and a database already in place; `--yes` takes every other default - and in a terminal that includes installing and starting the dev server itself, so the first command is the only one you type now; the other four are what it ran, and `cd board` then `bun run dev` is how you start it again. Outside a terminal, or with `--no-install`, run them yourself. Either way, open http://localhost:3000 and register an account at `/register`: that is the app this guide builds on.
 
 ## What you just got
 
 ```
-pages/                one file per route: index, login, register, account, live, news
+pages/                one file per route: index, login, register, account, live, news;
+                      _layout.tsx wraps them all
 api/                  the Go API: users.go (sessions and login), notes.go, events.go,
                       realtime.go (who may hold a WebSocket topic), middleware.go
 db/                   opens SQLite and applies db/migrations/ at boot
@@ -25,11 +26,13 @@ env.ts                the app's environment, declared once and typed
 env/env.gen.go        the same declarations for Go, written from env.ts - never edited
 middleware.ts         the pages' guard: which paths need a session
 main.go               the Go entrypoint: opens the database, calls borgo.Serve()
+api/borgo.gen.go      written by borgogen at the first dev run: mounts the //borgo:route handlers
+                      and api/middleware.go, and any //borgo:export - committed, never edited
 .borgo/               generated: api-types.d.ts (committed) and build plumbing
 .env                  SESSION_SECRET, random and unique to this app - never committed
 ```
 
-Plus `Dockerfile`, `docker-compose.yml`, `index.html`, `style.scss`, `package.json` and `go.mod`.
+Plus `public/` for static files, `ws-events.d.ts` for events the browser publishes, `Dockerfile`, `docker-compose.yml`, `index.html`, `style.scss`, `package.json`, `tsconfig.json`, `go.mod` and the app's own `README.md`.
 
 Two processes are running. The Go binary answers port 3000: it serves `/api/*` in its own process, the static files and the WebSocket topics, and asks the second process - Bun, on a loopback port nothing else can reach - for the one thing that needs JavaScript, a rendered page. From the browser there is one origin and one port.
 
@@ -49,6 +52,26 @@ CREATE TABLE links (
 
 Save it and watch the terminal: the API rebuilds, and at boot `db.Open` applies every migration the database has not seen, in a transaction, and records it. Once applied, a migration is history: edit it later and the app refuses to boot rather than run against a schema it does not know, so a change is always a new file. [The database](database.md) has the runner and its rules.
 
+## A setting, declared once
+
+The board will cap how many links one user shares, and the cap is a setting, not a constant. Declare it in `env.ts`, under `server`:
+
+```ts no-check
+    // how many links one user may share
+    LINKS_PER_USER: { type: "number", default: 20 },
+```
+
+Save, and `env/env.gen.go` is written again with a typed field, `LINKS_PER_USER float64`, which the Go code below reads as `env.Must().LINKS_PER_USER`, by the same rules `env.ts` reads it with. Start the app with `LINKS_PER_USER=abc` and both halves refuse to boot, each naming the variable - the Go binary with
+
+```
+borgo env: 1 variable refused:
+  - LINKS_PER_USER: expected a number, got "abc"
+```
+
+and the render service with `the environment refused the boot - 1 variable:` over the same line.
+
+One declaration, checked in the process that renders and in the process that uses it. See [the environment](environment.md).
+
 ## The Go side
 
 Create `api/links.go`:
@@ -58,6 +81,7 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/LuigiDavideMicca/borgo"
@@ -119,16 +143,24 @@ func CreateLink(w http.ResponseWriter, r *http.Request) {
 		borgo.BindError(w, err)
 		return
 	}
-	var count int
-	db.DB.QueryRowContext(r.Context(), `SELECT count(*) FROM links WHERE owner = ?`, me.Username).Scan(&count)
-	if count >= int(env.Must().LINKS_PER_USER) {
-		http.Error(w, "you have shared as many links as this board allows", http.StatusConflict)
+	// a link is http or https: anything else - javascript:, data: - is not
+	// one to put in an href for everybody else
+	if u, err := url.Parse(body.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		http.Error(w, "a link starts with http:// or https://", http.StatusBadRequest)
 		return
 	}
 	link := Link{URL: body.URL, Title: body.Title, Owner: me.Username, CreatedAt: time.Now().Format(time.RFC3339)}
-	res, err := db.DB.ExecContext(r.Context(), `INSERT INTO links (url, title, owner, created_at) VALUES (?, ?, ?, ?)`, link.URL, link.Title, link.Owner, link.CreatedAt)
+	// the limit and the insert in one statement, so two tabs posting at once
+	// cannot both slip past it
+	res, err := db.DB.ExecContext(r.Context(), `INSERT INTO links (url, title, owner, created_at)
+		SELECT ?, ?, ?, ? WHERE (SELECT count(*) FROM links WHERE owner = ?) < ?`,
+		link.URL, link.Title, link.Owner, link.CreatedAt, me.Username, int(env.Must().LINKS_PER_USER))
 	if err != nil {
 		storeFailed(w, "create link", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		http.Error(w, "you have shared as many links as this board allows", http.StatusConflict)
 		return
 	}
 	id, _ := res.LastInsertId()
@@ -152,7 +184,7 @@ func DeleteLink(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-Three handlers, registered in `init` with `borgo.Handle` and wrapped in `borgo.Authed`, which answers `401` to a request without a session before the handler runs. Inside, `borgo.GetSession[Me]` reads who is asking - `Me` is what `api/users.go` stores at login - and the queries are plain `database/sql` against `db.DB`. The delete names the owner in its `WHERE`: someone else's link is a `404`, the same answer as a link that does not exist, so an id tells nobody anything.
+Three handlers, registered in `init` with `borgo.Handle` and wrapped in `borgo.Authed`, which answers `401` to a request without a session before the handler runs. Inside, `borgo.GetSession[Me]` reads who is asking - `Me` is what `api/users.go` stores at login - and the queries are plain `database/sql` against `db.DB`. `CreateLink` refuses what is not an `http` or `https` link - a `javascript:` one would land in everybody's `href` - and puts the limit and the insert in one statement, so two tabs posting at once cannot both slip past it. The delete names the owner in its `WHERE`: someone else's link is a `404`, the same answer as a link that does not exist, so an id tells nobody anything.
 
 Now look at `.borgo/api-types.d.ts`. borgogen read your Go source - not a spec, not the running program - and wrote, among the rest:
 
@@ -189,7 +221,7 @@ Create `pages/links.tsx`:
 
 ```tsx no-check
 import { useEffect, useState } from "react";
-import { CsrfField, redirect, subscribe, type ActionContext, type LoaderContext } from "borgo-framework";
+import { ApiError, CsrfField, redirect, subscribe, type ActionContext, type LoaderContext } from "borgo-framework";
 import type { Link } from "@/.borgo/api-types";
 
 export const head = { title: "Links" };
@@ -203,8 +235,14 @@ export async function action({ request, api }: ActionContext) {
   const form = await request.formData();
   const url = String(form.get("url") ?? "").trim();
   const title = String(form.get("title") ?? "").trim();
-  if (!URL.canParse(url)) return { error: "that is not a link" };
-  await api("POST /api/links", { body: { url, title: title || url } });
+  if (!/^https?:\/\//i.test(url) || !URL.canParse(url)) return { error: "a link starts with http:// or https://" };
+  try {
+    await api("POST /api/links", { body: { url, title: title || url } });
+  } catch (error) {
+    // the api's own refusals, said where the form is: the limit, a bad link
+    if (error instanceof ApiError && (error.status === 409 || error.status === 400)) return { error: error.body.trim() };
+    throw error;
+  }
   return redirect("/links");
 }
 
@@ -239,7 +277,7 @@ export default function Links({ links: initial, actionData }: { links: Link[]; a
 }
 ```
 
-The `loader` runs on the server before rendering, and what it returns becomes the props. They are in the HTML before any JavaScript runs, and readable by the visitor, so return what the page shows. The `action` takes the form's `POST`. With JavaScript off it works as a classic post, redirect and get; with it on, the runtime submits over `fetch` and renders in place, and an object returned instead of a redirect becomes `actionData`. `<CsrfField />` is what makes a cross-site copy of the form fail. The check is off under `borgo dev` and enforced in production, so a form without it works now and breaks on the first deploy.
+The `loader` runs on the server before rendering, and what it returns becomes the props. They are in the HTML before any JavaScript runs, and readable by the visitor, so return what the page shows. The `action` takes the form's `POST`, and turns the API's own refusals - the limit, a bad link - into a message beside the form instead of an error page. With JavaScript off it works as a classic post, redirect and get; with it on, the runtime submits over `fetch` and renders in place, and an object returned instead of a redirect becomes `actionData`. `<CsrfField />` is what makes a cross-site copy of the form fail. The check is off under `borgo dev` and enforced in production, so a form without it works now and breaks on the first deploy.
 
 Now break it on purpose. Change `"GET /api/links"` to `"GET /api/link"`, and `bunx tsc --noEmit` answers:
 
@@ -259,24 +297,6 @@ export const matcher = ["/account", "/links"];
 ```
 
 The middleware runs before the loader, before the props a client navigation fetches, and before the action - all three doors of the page - and sends a visitor without a session to `/login`. A redirect in the loader would have guarded the loader only; a `POST` to the page would still have reached the action. [Middleware and authorization](middleware-and-authorization.md) has the rest, including `api/middleware.go`, the same idea in front of the API.
-
-## A limit from the environment
-
-`CreateLink` refuses past `env.Must().LINKS_PER_USER`. Declare it in `env.ts`, under `server`:
-
-```ts no-check
-    // how many links one user may share
-    LINKS_PER_USER: { type: "number", default: 20 },
-```
-
-Save, and `env/env.gen.go` is written again with a typed field, `LINKS_PER_USER float64`, read by the same rules `env.ts` reads it with. Start the app with `LINKS_PER_USER=abc` and both halves refuse to boot, naming the variable:
-
-```
-borgo env: 1 variable refused:
-  - LINKS_PER_USER: expected a number, got "abc"
-```
-
-One declaration, checked in the process that renders and in the process that uses it. See [the environment](environment.md).
 
 ## Live
 

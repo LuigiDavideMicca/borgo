@@ -14,6 +14,7 @@ import { join } from "node:path";
 import {
   copyPublic,
   countAssets,
+  exportApiEnv,
   exportSummary,
   fillPattern,
   freePorts,
@@ -813,4 +814,15 @@ describe("hunting round 2: the exporter's params and paths", () => {
     expect(unsafeParamReason("")).toContain("empty");
     expect(() => fillPattern("/posts/:id", { id: "" })).toThrow('param "id" is empty');
   });
+});
+
+// the api an export starts serves its loaders and nobody else: loopback, and
+// a plain api - no render service named, whatever the shell had
+test("the export's api is a plain api on loopback", () => {
+  const env = exportApiEnv({ BORGO_RENDER_URL: "http://127.0.0.1:9", PATH: "/bin" }, 4501, 4000);
+  expect(env.BORGO_API_LOOPBACK).toBe("1");
+  expect(env.BORGO_RENDER_URL).toBe("");
+  expect(env.API_PORT).toBe("4501");
+  expect(env.PORT).toBe("4000");
+  expect(env.PATH).toBe("/bin");
 });

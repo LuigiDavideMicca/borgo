@@ -1362,3 +1362,68 @@ func TestBindRequiresAJSONContentType(t *testing.T) {
 		})
 	}
 }
+
+// the api borgo export starts answers its loaders on loopback and nothing on
+// the machine's other addresses (found by the verifier of phase 7)
+func TestAnExportsApiListensOnLoopbackAlone(t *testing.T) {
+	var outside net.IP
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() && !n.IP.IsLinkLocalUnicast() {
+			outside = n.IP
+			break
+		}
+	}
+	if outside == nil {
+		t.Skip("no address but loopback to reach the api from")
+	}
+	restoreRegistry(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	port := freePort(t)
+	t.Setenv("API_PORT", port)
+	t.Setenv("BORGO_API_LOOPBACK", "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- ServeContext(ctx) }()
+	defer func() {
+		cancel()
+		<-errCh
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		res, err := http.Get("http://127.0.0.1:" + port + "/healthz")
+		if err == nil {
+			res.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the api never came up on loopback: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort(outside.String(), port), time.Second); err == nil {
+		conn.Close()
+		t.Errorf("the api answered on %s", outside)
+	}
+}
+
+func TestApiOnlyAddr(t *testing.T) {
+	for _, c := range []struct{ env, want string }{
+		{"", ":3501"},
+		{"1", "127.0.0.1:3501"},
+		{"true", "127.0.0.1:3501"},
+		{"0", ":3501"},
+		{"false", ":3501"},
+	} {
+		t.Setenv("BORGO_API_LOOPBACK", c.env)
+		if got, err := apiOnlyAddr("3501"); got != c.want || err != nil {
+			t.Errorf("BORGO_API_LOOPBACK=%q: %q %v, want %q", c.env, got, err, c.want)
+		}
+	}
+	// refused, not read as off: off is every interface
+	t.Setenv("BORGO_API_LOOPBACK", "yes")
+	if got, err := apiOnlyAddr("3501"); err == nil {
+		t.Errorf("BORGO_API_LOOPBACK=yes read as %q", got)
+	}
+}

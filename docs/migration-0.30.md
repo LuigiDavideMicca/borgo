@@ -83,7 +83,7 @@ Three smaller consequences:
 
 The rest of 0.30 adds API rather than changing it - [page middleware](middleware-and-authorization.md), `borgo.CheckSession`, `borgo.Signup`, typed computed topics, [uploads](typed-bridge.md#uploads-borgobindmultipart), [the database page](database.md) and the Go half of [the environment](environment.md#the-go-half-reads-the-same-contract). An app that uses none of it meets the few changes below.
 
-**Two can stop a build, in an app with `go.mod` whose `env.ts` declares server variables.** The build now writes `env/env.gen.go` from `env.ts` - commit it, as you commit `api/borgo.gen.go` - and two things it cannot write refuse the build by name: a server variable whose name does not start with a capital letter (it becomes a Go field), and one server variable declared by two exported schemas. Rename the first, keep the second in one schema. And `env/` is now the generated package's directory: if your app has a Go package of its own there *and* server variables in `env.ts`, move the package, and the build says which files. An app without server variables meets neither.
+**Two can stop a build, in an app with `go.mod` whose `env.ts` declares server variables.** The build now writes `env/env.gen.go` from `env.ts` - commit it, as you commit `api/borgo.gen.go` - and two things it cannot write refuse the build by name: a server variable whose name is not a capital letter followed by letters, digits and underscores (it becomes a Go field), and one server variable declared by two exported schemas. Rename the first, keep the second in one schema. And `env/` is now the generated package's directory: if your app has a Go package of its own there *and* server variables in `env.ts`, move the package, and the build says which files. An app without server variables meets neither.
 
 **Five are visible from outside.**
 
@@ -93,7 +93,7 @@ The rest of 0.30 adds API rather than changing it - [page middleware](middleware
 - **`borgo export` skips a page `middleware.ts` can reach**, and `404.html` when the matcher can reach a path no page answers: a static host runs no guard. A matcher-less `middleware.ts` therefore exports nothing.
 - **A page from the shared cache is rendered fresh for a signed-in visitor without a CSRF cookie**, so the page carries a token again. Invisible unless you watch the cache header: that one request reads `bypass`.
 
-**One in an image you built from a 0.2x template.** Those Dockerfiles copy `islands`, `components` and `lib` into the runtime image, and not `middleware.ts`, which 0.30 introduced: add one, and the image builds and exits at start with `Cannot find module '../middleware'`. Add `middleware.ts` to that `for d in ...` line, as the 0.30 templates do, or regenerate the Dockerfile from a fresh scaffold and diff.
+**One in an image you built from a 0.2x template.** Those Dockerfiles copy `islands`, `components` and `lib` into the runtime image, and not `middleware.ts`, which 0.30 introduced: add one, and the image builds and exits at start with `Cannot find module '../middleware'`. Add `middleware.ts` to that `for d in ...` line and change its `[ -d "$d" ]` to `[ -e "$d" ]` - the test for a directory is false for a file, so the name alone copies nothing - as the 0.30 templates do, or regenerate the Dockerfile from a fresh scaffold and diff.
 
 ## A new port to know about
 
@@ -109,5 +109,5 @@ The rest of 0.30 adds API rather than changing it - [page middleware](middleware
 6. Behind a reverse proxy, set `BORGO_TRUSTED_PROXIES`.
 7. `curl -si localhost:3000/healthz` reports both halves; a `503` with `Retry-After` on a page means the render service is not up, and the body says so.
 8. If `env.ts` declares server variables, run `borgo build` and commit the `env/env.gen.go` it writes.
-9. If your Dockerfile came from a 0.2x template and the app has, or will have, a `middleware.ts`, add it to the runtime stage's copy line.
+9. If your Dockerfile came from a 0.2x template and the app has, or will have, a `middleware.ts`, add it to the runtime stage's copy line and test it with `-e`, not `-d`.
 10. If something outside a browser posts forms to `/api` with a session cookie, make it send JSON or the CSRF header.

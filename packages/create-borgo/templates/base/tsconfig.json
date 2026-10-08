@@ -19,5 +19,8 @@
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["**/*", ".borgo/api-types.d.ts"]
+  "include": ["**/*", ".borgo/api-types.d.ts"],
+  // build output: with allowJs, the bundles the build writes into
+  // public/assets would join the program, and a javascript check flags them
+  "exclude": ["node_modules", "public", "dist"]
 }

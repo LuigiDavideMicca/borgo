@@ -19,6 +19,20 @@ export type ExportPlan = {
   export404: boolean;
 };
 
+// the environment of the api an export runs. No BORGO_RENDER_URL: a plain
+// api on apiPort, which is what the loaders of the pages being exported call
+// - and on loopback, for those loaders alone: not on the network while the
+// export runs (found by the verifier of phase 7)
+export function exportApiEnv(env: NodeJS.ProcessEnv, apiPort: number, frontPort: number): Record<string, string | undefined> {
+  return {
+    ...withoutRenderEnv(env),
+    API_PORT: String(apiPort),
+    PORT: String(frontPort),
+    BORGO_RENDER_URL: "",
+    BORGO_API_LOOPBACK: "1",
+  };
+}
+
 // a _404 page exports as 404.html even when no regular page is exportable
 // guarded: whether middleware.ts can run for a page of the pattern;
 // guarded404: whether it can run for a path no page answers
@@ -340,14 +354,7 @@ export async function exportSite(): Promise<number> {
       apiProc = Bun.spawn([apiBin], {
         stdout: "ignore",
         stderr: "inherit",
-        // no BORGO_RENDER_URL: a plain api on apiPort, which is what the
-        // loaders of the pages being exported call
-        env: {
-          ...withoutRenderEnv(process.env),
-          API_PORT: String(apiPort),
-          PORT: String(frontPort),
-          BORGO_RENDER_URL: "",
-        },
+        env: exportApiEnv(process.env, apiPort, frontPort),
       });
       const probe = `http://localhost:${apiPort}/`;
       const deadline = Date.now() + 30_000;

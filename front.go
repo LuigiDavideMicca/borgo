@@ -307,6 +307,10 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// verifier of the step that put go in front). The request itself travels as written; only
 	// the decision is taken on what it will mean at the far end
 	cleaned := path.Clean(r.URL.Path)
+	// a name only this process may state, to the render service; a client
+	// sending it is answered as if it had not, before any middleware or
+	// handler reads it (found by the verifier of phase 7)
+	r.Header.Del(peerHeader)
 	// the names the two processes use between themselves are not urls: a
 	// public request for one is answered as if it did not exist. One
 	// exception, in dev only: the browser's fast-refresh channel lives on

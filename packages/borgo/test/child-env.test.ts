@@ -29,7 +29,8 @@ describe("a go child is not handed the render half's switches", () => {
 
   test("borgo start and borgo export spawn go from it", () => {
     expect(source("cli.ts")).toContain("...withoutRenderEnv(process.env),\n          ...goFrontEnv(topology),");
-    expect(source("export.ts")).toContain("...withoutRenderEnv(process.env),\n          API_PORT: String(apiPort),");
+    expect(source("export.ts")).toContain("env: exportApiEnv(process.env, apiPort, frontPort),");
+    expect(source("export.ts")).toContain("...withoutRenderEnv(env),\n    API_PORT: String(apiPort),");
   });
 });
 

@@ -804,6 +804,16 @@ func anonymised(r *http.Request) *http.Request {
 		sessionHeader,
 		// and the middleware's forwarded values, which are about somebody too
 		localsHeader,
+		// and the address of whoever triggered the render: the loaders of a
+		// shared copy call the api as nobody, from loopback - and a client
+		// spelling it here chose the RemoteAddr the api saw (found by the
+		// verifier of phase 7)
+		peerHeader,
+		// and the visitor's address as a proxy spelled it: borgo's own
+		// caddy and nginx configs set X-Real-IP, and a loader reading it
+		// would bake one visitor into everybody's copy (found by the
+		// verifier of phase 7)
+		"X-Real-IP", "Forwarded",
 		// what a render could answer differently for the next visitor.
 		// A page that negotiates on these and says so in Vary is refused
 		// outright by unstorable; one that does not say so gets the

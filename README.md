@@ -195,7 +195,7 @@ docs/                   getting started, then deep dives: pages, typed bridge, c
                         deploy, performance, faq; api reference and the 0.30 upgrade guide
 ```
 
-Commands (in an app): `borgo dev` (both servers, watch, fast refresh), `borgo build` (client assets in `public/assets/`, Go binary in `dist/`), `borgo start` (run from build output, supervising both processes on one host), `borgo export` (static site in `dist/site/`), `borgo deploy init <caddy|nginx|systemd|compose>` (deploy configs), `borgo pwa init` (manifest and service worker), `borgo doctor` (environment diagnosis). Ports via `PORT` (the public port the Go binary answers, 3000) and `API_PORT` (Go's loopback-only internal listener, 3501); the render service takes a free loopback port each boot (`BORGO_RENDER_PORT` pins one).
+Commands (in an app): `borgo dev` (both servers, watch, fast refresh), `borgo build` (client assets in `public/assets/`, Go binary in `dist/`), `borgo start` (run from build output, supervising both processes on one host), `borgo export` (static site in `dist/site/`), `borgo deploy init <caddy|nginx|systemd|compose>` (deploy configs), `borgo pwa init` (manifest and service worker), `borgo doctor` (environment diagnosis). Ports via `PORT` (the public port the Go binary answers, 3000) and `API_PORT` (Go's internal listener, 3501, loopback-only under `borgo start` and `borgo dev`); the render service takes a free loopback port each boot (`BORGO_RENDER_PORT` pins one).
 
 ### Deploying
 

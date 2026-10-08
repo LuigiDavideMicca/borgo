@@ -43,7 +43,7 @@ Run the CLI through Bun (`bun run dev` in an app). If you hit `error: bun is not
 - **One host, one container.** `--front-only` is refused, and `API_PORT` is a loopback-only listener: anything that dialed the API directly goes through the public port.
 - **`BORGO_FRONT_READ_TIMEOUT` and `BORGO_API_TIMEOUT` are gone**, for `BORGO_READ_TIMEOUT` and `BORGO_RENDER_TIMEOUT`.
 - **`env/env.gen.go`** is written from `env.ts` when it declares server variables: commit it.
-- **A Dockerfile from a 0.2x template** does not copy `middleware.ts` into the runtime image: add it to the copy line before adding one.
+- **A Dockerfile from a 0.2x template** does not copy `middleware.ts` into the runtime image: add it to the copy line, with `[ -e "$d" ]` in place of `[ -d "$d" ]`, before adding one.
 
 ## Upgrading from 0.21
 

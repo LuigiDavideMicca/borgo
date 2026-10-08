@@ -48,7 +48,7 @@ The `borgo` CLI also has `deploy init <caddy|nginx|systemd|compose>` (write the 
 
 Not in this template, but one page away in the docs: two-way WebSocket topics (`subscribe` in the browser, `borgo.Push(topic, event, data)` in Go, with the payload type flowing from one to the other) and users — signed-cookie sessions, password hashing and the `borgo.Auth` login/logout/register helpers are built in. `--template full` has both wired up; the [auth guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/auth-and-sessions.md) and the [realtime guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/realtime.md) explain them.
 
-Ports: the go binary answers `PORT` (default 3000), the only public one. Its api also listens on `API_PORT` (default 3501) and the bun render service on `BORGO_RENDER_PORT` (default 3600), both on loopback.
+Ports: the go binary answers `PORT` (default 3000), the only public one. Its api also listens on `API_PORT` (default 3501) and the bun render service on a free loopback port each boot (`BORGO_RENDER_PORT` pins one), both on loopback.
 
 ---
 

@@ -57,7 +57,7 @@ The compose file reads `SESSION_SECRET` from the `.env` described under [Setup](
 
 `env/env.gen.go` is written from `env.ts` by `borgo build` and `borgo dev`, so the Go side reads `DB_PATH` with the same rules and default as the render service — edit `env.ts`, never the generated file. A change to the schema is a new file in `db/migrations/` (`0002_what.sql`): it applies at the next boot, once, and an applied file is never edited — `db/migrate.go` refuses one that changed. The [auth guide](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/auth-and-sessions.md) explains what the framework guarantees and what stays yours.
 
-Ports: the go binary answers `PORT` (default 3000), the only public one. Its api also listens on `API_PORT` (default 3501) and the bun render service on `BORGO_RENDER_PORT` (default 3600), both on loopback.
+Ports: the go binary answers `PORT` (default 3000), the only public one. Its api also listens on `API_PORT` (default 3501) and the bun render service on a free loopback port each boot (`BORGO_RENDER_PORT` pins one), both on loopback.
 
 ---
 

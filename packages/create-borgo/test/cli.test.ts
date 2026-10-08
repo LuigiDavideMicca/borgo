@@ -1365,6 +1365,17 @@ describe("the scaffolded tree", () => {
     expect(tsconfig).toContain(".borgo/api-types.d.ts");
   });
 
+  // allowJs puts every bundle the build wrote into the program, and a checkJs
+  // or an editor's javascript check then reports errors in minified code
+  // (found by the verifier of phase 7)
+  test.each(["minimal", "base", "full"])("the %s tsconfig leaves build output out of the program", (template) => {
+    run([`app-${template}`, "--template", template, NG]);
+    const tsconfig = readFileSync(join(cwd, `app-${template}`, "tsconfig.json"), "utf8");
+    const exclude = tsconfig.match(/"exclude":\s*\[([^\]]*)\]/)?.[1] ?? "";
+    expect(exclude).toContain('"public"');
+    expect(exclude).toContain('"dist"');
+  });
+
   test("package.json stays valid json through every rewrite", () => {
     run(["app", "--template", "full", "--tailwind", "--linter", "eslint", NG]);
     const p = pkg("app");

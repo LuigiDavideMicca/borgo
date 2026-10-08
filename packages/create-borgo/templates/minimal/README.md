@@ -48,7 +48,7 @@ What this template ships is the whole list:
 
 Nothing else is wired up here on purpose. Sessions and auth, server-sent events, WebSocket topics and islands are all in the framework and none of them are in this template — `--template base` demonstrates SSE and islands, `--template full` adds auth and CRUD, and the [docs](https://github.com/LuigiDavideMicca/borgo/blob/main/docs/README.md) cover each one on its own page.
 
-Ports: the go binary answers `PORT` (default 3000), the only public one. Its api also listens on `API_PORT` (default 3501) and the bun render service on `BORGO_RENDER_PORT` (default 3600), both on loopback.
+Ports: the go binary answers `PORT` (default 3000), the only public one. Its api also listens on `API_PORT` (default 3501) and the bun render service on a free loopback port each boot (`BORGO_RENDER_PORT` pins one), both on loopback.
 
 ---
 

@@ -421,7 +421,11 @@ func newServer(port string, handler http.Handler) (*http.Server, error) {
 	}, nil
 }
 
-// Serve mounts every registered route and listens on API_PORT (default 3501).
+// Serve mounts every registered route and listens. Under borgo start or borgo
+// dev - with a render service named by BORGO_RENDER_URL - it answers the
+// public PORT and keeps API_PORT (default 3501) on loopback for the render
+// service; with none, an api-only app, it listens on API_PORT on every
+// interface.
 // It also answers GET /healthz, unless a registered route claims it. It blocks
 // until the process is signalled, then shuts down gracefully; a listener that
 // fails to start, or an environment CheckEnv refuses, is fatal.
@@ -439,7 +443,7 @@ func Serve() {
 }
 
 // ServeContext is Serve that returns instead of exiting. It mounts every
-// registered route, listens on API_PORT and blocks until ctx is cancelled or
+// registered route, listens as Serve does and blocks until ctx is cancelled or
 // the parent process named by BORGO_PARENT_PID exits, then shuts down
 // gracefully within BORGO_SHUTDOWN_TIMEOUT and returns nil. A listener that
 // cannot start or stops on its own, a refusal from CheckEnv and a malformed
@@ -490,6 +494,9 @@ func serveContext(ctx context.Context, onShutdown func()) error {
 	}
 	if renderer != nil {
 		return serveFront(ctx, onShutdown, renderer, port, grace, parentPID)
+	}
+	if srv.Addr, err = apiOnlyAddr(port); err != nil {
+		return err
 	}
 	// bound here, not in ListenAndServe: a port in use is a refusal like the
 	// others, with the registry untouched and no banner printed
@@ -882,6 +889,26 @@ func printFrontStartup(patterns []string, publicPort, internalAddr string, rende
 	printRelayNotice(terra, reset)
 }
 
+// apiOnlyAddr is where an api with no render service listens: every
+// interface, as a deployment of one needs - or loopback, when borgo export
+// runs it for the loaders of the pages it writes and for nobody else (found
+// by the verifier of phase 7). A value ParseBool cannot read is refused
+// rather than read as off: off is the open answer
+func apiOnlyAddr(port string) (string, error) {
+	v := os.Getenv("BORGO_API_LOOPBACK")
+	if v == "" {
+		return ":" + port, nil
+	}
+	loopback, err := strconv.ParseBool(v)
+	if err != nil {
+		return "", fmt.Errorf("borgo: BORGO_API_LOOPBACK=%q is not a boolean", v)
+	}
+	if loopback {
+		return "127.0.0.1:" + port, nil
+	}
+	return ":" + port, nil
+}
+
 // apiOnlyHandler is the public port of an api with no pages: the protections
 // the front applies, and api/middleware.go guarding it exactly as it guards
 // the front; /ws is the relay's, behind the same guards, nil when there is
@@ -898,7 +925,14 @@ func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware,
 			api.ServeHTTP(w, r)
 		})
 	}
-	return security.middleware(progressDeadlines(limitBody(maxBody, withSessionOnce(withAppMiddleware(app, routed)))))
+	guarded := security.middleware(progressDeadlines(limitBody(maxBody, withSessionOnce(withAppMiddleware(app, routed)))))
+	// honoured only behind the internal key, which this shape has none of:
+	// dropped all the same, so the app reads the header the same way in
+	// both shapes - absent (found by the verifier of phase 7)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Del(peerHeader)
+		guarded.ServeHTTP(w, r)
+	})
 }
 
 // internalHandler is the loaders' way in. The app's middleware guards it as

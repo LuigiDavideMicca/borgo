@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -137,13 +138,24 @@ func TestMigrateRefusesANameWithNoPlaceInTheOrder(t *testing.T) {
 	}
 }
 
-// the embedded migrations apply to a fresh file, which is what Open does
+// the embedded migrations apply to a fresh file, which is what Open does -
+// every one of them, the app's own included, so a new migration is checked
+// here without editing this test
 func TestOpenAppliesTheEmbeddedMigrations(t *testing.T) {
 	if err := Open(context.Background(), filepath.Join(t.TempDir(), "app.db")); err != nil {
 		t.Fatal(err)
 	}
 	defer DB.Close()
-	if got := tables(t, DB); got != "notes,schema_migrations,users" {
+	names, err := fs.Glob(migrations, "migrations/*.sql")
+	if err != nil || len(names) == 0 {
+		t.Fatalf("embedded migrations: %v %v", names, err)
+	}
+	var applied int
+	DB.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&applied)
+	if applied != len(names) {
+		t.Errorf("%d of %d migrations applied", applied, len(names))
+	}
+	if got := tables(t, DB); !strings.Contains(got, "notes") || !strings.Contains(got, "users") {
 		t.Errorf("tables: %s", got)
 	}
 }

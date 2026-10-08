@@ -289,8 +289,8 @@ These are borgo's own variables. Your application's variables get the same disci
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `3000` | the public port, bound by the go binary — the only port a browser reaches |
-| `API_PORT` | `3501` | the api's internal listener, on `127.0.0.1` alone, for loaders and form actions; a value that is not 0-65535 is refused before the server binds |
-| `API_URL` | `http://localhost:$API_PORT` | where the render service reaches the api |
+| `API_PORT` | `3501` | the api's internal listener, on `127.0.0.1` alone, for loaders and form actions (an api-only app, with no render service, answers on it on every interface); a value that is not 0-65535 is refused before the server binds |
+| `API_URL` | `http://127.0.0.1:$API_PORT` | where the render service reaches the api |
 | `BORGO_RENDER_URL` | set by `borgo start` | the render service the front forwards pages to. Setting it is what makes the binary a front; unset, it is an api alone on its single listener |
 | `BORGO_RENDER_PORT` | a free port | the loopback port the render service binds. Unset, `borgo start` picks a free one at boot and configures both halves from it; set, a port that already answers on `127.0.0.1` refuses the boot |
 | `BORGO_INTERNAL_KEY` | minted per boot | the key that authorises the front's requests to the render service, 32 bytes minimum. Normally never set by hand: the CLI mints one per boot for both halves. A render service without a usable one refuses to boot |
