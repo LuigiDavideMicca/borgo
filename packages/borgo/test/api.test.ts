@@ -29,6 +29,57 @@ describe("makeApiClient", () => {
     expect(calls[0].init.method).toBe("GET");
   });
 
+  // ServeMux's own wildcards were sent as written: the handler received the
+  // literal "{rest...}", and {$} was a 404 (found by hunt 3)
+  test("{$} takes no value and {name...} keeps the slashes of its value", async () => {
+    stubFetch(() => Response.json({}));
+    const untyped = makeApiClient("http://api:1") as unknown as (route: string, opts?: object) => Promise<unknown>;
+    await untyped("GET /api/files/{rest...}", { params: { rest: "a b/c%d" } });
+    expect(calls[0].url).toBe("http://api:1/api/files/a%20b/c%25d");
+    await untyped("GET /api/exact/{$}");
+    expect(calls[1].url).toBe("http://api:1/api/exact/");
+  });
+
+  // ".." was resolved away by the url: DELETE /api/tasks/{id} with id ".."
+  // was DELETE /api/ (found by hunt 3)
+  test("a dot segment in a param is refused before anything is sent", async () => {
+    stubFetch(() => Response.json({}));
+    const untyped = makeApiClient("http://api:1") as unknown as (route: string, opts?: object) => Promise<unknown>;
+    for (const id of [".", ".."]) {
+      await expect(untyped("DELETE /api/tasks/{id}", { params: { id } })).rejects.toThrow("dot segment");
+    }
+    await expect(untyped("GET /api/files/{rest...}", { params: { rest: "a/../secret" } })).rejects.toThrow("dot segment");
+    expect(calls.length).toBe(0);
+    await untyped("GET /api/tasks/{id}", { params: { id: "..." } });
+    expect(calls[0].url).toBe("http://api:1/api/tasks/...");
+  });
+
+  // followed, a redirect carried the boot key to whatever host an open ?next=
+  // named (found by hunt 3)
+  test("a redirect from the api is an answer, not a request sent on", async () => {
+    globalThis.fetch = realFetch;
+    let reached: string | null = null;
+    const elsewhere = Bun.serve({
+      port: 0,
+      fetch(req) {
+        reached = req.headers.get("x-borgo-internal") ?? "";
+        return new Response("elsewhere");
+      },
+    });
+    const api = Bun.serve({ port: 0, fetch: () => Response.redirect(`http://127.0.0.1:${elsewhere.port}/steal`, 302) });
+    try {
+      const client = makeApiClient(`http://127.0.0.1:${api.port}`, { "X-Borgo-Internal": "the-boot-key" });
+      const untyped = client as unknown as (route: string) => Promise<unknown>;
+      const error = await untyped("GET /api/go").catch((e) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).status).toBe(302);
+      expect(reached).toBeNull();
+    } finally {
+      api.stop(true);
+      elsewhere.stop(true);
+    }
+  });
+
   test("a route key without a method fails loudly, not with a mangled url", async () => {
     stubFetch(() => Response.json({}));
     const api = makeApiClient("http://api:1");

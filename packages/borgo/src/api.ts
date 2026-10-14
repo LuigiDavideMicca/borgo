@@ -18,8 +18,11 @@ export type ApiRequest<K extends string> = Entry<K> extends { request: infer B }
 // built from the object, or handed over as a FormData of the caller's own
 export type ApiMultipart<K extends string> = Entry<K> extends { multipart: true } ? true : false;
 
+// ServeMux's own wildcards: {$} anchors the end and takes no value, and
+// {name...} is the param name, matching the rest of the path
+type ParamName<P extends string> = P extends "$" ? never : P extends `${infer N}...` ? N : P;
 type ParamNames<S extends string> = S extends `${string}{${infer P}}${infer Rest}`
-  ? P | ParamNames<Rest>
+  ? ParamName<P> | ParamNames<Rest>
   : never;
 
 export type ApiOptions<K extends string> = {
@@ -148,10 +151,27 @@ export function makeApiClient(
     // without this, slice(0, -1) silently mangles the key into nonsense
     if (space === -1) throw new Error(`api route "${route}": expected "METHOD /path"`);
     const method = route.slice(0, space);
-    const path = route.slice(space + 1).replace(/\{(\w+)\}/g, (_, name) => {
+    // {$} and {name...} were sent literally - the handler received
+    // "{rest...}" - and a param of "." or ".." was resolved away by the url,
+    // so DELETE /api/tasks/{id} with id ".." was DELETE /api/ (found by
+    // hunt 3). An encoded dot segment is still one to the url standard, so
+    // it is refused, not escaped
+    const segment = (name: string, value: string) => {
+      if (value === "." || value === "..") {
+        throw new Error(`api ${route}: param "${name}" is "${value}", a dot segment that would change the path`);
+      }
+      return encodeURIComponent(value);
+    };
+    const path = route.slice(space + 1).replace(/\{(\$|(\w+)(\.\.\.)?)\}/g, (_, all, name, rest) => {
+      if (all === "$") return "";
       const value = opts.params?.[name];
       if (value === undefined) throw new Error(`api ${route}: missing param "${name}"`);
-      return encodeURIComponent(String(value));
+      return rest
+        ? String(value)
+            .split("/")
+            .map((part) => segment(name, part))
+            .join("/")
+        : segment(name, String(value));
     });
 
     const url = new URL(base + path);
@@ -170,6 +190,11 @@ export function makeApiClient(
     const form = multipartBody(opts.body);
     const init = {
       method,
+      // a redirect is the api's answer, not a place to send the request on
+      // to: followed, it carried the boot key to whatever host an open
+      // ?next= named (found by hunt 3). It comes back as an ApiError with
+      // its status; in the browser an opaque one, status 0
+      redirect: "manual" as const,
       headers: {
         ...defaults,
         // fetch writes the multipart boundary itself

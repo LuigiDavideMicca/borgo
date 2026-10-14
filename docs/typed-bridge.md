@@ -380,7 +380,7 @@ export async function loader({ params, api }: LoaderContext) {
 }
 ```
 
-Options are `params`, `query`, `body`, `headers` and `timeout` (milliseconds; off by default, because a hard default would break streaming and long-polling callers). Non-2xx responses throw `ApiError`, which carries `.status` and a size-capped `.body`:
+Options are `params`, `query`, `body`, `headers` and `timeout` (milliseconds; off by default, because a hard default would break streaming and long-polling callers). A redirect is not followed - it is the api's answer, and following it would carry the request's headers to wherever it points - so a `3xx` throws like any other non-2xx. A path param of `.` or `..` throws before anything is sent; `{name...}` takes a value with slashes and keeps them, and `{$}` takes none. Non-2xx responses throw `ApiError`, which carries `.status` and a size-capped `.body`:
 
 ```tsx
 import { ApiError, redirect, type LoaderContext } from "borgo-framework";

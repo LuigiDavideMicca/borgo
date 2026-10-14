@@ -17,6 +17,8 @@ declare module "borgo-framework" {
   interface ApiRoutes {
     "POST /api/attachments": { response: { id: string }; request: Form; multipart: true };
     "POST /api/tasks": { response: { id: string }; request: { title?: string | null } };
+    "GET /api/files/{rest...}": { response: { size: number } };
+    "GET /api/exact/{$}": { response: { ok: boolean } };
   }
 }
 
@@ -36,6 +38,11 @@ export async function calls() {
   await api("POST /api/tasks", { body: { title: "t" } });
   // @ts-expect-error a JSON route is not sent a FormData
   await api("POST /api/tasks", { body: new FormData() });
+  // ServeMux's wildcards: {name...} is the param name, {$} takes none
+  await api("GET /api/files/{rest...}", { params: { rest: "a/b" } });
+  // @ts-expect-error the param is rest, not "rest..."
+  await api("GET /api/files/{rest...}", { params: { "rest...": "a/b" } });
+  await api("GET /api/exact/{$}");
 }
 `;
 
