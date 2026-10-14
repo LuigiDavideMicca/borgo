@@ -363,9 +363,14 @@ func (a *Auth[U]) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 // hashing, ErrUserExists a 409, a missing SESSION_SECRET a 500 before the
 // store is written, more parallel hashes than the box can take a 503 with
 // Retry-After - and on success it starts the session and responds 201 with
-// the principal. What register validates beyond that is the app's: an
-// error it returns is a 500 "registration failed", so refuse a malformed
-// email in the page's action, where the message can be shown.
+// the principal. What the app validates beyond that it says in its own
+// words: a form with a Validate() error method is asked before the password
+// is hashed, and an error from it, or a Refuse from register - an email
+// already registered - answers with the status and body the app chose; any
+// other error from Validate is a 400 with its message, and from register a
+// 500 "registration failed". Before 0.30 every refusal of the app's was
+// that 500, and an email taken said "username taken" (found rebuilding
+// piazza on 0.30).
 func Signup[U any, S SignupForm](a *Auth[U], register func(ctx context.Context, form S, hash string) (U, error)) http.HandlerFunc {
 	if a == nil {
 		panic("borgo.Signup: auth is nil")
@@ -398,6 +403,13 @@ func Signup[U any, S SignupForm](a *Auth[U], register func(ctx context.Context, 
 			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "username and password required"})
 			return
 		}
+		// before the hash: a refused form must not cost a PBKDF2
+		if v, ok := any(form).(interface{ Validate() error }); ok {
+			if err := v.Validate(); err != nil {
+				writeRefusal(w, err, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 		var hash string
 		if !WithHashSlot(w, r, func() { hash, err = a.hasher().Hash(creds.Password) }) {
 			return
@@ -415,6 +427,10 @@ func Signup[U any, S SignupForm](a *Auth[U], register func(ctx context.Context, 
 			return
 		}
 		user, err := register(r.Context(), form, hash)
+		if refusal := (*Refusal)(nil); errors.As(err, &refusal) {
+			writeRefusal(w, err, 0, nil)
+			return
+		}
 		if errors.Is(err, ErrUserExists) {
 			WriteJSON(w, http.StatusConflict, map[string]string{"error": "username taken"})
 			return
@@ -450,4 +466,31 @@ func Authed(next http.HandlerFunc) http.HandlerFunc {
 func hasValidSession(r *http.Request) bool {
 	_, ok := GetSession[json.RawMessage](r)
 	return ok
+}
+
+// Refusal is an answer the app chose for a request it will not serve: the
+// status and the JSON body Signup writes for it. Make one with Refuse.
+type Refusal struct {
+	Status int
+	Body   any
+}
+
+func (r *Refusal) Error() string { return fmt.Sprintf("refused with %d", r.Status) }
+
+// Refuse is the error a Signup form's Validate, or its register function,
+// returns to answer with its own status and body - a 400 naming the field,
+// a 409 for an email already registered - instead of borgo's. A status
+// outside 400-599 is a 400.
+func Refuse(status int, body any) error {
+	if status < 400 || status > 599 {
+		status = http.StatusBadRequest
+	}
+	return &Refusal{Status: status, Body: body}
+}
+
+func writeRefusal(w http.ResponseWriter, err error, status int, body any) {
+	if refusal := (*Refusal)(nil); errors.As(err, &refusal) {
+		status, body = refusal.Status, refusal.Body
+	}
+	WriteJSON(w, status, body)
 }

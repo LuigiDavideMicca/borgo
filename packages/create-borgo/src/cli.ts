@@ -159,6 +159,18 @@ if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(name) || name.endsWith(
   process.exit(1);
 }
 
+// the name is the go module's path too, and a module named after a package
+// of the standard library is one go cannot build: "go" is no module path at
+// all, and fmt or net made every import of the package ambiguous (found by
+// hunt 3). go list std's top-level names, as of go 1.27
+const GO_STD = new Set(
+  "archive bufio builtin bytes cmd cmp compress container context crypto database debug embed encoding errors expvar flag fmt go hash html image index internal io iter log maps math mime net os path plugin reflect regexp runtime slices sort std strconv strings structs sync syscall testing text time unicode unique unsafe uuid vendor weak".split(" "),
+);
+if (GO_STD.has(name)) {
+  console.error(`invalid project name "${name}": it names the go module too, and ${name} is a package of go's standard library - pick another name`);
+  process.exit(1);
+}
+
 const isTemplate = (t: string): t is TemplateName => TEMPLATES.some((k) => k.name === t);
 const isLinter = (l: string): l is LinterName => LINTERS.some((k) => k.name === l);
 

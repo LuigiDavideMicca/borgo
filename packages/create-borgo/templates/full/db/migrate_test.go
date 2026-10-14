@@ -227,3 +227,47 @@ func TestMigrateRefusesAMigrationThatLeavesRowsDangling(t *testing.T) {
 		t.Errorf("%d notes", n)
 	}
 }
+
+// a plain directory embed skipped _0002_x.sql in silence, and so did the
+// runner's own listing of hidden names: a hidden or underscored .sql is
+// refused by name, while what a file manager leaves beside the files is not
+// a migration at all (found by hunt 3)
+func TestMigrateRefusesAHiddenMigrationAndIgnoresTheClutter(t *testing.T) {
+	for _, name := range []string{"_0002_x.sql", ".0002_x.sql"} {
+		err := Migrate(context.Background(), scratch(t), files(map[string]string{"0001_a.sql": `CREATE TABLE a (id INTEGER);`, name: `SELECT 1;`}))
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	err := Migrate(context.Background(), scratch(t), files(map[string]string{"0001_a.sql": `CREATE TABLE a (id INTEGER);`, ".DS_Store": "x", ".gitkeep": ""}))
+	if err != nil {
+		t.Errorf("clutter beside the migrations: %v", err)
+	}
+}
+
+// a COMMIT in the file ended the runner's transaction half way: what came
+// after ran outside it, a failure there left the first half applied and
+// unrecorded, and every later boot failed on "table already exists" (found
+// by hunt 3). A trigger's BEGIN ... END is not a transaction
+func TestMigrateRefusesATransactionOfItsOwn(t *testing.T) {
+	for _, body := range []string{
+		"CREATE TABLE a (id INTEGER);\nCOMMIT;\nCREATE TABLE b (id INTEGER);",
+		"BEGIN TRANSACTION;\nCREATE TABLE a (id INTEGER);",
+		"begin;\nCREATE TABLE a (id INTEGER);",
+		"CREATE TABLE a (id INTEGER);\n  rollback",
+	} {
+		conn := scratch(t)
+		err := Migrate(context.Background(), conn, files(map[string]string{"0001_a.sql": body}))
+		if err == nil || !strings.Contains(err.Error(), "transaction of its own") {
+			t.Errorf("%q: %v", body, err)
+		}
+		// refused before anything ran
+		if got := tables(t, conn); got != "schema_migrations" {
+			t.Errorf("%q left tables behind: %s", body, got)
+		}
+	}
+	trigger := "CREATE TABLE a (id INTEGER, n INTEGER);\nCREATE TRIGGER bump AFTER INSERT ON a\nBEGIN\n  UPDATE a SET n = 1 WHERE id = NEW.id;\nEND;"
+	if err := Migrate(context.Background(), scratch(t), files(map[string]string{"0001_a.sql": trigger})); err != nil {
+		t.Errorf("a trigger: %v", err)
+	}
+}

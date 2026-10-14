@@ -1359,6 +1359,14 @@ describe("the scaffolded tree", () => {
     expect(pkg("app").dependencies["borgo-framework"]).toBe(`^${version}`);
   });
 
+  // TypeScript 7 loads no @types package unless named: process.env and Bun.*
+  // in app code failed tsc (found rebuilding piazza on 0.30)
+  test.each(["minimal", "base", "full"])("the %s tsconfig loads the bun types", (template) => {
+    run([`types-${template}`, "--template", template, NG]);
+    const tsconfig = readFileSync(join(cwd, `types-${template}`, "tsconfig.json"), "utf8");
+    expect(tsconfig).toContain(`"types": ["bun"]`);
+  });
+
   test("tsconfig includes the generated types explicitly", () => {
     run(["app", NG]);
     const tsconfig = readFileSync(join(cwd, "app", "tsconfig.json"), "utf8");
@@ -1714,6 +1722,19 @@ describe("refusals", () => {
     const dotted = run(["app."]);
     expect(dotted.code).toBe(1);
     expect(dotted.out).toContain("trailing dot");
+  });
+
+  // the name is the go module's path: go, fmt or net scaffolded an app go
+  // cannot build (found by hunt 3)
+  test("a name of go's standard library is refused, not scaffolded", () => {
+    for (const name of ["go", "fmt", "net", "strings"]) {
+      const { code, out } = run([name]);
+      expect(`${name}: ${code}`).toBe(`${name}: 1`);
+      expect(out).toContain("standard library");
+      expect(existsSync(join(cwd, name))).toBe(false);
+    }
+    // a name that only starts like one is fine
+    expect(run(["netflix-clone", "--yes", "--no-install"]).code).toBe(0);
   });
 
   // hunting round 2: the scaffolder's floor said 1.25 while every template's

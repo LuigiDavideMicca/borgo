@@ -11,12 +11,18 @@ import (
 	"io/fs"
 	"regexp"
 	"slices"
+	"strings"
 )
 
 // a migration is a file named for its place in the order: 0001_init.sql,
 // 0002_add_tags.sql. Applied in name order, so the number leads, and it is
 // four digits wide: 10_x.sql would otherwise sort before 9_x.sql
 var migrationName = regexp.MustCompile(`^[0-9]{4}_[A-Za-z0-9_]+\.sql$`)
+
+// a statement that begins or ends a transaction, alone on its line. A
+// trigger's BEGIN ... END is not one: its BEGIN carries no semicolon, and its
+// END is left alone
+var transactionStatement = regexp.MustCompile(`(?im)^[[:blank:]]*(BEGIN([[:blank:]]+(DEFERRED|IMMEDIATE|EXCLUSIVE))?([[:blank:]]+TRANSACTION)?[[:blank:]]*;|(COMMIT|ROLLBACK)([[:blank:]]+TRANSACTION)?[[:blank:]]*;?)[[:blank:]]*$`)
 
 // Migrate applies every migration in fsys that the database has not seen,
 // in name order, each in a transaction with the row that records it. A
@@ -44,6 +50,12 @@ func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 	var names []string
 	for _, f := range files {
 		if f.IsDir() {
+			continue
+		}
+		// what an editor or a file manager leaves beside the files is not a
+		// migration that failed to be named: .DS_Store, .gitkeep. A hidden
+		// .sql is one, and is refused below
+		if strings.HasPrefix(f.Name(), ".") && !strings.HasSuffix(strings.ToLower(f.Name()), ".sql") {
 			continue
 		}
 		if !migrationName.MatchString(f.Name()) {
@@ -90,6 +102,13 @@ func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 				return fmt.Errorf("migrations: %s changed after it was applied - a migration that ran is history; undo it in a new file", name)
 			}
 			continue
+		}
+		// the runner owns the transaction: a COMMIT inside the file ended it
+		// half way, the statements after ran outside it, and a failure there
+		// left the first half applied and unrecorded - the next boot then
+		// failed on "table already exists" for good (found by hunt 3)
+		if line := transactionStatement.FindString(string(body)); line != "" {
+			return fmt.Errorf("migrations: %s holds %q: the runner wraps every migration in a transaction of its own", name, strings.TrimSpace(line))
 		}
 		if err := apply(ctx, db, name, string(body), sum); err != nil {
 			return fmt.Errorf("migrations: %s: %w", name, err)

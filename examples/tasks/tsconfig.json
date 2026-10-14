@@ -7,6 +7,10 @@
     "module": "ESNext",
     "moduleDetection": "force",
     "jsx": "react-jsx",
+    // TypeScript 7 loads no @types package unless named: without this the
+    // @types/bun in devDependencies is never read, and process.env or Bun.*
+    // in app code fails tsc (found rebuilding piazza on 0.30)
+    "types": ["bun"],
     "allowJs": true,
 
     "moduleResolution": "bundler",

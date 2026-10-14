@@ -15,9 +15,11 @@ import (
 )
 
 // the whole directory, not *.sql: a file the pattern missed - 0002_tags.SQL -
-// would be skipped in silence, where the runner refuses it by name
+// would be skipped in silence, where the runner refuses it by name. all:,
+// because a plain directory embed skips names starting with . or _ in
+// silence too, and _0003_tags.sql never ran (found by hunt 3)
 //
-//go:embed migrations
+//go:embed all:migrations
 var migrations embed.FS
 
 // DB is the app's handle, opened by Open before borgo.Serve.
