@@ -346,3 +346,17 @@ describe("connection-refused retries", () => {
     expect(src).not.toContain("proxyRequest");
   });
 });
+
+// an empty value collapsed its segment and routed the call elsewhere, and a
+// name ServeMux takes went unsubstituted when it was not a word (found by
+// the verifier of hunt 3's fixes)
+test("an empty param is refused, and any name ServeMux takes is filled", async () => {
+  stubFetch(() => Response.json({}));
+  const untyped = makeApiClient("http://api:1") as unknown as (route: string, opts?: object) => Promise<unknown>;
+  await expect(untyped("GET /api/t/{id}", { params: { id: "" } })).rejects.toThrow("is empty");
+  await expect(untyped("GET /api/files/{rest...}", { params: { rest: "/a" } })).rejects.toThrow("is empty");
+  await expect(untyped("GET /api/files/{rest...}", { params: { rest: "a//b" } })).rejects.toThrow("is empty");
+  expect(calls.length).toBe(0);
+  await untyped("GET /api/città/{città}", { params: { città: "roma" } });
+  expect(calls[0].url).toBe("http://api:1/api/citt%C3%A0/roma");
+});

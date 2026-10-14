@@ -159,16 +159,10 @@ func TestWsSitsBehindTheAppMiddlewareOnBothPorts(t *testing.T) {
 	// the api-only port has no canonical rule and admits every spelling once
 	// the middleware does; the front answers 308 to the aliases, and its
 	// /ws is TestFrontServesTheRelayOnWsAndPushReachesIt
-	// - all but an encoded slash spelling a dot or an empty segment, which
-	// every port refuses (slashAlias)
 	for _, path := range spellings {
-		want := http.StatusSwitchingProtocols
-		if path == "/ws%2F" {
-			want = http.StatusBadRequest
-		}
 		p := dialWSRaw(t, api.URL, wsHandshakeOn(path+"?topics=a"))
-		if p.res.StatusCode != want {
-			t.Errorf("api: %s answered %d, want %d", path, p.res.StatusCode, want)
+		if p.res.StatusCode != http.StatusSwitchingProtocols {
+			t.Errorf("api: %s answered %d", path, p.res.StatusCode)
 		}
 	}
 }

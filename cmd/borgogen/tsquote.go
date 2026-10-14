@@ -26,9 +26,10 @@ func tsString(s string) string {
 	return strings.TrimSuffix(b.String(), string(rune(10)))
 }
 
-// eventKey is a WsEvents template key as written: its topic part was
+// eventKey is a WsEvents template key as written: its topic part - no topic
+// holds a "/", an event may, so the first one ends it - was
 // escaped with its pattern, and the event is the app's literal
 func eventKey(k string) string {
-	at := strings.LastIndex(k, "/")
+	at := strings.Index(k, "/")
 	return k[:at+1] + templateText(k[at+1:])
 }

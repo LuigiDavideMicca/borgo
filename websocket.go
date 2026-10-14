@@ -522,15 +522,9 @@ func wsOriginRefusal(r *http.Request, trusted []*net.IPNet, allowNoOrigin bool) 
 	// two Origin lines read as one value, as fetch's Headers.get joins them,
 	// and no single origin is that
 	origin := strings.Join(values, ", ")
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if peerTrusted(r.RemoteAddr, trusted) {
-		if declared := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); declared != "" {
-			scheme = declared
-		}
-	}
+	// the scheme by the one rule the cache key and the render are told by
+	// (found by the verifier of hunt 3's fixes: this was a third)
+	scheme := schemeOf(r, peerTrusted(r.RemoteAddr, trusted))
 	// url.Parse is stricter than a browser's URL parser on spellings a browser
 	// never sends ("http:app.test", an empty or zero-padded port, an ipv6
 	// address written another way): refusing more of those costs nothing, since

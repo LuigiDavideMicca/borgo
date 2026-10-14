@@ -166,6 +166,30 @@ switch (command) {
       );
       process.exit(1);
     }
+    // an intentional stop must exit 0, or a supervisor restart-loops; the
+    // flag wins the race when the signal reaches the child first. The
+    // first signal is passed on and this process stays - it renders the
+    // pages the requests in flight are waiting for - until the front has
+    // drained them within BORGO_SHUTDOWN_TIMEOUT: exiting at once dropped
+    // every request in flight, and in a container, where this is pid 1,
+    // took the front's drain with it (found by hunt 3). A second signal
+    // is the operator insisting. Installed before the rebuild: a stop
+    // during it, with no front yet, was the default action and exit 143
+    // (found by the verifier of that fix)
+    let apiProc: import("bun").Subprocess | null = null;
+    let stopping = false;
+    const stop = () => {
+      if (stopping || !apiProc) {
+        apiProc?.kill("SIGKILL");
+        process.exit(0);
+      }
+      stopping = true;
+      apiProc.kill("SIGTERM");
+      apiProc.exited.then(() => process.exit(0));
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+
     // the rebuild comes before the go front starts: the front indexes
     // public/ at boot, and a rebuild after it served every new asset as one
     // it had not vouched for - no-cache, from disk, for the process's whole
@@ -191,7 +215,7 @@ switch (command) {
       }
 
       // the api watches this pid: a force-killed start leaves no orphan
-      const apiProc = Bun.spawn([bin], {
+      apiProc = Bun.spawn([bin], {
         stdout: "inherit",
         stderr: "inherit",
         env: {
@@ -200,26 +224,6 @@ switch (command) {
           BORGO_PARENT_PID: String(process.pid),
         },
       });
-      // an intentional stop must exit 0, or a supervisor restart-loops; the
-      // flag wins the race when the signal reaches the child first. The
-      // first signal is passed on and this process stays - it renders the
-      // pages the requests in flight are waiting for - until the front has
-      // drained them within BORGO_SHUTDOWN_TIMEOUT: exiting at once dropped
-      // every request in flight, and in a container, where this is pid 1,
-      // took the front's drain with it (found by hunt 3). A second signal
-      // is the operator insisting
-      let stopping = false;
-      const stop = () => {
-        if (stopping) {
-          apiProc.kill("SIGKILL");
-          process.exit(0);
-        }
-        stopping = true;
-        apiProc.kill("SIGTERM");
-        apiProc.exited.then(() => process.exit(0));
-      };
-      process.on("SIGINT", stop);
-      process.on("SIGTERM", stop);
       apiProc.exited.then((code) => {
         if (stopping) return;
         console.error(`  ${c.red(g.err)} go front exited (${code})`);

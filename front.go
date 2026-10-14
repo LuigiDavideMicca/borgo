@@ -315,7 +315,7 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// handler reads it (found by the verifier of phase 7)
 	r.Header.Del(peerHeader)
 	if slashAlias(r) {
-		http.Error(w, "an encoded slash that spells a dot segment is refused", http.StatusBadRequest)
+		http.Error(w, "an encoded segment that steps up the path is refused", http.StatusBadRequest)
 		return
 	}
 	// the names the two processes use between themselves are not urls: a

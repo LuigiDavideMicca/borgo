@@ -868,3 +868,15 @@ test("exportSite asks the go cover and renders the 404 at the probe", () => {
   expect(site).toContain("fetch(`${renderBase}${notFoundProbe(routes.map((r) => r.pattern))}`");
   expect(site).not.toContain("/__borgo-export-404-probe`");
 });
+
+// a page whose middleware or loader redirected off-site took the boot key
+// with it: no fetch carrying the key follows a redirect
+test("every fetch carrying the boot key refuses to follow a redirect", () => {
+  for (const file of ["export.ts", "dev.ts"]) {
+    const src = readFileSync(join(import.meta.dir, "../src", file), "utf8");
+    const keyed = src.split("headers: renderHeaders").length - 1;
+    const manual = src.split('redirect: "manual"').length - 1;
+    expect(keyed).toBeGreaterThan(0);
+    expect(manual).toBe(keyed);
+  }
+});

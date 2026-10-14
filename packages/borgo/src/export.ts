@@ -396,6 +396,8 @@ export async function exportSite(): Promise<number> {
   // without the key its own render mode was given
   const renderBase = `http://127.0.0.1:${topology.renderPort}`;
   const renderHeaders: Record<string, string> = { [INTERNAL_KEY_HEADER]: topology.key };
+  // and nothing that carries it follows a redirect: the key stays on loopback
+  // (found by the verifier of hunt 3's fixes)
 
   let apiProc: import("bun").Subprocess | null = null;
   // named before the build: a build that dies partway still leaves the file
@@ -495,7 +497,7 @@ export async function exportSite(): Promise<number> {
       const zeroJs = route.module.hydrate === false && !route.islands;
       const target = join(stageDir, outputPath(path));
       try {
-        const res = await fetch(`${renderBase}${path}`, { headers: renderHeaders });
+        const res = await fetch(`${renderBase}${path}`, { headers: renderHeaders, redirect: "manual" });
         if (!res.ok) throw new Error(`responded ${res.status}`);
         const html = await res.text();
         const residue = requestResidue(html);
@@ -516,7 +518,7 @@ export async function exportSite(): Promise<number> {
     let wrote404 = false;
     if (export404) {
       try {
-        const res = await fetch(`${renderBase}${notFoundProbe(routes.map((r) => r.pattern))}`, { headers: renderHeaders });
+        const res = await fetch(`${renderBase}${notFoundProbe(routes.map((r) => r.pattern))}`, { headers: renderHeaders, redirect: "manual" });
         if (res.status !== 404) throw new Error(`responded ${res.status}`);
         const html = await res.text();
         const residue = requestResidue(html);

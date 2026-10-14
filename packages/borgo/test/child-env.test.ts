@@ -59,7 +59,14 @@ describe("borgo start", () => {
   // every new asset as one it had not vouched for
   test("the go front starts after the rebuild", () => {
     expect(start.indexOf("await build();")).toBeGreaterThan(-1);
-    expect(start.indexOf("const apiProc = Bun.spawn([bin]")).toBeGreaterThan(start.indexOf("await build();"));
+    expect(start.indexOf("apiProc = Bun.spawn([bin]")).toBeGreaterThan(start.indexOf("await build();"));
+  });
+
+  // installed after the rebuild, a stop during it was the default action:
+  // exit 143, which an on-failure supervisor restarts (found by the verifier)
+  test("the stop is handled from before the rebuild", () => {
+    expect(start.indexOf('process.on("SIGTERM", stop);')).toBeGreaterThan(-1);
+    expect(start.indexOf('process.on("SIGTERM", stop);')).toBeLessThan(start.indexOf("await build();"));
   });
 
   // exiting on the first signal dropped every request in flight, and in a
@@ -68,8 +75,8 @@ describe("borgo start", () => {
     const stop = start.slice(start.indexOf("const stop = () => {"), start.indexOf('process.on("SIGINT", stop);'));
     expect(stop).toContain('apiProc.kill("SIGTERM");');
     expect(stop).toContain("apiProc.exited.then(() => process.exit(0));");
-    expect(stop.indexOf("if (stopping) {")).toBeLessThan(stop.indexOf("stopping = true;"));
-    expect(stop).toContain('apiProc.kill("SIGKILL");');
+    expect(stop.indexOf("if (stopping || !apiProc) {")).toBeLessThan(stop.indexOf("stopping = true;"));
+    expect(stop).toContain('apiProc?.kill("SIGKILL");');
     // the first signal does not exit on its own
     const first = stop.slice(stop.indexOf("stopping = true;"));
     expect(first).not.toMatch(/^\s*process\.exit\(0\);/m);

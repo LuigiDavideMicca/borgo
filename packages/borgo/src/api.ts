@@ -156,13 +156,18 @@ export function makeApiClient(
     // so DELETE /api/tasks/{id} with id ".." was DELETE /api/ (found by
     // hunt 3). An encoded dot segment is still one to the url standard, so
     // it is refused, not escaped
+    // a param name is whatever ServeMux takes between the braces - {città}
+    // went unsubstituted when only word characters were (found by the
+    // verifier of hunt 3's fixes)
     const segment = (name: string, value: string) => {
-      if (value === "." || value === "..") {
-        throw new Error(`api ${route}: param "${name}" is "${value}", a dot segment that would change the path`);
+      if (value === "" || value === "." || value === "..") {
+        // an empty value collapses its segment out of the path, and routes
+        // the call somewhere else (found by the verifier of hunt 3's fixes)
+        throw new Error(`api ${route}: param "${name}" is ${value === "" ? "empty" : `"${value}", a dot segment`} - it would change the path`);
       }
       return encodeURIComponent(value);
     };
-    const path = route.slice(space + 1).replace(/\{(\$|(\w+)(\.\.\.)?)\}/g, (_, all, name, rest) => {
+    const path = route.slice(space + 1).replace(/\{(\$|([^{}.]+)(\.\.\.)?)\}/g, (_, all, name, rest) => {
       if (all === "$") return "";
       const value = opts.params?.[name];
       if (value === undefined) throw new Error(`api ${route}: missing param "${name}"`);

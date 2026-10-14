@@ -7,6 +7,7 @@ declare module "borgo-framework" {
     "bell/ring\u0007": number;
     [k: `chat:${string}/x\${y}`]: number;
     [k: `room:${string}/a\`b`]: number;
+    [k: `room:${string}/x\`y/z`]: number;
   }
 }
 

@@ -16,7 +16,9 @@ func TestATemplateKeyEscapesTheEventName(t *testing.T) {
 		"room:${string}/a`b":          "room:${string}/a" + bs + "`b",
 		"chat:${string}/x${y}":        "chat:${string}/x" + bs + "${y}",
 		"chat:${string}/a" + bs + "b": "chat:${string}/a" + bs + bs + "b",
-		"chat:${string}/plain":        "chat:${string}/plain",
+		// an event may hold a slash, a topic never: the first one ends the topic
+		"room:${string}/x`y/z": "room:${string}/x" + bs + "`y/z",
+		"chat:${string}/plain": "chat:${string}/plain",
 	}
 	for in, want := range cases {
 		if got := eventKey(in); got != want {
@@ -68,6 +70,7 @@ func TestEventNamesAreWrittenAsTypeScriptReadsThem(t *testing.T) {
 	wants(t, generateFresh(t, "topicescape"),
 		"[k: `room:${string}/a"+bs+"`b`]: number;",
 		"[k: `chat:${string}/x"+bs+"${y}`]: number;",
+		"[k: `room:${string}/x"+bs+"`y/z`]: number;",
 		`"bell/ring`+bs+`u0007": number;`,
 	)
 }
@@ -96,5 +99,17 @@ func TestTheMiddlewaresCoverIsWrittenForExport(t *testing.T) {
 	generateFresh(t, "topicescape")
 	if _, err := os.Stat(filepath.Join("testdata", "topicescape", ".borgo", "middleware.json")); !os.IsNotExist(err) {
 		t.Errorf("an app without middleware has a cover file: %v", err)
+	}
+}
+
+// borgo-framework's own declarations resolve first inside its declare module
+// block: an app type of that name took borgo's place (found by the verifier
+// of hunt 3)
+func TestBorgosOwnTypeNamesAreReserved(t *testing.T) {
+	reserved := reservedTSNames()
+	for _, name := range []string{"WsEvents", "ApiRoutes", "Channel", "SubscribeOptions", "TopicEvents", "IslandProps", "Blob"} {
+		if !reserved[name] {
+			t.Errorf("%s is not reserved", name)
+		}
 	}
 }

@@ -281,6 +281,10 @@ export async function dev() {
         return await fetch(`${base}/__borgo/dev/${path}`, {
           method: "POST",
           headers: renderHeaders,
+          // every fetch carrying the boot key stays on loopback: a redirect is
+          // an answer, never a place to send the key on to (found by the
+          // verifier of hunt 3's fixes)
+          redirect: "manual",
           signal: AbortSignal.timeout(2_000),
         });
       } catch {}
@@ -300,7 +304,7 @@ export async function dev() {
       try {
         // with the key: a probe without it is logged by the internal listener as
         // a stranger refused, once per restart
-        await fetch(`http://localhost:${apiPort}/`, { signal: AbortSignal.timeout(1_000), headers: renderHeaders });
+        await fetch(`http://localhost:${apiPort}/`, { signal: AbortSignal.timeout(1_000), headers: renderHeaders, redirect: "manual" });
         return true;
       } catch {}
       await Bun.sleep(100);
@@ -443,7 +447,7 @@ export async function dev() {
     proc.exited.then(() => (exited = true));
     while (Date.now() < deadline && !exited) {
       try {
-        await fetch(`${renderBase}/healthz`, { headers: renderHeaders, signal: AbortSignal.timeout(1_000) });
+        await fetch(`${renderBase}/healthz`, { headers: renderHeaders, redirect: "manual", signal: AbortSignal.timeout(1_000) });
         break;
       } catch {}
       await Bun.sleep(100);

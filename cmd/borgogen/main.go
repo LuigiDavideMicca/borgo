@@ -2899,6 +2899,11 @@ func tsPropName(name string) string {
 // a real File no longer fit and an object did (found by hunt 3).
 var tsReserved = []string{
 	"Array", "Record", "Blob",
+	// borgo-framework's own declarations: the generated file writes app types
+	// inside its declare module block, where these names resolve to borgo's -
+	// an app type WsEvents became borgo's (found by the verifier of hunt 3)
+	"ApiRoutes", "Channel", "EventPairs", "EventsFor", "Island", "IslandProps",
+	"PublishArgs", "SubscribeOptions", "TopicEventName", "TopicEvents", "WsEvents",
 	"as", "await", "break", "case", "catch", "class", "const", "continue",
 	"debugger", "default", "delete", "do", "else", "enum", "export", "extends",
 	"false", "finally", "for", "function", "if", "implements", "import", "in",

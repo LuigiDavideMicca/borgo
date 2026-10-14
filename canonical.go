@@ -2,6 +2,7 @@ package borgo
 
 import (
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 )
@@ -65,25 +66,42 @@ func canonicalPath(p string) string {
 	return path.Clean(b.String())
 }
 
-// slashAlias: a path whose encoded slashes spell a dot segment or an empty
-// segment once decoded. The app's middleware decides on the decoded, cleaned
-// path and ServeMux matches the escaped one segment by segment, so
-// /api/admin/x%2F..%2F..%2Fpublic was /api/public to the guard and
-// /api/admin/{id} to the mux - the guard skipped, on every port (found by
-// the verifier of hunt 3's fixes). An encoded slash inside one segment's
-// value, which decodes clean, is a param's own and passes
+// slashAlias: an escaped segment that decodes to hold a ".." - %2E%2E, or
+// x%2F..%2F.. The app's middleware decides on the decoded, cleaned path and
+// ServeMux matches the escaped one segment by segment, so such a segment was
+// a step up to the guard and a param's value to the mux: the guard decided
+// for /api/public while /api/admin/{id} ran, on every port (found by the
+// verifiers of hunt 3's fixes, %2F first and then %2E%2E alone). A ".." is
+// the one segment that removes a prefix the guard matched on: "." and empty
+// segments only shorten the path, and the guard still covers what the mux
+// routes. Literal dot segments never get here - the mux and the canonical
+// rule redirect them first
 func slashAlias(r *http.Request) bool {
 	escaped := r.URL.EscapedPath()
-	if !strings.Contains(escaped, "%2F") && !strings.Contains(escaped, "%2f") {
+	if !strings.Contains(escaped, "%") {
 		return false
 	}
-	return path.Clean(r.URL.Path) != r.URL.Path
+	for _, segment := range strings.Split(escaped, "/") {
+		if !strings.Contains(segment, "%") {
+			continue
+		}
+		decoded, err := url.PathUnescape(segment)
+		if err != nil {
+			return true
+		}
+		for _, part := range strings.Split(decoded, "/") {
+			if part == ".." {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func refuseSlashAlias(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if slashAlias(r) {
-			http.Error(w, "an encoded slash that spells a dot segment is refused", http.StatusBadRequest)
+			http.Error(w, "an encoded segment that steps up the path is refused", http.StatusBadRequest)
 			return
 		}
 		next.ServeHTTP(w, r)

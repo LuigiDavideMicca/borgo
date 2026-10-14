@@ -189,7 +189,7 @@ describe("the orchestrators wire the topology", () => {
   // pages alone has no go module, and the suite caught that export dying
   test("borgo export: the pages come from the render service, go only when a loader needs it", () => {
     expect(exp).toContain("if (needApi) {");
-    expect(exp).toContain("fetch(`${renderBase}${path}`, { headers: renderHeaders })");
+    expect(exp).toContain("fetch(`${renderBase}${path}`, { headers: renderHeaders, redirect: \"manual\" })");
     expect(exp).toContain("const probe = `http://localhost:${apiPort}/`;");
     expect(exp).not.toContain("goFrontEnv");
     // the flag is gone: nothing in the three commands asks whether to do this

@@ -8,5 +8,7 @@ func notify(id string) {
 	borgo.Push("room:"+id, "a`b", 1)
 	//borgo:topic chat:{id}
 	borgo.Push("chat:"+id, "x${y}", 2)
+	//borgo:topic room:{id}
+	borgo.Push("room:"+id, "x`y/z", 4)
 	borgo.Push("bell", "ring\a", 3)
 }

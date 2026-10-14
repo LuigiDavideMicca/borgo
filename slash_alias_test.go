@@ -88,17 +88,23 @@ func TestAnEncodedSlashCannotGoAroundTheApiGuardOnAnyPort(t *testing.T) {
 			"/api/admin/x%2f..%2f..%2fpublic",
 			"/api/admin/..%2F..%2Fpublic",
 			"/api/admin/%2E%2E%2F..%2Fpublic",
-			"/api/admin/x%2F%2F",
+			// no encoded slash at all: the mux's wildcard took ".." as a value
+			// (found by the verifier of the first fix)
+			"/api/admin/%2E%2E/public",
+			"/api/admin/%2e%2e/public",
+			"/api/admin/.%2E/public",
 		} {
 			code, body := rawGet(t, port.base, target, port.headers...)
 			if strings.HasPrefix(body, "ADMIN") || code != http.StatusBadRequest {
 				t.Errorf("%s %s: %d %q, want the 400", port.name, target, code, strings.TrimSpace(body))
 			}
 		}
-		// an encoded slash inside one param's value decodes clean: the
-		// param's own, and the guard still sees /api/admin/...
-		if code, body := rawGet(t, port.base, "/api/admin/a%2Fb", port.headers...); code != http.StatusUnauthorized {
-			t.Errorf("%s /api/admin/a%%2Fb: %d %q, want the guard's 401", port.name, code, strings.TrimSpace(body))
+		// an encoded slash, a "." or an empty segment only shortens the path:
+		// the guard still covers what the mux routes, and runs
+		for _, target := range []string{"/api/admin/a%2Fb", "/api/admin/x%2F%2F", "/api/admin/me%2F", "/api/admin/%2E"} {
+			if code, body := rawGet(t, port.base, target, port.headers...); code != http.StatusUnauthorized {
+				t.Errorf("%s %s: %d %q, want the guard's 401", port.name, target, code, strings.TrimSpace(body))
+			}
 		}
 	}
 }
