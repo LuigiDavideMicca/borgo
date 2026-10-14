@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, watch, writeFileSync }
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import { c, g } from "./colors";
-import { parentGone, readParent, watchParent } from "./parent-watch";
+import { isReused, parentGone, processStart, readParent, selfStart, watchParent, type StartToken } from "./parent-watch";
 import {
   encodeChanged,
   frontTopology,
@@ -131,18 +131,22 @@ export function rebuildSides(file: string): ("api" | "css" | "app")[] {
 // same-port case; this catches the rest.
 export const DEV_LOCK = ".borgo/dev.lock";
 
+// a session writes its own start into the lock: a live pid that started
+// otherwise is the pid reused, not the session (isReused)
 export function readDevLock(
   text: string,
   isAlive: (pid: number) => boolean,
   self: number,
+  startOf: (pid: number) => StartToken | null,
 ): { pid: number; port: string; apiPort: string } | null {
-  let held: { pid?: unknown; port?: unknown; apiPort?: unknown };
+  let held: { pid?: unknown; port?: unknown; apiPort?: unknown; start?: unknown };
   try {
     held = JSON.parse(text);
   } catch {
     return null; // a torn lock is not a session
   }
   if (typeof held.pid !== "number" || held.pid === self || !isAlive(held.pid)) return null;
+  if (isReused(held.pid, held.start, startOf)) return null;
   return {
     pid: held.pid,
     port: String(held.port ?? "?"),
@@ -195,7 +199,7 @@ export async function dev() {
   // refusal whatever ports it holds, because the collision is the build
   // directory and not the socket
   try {
-    const held = readDevLock(readFileSync(DEV_LOCK, "utf8"), pidAlive, process.pid);
+    const held = readDevLock(readFileSync(DEV_LOCK, "utf8"), pidAlive, process.pid, processStart);
     if (held) {
       console.error(
         `  ${c.red(g.err)} another borgo dev is already running in this directory` +
@@ -211,13 +215,13 @@ export async function dev() {
   mkdirSync(".borgo", { recursive: true });
   writeFileSync(
     DEV_LOCK,
-    JSON.stringify({ pid: process.pid, port: frontPort, apiPort, startedAt: Date.now() }),
+    JSON.stringify({ pid: process.pid, port: frontPort, apiPort, start: selfStart() }),
   );
   const dropLock = () => {
     try {
       // only ours: a session that replaced a stale lock must not delete the
       // live one that replaced it in turn
-      const mine = readDevLock(readFileSync(DEV_LOCK, "utf8"), () => true, -1);
+      const mine = readDevLock(readFileSync(DEV_LOCK, "utf8"), () => true, -1, () => null);
       if (mine?.pid === process.pid) unlinkSync(DEV_LOCK);
     } catch {}
   };

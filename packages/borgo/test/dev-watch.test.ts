@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { StartToken } from "../src/parent-watch";
 import { createChangeBatcher, createContentDedup, gitignoredMatcher, ignored, readDevLock, rebuildSides, watchedSide } from "../src/dev";
 import { propsPathEnabled } from "../src/runtime";
 
@@ -185,24 +187,62 @@ describe("readDevLock", () => {
   // mid-build; the loser reports ENOENT on a name that existed a moment ago
   const live = () => true;
   const dead = () => false;
+  const unknown = () => null;
 
   test("a live session in this directory is reported, ports included", () => {
-    const held = readDevLock(JSON.stringify({ pid: 4321, port: "3000", apiPort: "3501" }), live, 99);
+    const held = readDevLock(JSON.stringify({ pid: 4321, port: "3000", apiPort: "3501" }), live, 99, unknown);
     expect(held).toEqual({ pid: 4321, port: "3000", apiPort: "3501" });
   });
 
   test("a lock whose process is gone is not a session", () => {
-    expect(readDevLock(JSON.stringify({ pid: 4321, port: "3000" }), dead, 99)).toBeNull();
+    expect(readDevLock(JSON.stringify({ pid: 4321, port: "3000" }), dead, 99, unknown)).toBeNull();
   });
 
   test("our own lock is not somebody else's", () => {
-    expect(readDevLock(JSON.stringify({ pid: 99, port: "3000" }), live, 99)).toBeNull();
+    expect(readDevLock(JSON.stringify({ pid: 99, port: "3000" }), live, 99, unknown)).toBeNull();
+  });
+
+  // windows hands a freed pid on: a lock left by a killed session named
+  // wslhost, and borgo dev refused to start (found while closing phase 7)
+  const lockOf = (start: unknown) => JSON.stringify({ pid: 4321, port: "3000", apiPort: "3501", start });
+  // the start of whichever pid is asked about: the lock's own, or nothing
+  const startOf = (token: StartToken) => (pid: number) => (pid === 4321 ? token : null);
+
+  test("a live pid that started otherwise is not the session", () => {
+    expect(readDevLock(lockOf({ clock: "ticks", value: 500 }), live, 99, startOf({ clock: "ticks", value: 501 }))).toBeNull();
+    expect(readDevLock(lockOf({ clock: "ms", value: 1_000_000 }), live, 99, startOf({ clock: "ms", value: 1_002_001 }))).toBeNull();
+  });
+
+  test("the session that wrote the lock still holds it", () => {
+    const held = { pid: 4321, port: "3000", apiPort: "3501" };
+    expect(readDevLock(lockOf({ clock: "ticks", value: 500 }), live, 99, startOf({ clock: "ticks", value: 500 }))).toEqual(held);
+    // an outside reading may come out late by a little, and early by any
+    // amount: the holder records its start only once its runtime is up
+    expect(readDevLock(lockOf({ clock: "ms", value: 1_000_000 }), live, 99, startOf({ clock: "ms", value: 1_002_000 }))).toEqual(held);
+    expect(readDevLock(lockOf({ clock: "ms", value: 1_000_000 }), live, 99, startOf({ clock: "ms", value: 990_000 }))).toEqual(held);
+  });
+
+  test("a start that cannot be told, or a lock without one, keeps refusing", () => {
+    expect(readDevLock(lockOf({ clock: "ticks", value: 500 }), live, 99, unknown)).not.toBeNull();
+    expect(readDevLock(lockOf(undefined), live, 99, startOf({ clock: "ticks", value: 9 }))).not.toBeNull();
+    expect(readDevLock(lockOf(null), live, 99, startOf({ clock: "ticks", value: 9 }))).not.toBeNull();
+    expect(readDevLock(lockOf({ clock: "eons", value: 1 }), live, 99, startOf({ clock: "ticks", value: 9 }))).not.toBeNull();
+    // a lock from another clock cannot be compared
+    expect(readDevLock(lockOf({ clock: "ms", value: 1 }), live, 99, startOf({ clock: "ticks", value: 9 }))).not.toBeNull();
+  });
+
+  // the unit above is only the fix if dev() writes its start and asks with
+  // the real reader
+  test("borgo dev writes its own start and reads the holder's", () => {
+    const src = readFileSync(fileURLToPath(new URL("../src/dev.ts", import.meta.url)), "utf8");
+    expect(src).toContain("readDevLock(readFileSync(DEV_LOCK, \"utf8\"), pidAlive, process.pid, processStart)");
+    expect(src).toContain("start: selfStart() })");
   });
 
   test("a torn or foreign lock file refuses nobody", () => {
-    expect(readDevLock("", live, 99)).toBeNull();
-    expect(readDevLock("{not json", live, 99)).toBeNull();
-    expect(readDevLock(JSON.stringify({ pid: "4321" }), live, 99)).toBeNull();
+    expect(readDevLock("", live, 99, unknown)).toBeNull();
+    expect(readDevLock("{not json", live, 99, unknown)).toBeNull();
+    expect(readDevLock(JSON.stringify({ pid: "4321" }), live, 99, unknown)).toBeNull();
   });
 });
 

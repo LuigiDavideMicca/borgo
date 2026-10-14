@@ -14,7 +14,7 @@ import { c, g } from "./colors";
 import { NO_BUILD_OUTPUTS, precompressAssets, type BuildOutputs } from "./compress";
 import { APP_ENV_FILE, appEnvMetas, clientEnvDefine, clientEnvRefusal, envClientShim } from "./env-app";
 import { stampWorkerFile } from "./pwa";
-import { parentGone, readParent } from "./parent-watch";
+import { isReused, parentGone, processStart, readParent, selfStart, type StartToken } from "./parent-watch";
 import { matcherRefusal } from "./page-middleware";
 import { filePathToPattern } from "./router";
 import { type AssetNames } from "./util";
@@ -1406,9 +1406,11 @@ export function reportBuildFailure(error: unknown, debug = debugEnabled()): void
 // mistake is two builds in one directory, not waiting once too long.
 export const BUILD_LOCK = ".borgo/build.lock";
 
-type LockHolder = { pid: number } | "stale" | "unreadable";
+type LockHolder = { pid: number } | { stale: string } | "unreadable";
 
-function readLockHolder(lockPath: string): LockHolder {
+// reused is asked once per lock: on windows the answer is a powershell
+// spawn, and a waiter polls every 50 ms (found by the verifier)
+function readLockHolder(lockPath: string, startOf: (pid: number) => StartToken | null, reused: Map<string, boolean>): LockHolder {
   let text: string;
   try {
     text = readFileSync(lockPath, "utf8");
@@ -1416,16 +1418,43 @@ function readLockHolder(lockPath: string): LockHolder {
     return "unreadable"; // gone between the refusal and the read: try again
   }
   try {
-    const held = JSON.parse(text) as { pid?: unknown };
-    if (typeof held.pid !== "number") return "stale";
-    return parentGone(held.pid, readParent(held.pid, false)) ? "stale" : { pid: held.pid };
+    const held = JSON.parse(text) as { pid?: unknown; start?: unknown };
+    if (typeof held.pid !== "number") return { stale: text };
+    if (parentGone(held.pid, readParent(held.pid, false))) return { stale: text };
+    // a build killed hard leaves its lock, and its pid goes to someone else
+    if (!reused.has(text)) reused.set(text, isReused(held.pid, held.start, startOf));
+    return reused.get(text) ? { stale: text } : { pid: held.pid };
   } catch {
     // torn: a writer is mid-write right now, or died mid-write long ago
     try {
-      return Date.now() - statSync(lockPath).mtimeMs > 10_000 ? "stale" : "unreadable";
+      return Date.now() - statSync(lockPath).mtimeMs > 10_000 ? { stale: text } : "unreadable";
     } catch {
       return "unreadable";
     }
+  }
+}
+
+// two waiters may judge one stale lock at once, and the second used to
+// delete the fresh lock the first had just made: two builds in, the very
+// thing the lock is for (found by hunt 3). The removal happens under a
+// second lock, and only of the text that was judged
+export function takeOverStale(lockPath: string, judged: string): void {
+  const guard = `${lockPath}.takeover`;
+  try {
+    writeFileSync(guard, String(process.pid), { flag: "wx" });
+  } catch {
+    // another waiter is taking over, or one died doing it long ago
+    try {
+      if (Date.now() - statSync(guard).mtimeMs > 10_000) rmSync(guard, { force: true });
+    } catch {}
+    return;
+  }
+  try {
+    if (readFileSync(lockPath, "utf8") === judged) rmSync(lockPath, { force: true });
+  } catch {
+    // gone already: free
+  } finally {
+    rmSync(guard, { force: true });
   }
 }
 
@@ -1433,21 +1462,27 @@ export async function withBuildLock<T>(
   body: () => Promise<T>,
   lockPath: string = BUILD_LOCK,
   waitMs = 300_000,
+  startOf: (pid: number) => StartToken | null = processStart,
 ): Promise<T> {
   const token = `${process.pid}-${crypto.randomUUID()}`;
   const deadline = Date.now() + waitMs;
   let announced = false;
+  const reused = new Map<string, boolean>();
   mkdirSync(dirname(lockPath), { recursive: true });
   for (;;) {
     try {
-      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token, startedAt: Date.now() }), { flag: "wx" });
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token, start: selfStart() }), { flag: "wx" });
       break;
     } catch (error) {
-      if ((error as { code?: string }).code !== "EEXIST") throw error;
+      // EPERM is windows refusing a name whose deletion is still pending:
+      // held, for a moment longer
+      const code = (error as { code?: string }).code;
+      if (code !== "EEXIST" && code !== "EPERM") throw error;
     }
-    const holder = readLockHolder(lockPath);
-    if (holder === "stale") {
-      rmSync(lockPath, { force: true });
+    const holder = readLockHolder(lockPath, startOf, reused);
+    if (typeof holder === "object" && "stale" in holder) {
+      takeOverStale(lockPath, holder.stale);
+      await Bun.sleep(5);
       continue;
     }
     if (Date.now() > deadline) {

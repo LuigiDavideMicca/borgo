@@ -8,7 +8,19 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isCorpse, parentGone, readParent, watchParent, type ParentReading } from "../src/parent-watch";
+import {
+  isCorpse,
+  isReused,
+  parentGone,
+  parseEtime,
+  processStart,
+  readParent,
+  selfStart,
+  startedAfter,
+  ticksFromProcStat,
+  watchParent,
+  type ParentReading,
+} from "../src/parent-watch";
 
 const PKG_DIR = join(import.meta.dir, "..");
 const DEV_SRC = join(PKG_DIR, "src", "dev.ts");
@@ -551,5 +563,65 @@ describe("the parent mismatch line, where the watch starts", () => {
     const watch = readFileSync(WATCH_SRC, "utf8");
     expect(watch).toContain("if (mismatch && !parentGone(parentPid, readParent(parentPid, direct))) console.error(mismatch);");
     expect(readFileSync(CLI_SRC, "utf8")).toContain('"BORGO_SUPERVISOR_PID")');
+  });
+});
+
+// a pid names whoever holds it now: the locks ask when their holder started,
+// in a token read the same way at both ends
+describe("process start tokens", () => {
+  test("this process's start, read from outside, is the start it records", () => {
+    const own = selfStart();
+    const seen = processStart(process.pid);
+    expect(seen).not.toBeNull();
+    expect(seen!.clock).toBe(own.clock);
+    expect(startedAfter(seen!, own)).toBe(false);
+    // linux counts ticks after boot, which no change of the wall clock moves
+    if (process.platform === "linux") expect(own.clock).toBe("ticks");
+  }, 20_000);
+
+  test("a pid nobody holds has no start", () => {
+    expect(processStart(2 ** 22 - 3)).toBeNull();
+  }, 20_000);
+
+  test("ticks compare exactly, an epoch start only counts as later, two clocks not at all", () => {
+    expect(startedAfter({ clock: "ticks", value: 7 }, { clock: "ticks", value: 7 })).toBe(false);
+    expect(startedAfter({ clock: "ticks", value: 8 }, { clock: "ticks", value: 7 })).toBe(true);
+    // a lock from before a reboot: ticks start again from zero
+    expect(startedAfter({ clock: "ticks", value: 5 }, { clock: "ticks", value: 7 })).toBe(true);
+    expect(startedAfter({ clock: "ms", value: 2_000 }, { clock: "ms", value: 0 })).toBe(false);
+    expect(startedAfter({ clock: "ms", value: 2_001 }, { clock: "ms", value: 0 })).toBe(true);
+    // the recorded start is read after the runtime came up: on a loaded
+    // machine seconds after the creation the outside sees - still the holder
+    expect(startedAfter({ clock: "ms", value: 0 }, { clock: "ms", value: 60_000 })).toBe(false);
+    expect(startedAfter({ clock: "ms", value: 1e12 }, { clock: "ticks", value: 1 })).toBe(false);
+  });
+
+  test("a recorded start decides only when both ends can be read", () => {
+    const at = (value: number) => () => ({ clock: "ticks" as const, value });
+    expect(isReused(1, { clock: "ticks", value: 5 }, at(6))).toBe(true);
+    expect(isReused(1, { clock: "ticks", value: 5 }, at(5))).toBe(false);
+    expect(isReused(1, { clock: "ticks", value: 5 }, () => null)).toBe(false);
+    expect(isReused(1, undefined, at(6))).toBe(false);
+    expect(isReused(1, { clock: "ticks", value: "5" }, at(6))).toBe(false);
+    expect(isReused(1, null, at(6))).toBe(false);
+    let asked = 0;
+    isReused(42, { clock: "ticks", value: 5 }, (pid) => ((asked = pid), null));
+    expect(asked).toBe(42);
+  });
+
+  test("the start field of /proc/<pid>/stat, past a comm that holds a paren", () => {
+    // fields 3..21 then starttime (22) = 12345 ticks after boot
+    const stat = `77 (my prog (x)) S ${Array.from({ length: 18 }, (_, i) => i + 4).join(" ")} 12345 999 0`;
+    expect(ticksFromProcStat(stat)).toBe(12345);
+    expect(ticksFromProcStat("garbage")).toBeNull();
+    // a stat cut short has no field 22 to read
+    expect(ticksFromProcStat("77 (x) S 1 2")).toBeNull();
+  });
+
+  test("ps etime in its three shapes", () => {
+    expect(parseEtime("  05:07\n")).toBe((5 * 60 + 7) * 1000);
+    expect(parseEtime("02:05:07")).toBe(((2 * 60 + 5) * 60 + 7) * 1000);
+    expect(parseEtime("3-02:05:07")).toBe((((3 * 24 + 2) * 60 + 5) * 60 + 7) * 1000);
+    expect(parseEtime("")).toBeNull();
   });
 });
