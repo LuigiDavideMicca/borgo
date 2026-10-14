@@ -16,6 +16,8 @@ import {
   countAssets,
   exportApiEnv,
   exportSummary,
+  goGuard,
+  notFoundProbe,
   fillPattern,
   freePorts,
   isExportedFile,
@@ -31,7 +33,7 @@ import { CSRF_FIELD } from "../src/index";
 import { createSecurity } from "../src/util";
 import { buildDefine } from "../src/build";
 import { buildAssetIndex } from "../src/compress";
-import type { Route } from "../src/router";
+import { matchRoute, type Route } from "../src/router";
 import { propsPathEnabled } from "../src/runtime";
 
 const route = (pattern: string, module: Record<string, unknown>, islands = false): Route =>
@@ -825,4 +827,44 @@ test("the export's api is a plain api on loopback", () => {
   expect(env.API_PORT).toBe("4501");
   expect(env.PORT).toBe("4000");
   expect(env.PATH).toBe("/bin");
+});
+
+// a fixed probe name was matched by any top-level [slug] page, answered
+// 200, and no such app could export (found by hunt 3)
+test("the 404 probe is a path no route matches", () => {
+  const routes = ["/", "/:slug", "/posts/:id", "/a/b/:c"].map((pattern) => ({ pattern }));
+  const probe = notFoundProbe(routes.map((r) => r.pattern));
+  expect(matchRoute(probe, routes)).toBeNull();
+  expect(notFoundProbe([])).toBe("/__borgo-export-404-probe");
+});
+
+// only middleware.ts was asked, and a page api/middleware.go guarded was
+// published as a file for everyone (found by hunt 3)
+test("the go middleware's cover is read with go's own grammar", () => {
+  expect(goGuard(null)).toBeNull();
+  const listed = goGuard(JSON.stringify({ covers: ["/admin/*", "/account", "/team*"] }))!;
+  expect(listed("/admin")).toBe(true);
+  expect(listed("/admin/users")).toBe(true);
+  expect(listed("/administrators")).toBe(false);
+  expect(listed("/account")).toBe(true);
+  expect(listed("/account/x")).toBe(false);
+  expect(listed("/teams")).toBe(true);
+  expect(listed("/")).toBe(false);
+  // no matcher, an unreadable one, or a broken file: every page is guarded
+  for (const text of [JSON.stringify({ covers: "all" }), JSON.stringify({ covers: "unknown" }), "{not json", JSON.stringify({ covers: [] })]) {
+    expect(goGuard(text)!("/anything")).toBe(true);
+  }
+});
+
+// the two above are the fix only where exportSite asks them: pinned there
+// (verified end to end on an app with [slug].tsx, _404.tsx and a Go Matcher)
+test("exportSite asks the go cover and renders the 404 at the probe", () => {
+  const src = readFileSync(join(import.meta.dir, "../src/export.ts"), "utf8");
+  const site = src.slice(src.indexOf("export async function exportSite"));
+  expect(site).toContain('const goGuarded = goGuard(cover);');
+  expect(site).toContain("if (dynamic || !goGuarded(route.pattern)) return true;");
+  expect(site).toContain("if (goGuarded?.(decode(path))) {");
+  expect(site).toContain("if (export404 && goGuarded(probe)) {");
+  expect(site).toContain("fetch(`${renderBase}${notFoundProbe(routes.map((r) => r.pattern))}`");
+  expect(site).not.toContain("/__borgo-export-404-probe`");
 });

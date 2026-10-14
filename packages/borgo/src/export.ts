@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeApiClient } from "./api";
@@ -31,6 +31,46 @@ export function exportApiEnv(env: NodeJS.ProcessEnv, apiPort: number, frontPort:
     BORGO_RENDER_URL: "",
     BORGO_API_LOOPBACK: "1",
   };
+}
+
+// which paths api/middleware.go guards, from what borgogen read of its
+// Matcher: a page it guards must not become a file a static host serves to
+// everyone, and only middleware.ts was asked (found by hunt 3). Go's own
+// grammar, as covers() in middleware.go has it: no Matcher covers every
+// path. A Matcher borgogen could not read covers every path too - nothing
+// can say which pages it leaves alone
+export const GO_GUARD_UNREAD =
+  "api/middleware.go's Matcher is not a list of string literals - borgo export cannot tell which pages it guards";
+
+export function goGuard(text: string | null): ((path: string) => boolean) | null {
+  if (text === null) return null;
+  let covers: unknown;
+  try {
+    covers = (JSON.parse(text) as { covers?: unknown }).covers;
+  } catch {
+    return () => true;
+  }
+  if (!Array.isArray(covers)) return () => true;
+  const matcher = covers.filter((m): m is string => typeof m === "string");
+  if (matcher.length === 0) return () => true;
+  return (path) =>
+    matcher.some((m) => {
+      if (m.endsWith("/*")) {
+        const base = m.slice(0, -2);
+        return base === "" || path === base || path.startsWith(base + "/");
+      }
+      if (m.endsWith("*")) return path.startsWith(m.slice(0, -1));
+      return path === m;
+    });
+}
+
+// a path no route can match, for the 404 page's own render: the router has
+// no catch-all, so one segment deeper than the deepest route matches
+// nothing. A fixed name was matched by any top-level [slug] page, which
+// answered 200, and the export of every such app failed (found by hunt 3)
+export function notFoundProbe(patterns: string[]): string {
+  const depth = Math.max(0, ...patterns.map((p) => p.split("/").filter(Boolean).length)) + 1;
+  return "/" + Array.from({ length: depth }, () => "__borgo-export-404-probe").join("/");
 }
 
 // a _404 page exports as 404.html even when no regular page is exportable
@@ -290,12 +330,38 @@ export async function exportSite(): Promise<number> {
     pageMiddleware?: unknown;
   };
   const pageMw = resolvePageMiddleware(pageMiddleware ?? null);
-  const { plans, skipped, needApi, export404 } = planExport(
+  const planned = planExport(
     routes,
     notFound,
     (pattern) => pageMw?.guardsRoute(pattern) ?? false,
     pageMw?.guardsUnknown(routes.map((r) => r.pattern)) ?? false,
   );
+  const { skipped, needApi } = planned;
+  let { plans, export404 } = planned;
+  const cover = existsSync(".borgo/middleware.json") ? readFileSync(".borgo/middleware.json", "utf8") : null;
+  const goGuarded = goGuard(cover);
+  const goReason = cover?.includes('"covers":"unknown"')
+    ? GO_GUARD_UNREAD
+    : "guarded by api/middleware.go - serve it with borgo start";
+  const decode = (path: string) => {
+    try {
+      return decodeURIComponent(path);
+    } catch {
+      return path;
+    }
+  };
+  if (goGuarded) {
+    plans = plans.filter(({ route, dynamic }) => {
+      if (dynamic || !goGuarded(route.pattern)) return true;
+      skipped.push({ pattern: route.pattern, reason: goReason });
+      return false;
+    });
+    const probe = notFoundProbe(routes.map((r) => r.pattern));
+    if (export404 && goGuarded(probe)) {
+      export404 = false;
+      skipped.push({ pattern: "404", reason: goReason });
+    }
+  }
 
   if (plans.length === 0 && !export404) {
     for (const s of skipped) {
@@ -397,6 +463,11 @@ export async function exportSite(): Promise<number> {
       for (const params of sets) {
         const path = fillPattern(route.pattern, params);
         if (seenPaths.has(path)) continue;
+        if (goGuarded?.(decode(path))) {
+          seenPaths.add(path);
+          skipped.push({ pattern: path, reason: goReason });
+          continue;
+        }
         seenPaths.add(path);
         pages.push({ path, route });
       }
@@ -445,7 +516,7 @@ export async function exportSite(): Promise<number> {
     let wrote404 = false;
     if (export404) {
       try {
-        const res = await fetch(`${renderBase}/__borgo-export-404-probe`, { headers: renderHeaders });
+        const res = await fetch(`${renderBase}${notFoundProbe(routes.map((r) => r.pattern))}`, { headers: renderHeaders });
         if (res.status !== 404) throw new Error(`responded ${res.status}`);
         const html = await res.text();
         const residue = requestResidue(html);

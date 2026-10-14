@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -68,4 +70,31 @@ func TestEventNamesAreWrittenAsTypeScriptReadsThem(t *testing.T) {
 		"[k: `chat:${string}/x"+bs+"${y}`]: number;",
 		`"bell/ring`+bs+`u0007": number;`,
 	)
+}
+
+func middlewareCover(t *testing.T, dir string) string {
+	t.Helper()
+	generateFresh(t, dir)
+	return strings.TrimSpace(read(t, filepath.Join("testdata", dir, ".borgo", "middleware.json")))
+}
+
+// borgo export cannot run the app to ask which paths api/middleware.go
+// guards, and published the pages it guarded (found by hunt 3): the
+// generator reads the Matcher when it can, and says when it cannot
+func TestTheMiddlewaresCoverIsWrittenForExport(t *testing.T) {
+	cases := map[string]string{
+		"middleware":     `{"covers":["/api/admin/*"]}`,
+		"middlewareonly": `{"covers":"all"}`,
+		"mwcomputed":     `{"covers":"unknown"}`,
+		"mwreassigned":   `{"covers":"unknown"}`,
+	}
+	for dir, want := range cases {
+		if got := middlewareCover(t, dir); got != want {
+			t.Errorf("%s: %s, want %s", dir, got, want)
+		}
+	}
+	generateFresh(t, "topicescape")
+	if _, err := os.Stat(filepath.Join("testdata", "topicescape", ".borgo", "middleware.json")); !os.IsNotExist(err) {
+		t.Errorf("an app without middleware has a cover file: %v", err)
+	}
 }

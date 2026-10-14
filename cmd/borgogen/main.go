@@ -17,6 +17,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/constant"
@@ -243,6 +244,7 @@ func run(root string) (err error) {
 		fail("%v", mkErr)
 	}
 	writeIfChanged(filepath.Join(root, ".borgo", "api-types.d.ts"), out.String())
+	writeMiddlewareCover(root, mw)
 	fmt.Printf("borgogen: %d routes -> .borgo/api-types.d.ts\n", len(patterns))
 	goPath := filepath.Join(root, ".borgo", "go.ts")
 	if goTS == "" {
@@ -474,6 +476,10 @@ func warnExcludedRouteFiles(root string, pkg *packages.Package) {
 type middlewareDecl struct {
 	present bool
 	matcher bool
+	// the Matcher's paths when it is a literal list of constant strings
+	// that nothing reassigns; known false when it cannot be read statically
+	values []string
+	known  bool
 }
 
 var middlewareSig = "func(http.Handler) http.Handler"
@@ -502,8 +508,64 @@ func collectMiddleware(pkg *packages.Package) middlewareDecl {
 			fail("%s: Matcher is declared but package %s has no Middleware: a matcher with nothing to run protects nothing", pos, pkg.Name)
 		}
 		decl.matcher = true
+		decl.values, decl.known = matcherLiteral(pkg, v)
 	}
 	return decl
+}
+
+// matcherLiteral reads the Matcher's paths without running the app: a
+// composite literal of constant strings, assigned nowhere else. Anything
+// else - a computed list, an append in init - is unknown, and borgo export
+// says so rather than guessing which pages it guards
+func matcherLiteral(pkg *packages.Package, v *types.Var) ([]string, bool) {
+	var values []string
+	found, known := false, true
+	for _, file := range pkg.Syntax {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.ValueSpec:
+				for i, name := range n.Names {
+					if pkg.TypesInfo.Defs[name] != v {
+						continue
+					}
+					found = true
+					var lit ast.Expr
+					if i < len(n.Values) {
+						lit = n.Values[i]
+					}
+					cl, isLit := lit.(*ast.CompositeLit)
+					if !isLit {
+						known = false
+						continue
+					}
+					for _, elt := range cl.Elts {
+						tv := pkg.TypesInfo.Types[elt]
+						if tv.Value == nil || tv.Value.Kind() != constant.String {
+							known = false
+							continue
+						}
+						values = append(values, constant.StringVal(tv.Value))
+					}
+				}
+			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					if id, ok := ast.Unparen(lhs).(*ast.Ident); ok && pkg.TypesInfo.Uses[id] == v {
+						known = false
+					}
+				}
+			case *ast.UnaryExpr:
+				// &Matcher handed to something that may write through it
+				if id, ok := ast.Unparen(n.X).(*ast.Ident); ok && n.Op == token.AND && pkg.TypesInfo.Uses[id] == v {
+					known = false
+				}
+			}
+			return true
+		})
+	}
+	if !found || !known {
+		return nil, false
+	}
+	return values, true
 }
 
 func isMiddlewareSig(fn *types.Func) bool {
@@ -2982,4 +3044,25 @@ func lookupTag(tag, key string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// writeMiddlewareCover tells borgo export which paths api/middleware.go
+// guards: a page it covers must not become a file a static host serves to
+// everyone (found by hunt 3). Without a Matcher the middleware covers every
+// path, as it does in Go; no middleware, no file
+func writeMiddlewareCover(root string, mw middlewareDecl) {
+	path := filepath.Join(root, ".borgo", "middleware.json")
+	if !mw.present {
+		os.Remove(path)
+		return
+	}
+	var covers any = "all"
+	switch {
+	case mw.matcher && mw.known:
+		covers = append([]string{}, mw.values...)
+	case mw.matcher:
+		covers = "unknown"
+	}
+	data, _ := json.Marshal(map[string]any{"covers": covers})
+	writeIfChanged(path, string(data)+string(rune(10)))
 }
