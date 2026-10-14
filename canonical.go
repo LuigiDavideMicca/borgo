@@ -65,6 +65,11 @@ func canonicalPath(p string) string {
 	return path.Clean(b.String())
 }
 
+// asked after the canonical redirect, which has uppercased every kept escape
+func hasEncodedSlash(escaped string) bool {
+	return strings.Contains(escaped, "%2F")
+}
+
 func isHexDigit(c byte) bool {
 	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }

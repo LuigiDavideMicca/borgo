@@ -345,8 +345,20 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// and it applying it ALONE is what let one request for an alias turn the
 	// cache off for the real page: see canonical.go. /api is exempt. And it
 	// comes before the app's middleware, whose matcher must see one spelling
-	if !inProcess(cleaned) && redirectToCanonical(w, r, canonicalPath(r.URL.EscapedPath())) {
-		return
+	if !inProcess(cleaned) {
+		if redirectToCanonical(w, r, canonicalPath(r.URL.EscapedPath())) {
+			return
+		}
+		// this side decides on the decoded path, and the render service
+		// routes the path as written, where %2F stays inside a segment: an
+		// encoded slash made the two read different pages. /posts/x%2F..%2Fnews
+		// was /news to the cache and the app's middleware and /posts/:slug to
+		// the router - another page's render stored as /news for everyone,
+		// and a guarded page served past its guard (found by hunt 3)
+		if hasEncodedSlash(r.URL.EscapedPath()) {
+			http.Error(w, "an encoded slash in a page path is refused: a param cannot carry a slash, put it in the query", http.StatusBadRequest)
+			return
+		}
 	}
 	f.guarded.ServeHTTP(w, r)
 }

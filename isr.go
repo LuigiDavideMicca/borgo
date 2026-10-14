@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -364,7 +363,9 @@ const keyHostSep = "\x00"
 
 // cacheKey is the identity of a shared copy: host, cleaned path, query.
 func cacheKey(r *http.Request) string {
-	key := cacheHost(r.Host) + keyHostSep + path.Clean(r.URL.Path)
+	// the path as written, in its one spelling: decoded, an escaped "?" would
+	// read as the start of the query and share a key with it
+	key := cacheHost(r.Host) + keyHostSep + canonicalPath(r.URL.EscapedPath())
 	if r.URL.RawQuery != "" {
 		key += "?" + r.URL.RawQuery
 	}
@@ -405,6 +406,24 @@ func keyLabel(key string) string {
 // pathMatchesKey answers whether a Revalidate path names this key. The host
 // is not part of the question: the operator is saying the data changed, and
 // the data is not one vhost's.
+// revalidatePath is a Revalidate argument in the spelling keys are stored
+// in: "/news/" and "/x/../news" dropped nothing, while the copy they named
+// kept serving (found by hunt 3). A trailing * or /* is the call's own
+// grammar and stays
+func revalidatePath(p string) string {
+	switch {
+	case strings.HasSuffix(p, "/*"):
+		base := canonicalPath(strings.TrimSuffix(p, "/*"))
+		if base == "/" {
+			return "/*"
+		}
+		return base + "/*"
+	case strings.HasSuffix(p, "*"):
+		return canonicalPath(strings.TrimSuffix(p, "*")) + "*"
+	}
+	return canonicalPath(p)
+}
+
 func pathMatchesKey(path, key string) bool {
 	key = keyPath(key)
 	matches := func(p, k string) bool {
@@ -882,6 +901,7 @@ func (i *isr) respond(w http.ResponseWriter, r *http.Request, entry *cachedPage,
 }
 
 func (i *isr) invalidatePath(path string) int {
+	path = revalidatePath(path)
 	i.mu.Lock()
 	defer i.drain()
 	defer i.mu.Unlock()
