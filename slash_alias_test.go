@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -179,5 +181,25 @@ func TestTheApiIsCountedUnderItsPatternBehindMiddleware(t *testing.T) {
 	front.ServeHTTP(w, httptest.NewRequest("GET", "http://app.example/metrics", nil))
 	if !strings.Contains(w.Body.String(), `route="GET /api/public"`) {
 		t.Fatalf("the api request was not counted under its pattern:%s%s", crlf, w.Body.String())
+	}
+}
+
+// the front asks for the session of every request: the first cookie-less
+// page view of an app with no sessions was told about a secret it does not
+// need (found by hunt 3)
+func TestTheMissingSecretIsMentionedOnlyWhereASessionIs(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "")
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	noSecretWarned = sync.Once{}
+	t.Cleanup(func() { noSecretWarned = sync.Once{} })
+	if _, ok := sessionPayload(httptest.NewRequest("GET", "/", nil)); ok || logs.Len() != 0 {
+		t.Fatalf("a request without a cookie: %q", logs.String())
+	}
+	withCookie := httptest.NewRequest("GET", "/", nil)
+	withCookie.AddCookie(&http.Cookie{Name: sessionCookie, Value: "a.b"})
+	if _, ok := sessionPayload(withCookie); ok || !strings.Contains(logs.String(), "SESSION_SECRET not set") {
+		t.Fatalf("a request with a session cookie: %q", logs.String())
 	}
 }

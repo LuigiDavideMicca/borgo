@@ -8,8 +8,10 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // EnvVar is one server variable of the app's env.ts, as the generated env
@@ -398,16 +400,18 @@ func validPunycodeLabels(host string) bool {
 }
 
 // decodesAsPunycode is RFC 3492's decoder, reporting only whether it
-// succeeds - and on a non-empty result, as UTS 46 asks
+// succeeds on a label UTS 46 allows
 func decodesAsPunycode(s string) bool {
 	const base, tmin, tmax, skew, damp = 36, 1, 26, 38, 700
 	n, bias, out := 128, 72, 0
+	var runes []rune
 	if i := strings.LastIndexByte(s, '-'); i >= 0 {
 		for j := 0; j < i; j++ {
 			if s[j] >= 0x80 {
 				return false
 			}
 		}
+		runes = []rune(s[:i])
 		out, s = i, s[i+1:]
 	}
 	for i, pos := 0, 0; pos < len(s); {
@@ -468,7 +472,36 @@ func decodesAsPunycode(s string) bool {
 		if n < 0xa0 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff) {
 			return false
 		}
+		runes = slices.Insert(runes, i, rune(n))
 		i++
 	}
-	return out > 0
+	return out > 0 && allowedLabel(runes)
+}
+
+// allowedLabel is what a decoded label must be for the javascript parser to
+// take it: not plain ascii - an xn-- label that decodes to ascii is not one
+// UTS 46 allows - and made of letters, marks, digits and hyphens. A zero
+// width joiner, a soft hyphen, a no-break space or an unassigned code point
+// was taken here and refused there (found by hunt 3). Without the
+// normalization tables, a combining diacritic of U+0300-U+036F straight
+// after an ascii letter stands for the non-NFC spellings - e and U+0301 is
+// é decomposed: refused, stricter than the parser where it errs, never
+// looser
+func allowedLabel(runes []rune) bool {
+	ascii := true
+	for i, r := range runes {
+		if r >= 0x80 {
+			ascii = false
+		}
+		switch {
+		case r == '-', unicode.IsLetter(r), unicode.IsDigit(r):
+		case unicode.IsMark(r):
+			if i == 0 || (r >= 0x300 && r <= 0x36f && runes[i-1] < 0x80) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return !ascii
 }

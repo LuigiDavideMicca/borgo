@@ -140,7 +140,7 @@ Set `SESSION_SECURE=1` in production. It is off by default only so that `http://
 
 `SESSION_SECRET` is treated differently depending on how it is wrong, because the two cases fail in opposite directions.
 
-**Absent is reported, not enforced.** `borgo.Serve` logs `SESSION_SECRET not set: session and auth routes will fail until it is` before it binds the port, then boots: an app with no sessions is a legitimate app, and nothing at boot can tell one from the other. The failure is per request and it is closed — `SetSession` returns `ErrNoSessionSecret`, and borgo refuses to *verify* a session too, so a deployment that loses the variable logs everyone out rather than letting anyone in.
+**Absent is reported, not enforced.** borgo boots, and logs `borgo: SESSION_SECRET not set (or under 32 bytes): sessions and auth refuse until it is` once, at the first request that carries a session cookie or tries to set one: an app with no sessions is a legitimate app, and nothing at boot can tell one from the other. The failure is per request and it is closed — `SetSession` returns `ErrNoSessionSecret`, and borgo refuses to *verify* a session too, so a deployment that loses the variable logs everyone out rather than letting anyone in.
 
 **Shorter than 32 bytes refuses to boot.** A short key is not a weaker secret, it is a searchable one: the security of the cookie rests on nobody being able to produce its HMAC, and a handful of bytes can be exhausted offline from a single captured cookie. Setting one is a deliberate act with a wrong value, so borgo treats it like any other malformed environment variable and stops, naming the length it got and the length it needs. Everywhere else in the framework a secret under the floor is indistinguishable from no secret at all.
 
@@ -154,7 +154,7 @@ openssl rand -base64 48
 
 ### Duplicate cookies are treated as no cookie
 
-If a request carries two `borgo_session` cookies with different values, borgo behaves as if there were none. The same rule applies to `borgo_csrf`, and Go, the render service and the browser runtime all agree on it.
+If a request carries two valid `borgo_session` cookies - with the same value or not - borgo behaves as if there were none. Two `borgo_csrf` cookies with different values are none as well, and Go, the render service and the browser runtime all agree on it.
 
 This defends against **cookie tossing**. A cookie on a sibling subdomain (`blog.example.com`, or anything an attacker gets to run on your domain) can be set with `Domain=.example.com`, and the browser will then send *two* cookies with the same name. The order is not something you control — it depends on path length and creation time, both attacker-influenceable — so "take the first one" meant an attacker could decide which session or which CSRF token your server read. Refusing to guess is the only safe answer.
 

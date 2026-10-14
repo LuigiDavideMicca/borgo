@@ -8,9 +8,9 @@ export const env = defineEnv({
   server: {
     // the sqlite file the go api opens and migrates at boot (db/)
     DB_PATH: { default: "app.db" },
-    // mirrors the rule borgo.Serve enforces on the go half: unset boots with
-    // a warning there (sessions then fail per request), set but short is
-    // refused at boot. try: openssl rand -base64 32
+    // mirrors the rule borgo.Serve enforces on the go half: unset boots and
+    // warns at the first login (sessions then fail per request), set but
+    // short is refused at boot. try: openssl rand -base64 32
     SESSION_SECRET: {
       optional: true,
       validate: (raw) => {

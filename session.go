@@ -236,6 +236,14 @@ func verifiedEnvelope(r *http.Request) (sessionEnvelope, bool) {
 // duplicates are skipped; a second cookie that also verifies is ambiguous, no
 // session.
 func sessionPayload(r *http.Request) (string, bool) {
+	// no cookie, no session to verify: asked before the secret, so the first
+	// cookie-less page view of an app with no sessions is not told about a
+	// secret it does not need - the front asks this of every request (found
+	// by hunt 3)
+	cookies := r.CookiesNamed(sessionCookie)
+	if len(cookies) == 0 {
+		return "", false
+	}
 	// hmac keyed on the empty string is a MAC anyone can compute: a deploy
 	// that loses SESSION_SECRET must log everyone out, not let everyone in
 	secret := sessionSecret()
@@ -244,7 +252,7 @@ func sessionPayload(r *http.Request) (string, bool) {
 	}
 	var found string
 	var valid int
-	for _, cookie := range r.CookiesNamed(sessionCookie) {
+	for _, cookie := range cookies {
 		// nothing this server issued is over the limit, so an oversized value
 		// is junk: reject it before hashing it
 		if len(cookie.Value) > sessionCookieMaxLen {

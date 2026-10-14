@@ -4798,5 +4798,47 @@
   "raw": "http://../",
   "ok": true,
   "value": "http://../"
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--a-/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--a-/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--1ug/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--1ug/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--kba/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--kba/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--zva/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--zva/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--6a/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--6a/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--e-xbb/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--e-xbb/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--ls8h-/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--ls8h-/\""
  }
 ]
