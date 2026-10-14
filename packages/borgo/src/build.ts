@@ -1231,7 +1231,10 @@ export async function writeBuildInventory(
 ) {
   const hashed: Record<string, number> = {};
   for (const name of Object.keys(vouched?.sizes ?? {}).sort()) hashed[name] = vouched!.sizes[name];
-  const body = { files: [...new Set(files)].sort(), dir: vouched?.dir ?? "", hashed, entries };
+  // one per build: the page cache keys its persisted copies to it, and the
+  // hashed names alone do not move when only a loader changed - loaders are
+  // stripped from the client chunks (found by hunt 3)
+  const body = { files: [...new Set(files)].sort(), dir: vouched?.dir ?? "", hashed, entries, build: crypto.randomUUID() };
   await Bun.write(path, JSON.stringify(body) + "\n");
 }
 

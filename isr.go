@@ -361,23 +361,33 @@ func (c *pageCache) size() int { return c.order.Len() }
 // collide with another site's copy.
 const keyHostSep = "\x00"
 
-// cacheKey is the identity of a shared copy: host, cleaned path, query.
+// cacheKey is the identity of a shared copy: scheme, host, path, query.
 func cacheKey(r *http.Request) string {
+	// the scheme too: a page that builds its public url from it rendered once
+	// for http and was served to https visitors (found by hunt 3)
+	scheme := requestScheme(r)
 	// the path as written, in its one spelling: decoded, an escaped "?" would
 	// read as the start of the query and share a key with it
-	key := cacheHost(r.Host) + keyHostSep + canonicalPath(r.URL.EscapedPath())
+	key := scheme + "://" + cacheHost(r.Host, scheme) + keyHostSep + canonicalPath(r.URL.EscapedPath())
 	if r.URL.RawQuery != "" {
 		key += "?" + r.URL.RawQuery
 	}
 	return key
 }
 
-// cacheHost is one spelling per host: case folded (dns is), the default
-// port dropped (a browser omits it, a proxy may not), and the separator
-// and path characters removed rather than trusted - a Host is a client's
-// string, and an absolute-form request target can put anything in it.
-func cacheHost(host string) string {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSuffix(host, ":80"), ":443"))
+// cacheHost is one spelling per host: case folded (dns is), the scheme's
+// own default port dropped (a browser omits it, a proxy may not - and only
+// that one: :80 on https is another origin, found by hunt 3), and the
+// separator and path characters removed rather than trusted - a Host is a
+// client's string, and an absolute-form request target can put anything in
+// it.
+func cacheHost(host, scheme string) string {
+	host = strings.ToLower(host)
+	if scheme == "https" {
+		host = strings.TrimSuffix(host, ":443")
+	} else {
+		host = strings.TrimSuffix(host, ":80")
+	}
 	return strings.Map(func(r rune) rune {
 		if r == 0 || r == '/' || r == '?' || r == '#' {
 			return -1
@@ -395,17 +405,14 @@ func keyPath(key string) string {
 	return key
 }
 
-// keyLabel renders a key for a human: "//app.example/news?page=2".
+// keyLabel renders a key for a human: "https://app.example/news?page=2".
 func keyLabel(key string) string {
 	if host, p, ok := strings.Cut(key, keyHostSep); ok {
-		return "//" + host + p
+		return host + p
 	}
 	return key
 }
 
-// pathMatchesKey answers whether a Revalidate path names this key. The host
-// is not part of the question: the operator is saying the data changed, and
-// the data is not one vhost's.
 // revalidatePath is a Revalidate argument in the spelling keys are stored
 // in: "/news/" and "/x/../news" dropped nothing, while the copy they named
 // kept serving (found by hunt 3). A trailing * or /* is the call's own
@@ -424,6 +431,9 @@ func revalidatePath(p string) string {
 	return canonicalPath(p)
 }
 
+// pathMatchesKey answers whether a Revalidate path names this key. The host
+// is not part of the question: the operator is saying the data changed, and
+// the data is not one vhost's.
 func pathMatchesKey(path, key string) bool {
 	key = keyPath(key)
 	matches := func(p, k string) bool {
@@ -805,41 +815,31 @@ func (i *isr) regenerate(key string, r *http.Request, policy *isrPolicy, backgro
 // authorization, no session fact, plain GET, identity coding, and none of
 // the negotiation a render could personalise on - so the shared property
 // holds by construction instead of by trust in every loader.
+const anonHeaderLimit = 1024
+
 func anonymised(r *http.Request) *http.Request {
 	anon := r.Clone(context.Background())
 	anon.Method = http.MethodGet
 	anon.Body = http.NoBody
 	anon.ContentLength = 0
-	anon.Header = r.Header.Clone()
-	for _, name := range []string{
-		"Cookie", "Authorization", "Content-Length", "Content-Type",
-		// the coding this cache negotiates per replay, not per render
-		"Accept-Encoding",
-		// a fact only the front may state, and the front states it about
-		// somebody: a shared render is about nobody. Deleted here rather
-		// than at the one call site, so a second caller inherits the
-		// property and not the hole (the verifier of this phase mutated
-		// away that call site and no test noticed)
-		sessionHeader,
-		// and the middleware's forwarded values, which are about somebody too
-		localsHeader,
-		// and the address of whoever triggered the render: the loaders of a
-		// shared copy call the api as nobody, from loopback - and a client
-		// spelling it here chose the RemoteAddr the api saw (found by the
-		// verifier of phase 7)
-		peerHeader,
-		// and the visitor's address as a proxy spelled it: borgo's own
-		// caddy and nginx configs set X-Real-IP, and a loader reading it
-		// would bake one visitor into everybody's copy (found by the
-		// verifier of phase 7)
-		"X-Real-IP", "Forwarded",
-		// what a render could answer differently for the next visitor.
-		// A page that negotiates on these and says so in Vary is refused
-		// outright by unstorable; one that does not say so gets the
-		// neutral render, which is the same answer for everyone
-		"Accept-Language", "Accept-Charset",
-	} {
-		anon.Header.Del(name)
+	// what reaches a shared render is chosen, not what is left after a
+	// list of exclusions: every header a client sent rode along, so one of
+	// 16 kB made the render service answer 431, recorded as the page's own
+	// refusal - one request turned the cache off (found by hunt 3) - and
+	// any header a loader read was baked into everybody's copy. Gone with
+	// the rest: cookies, authorization, the session and locals the front
+	// states about somebody, the peer and every proxy's spelling of the
+	// visitor's address, and the negotiation a render could personalise on.
+	// What stays: Accept and User-Agent - a render that cannot see the
+	// agent at all is a different render - and the two forwarded facts
+	// forwardFacts reads from a trusted proxy: the scheme the page's public
+	// url needs, and the chain it deletes again for a shared render. Each
+	// only at a size no render service refuses
+	anon.Header = http.Header{}
+	for _, name := range []string{"Accept", "User-Agent", "X-Forwarded-Proto", "X-Forwarded-For"} {
+		if v := r.Header.Values(name); len(v) > 0 && len(strings.Join(v, ", ")) <= anonHeaderLimit {
+			anon.Header[name] = append([]string(nil), v...)
+		}
 	}
 	return anon
 }
@@ -1189,8 +1189,10 @@ func readVerdict(err error) savedVerdict {
 }
 
 // buildIDFromInventory keys the persisted copies to the build that rendered
-// them, the same way hashed asset names are: a new build writes new names,
-// and every copy the old one rendered is swept at boot.
+// them: every borgo build records its own id, and every copy an older one
+// rendered is swept at boot. The hashed names alone were the key, and a
+// build that changed only a loader - stripped from every client chunk -
+// kept serving the old build's pages (found by hunt 3).
 func buildIDFromInventory(outputs buildOutputs) string {
 	names := make([]string, 0, len(outputs.sizes))
 	for name := range outputs.sizes {
@@ -1198,6 +1200,8 @@ func buildIDFromInventory(outputs buildOutputs) string {
 	}
 	sort.Strings(names)
 	h := sha256.New()
+	io.WriteString(h, outputs.build)
+	io.WriteString(h, ";")
 	for _, name := range names {
 		io.WriteString(h, name)
 		io.WriteString(h, "=")

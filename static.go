@@ -110,6 +110,8 @@ func assetType(p string) string {
 type buildOutputs struct {
 	dir   string
 	sizes map[string]int64
+	// one per borgo build, for buildIDFromInventory
+	build string
 }
 
 func readBuildOutputs(file string) buildOutputs {
@@ -121,8 +123,13 @@ func readBuildOutputs(file string) buildOutputs {
 	var parsed struct {
 		Dir    string                     `json:"dir"`
 		Hashed map[string]json.RawMessage `json:"hashed"`
+		Build  string                     `json:"build"`
 	}
-	if json.Unmarshal(raw, &parsed) != nil || parsed.Dir == "" || parsed.Hashed == nil {
+	if json.Unmarshal(raw, &parsed) != nil {
+		return none
+	}
+	none.build = parsed.Build
+	if parsed.Dir == "" || parsed.Hashed == nil {
 		return none
 	}
 	sizes := map[string]int64{}
@@ -140,7 +147,7 @@ func readBuildOutputs(file string) buildOutputs {
 	if len(sizes) == 0 {
 		return none
 	}
-	return buildOutputs{dir: strings.TrimRight(filepath.ToSlash(parsed.Dir), "/"), sizes: sizes}
+	return buildOutputs{dir: strings.TrimRight(filepath.ToSlash(parsed.Dir), "/"), sizes: sizes, build: parsed.Build}
 }
 
 // recordedSize is the byte length the build recorded for this exact path.

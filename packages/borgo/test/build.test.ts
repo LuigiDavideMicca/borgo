@@ -905,6 +905,23 @@ describe("build inventory", () => {
     }
   });
 
+  // the page cache keys its persisted copies to this: two builds, two ids
+  test("every build records an id of its own", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "borgo-inventory-"));
+    const path = join(dir, "build-output.json");
+    try {
+      await writeBuildInventory(["a.js"], null, path);
+      const first = JSON.parse(readFileSync(path, "utf8")).build;
+      await writeBuildInventory(["a.js"], null, path);
+      const second = JSON.parse(readFileSync(path, "utf8")).build;
+      expect(typeof first).toBe("string");
+      expect(first.length).toBeGreaterThan(8);
+      expect(second).not.toBe(first);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("garbage on disk reads as no inventory, not as a crash", () => {
     const dir = mkdtempSync(join(tmpdir(), "borgo-inventory-"));
     const path = join(dir, "build-output.json");

@@ -1,6 +1,7 @@
 package borgo
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
@@ -287,6 +288,8 @@ type front struct {
 	csrf     bool
 	// serveGuarded behind the app's middleware
 	guarded http.Handler
+	// the proxies whose X-Forwarded-Proto is believed, for the cache key
+	trusted []*net.IPNet
 }
 
 // inProcess names what the api mux answers on the public port; /healthz
@@ -421,6 +424,7 @@ func (f *front) serveGuarded(w http.ResponseWriter, r *http.Request) {
 			if f.csrf && needsCsrfToken(r) {
 				r = markBypass(r)
 			} else {
+				r = withScheme(r, f.trusted)
 				switch f.isr.handle(w, r, policy) {
 				case isrServed:
 					return
@@ -557,7 +561,7 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 		FlushInterval: -1,
 		ErrorHandler:  renderUnavailable,
 	}
-	f := &front{api: api, ws: opts.ws, devCh: opts.devCh, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev, csrf: opts.csrf}
+	f := &front{api: api, ws: opts.ws, devCh: opts.devCh, assets: opts.assets, isr: opts.isr, policies: policies, proxy: proxy, health: health, metrics: metricsEndpoint, dev: opts.dev, csrf: opts.csrf, trusted: opts.trusted}
 	// api/middleware.go in front of everything the front does not answer
 	// itself; middleware.go says why each position is where it is
 	f.guarded = withAppMiddleware(opts.app, http.HandlerFunc(f.serveGuarded))
@@ -614,6 +618,35 @@ func publicTimeouts(srv *http.Server) {
 // reading like the guard while the standard library did the work - deleted,
 // because a guard somebody may "keep working" without knowing where it lives
 // is worse than no guard at all (the verifier of phase 1 found it dead).
+type schemeKey struct{}
+
+// withScheme records the scheme the front believes, by forwardFacts' rule,
+// for the cache key to read
+func withScheme(r *http.Request, trusted []*net.IPNet) *http.Request {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if prior := r.Header.Get("X-Forwarded-Proto"); prior != "" && peerTrusted(r.RemoteAddr, trusted) {
+		first, _, _ := strings.Cut(prior, ",")
+		if p := strings.ToLower(strings.TrimSpace(first)); p == "http" || p == "https" {
+			scheme = p
+		}
+	}
+	return r.WithContext(context.WithValue(r.Context(), schemeKey{}, scheme))
+}
+
+// requestScheme is what withScheme recorded, or the connection's own
+func requestScheme(r *http.Request) string {
+	if s, ok := r.Context().Value(schemeKey{}).(string); ok {
+		return s
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
 func forwardFacts(in *http.Request, out http.Header, trusted []*net.IPNet) {
 	peer, _, err := net.SplitHostPort(in.RemoteAddr)
 	if err != nil {
