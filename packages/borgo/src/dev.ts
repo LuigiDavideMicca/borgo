@@ -106,6 +106,22 @@ export function gitignoredMatcher(text: string): (file: string) => boolean {
   };
 }
 
+// what the watcher never rebuilds for: borgo's own outputs, and what the
+// app's .gitignore names. The matcher existed and nothing called it, while
+// the template's .gitignore promised the watcher never rebuilt on an upload
+// (found by hunt 3)
+export function watchIgnores(file: string, gitignored: (file: string) => boolean): boolean {
+  return ignored.test(file) || gitignored(file);
+}
+
+function readGitignore(): (file: string) => boolean {
+  try {
+    return gitignoredMatcher(readFileSync(".gitignore", "utf8"));
+  } catch {
+    return () => false;
+  }
+}
+
 // which rebuild a changed file asks for. A .sql file is go's: migrations
 // are embedded into the binary, so a new one applies only once the api is
 // rebuilt (found by the verifier of phase 6)
@@ -471,8 +487,10 @@ export async function dev() {
       .catch((error) => console.error(error));
   });
 
+  let gitignored = readGitignore();
   watch(".", { recursive: true }, (_, file) => {
-    if (file && ignored.test(file)) return;
+    if (file === ".gitignore") gitignored = readGitignore();
+    if (file && watchIgnores(file, gitignored)) return;
     if (!file) {
       // events lost: unless it was our own rebuild writing, force a full reload
       if (!busy) schedule(UNKNOWN_CHANGE, "app");

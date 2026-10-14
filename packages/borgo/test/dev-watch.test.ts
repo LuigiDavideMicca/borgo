@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StartToken } from "../src/parent-watch";
-import { createChangeBatcher, createContentDedup, gitignoredMatcher, ignored, readDevLock, rebuildSides, watchedSide } from "../src/dev";
+import { createChangeBatcher, createContentDedup, gitignoredMatcher, ignored, readDevLock, rebuildSides, watchedSide, watchIgnores } from "../src/dev";
 import { propsPathEnabled } from "../src/runtime";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -272,4 +272,27 @@ test("env.ts rebuilds the pages and the api", () => {
   expect(rebuildSides("pages/env.ts")).toEqual(["app"]);
   expect(rebuildSides("api/x.go")).toEqual(["api"]);
   expect(rebuildSides("notes.md")).toEqual([]);
+});
+
+// the template's .gitignore promised the watcher never rebuilt on an upload,
+// and nothing read it: an upload rebuilt the app (found by hunt 3)
+describe("the watcher honours the app's .gitignore", () => {
+  const template = readFileSync(join(import.meta.dir, "../../create-borgo/templates/full/gitignore"), "utf8");
+  const gitignored = gitignoredMatcher(template);
+
+  test("an upload is not a change to rebuild for, a page is", () => {
+    expect(watchIgnores("uploads/report.html", gitignored)).toBe(true);
+    // a windows path, as the watcher reports it
+    expect(watchIgnores(["uploads", "dump.sql"].join(String.fromCharCode(92)), gitignored)).toBe(true);
+    expect(watchIgnores("pages/index.tsx", gitignored)).toBe(false);
+    expect(watchIgnores("api/notes.go", gitignored)).toBe(false);
+    // borgo's own outputs, as before
+    expect(watchIgnores("public/assets/x.js", () => false)).toBe(true);
+  });
+
+  test("borgo dev asks it of every event, and reads it again when it changes", () => {
+    const dev = readFileSync(join(import.meta.dir, "../src/dev.ts"), "utf8");
+    expect(dev).toContain("if (file && watchIgnores(file, gitignored)) return;");
+    expect(dev).toContain('if (file === ".gitignore") gitignored = readGitignore();');
+  });
 });
