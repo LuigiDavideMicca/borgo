@@ -363,6 +363,20 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.guarded.ServeHTTP(w, r)
 }
 
+// routeOwns: a route beats an extension-less file of the same name (decided
+// 9/9 - the shadowing was an operator mistake wearing a feature's clothes).
+// The render service used to apply it by probing the disk after its router
+// came up empty; that probe served files this side had refused, so the rule
+// is applied here, against the route table the render service hands over
+// (found by hunt 3)
+func (f *front) routeOwns(cleaned string) bool {
+	if f.policies == nil || strings.Contains(path.Base(cleaned), ".") {
+		return false
+	}
+	_, _, ok := f.policies.lookupPattern(cleaned)
+	return ok
+}
+
 // serveGuarded is everything the app's middleware stands in front of: the
 // api, public files, the page cache and the render service, in that order.
 func (f *front) serveGuarded(w http.ResponseWriter, r *http.Request) {
@@ -387,7 +401,7 @@ func (f *front) serveGuarded(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if f.assets != nil && f.assets.tryServe(w, r) {
+	if f.assets != nil && !f.routeOwns(cleaned) && f.assets.tryServe(w, r) {
 		return
 	}
 	// a page that declared itself shareable: answered from the cache when

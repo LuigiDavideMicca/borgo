@@ -460,9 +460,9 @@ var windowsReserved = `:*?"<>|`
 // tryServe answers a request for a file under public/ and reports whether it
 // did. GET and HEAD only: a public/ file must not shadow a post. The path is
 // the decoded one, so traversal is checked on what would be opened. An
-// extension-less path is almost always a page and stays the router's: the
-// render service keeps its late probe for a plain file that collides with no
-// route.
+// extension-less path reaches here only when no route owns it
+// (front.routeOwns), so the disk is never probed on a page request - that
+// probe once cost 4.6% of the ssr profile.
 func (ix *assetIndex) tryServe(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
@@ -478,12 +478,10 @@ func (ix *assetIndex) tryServe(w http.ResponseWriter, r *http.Request) bool {
 		ix.serveIndexed(w, r, info)
 		return true
 	}
-	if !strings.Contains(path.Base(p), ".") {
-		return false
-	}
 	if isHiddenAsset(p) {
 		return false
 	}
+
 	file, st, ok := ix.liveFile(p)
 	if !ok {
 		return false

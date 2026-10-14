@@ -69,6 +69,14 @@ describe("render mode is wired where it must be", () => {
     expect(server.slice(check, check + 200)).toContain("status: 403");
   });
 
+  // public/ is the front's: a file it refused - a windows short name for a
+  // dotfile, a symlink out of public/ - was served from here anyway (hunt 3)
+  test("render mode serves no file from public/", () => {
+    expect(server).toContain('if (!render && (req.method === "GET" || req.method === "HEAD")) {');
+    expect(server.match(/serveAsset\(/g)?.length).toBe(2);
+    expect(server.indexOf("probeLate = assetPath;")).toBeGreaterThan(server.indexOf("if (!render && (req.method"));
+  });
+
   test("render mode binds loopback, not every interface", () => {
     expect(server).toContain('const hostname = render ? "127.0.0.1" : undefined;');
     expect(server).toContain("...(hostname ? { hostname } : {}),");

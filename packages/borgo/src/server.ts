@@ -532,8 +532,12 @@ export async function serve({
     // checked on what will be opened; on windows also ntfs alternate streams
     // (file.css::$DATA) and reserved characters, which alias a file under names
     // the path checks never saw. get/head only: a public/ file must not shadow a post
+    // behind the go front, public/ is the front's alone: it judged the path
+    // already - hidden files, windows aliases, symlinks out of public/ - and
+    // a file it refused, served from here, was served anyway (/ENV~1.LOC was
+    // public/.env.local, found by hunt 3)
     let probeLate: string | null = null;
-    if (req.method === "GET" || req.method === "HEAD") {
+    if (!render && (req.method === "GET" || req.method === "HEAD")) {
       const assetPath = safeDecode(url.pathname);
       if (
         assetPath !== "/" &&

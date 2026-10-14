@@ -223,10 +223,12 @@ func TestStaticIndexIsASnapshotTheDiskMayLeave(t *testing.T) {
 	if !served || w.Code != 200 || w.Header().Get("Cache-Control") != "no-cache" {
 		t.Errorf("a late file: served=%v %d %q", served, w.Code, w.Header().Get("Cache-Control"))
 	}
-	// extension-less stays the router's
+	// whether a route owns an extension-less path is the front's question
+	// (routeOwns, TestARouteBeatsAnExtensionlessFile); asked, the index
+	// serves the file written after boot
 	os.WriteFile(filepath.Join(root, "about"), []byte("page?"), 0o644)
-	if _, served := get(t, ix, "/about"); served {
-		t.Error("an extension-less file shadowed the router")
+	if w, served := get(t, ix, "/about"); !served || w.Body.String() != "page?" {
+		t.Errorf("a late extension-less file: served=%v %q", served, w.Body.String())
 	}
 }
 
