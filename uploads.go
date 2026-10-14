@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -77,6 +79,7 @@ func (u *Uploads) save(src io.Reader, name string) (Stored, error) {
 	}
 	kind := http.DetectContentType(head[:n])
 	if len(u.Types) > 0 {
+		warnUnsniffable(u.Types)
 		media, _, _ := mime.ParseMediaType(kind)
 		if !slices.ContainsFunc(u.Types, func(t string) bool { return sameMediaType(t, media) }) {
 			return Stored{}, fmt.Errorf("%w: %s", ErrUploadType, media)
@@ -227,4 +230,31 @@ func dirError(dir string, err error) error {
 		return fmt.Errorf("borgo.Uploads: cannot write to %s: %w (in a container, mount the volume at a directory the image creates for the app's user, not below it)", dir, err)
 	}
 	return fmt.Errorf("borgo.Uploads: cannot write to %s: %w", dir, err)
+}
+
+// what http.DetectContentType can answer: an entry of Types outside this
+// list never matches, and every genuine file of that type is refused - an
+// svg sniffs as text/xml or text/plain, a docx as application/zip, json and
+// csv as text/plain (found by hunt 3). Said once per entry, at the first
+// upload, rather than refused: the app's config is what is wrong
+var sniffable = []string{
+	"application/octet-stream", "application/ogg", "application/pdf", "application/postscript",
+	"application/vnd.ms-fontobject", "application/wasm", "application/x-gzip", "application/x-rar-compressed",
+	"application/zip", "audio/aiff", "audio/basic", "audio/midi", "audio/mpeg", "audio/wave",
+	"font/collection", "font/otf", "font/ttf", "font/woff", "font/woff2", "image/bmp", "image/gif",
+	"image/jpeg", "image/png", "image/webp", "image/x-icon", "text/html", "text/plain", "text/xml",
+	"video/avi", "video/mp4", "video/webm",
+}
+
+var unsniffableWarned sync.Map
+
+func warnUnsniffable(types []string) {
+	for _, t := range types {
+		if slices.ContainsFunc(sniffable, func(s string) bool { return sameMediaType(t, s) }) {
+			continue
+		}
+		if _, seen := unsniffableWarned.LoadOrStore(strings.ToLower(t), true); !seen {
+			log.Printf("borgo.Uploads: Types lists %q, which content sniffing never reports - no file is ever accepted as it; list what such a file sniffs as (text/xml, text/plain, application/zip...)", t)
+		}
+	}
 }

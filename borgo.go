@@ -929,10 +929,10 @@ func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware,
 	// honoured only behind the internal key, which this shape has none of:
 	// dropped all the same, so the app reads the header the same way in
 	// both shapes - absent (found by the verifier of phase 7)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return withFormCleanup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del(peerHeader)
 		guarded.ServeHTTP(w, r)
-	})
+	}))
 }
 
 // internalHandler is the loaders' way in. The app's middleware guards it as
@@ -942,5 +942,5 @@ func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware,
 func internalHandler(key string, app *appMiddleware, api http.Handler, pokes http.Handler) http.Handler {
 	// the dev channel's pokes are borgo's own, like the exports: behind the
 	// key, ahead of the app's middleware, and nothing in production
-	return requireInternalKey(key, withDevPokes(pokes, withSessionOnce(withExports(withAppMiddleware(app, api)))))
+	return withFormCleanup(requireInternalKey(key, withDevPokes(pokes, withSessionOnce(withExports(withAppMiddleware(app, api))))))
 }

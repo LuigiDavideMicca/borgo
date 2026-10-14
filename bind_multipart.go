@@ -1,11 +1,13 @@
 package borgo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -110,13 +112,19 @@ func BindMultipartMax[T any](r *http.Request, limit int64) (T, error) {
 		// an overflow, or the parser's ErrMessageTooLarge, inside it
 		return v, fmt.Errorf("multipart form: %w", err)
 	}
+	if c, ok := r.Context().Value(formCleanupKey{}).(*formCleanup); ok {
+		c.add(r.MultipartForm)
+	}
 	fields := multipartFields(rv.Type(), nil)
 	for _, f := range fields {
 		files := r.MultipartForm.File[f.name]
 		if len(files) == 0 || !fileTypes[f.typ] {
 			continue
 		}
-		field := fieldFor(rv, f.index)
+		field, err := fieldFor(rv, f.index, f.name)
+		if err != nil {
+			return v, err
+		}
 		switch f.typ {
 		case fileType:
 			field.Set(reflect.ValueOf(fileOf(files[0])))
@@ -136,7 +144,11 @@ func BindMultipartMax[T any](r *http.Request, limit int64) (T, error) {
 		if !sent || fileTypes[f.typ] {
 			continue
 		}
-		if err := setTextField(fieldFor(rv, f.index), f.name, values); err != nil {
+		field, err := fieldFor(rv, f.index, f.name)
+		if err != nil {
+			return v, err
+		}
+		if err := setTextField(field, f.name, values); err != nil {
 			return v, err
 		}
 	}
@@ -257,18 +269,24 @@ func textKind(t reflect.Type) bool {
 }
 
 // fieldFor reaches a field through its embeddings, allocating an embedded
-// pointer on the way: only called when something is about to be set
-func fieldFor(rv reflect.Value, index []int) reflect.Value {
+// pointer on the way: only called when something is about to be set. A nil
+// pointer to an unexported struct cannot be allocated from here, and the
+// request carrying its field is refused as encoding/json refuses it - it
+// was a panic (found by hunt 3)
+func fieldFor(rv reflect.Value, index []int, name string) (reflect.Value, error) {
 	for i, at := range index {
 		if i > 0 && rv.Kind() == reflect.Pointer {
 			if rv.IsNil() {
+				if !rv.CanSet() {
+					return reflect.Value{}, fmt.Errorf("multipart form: field %q is reached through an embedded pointer to an unexported struct, which cannot be set", name)
+				}
 				rv.Set(reflect.New(rv.Type().Elem()))
 			}
 			rv = rv.Elem()
 		}
 		rv = rv.Field(at)
 	}
-	return rv
+	return rv, nil
 }
 
 // zeroFiles clears every file field of a value decoded from JSON: a file
@@ -379,7 +397,9 @@ func setTextField(field reflect.Value, name string, values []string) error {
 		field.SetUint(n)
 	default: // floats: the shape check admitted nothing else
 		n, err := strconv.ParseFloat(value, field.Type().Bits())
-		if err != nil {
+		// NaN and the infinities parse, and no JSON can carry them: the
+		// handler's own echo of the value failed as a 500 (found by hunt 3)
+		if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
 			return fmt.Errorf("multipart form: field %q: %q is not a number of %d bits", name, value, field.Type().Bits())
 		}
 		field.SetFloat(n)
@@ -409,4 +429,40 @@ func bindErrorStatus(err error) int {
 		return http.StatusUnsupportedMediaType
 	}
 	return http.StatusBadRequest
+}
+
+// net/http removes a request's spilled upload files once the handler
+// returns - for the request it made. Every layer of borgo's ports hands the
+// handler a copy (WithContext), and the form was parsed onto the copy, so
+// the files of every upload past 8 MiB stayed on disk forever: a signed-in
+// user could fill it (found by hunt 3). The outermost layer of each port
+// carries a collector the copies share through their context.
+type formCleanupKey struct{}
+
+type formCleanup struct {
+	mu    sync.Mutex
+	forms []*multipart.Form
+}
+
+func (c *formCleanup) add(f *multipart.Form) {
+	if f == nil {
+		return
+	}
+	c.mu.Lock()
+	c.forms = append(c.forms, f)
+	c.mu.Unlock()
+}
+
+func withFormCleanup(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := &formCleanup{}
+		defer func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			for _, f := range c.forms {
+				f.RemoveAll()
+			}
+		}()
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), formCleanupKey{}, c)))
+	})
 }
