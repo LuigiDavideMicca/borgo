@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -216,7 +217,7 @@ func run(root string) (err error) {
 	}
 	out.WriteString("declare module \"borgo-framework\" {\n  interface ApiRoutes {\n")
 	for _, p := range patterns {
-		fmt.Fprintf(&out, "    %q: %s;\n", p, entries[p])
+		fmt.Fprintf(&out, "    %s: %s;\n", tsString(p), entries[p])
 	}
 	out.WriteString("  }\n")
 	if len(wsKeys) > 0 {
@@ -225,10 +226,10 @@ func run(root string) (err error) {
 			if wsPatterns[k] {
 				// a template literal index signature: the key of every topic
 				// the pattern admits, matched by EventsFor in index.ts
-				fmt.Fprintf(&out, "    [k: `%s`]: %s;\n", k, wsEntries[k])
+				fmt.Fprintf(&out, "    [k: `%s`]: %s;\n", eventKey(k), wsEntries[k])
 				continue
 			}
-			fmt.Fprintf(&out, "    %q: %s;\n", k, wsEntries[k])
+			fmt.Fprintf(&out, "    %s: %s;\n", tsString(k), wsEntries[k])
 		}
 		out.WriteString("  }\n")
 	}
@@ -1197,8 +1198,7 @@ func topicDirectives(pkg *packages.Package, file *ast.File) map[int]*topicDirect
 			}
 			d := &topicDirective{pattern: pattern, pos: pos, template: placeholderRe.MatchString(pattern)}
 			if d.template {
-				key := strings.ReplaceAll(strings.ReplaceAll(pattern, "\\", "\\\\"), "`", "\\`")
-				key = strings.ReplaceAll(key, "${", "\\${")
+				key := templateText(pattern)
 				d.key = placeholderRe.ReplaceAllString(key, "$${string}")
 			}
 			out[pkg.Fset.Position(c.End()).Line] = d
@@ -2832,9 +2832,11 @@ func tsPropName(name string) string {
 // categories, TS1xxx at the parse and TS2427/TS2457 at the check. Array and
 // Record are the two generics this file writes: an interface under either
 // name shadows them in the module and every use becomes "type is not
-// generic", quietly, since apps typecheck with skipLibCheck.
+// generic", quietly, since apps typecheck with skipLibCheck. Blob is the
+// type a file field is written as: an app type of that name took its place,
+// a real File no longer fit and an object did (found by hunt 3).
 var tsReserved = []string{
-	"Array", "Record",
+	"Array", "Record", "Blob",
 	"as", "await", "break", "case", "catch", "class", "const", "continue",
 	"debugger", "default", "delete", "do", "else", "enum", "export", "extends",
 	"false", "finally", "for", "function", "if", "implements", "import", "in",
@@ -2967,7 +2969,13 @@ func lookupTag(tag, key string) (string, bool) {
 		if i >= len(tag) {
 			break
 		}
-		value := tag[1:i]
+		// unquoted as reflect.StructTag.Lookup unquotes it: the raw text kept
+		// its escapes, and the wire name json writes did not match the type's
+		// (found by hunt 3)
+		value, err := strconv.Unquote(tag[:i+1])
+		if err != nil {
+			break
+		}
 		tag = tag[i+1:]
 		if k == key {
 			return value, true

@@ -720,8 +720,9 @@ func TestByteSlicesAreBase64Strings(t *testing.T) {
 		`{"text":["tb"],"ptext":["pb"],"js":["jb"]}`)
 
 	wants(t, generate(t, "bytes"),
-		// a nil []byte is "null", not "" - only the array is always there
-		"export interface Blob {\n  raw: string | null;\n  alias: string | null;\n  defined: string | null;\n  arr: Array<number>;\n}",
+		// a nil []byte is "null", not "" - only the array is always there; Blob
+		// is the name file fields are written with, so the app type moves aside
+		"export interface ApiBlob {\n  raw: string | null;\n  alias: string | null;\n  defined: string | null;\n  arr: Array<number>;\n}",
 		// a byte-kinded element that marshals itself leaves the base64 path
 		"export interface SelfBytes {\n  text: Array<string> | null;\n  ptext: Array<string> | null;\n  js: Array<unknown> | null;\n}",
 	)
