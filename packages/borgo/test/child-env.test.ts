@@ -49,3 +49,29 @@ describe("a restart borgo dev asked for is not reported as a crash", () => {
     expect(dev).toContain("const previous = goProc;\n    goProc = null;");
   });
 });
+
+// borgo start's own order and stop, pinned where they live (hunt 3)
+describe("borgo start", () => {
+  const cli = source("cli.ts");
+  const start = cli.slice(cli.indexOf('case "start"'), cli.indexOf('case "export"'));
+
+  // the front indexes public/ at boot: started before a rebuild, it served
+  // every new asset as one it had not vouched for
+  test("the go front starts after the rebuild", () => {
+    expect(start.indexOf("await build();")).toBeGreaterThan(-1);
+    expect(start.indexOf("const apiProc = Bun.spawn([bin]")).toBeGreaterThan(start.indexOf("await build();"));
+  });
+
+  // exiting on the first signal dropped every request in flight, and in a
+  // container took the front's drain with it
+  test("a stop is passed on and waited for, and a second one insists", () => {
+    const stop = start.slice(start.indexOf("const stop = () => {"), start.indexOf('process.on("SIGINT", stop);'));
+    expect(stop).toContain('apiProc.kill("SIGTERM");');
+    expect(stop).toContain("apiProc.exited.then(() => process.exit(0));");
+    expect(stop.indexOf("if (stopping) {")).toBeLessThan(stop.indexOf("stopping = true;"));
+    expect(stop).toContain('apiProc.kill("SIGKILL");');
+    // the first signal does not exit on its own
+    const first = stop.slice(stop.indexOf("stopping = true;"));
+    expect(first).not.toMatch(/^\s*process\.exit\(0\);/m);
+  });
+});

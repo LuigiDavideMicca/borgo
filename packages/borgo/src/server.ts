@@ -286,6 +286,13 @@ export async function serve({
   dev = false,
   switches = resolveSwitches(process.env, dev),
 }: { dev?: boolean; switches?: Switches } = {}) {
+  // this process renders behind the go front, which answers the public port
+  // and /api: started alone it bound every interface, announced an api
+  // "proxied at /api" that nothing proxies any more, and answered /api with
+  // a 404 (found by hunt 3)
+  if (!switches.render) {
+    throw new Error("borgo: the render service runs behind the go front - start the app with `borgo start` or `borgo dev`");
+  }
   const started = performance.now();
   // the app's declared environment is checked before anything binds: a
   // missing or malformed variable refuses the boot naming every failure at

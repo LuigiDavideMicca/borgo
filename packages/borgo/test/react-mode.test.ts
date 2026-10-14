@@ -75,13 +75,19 @@ describe("the launch matrix is coherent in every mode", () => {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     delete env.NODE_ENV;
     if (nodeEnv !== undefined) env.NODE_ENV = nodeEnv;
-    env.PORT = String(port);
+    // as borgo start runs it: the render service behind the go front, on
+    // loopback, answering only this boot's key
+    env.BORGO_RENDER = "1";
+    env.BORGO_RENDER_PORT = String(port);
+    env.BORGO_INTERNAL_KEY = "k".repeat(32);
     env.BUN_CONFIG_MAX_HTTP_REQUESTS = "16384";
     // /about has no loader, so the go api is not needed for the render
     const script = `
       const { serve } = await import(${JSON.stringify(serverTs)});
       await serve({ dev: false });
-      const res = await fetch("http://localhost:" + process.env.PORT + "/about");
+      const res = await fetch("http://127.0.0.1:" + process.env.BORGO_RENDER_PORT + "/about", {
+        headers: { "X-Borgo-Internal": process.env.BORGO_INTERNAL_KEY },
+      });
       const body = await res.text();
       const jsxDev = Object.keys(require.cache).some((k) => k.includes("jsx-dev-runtime"));
       const prodDom = Object.keys(require.cache).some((k) => k.includes("react-dom-server.bun.production"));

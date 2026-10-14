@@ -77,6 +77,14 @@ describe("render mode is wired where it must be", () => {
     expect(server.indexOf("probeLate = assetPath;")).toBeGreaterThan(server.indexOf("if (!render && (req.method"));
   });
 
+  // started alone it bound every interface and answered /api with a 404
+  // under a banner naming a proxy that no longer exists (hunt 3)
+  test("the render service refuses to start outside render mode", () => {
+    const head = server.slice(server.indexOf("export async function serve("), server.indexOf("const started = performance.now();"));
+    expect(head).toContain("if (!switches.render) {");
+    expect(head).toContain("throw new Error(");
+  });
+
   test("render mode binds loopback, not every interface", () => {
     expect(server).toContain('const hostname = render ? "127.0.0.1" : undefined;');
     expect(server).toContain("...(hostname ? { hostname } : {}),");

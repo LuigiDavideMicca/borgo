@@ -166,6 +166,23 @@ switch (command) {
       );
       process.exit(1);
     }
+    // the rebuild comes before the go front starts: the front indexes
+    // public/ at boot, and a rebuild after it served every new asset as one
+    // it had not vouched for - no-cache, from disk, for the process's whole
+    // life (found by hunt 3)
+    // BORGO_STATIC belongs to `borgo export`: inherited, every rebuild here
+    // would be an export build and the next boot would rebuild again, forever
+    delete process.env.BORGO_STATIC;
+
+    // a stamp that cannot be read is not a licence to serve
+    const rebuildWhy = rebuildBeforeServing();
+    if (rebuildWhy) {
+      console.log(`  ${c.terracotta(g.change)} ${rebuildWhy} ${c.dim("- rebuilding for production")}`);
+      const rebuildStarted = performance.now();
+      await build();
+      console.log(`  ${c.sage(g.ok)} built in ${c.bold(fmtMs(performance.now() - rebuildStarted))}`);
+    }
+
     {
       const bin = `dist/${goBinName()}`;
       if (!existsSync(bin)) {
@@ -184,12 +201,22 @@ switch (command) {
         },
       });
       // an intentional stop must exit 0, or a supervisor restart-loops; the
-      // flag wins the race when the signal reaches the child first
+      // flag wins the race when the signal reaches the child first. The
+      // first signal is passed on and this process stays - it renders the
+      // pages the requests in flight are waiting for - until the front has
+      // drained them within BORGO_SHUTDOWN_TIMEOUT: exiting at once dropped
+      // every request in flight, and in a container, where this is pid 1,
+      // took the front's drain with it (found by hunt 3). A second signal
+      // is the operator insisting
       let stopping = false;
       const stop = () => {
+        if (stopping) {
+          apiProc.kill("SIGKILL");
+          process.exit(0);
+        }
         stopping = true;
-        apiProc.kill();
-        process.exit(0);
+        apiProc.kill("SIGTERM");
+        apiProc.exited.then(() => process.exit(0));
       };
       process.on("SIGINT", stop);
       process.on("SIGTERM", stop);
@@ -198,19 +225,6 @@ switch (command) {
         console.error(`  ${c.red(g.err)} go front exited (${code})`);
         process.exit(code);
       });
-    }
-
-    // BORGO_STATIC belongs to `borgo export`: inherited, every rebuild here
-    // would be an export build and the next boot would rebuild again, forever
-    delete process.env.BORGO_STATIC;
-
-    // a stamp that cannot be read is not a licence to serve
-    const rebuildWhy = rebuildBeforeServing();
-    if (rebuildWhy) {
-      console.log(`  ${c.terracotta(g.change)} ${rebuildWhy} ${c.dim("- rebuilding for production")}`);
-      const rebuildStarted = performance.now();
-      await build();
-      console.log(`  ${c.sage(g.ok)} built in ${c.bold(fmtMs(performance.now() - rebuildStarted))}`);
     }
 
     // `borgo build` printed these on a machine this operator may never have seen
