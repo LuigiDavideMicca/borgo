@@ -466,7 +466,7 @@ Failing is the point: a directive that is well formed and still does nothing rea
 | `X-Borgo-Cache` | HTTP | How a [cached page](pages-and-routing.md#cached-pages) answered: `miss`, `hit`, `stale` or `bypass`. Diagnostic — read it, do not build on it. | provisional |
 | `X-CSRF-Token` | HTTP | The double-submit token on an unsafe `/api/*` request. `apiFetch` attaches it. | stable |
 | `borgo_session`, `borgo_csrf` | Cookies | The two cookies borgo owns. | stable |
-| `/healthz`, `/metrics`, `/ws`, `/api/*`, `/assets/*`, `/__borgo/*` | URL | Reserved paths. An app route must not claim them (except `/healthz`, which an app may override on the Go side). | stable |
+| `/healthz`, `/metrics`, `/ws`, `/api/*`, `/assets/*`, `/__borgo/*` | URL | Reserved paths. An app route must not claim them. `/healthz` is the one an app may claim, and only in an api served alone: behind the front, the front answers it before any route. | stable |
 
 ## Findings
 

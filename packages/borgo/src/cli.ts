@@ -92,7 +92,7 @@ switch (command) {
       process.exit(1);
     }
     const binSize = Bun.file(bin).size;
-    console.log(`  ${c.sage(g.ok)} ${bin.padEnd(28)} ${kb(binSize).padStart(9)} ${c.dim("go api binary")}`);
+    console.log(`  ${c.sage(g.ok)} ${bin.padEnd(28)} ${kb(binSize).padStart(9)} ${c.dim("go front binary")}`);
     console.log(`\n  done in ${c.bold(fmtMs(performance.now() - t0))}`);
     console.log(
       `  ${c.dim(`${g.dot} restart borgo start to serve this build ${g.dot} a server left running holds the previous document, whose assets are gone`)}\n`,

@@ -1706,6 +1706,10 @@ export function codeMask(js: string): string {
   // `)` is a regex exactly when the paren it closed was one of those heads
   const parens: boolean[] = [];
   let lastParenControl = false;
+  // the last sign closed a ++ or --: a / after it divides - a regex literal
+  // cannot be incremented - and reading it as one blinded the mask for the
+  // rest of the module (found by hunt 3)
+  let afterIncDec = false;
   const blank = (from: number, to: number) => {
     for (let k = from; k < Math.min(to, js.length); k++) if (out[k] !== "\n") out[k] = " ";
   };
@@ -1719,6 +1723,9 @@ export function codeMask(js: string): string {
   // anything else advances; returns the next index
   const step = (i: number): number => {
     const c = js[i];
+    // only the regex test below reads it, against the sign just before
+    const incDec = afterIncDec;
+    if (c.trim() !== "") afterIncDec = false;
     if (c === "/" && js[i + 1] === "/") {
       let j = js.indexOf("\n", i + 2);
       if (j === -1) j = js.length;
@@ -1745,7 +1752,7 @@ export function codeMask(js: string): string {
       lastWord = "";
       return j;
     }
-    if (c === "/" && regexCanFollow()) {
+    if (c === "/" && !incDec && regexCanFollow()) {
       let j = i + 1;
       let inClass = false;
       while (j < js.length && js[j] !== "\n" && (inClass || js[j] !== "/")) {
@@ -1767,6 +1774,11 @@ export function codeMask(js: string): string {
       return j;
     }
     if (!/\s/.test(c)) {
+      // a run of one sign: ++ and -- pair up, so an odd run ends in a binary
+      // + or -, after which a regex may follow (a+++/re/ is a++ + /re/)
+      let run = 1;
+      while ((c === "+" || c === "-") && js[i - run] === c) run++;
+      afterIncDec = (c === "+" || c === "-") && run % 2 === 0;
       if (c === "(") parens.push(CONTROL_HEADS.has(lastWord));
       else if (c === ")") lastParenControl = parens.pop() ?? false;
       lastSig = c;

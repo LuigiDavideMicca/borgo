@@ -494,6 +494,30 @@ describe("codeMask", () => {
     expect(mask).not.toContain("inner");
     expect(mask).not.toContain("end`");
   });
+  // a postfix ++ or -- before a division read as a regex: with a "/" string
+  // and a template later on the line, the mask went blind for the rest of
+  // the module and a memo component was never registered (found by hunt 3)
+  test("a division after ++ or -- is a division", () => {
+    for (const op of ["++", "--"]) {
+      // the template opens at the end of the line: misread, its backtick sat
+      // inside a string, and the closing one opened the rest of the module
+      const js = [
+        "let seen = 0;",
+        "export const ratio = (n) => seen" + op + " / n + \"/\"; export const tip = `",
+        "multi-line help`;",
+        "export const Row = memo(function Row() { return null; });",
+      ].join(String.fromCharCode(10));
+      const mask = codeMask(js);
+      expect(mask).toContain("export const Row = memo(function Row() { return null; });");
+      expect(mask).not.toContain("multi-line help");
+    }
+    // three pluses are a++ then a binary +, after which a regex may follow
+    const js = ["const x = a+++/re/.source.length;", "const after = 1;"].join(String.fromCharCode(10));
+    expect(codeMask(js)).not.toContain("re/");
+    // and only the sign right after it: a keyword later still takes a regex
+    const later = ["let x = 0; x++", "return /a`b/.test(s);", "const after = 1;"].join(String.fromCharCode(10));
+    expect(codeMask(later)).toContain("const after = 1;");
+  });
 });
 
 describe("precacheStamp", () => {

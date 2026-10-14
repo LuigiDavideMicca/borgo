@@ -259,8 +259,9 @@ Point the uptime monitor at `/healthz` on the public port — it returns `{statu
 
 ```yaml
 healthcheck:
-  # /healthz answers 200 even when the api is down - the state is in
-  # the body. bun is the runtime image's own binary, so no curl needed.
+  # /healthz answers 200 even when the render service is down - the
+  # state is in the body. bun is the runtime image's own binary, so no
+  # curl needed.
   test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>r.text()).then(t=>process.exit(t.includes('\"status\":\"ok\"')?0:1)).catch(()=>process.exit(1))"]
   interval: 30s
   timeout: 5s
@@ -341,6 +342,6 @@ systemctl reload caddy
 kill -TERM "$OLD_PID"
 ```
 
-That `grep` is not decoration: `/healthz` answers 200 even while the API is down, reporting `"status":"degraded"`. See [health and metrics](#health-and-metrics).
+That `grep` is not decoration: `/healthz` answers 200 even while the render service is down, reporting `"status":"degraded"`. See [health and metrics](#health-and-metrics).
 
 With a single instance and a supervisor that restarts on exit, the window is the shutdown grace plus the boot time — usually under a second, but not zero. Docker's default `docker stop` grace is 10 seconds, which matches `BORGO_SHUTDOWN_TIMEOUT`'s default; lower one if you lower the other.
