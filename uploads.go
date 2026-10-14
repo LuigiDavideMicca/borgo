@@ -240,7 +240,7 @@ func dirError(dir string, err error) error {
 var sniffable = []string{
 	"application/octet-stream", "application/ogg", "application/pdf", "application/postscript",
 	"application/vnd.ms-fontobject", "application/wasm", "application/x-gzip", "application/x-rar-compressed",
-	"application/zip", "audio/aiff", "audio/basic", "audio/midi", "audio/mpeg", "audio/wave",
+	"application/zip", "audio/aiff", "audio/midi", "audio/mpeg", "audio/wave",
 	"font/collection", "font/otf", "font/ttf", "font/woff", "font/woff2", "image/bmp", "image/gif",
 	"image/jpeg", "image/png", "image/webp", "image/x-icon", "text/html", "text/plain", "text/xml",
 	"video/avi", "video/mp4", "video/webm",

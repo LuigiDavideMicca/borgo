@@ -189,7 +189,9 @@ func BindError(w http.ResponseWriter, err error) {
 // Cache-Control may sit outside the wrapper: an outer defer that writes
 // `public` after this has committed reaches the wire beside the cookie.
 func Middleware(h http.Handler) http.Handler {
-	return recoverMiddleware(gzipMiddleware(h))
+	// an app serving this on a server of its own gets the upload cleanup
+	// borgo's ports carry (found by the verifier of hunt 3's fixes)
+	return withFormCleanup(recoverMiddleware(gzipMiddleware(h)))
 }
 
 // recoverMiddleware answers a panicking handler with a 500 instead of letting
@@ -929,10 +931,10 @@ func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware,
 	// honoured only behind the internal key, which this shape has none of:
 	// dropped all the same, so the app reads the header the same way in
 	// both shapes - absent (found by the verifier of phase 7)
-	return withFormCleanup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return withFormCleanup(refuseSlashAlias(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del(peerHeader)
 		guarded.ServeHTTP(w, r)
-	}))
+	})))
 }
 
 // internalHandler is the loaders' way in. The app's middleware guards it as
@@ -942,5 +944,5 @@ func apiOnlyHandler(security *securityConfig, maxBody int64, app *appMiddleware,
 func internalHandler(key string, app *appMiddleware, api http.Handler, pokes http.Handler) http.Handler {
 	// the dev channel's pokes are borgo's own, like the exports: behind the
 	// key, ahead of the app's middleware, and nothing in production
-	return withFormCleanup(requireInternalKey(key, withDevPokes(pokes, withSessionOnce(withExports(withAppMiddleware(app, api))))))
+	return withFormCleanup(requireInternalKey(key, refuseSlashAlias(withDevPokes(pokes, withSessionOnce(withExports(withAppMiddleware(app, api)))))))
 }

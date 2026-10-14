@@ -65,6 +65,31 @@ func canonicalPath(p string) string {
 	return path.Clean(b.String())
 }
 
+// slashAlias: a path whose encoded slashes spell a dot segment or an empty
+// segment once decoded. The app's middleware decides on the decoded, cleaned
+// path and ServeMux matches the escaped one segment by segment, so
+// /api/admin/x%2F..%2F..%2Fpublic was /api/public to the guard and
+// /api/admin/{id} to the mux - the guard skipped, on every port (found by
+// the verifier of hunt 3's fixes). An encoded slash inside one segment's
+// value, which decodes clean, is a param's own and passes
+func slashAlias(r *http.Request) bool {
+	escaped := r.URL.EscapedPath()
+	if !strings.Contains(escaped, "%2F") && !strings.Contains(escaped, "%2f") {
+		return false
+	}
+	return path.Clean(r.URL.Path) != r.URL.Path
+}
+
+func refuseSlashAlias(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if slashAlias(r) {
+			http.Error(w, "an encoded slash that spells a dot segment is refused", http.StatusBadRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // asked after the canonical redirect, which has uppercased every kept escape
 func hasEncodedSlash(escaped string) bool {
 	return strings.Contains(escaped, "%2F")

@@ -113,6 +113,19 @@ func (p *policySource) lookupPattern(pathname string) (*isrPolicy, string, bool)
 	return nil, "", false
 }
 
+// owns: whether a route claims the path. A table not read yet - the render
+// service starting, down, or answering an error - claims everything: the
+// file would otherwise win until it is read, and a page served as the
+// public/ file of its name is the shadowing the rule exists to prevent
+// (found by the verifier of hunt 3's fixes)
+func (p *policySource) owns(pathname string) bool {
+	if _, ok := p.table(); !ok {
+		return true
+	}
+	_, _, ok := p.lookupPattern(pathname)
+	return ok
+}
+
 func (p *policySource) lookup(pathname string) (*isrPolicy, bool) {
 	policy, _, ok := p.lookupPattern(pathname)
 	return policy, ok

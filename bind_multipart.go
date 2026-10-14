@@ -455,6 +455,13 @@ func (c *formCleanup) add(f *multipart.Form) {
 
 func withFormCleanup(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// an outer layer already collects: the request goes on as it is,
+		// since a copy loses what the mux writes on it - r.Pattern, which
+		// the front labels its counters with (found by the e2e)
+		if _, ok := r.Context().Value(formCleanupKey{}).(*formCleanup); ok {
+			next.ServeHTTP(w, r)
+			return
+		}
 		c := &formCleanup{}
 		defer func() {
 			c.mu.Lock()

@@ -314,6 +314,10 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// sending it is answered as if it had not, before any middleware or
 	// handler reads it (found by the verifier of phase 7)
 	r.Header.Del(peerHeader)
+	if slashAlias(r) {
+		http.Error(w, "an encoded slash that spells a dot segment is refused", http.StatusBadRequest)
+		return
+	}
 	// the names the two processes use between themselves are not urls: a
 	// public request for one is answered as if it did not exist. One
 	// exception, in dev only: the browser's fast-refresh channel lives on
@@ -376,8 +380,7 @@ func (f *front) routeOwns(cleaned string) bool {
 	if f.policies == nil || strings.Contains(path.Base(cleaned), ".") {
 		return false
 	}
-	_, _, ok := f.policies.lookupPattern(cleaned)
-	return ok
+	return f.policies.owns(cleaned)
 }
 
 // serveGuarded is everything the app's middleware stands in front of: the
@@ -497,9 +500,8 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 				pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
 			}
 			pr.SetXForwarded()
-			if proto := pr.In.Header.Get("X-Forwarded-Proto"); trusted && proto != "" {
-				pr.Out.Header.Set("X-Forwarded-Proto", proto)
-			}
+			// by schemeOf's rule, the one the cache key is built on
+			pr.Out.Header.Set("X-Forwarded-Proto", schemeOf(pr.In, trusted))
 			// a client presenting either name is a client forging a fact
 			// only this process may state: Set replaces, so the delete is
 			// the statement, not the mechanism
@@ -623,17 +625,25 @@ type schemeKey struct{}
 // withScheme records the scheme the front believes, by forwardFacts' rule,
 // for the cache key to read
 func withScheme(r *http.Request, trusted []*net.IPNet) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), schemeKey{}, schemeOf(r, peerTrusted(r.RemoteAddr, trusted))))
+}
+
+// schemeOf is the scheme of a request: the connection's, or the first one a
+// believed proxy stated, normalised. One rule for the cache key and for what
+// the render is told: the key took the first value lowercased while the
+// render was handed the raw header (found by the verifier of hunt 3's fixes)
+func schemeOf(r *http.Request, believed bool) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	if prior := r.Header.Get("X-Forwarded-Proto"); prior != "" && peerTrusted(r.RemoteAddr, trusted) {
+	if prior := r.Header.Get("X-Forwarded-Proto"); prior != "" && believed {
 		first, _, _ := strings.Cut(prior, ",")
 		if p := strings.ToLower(strings.TrimSpace(first)); p == "http" || p == "https" {
 			scheme = p
 		}
 	}
-	return r.WithContext(context.WithValue(r.Context(), schemeKey{}, scheme))
+	return scheme
 }
 
 // requestScheme is what withScheme recorded, or the connection's own
@@ -659,12 +669,5 @@ func forwardFacts(in *http.Request, out http.Header, trusted []*net.IPNet) {
 	}
 	out.Set("X-Forwarded-For", chain)
 	out.Set("X-Forwarded-Host", in.Host)
-	proto := "http"
-	if in.TLS != nil {
-		proto = "https"
-	}
-	if prior := in.Header.Get("X-Forwarded-Proto"); believed && prior != "" {
-		proto = prior
-	}
-	out.Set("X-Forwarded-Proto", proto)
+	out.Set("X-Forwarded-Proto", schemeOf(in, believed))
 }
