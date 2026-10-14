@@ -1476,10 +1476,18 @@ export async function withBuildLock<T>(
     } catch (error) {
       // EPERM is windows refusing a name whose deletion is still pending:
       // held, for a moment longer
+      // EPERM is also windows' plain access denied: retried only while a
+      // lock is there to be pending (found by the verifier)
       const code = (error as { code?: string }).code;
-      if (code !== "EEXIST" && code !== "EPERM") throw error;
+      if (code !== "EEXIST" && !(code === "EPERM" && existsSync(lockPath))) throw error;
     }
     const holder = readLockHolder(lockPath, startOf, reused);
+    // a stale lock nothing can delete - an open handle, a denied ACL - is
+    // waited on like a live one, and bounded the same: it used to spin
+    // forever (found by the verifier)
+    if (typeof holder === "object" && "stale" in holder && Date.now() > deadline) {
+      throw new Error(`${lockPath} is left by a build that is gone, and it cannot be removed - delete it by hand`);
+    }
     if (typeof holder === "object" && "stale" in holder) {
       takeOverStale(lockPath, holder.stale);
       await Bun.sleep(5);

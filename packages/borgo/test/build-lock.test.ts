@@ -104,6 +104,19 @@ describe("withBuildLock", () => {
     expect(existsSync(`${lock}.takeover`)).toBe(false);
   });
 
+  // a stale lock nothing can remove used to spin forever, past waitMs
+  test("a stale lock that cannot be taken over is given up on in time", async () => {
+    const lock = join(mkdtempSync(join(tmpdir(), "borgo-lock-")), "build.lock");
+    writeFileSync(lock, JSON.stringify({ pid: 999_999, token: "dead" }));
+    // a guard that never ages out: no takeover can happen
+    writeFileSync(`${lock}.takeover`, "1");
+    const future = new Date(Date.now() + 3_600_000);
+    utimesSync(`${lock}.takeover`, future, future);
+    const started = Date.now();
+    await expect(withBuildLock(async () => "took it", lock, 400)).rejects.toThrow("cannot be removed");
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
   test("every build asks with the real reader", () => {
     const src = readFileSync(join(import.meta.dir, "../src/build.ts"), "utf8");
     expect(src).toContain("startOf: (pid: number) => StartToken | null = processStart,");
