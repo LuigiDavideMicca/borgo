@@ -360,3 +360,16 @@ test("an empty param is refused, and any name ServeMux takes is filled", async (
   await untyped("GET /api/città/{città}", { params: { città: "roma" } });
   expect(calls[0].url).toBe("http://api:1/api/citt%C3%A0/roma");
 });
+
+// {name...} may match nothing, as ServeMux lets it; null and a name that is
+// a key of Object's prototype are a param missing, not "null" or Object's
+// source (found by the verifier of hunt 3's fixes)
+test("an empty rest is sent, null and prototype names are missing params", async () => {
+  stubFetch(() => Response.json({}));
+  const untyped = makeApiClient("http://api:1") as unknown as (route: string, opts?: object) => Promise<unknown>;
+  await untyped("GET /api/files/{rest...}", { params: { rest: "" } });
+  expect(calls[0].url).toBe("http://api:1/api/files/");
+  await expect(untyped("GET /api/t/{id}", { params: { id: null } })).rejects.toThrow('missing param "id"');
+  await expect(untyped("GET /api/t/{constructor}", { params: {} })).rejects.toThrow('missing param "constructor"');
+  await expect(untyped("GET /api/t/{toString}")).rejects.toThrow('missing param "toString"');
+});

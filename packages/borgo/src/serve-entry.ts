@@ -62,6 +62,7 @@ if (import.meta.main) {
         fetch(`${api}/__borgo/dev/js`, {
           method: "POST",
           headers: { [INTERNAL_KEY_HEADER]: switches.internalKey, "Content-Type": "application/json" },
+          redirect: "manual",
           body: JSON.stringify({ files: files.length ? files : ["(build)"], chunks: {}, stamp: Date.now() }),
           signal: AbortSignal.timeout(2_000),
         }).catch((pokeError) =>

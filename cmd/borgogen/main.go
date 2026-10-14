@@ -514,9 +514,10 @@ func collectMiddleware(pkg *packages.Package) middlewareDecl {
 }
 
 // matcherLiteral reads the Matcher's paths without running the app: a
-// composite literal of constant strings, assigned nowhere else. Anything
-// else - a computed list, an append in init - is unknown, and borgo export
-// says so rather than guessing which pages it guards
+// composite literal of constant strings that nothing else in the package
+// touches. Anything else - a computed list, an append or an index written in
+// init - is unknown, and borgo export says so rather than guessing which
+// pages it guards
 func matcherLiteral(pkg *packages.Package, v *types.Var) ([]string, bool) {
 	var values []string
 	found, known := false, true
@@ -547,15 +548,13 @@ func matcherLiteral(pkg *packages.Package, v *types.Var) ([]string, bool) {
 						values = append(values, constant.StringVal(tv.Value))
 					}
 				}
-			case *ast.AssignStmt:
-				for _, lhs := range n.Lhs {
-					if id, ok := ast.Unparen(lhs).(*ast.Ident); ok && pkg.TypesInfo.Uses[id] == v {
-						known = false
-					}
-				}
-			case *ast.UnaryExpr:
-				// &Matcher handed to something that may write through it
-				if id, ok := ast.Unparen(n.X).(*ast.Ident); ok && n.Op == token.AND && pkg.TypesInfo.Uses[id] == v {
+			case *ast.Ident:
+				// any use of it but the call borgo.gen.go makes: an index
+				// written in an init, a copy, an alias, a slice handed to a
+				// function - each changes what Go guards at runtime while the
+				// literal says otherwise, and export published a page Go
+				// guards (found by the verifier of hunt 3's fixes)
+				if pkg.TypesInfo.Uses[n] == v && filepath.Base(pkg.Fset.Position(n.Pos()).Filename) != "borgo.gen.go" {
 					known = false
 				}
 			}

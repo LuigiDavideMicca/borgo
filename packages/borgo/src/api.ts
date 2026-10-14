@@ -169,8 +169,15 @@ export function makeApiClient(
     };
     const path = route.slice(space + 1).replace(/\{(\$|([^{}.]+)(\.\.\.)?)\}/g, (_, all, name, rest) => {
       if (all === "$") return "";
-      const value = opts.params?.[name];
-      if (value === undefined) throw new Error(`api ${route}: missing param "${name}"`);
+      // an own value, not null: {constructor} read Object's and sent its
+      // source, and null went as "null" (found by the verifier of hunt 3's
+      // fixes)
+      const params = opts.params ?? {};
+      const value = Object.hasOwn(params, name) ? params[name] : undefined;
+      if (value === undefined || value === null) throw new Error(`api ${route}: missing param "${name}"`);
+      // {name...} may match nothing at all, as ServeMux lets it; an empty
+      // segment inside it is still refused
+      if (rest && String(value) === "") return "";
       return rest
         ? String(value)
             .split("/")

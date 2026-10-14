@@ -128,6 +128,31 @@ switch (command) {
       }
       process.exit(await child.exited);
     }
+    // an intentional stop must exit 0, or a supervisor restart-loops; the
+    // flag wins the race when the signal reaches the child first. The
+    // first signal is passed on and this process stays - it renders the
+    // pages the requests in flight are waiting for - until the front has
+    // drained them within BORGO_SHUTDOWN_TIMEOUT: exiting at once dropped
+    // every request in flight, and in a container, where this is pid 1,
+    // took the front's drain with it (found by hunt 3). A second signal
+    // is the operator insisting. Installed before anything is awaited: a
+    // stop during the rebuild, or during the imports before it, with no
+    // front yet, was the default action and exit 143 (found by the
+    // verifiers of that fix)
+    let apiProc: import("bun").Subprocess | null = null;
+    let stopping = false;
+    const stop = () => {
+      if (stopping || !apiProc) {
+        apiProc?.kill("SIGKILL");
+        process.exit(0);
+      }
+      stopping = true;
+      apiProc.kill("SIGTERM");
+      apiProc.exited.then(() => process.exit(0));
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+
     // the env's pid, never process.ppid: a server started with nohup from a
     // shell that then exits must keep serving. A false death here exits 0 and
     // `Restart=on-failure` does not restart a clean exit - the site is down.
@@ -166,29 +191,6 @@ switch (command) {
       );
       process.exit(1);
     }
-    // an intentional stop must exit 0, or a supervisor restart-loops; the
-    // flag wins the race when the signal reaches the child first. The
-    // first signal is passed on and this process stays - it renders the
-    // pages the requests in flight are waiting for - until the front has
-    // drained them within BORGO_SHUTDOWN_TIMEOUT: exiting at once dropped
-    // every request in flight, and in a container, where this is pid 1,
-    // took the front's drain with it (found by hunt 3). A second signal
-    // is the operator insisting. Installed before the rebuild: a stop
-    // during it, with no front yet, was the default action and exit 143
-    // (found by the verifier of that fix)
-    let apiProc: import("bun").Subprocess | null = null;
-    let stopping = false;
-    const stop = () => {
-      if (stopping || !apiProc) {
-        apiProc?.kill("SIGKILL");
-        process.exit(0);
-      }
-      stopping = true;
-      apiProc.kill("SIGTERM");
-      apiProc.exited.then(() => process.exit(0));
-    };
-    process.on("SIGINT", stop);
-    process.on("SIGTERM", stop);
 
     // the rebuild comes before the go front starts: the front indexes
     // public/ at boot, and a rebuild after it served every new asset as one

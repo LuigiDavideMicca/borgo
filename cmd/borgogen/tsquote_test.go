@@ -90,6 +90,7 @@ func TestTheMiddlewaresCoverIsWrittenForExport(t *testing.T) {
 		"middlewareonly": `{"covers":"all"}`,
 		"mwcomputed":     `{"covers":"unknown"}`,
 		"mwreassigned":   `{"covers":"unknown"}`,
+		"mwindexed":      `{"covers":"unknown"}`,
 	}
 	for dir, want := range cases {
 		if got := middlewareCover(t, dir); got != want {

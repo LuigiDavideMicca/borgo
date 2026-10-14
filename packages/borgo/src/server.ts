@@ -796,6 +796,7 @@ export async function serve({
     fetch(`${api}/__borgo/dev/js`, {
       method: "POST",
       headers: { ...apiDefaults, "Content-Type": "application/json" },
+      redirect: "manual",
       body: JSON.stringify({ files: changed, chunks: chunkMap, stamp: bootStamp }),
       signal: AbortSignal.timeout(2_000),
     }).catch((error) => console.error(`  the go front was not told about this build: ${error instanceof Error ? error.message : error}`));

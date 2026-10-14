@@ -478,30 +478,49 @@ func decodesAsPunycode(s string) bool {
 	return out > 0 && allowedLabel(runes)
 }
 
-// allowedLabel is what a decoded label must be for the javascript parser to
-// take it: not plain ascii - an xn-- label that decodes to ascii is not one
-// UTS 46 allows - and made of letters, marks, digits and hyphens. A zero
-// width joiner, a soft hyphen, a no-break space or an unassigned code point
-// was taken here and refused there (found by hunt 3). Without the
-// normalization tables, a combining diacritic of U+0300-U+036F straight
-// after an ascii letter stands for the non-NFC spellings - e and U+0301 is
-// é decomposed: refused, stricter than the parser where it errs, never
-// looser
+// allowedLabel is what a decoded label must be for this side to take it,
+// and it must never take what the javascript parser refuses. That parser
+// applies UTS 46 - case mapping, NFKC, the bidi rule - and this side has none
+// of its tables: a label of letters, marks and digits let through capitals,
+// compatibility forms, right-to-left letters and decomposed spellings, about
+// one random label in twelve (found by the verifiers of hunt 3). So only
+// what all of those leave alone is taken: lowercase or caseless letters of a
+// few stable blocks, ascii digits and hyphens, and at least one non-ascii
+// letter - an xn-- label that decodes to ascii is not one UTS 46 allows.
+// Anything else is refused by name, stricter than the parser, never looser
 func allowedLabel(runes []rune) bool {
 	ascii := true
-	for i, r := range runes {
-		if r >= 0x80 {
-			ascii = false
-		}
+	for _, r := range runes {
 		switch {
-		case r == '-', unicode.IsLetter(r), unicode.IsDigit(r):
-		case unicode.IsMark(r):
-			if i == 0 || (r >= 0x300 && r <= 0x36f && runes[i-1] < 0x80) {
-				return false
-			}
+		case r == '-', r >= '0' && r <= '9', r >= 'a' && r <= 'z':
+		case stableLetter(r):
+			ascii = false
 		default:
 			return false
 		}
 	}
 	return !ascii
+}
+
+// stableLetter: a letter no part of UTS 46 changes - lowercase or caseless,
+// precomposed, left to right, with no compatibility mapping
+func stableLetter(r rune) bool {
+	switch {
+	case r >= 0xdf && r <= 0xff && r != 0xf7: // latin-1 lowercase
+		return true
+	case r >= 0x100 && r <= 0x17e: // latin extended-a, lowercase only
+		// the ligatures and forms NFKC rewrites: ĳ, ŀ, ŉ
+		return unicode.IsLower(r) && r != 0x133 && r != 0x140 && r != 0x149
+	case r >= 0x3ac && r <= 0x3ce: // greek lowercase
+		return true
+	case r >= 0x430 && r <= 0x45f: // cyrillic lowercase
+		return true
+	case r >= 0x3041 && r <= 0x3096, r >= 0x30a1 && r <= 0x30fa: // kana
+		return true
+	case r >= 0x4e00 && r <= 0x9fff: // cjk unified ideographs
+		return true
+	case r >= 0xac00 && r <= 0xd7a3: // hangul syllables
+		return true
+	}
+	return false
 }

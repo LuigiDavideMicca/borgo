@@ -43,6 +43,8 @@ export async function callExport<T>(name: string, args: unknown[]): Promise<T> {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Borgo-Internal": key },
     body: JSON.stringify(args),
+    // the key stays on loopback: a redirect is never followed with it
+    redirect: "manual" as const,
   };
   // dev restarts go on every .go edit, so a refused connection is routine there
   const retries = env().BORGO_DEV === "1" ? 15 : 3;

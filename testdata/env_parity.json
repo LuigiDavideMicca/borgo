@@ -2317,9 +2317,9 @@
  },
  {
   "type": "url",
-  "raw": "http://xn--zz-qqq",
+  "raw": "http://xn--bcher-kva.example",
   "ok": true,
-  "value": "http://xn--zz-qqq"
+  "value": "http://xn--bcher-kva.example"
  },
  {
   "type": "url",
@@ -4840,5 +4840,53 @@
   "raw": "http://xn--ls8h-/",
   "ok": false,
   "error": "V: expected an absolute url, got \"http://xn--ls8h-/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--qwa.example/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--qwa.example/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a.xn--bfa/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a.xn--bfa/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--zh7c/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--zh7c/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn----qy8h.example/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn----qy8h.example/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--s21h/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--s21h/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://a.xn--kkg/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://a.xn--kkg/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--dib/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--dib/\""
+ },
+ {
+  "type": "url",
+  "raw": "http://xn--p-fic.example/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn--p-fic.example/\""
  }
 ]
