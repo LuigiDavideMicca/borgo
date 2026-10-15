@@ -177,6 +177,11 @@ const (
 // and the body of a CREATE TRIGGER, whose BEGIN ... END is not a
 // transaction, stepped over (found by the verifier of that fix)
 func transactionStatement(sql string) string {
+	// sqlite reads a statement only up to a NUL: COMMIT\x00; ran as COMMIT
+	// while the word read here was not one
+	if end := strings.IndexByte(sql, 0); end >= 0 {
+		sql = sql[:end]
+	}
 	var statements []string
 	var current strings.Builder
 	for i := 0; i < len(sql); i++ {
@@ -236,7 +241,10 @@ func transactionStatement(sql string) string {
 			}
 			continue
 		}
-		if words[0] == "CREATE" && slices.Contains(words[:min(len(words), 4)], "TRIGGER") {
+		// by the grammar, CREATE [TEMP|TEMPORARY] TRIGGER: a column, table or
+		// index named trigger once stepped over every COMMIT after it (found
+		// by the verifier of this fix)
+		if isTrigger(words) {
 			inTrigger = true
 			continue
 		}
@@ -246,4 +254,14 @@ func transactionStatement(sql string) string {
 		}
 	}
 	return ""
+}
+
+func isTrigger(words []string) bool {
+	if len(words) < 2 || words[0] != "CREATE" {
+		return false
+	}
+	if words[1] == "TEMP" || words[1] == "TEMPORARY" {
+		words = words[1:]
+	}
+	return len(words) > 1 && words[1] == "TRIGGER"
 }

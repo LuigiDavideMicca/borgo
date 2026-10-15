@@ -265,6 +265,8 @@ func TestMigrateRefusesATransactionOfItsOwn(t *testing.T) {
 		"SAVEPOINT s;\nCREATE TABLE a (id INTEGER);",
 		"CREATE TABLE a (id INTEGER);\n-- the second half\nCOMMIT;",
 		"CREATE TABLE a (id INTEGER);\n/* the second half */ COMMIT;",
+		"CREATE TABLE audit(\n  trigger TEXT,\n  at INTEGER\n);\nCOMMIT;\nCREATE TABLE b (id INTEGER);",
+		"CREATE TABLE a (id INTEGER);\nCOMMIT\u0000;\nCREATE TABLE b (id INTEGER);",
 	} {
 		conn := scratch(t)
 		err := Migrate(context.Background(), conn, files(map[string]string{"0001_a.sql": body}))
@@ -280,6 +282,7 @@ func TestMigrateRefusesATransactionOfItsOwn(t *testing.T) {
 	for _, body := range []string{
 		"CREATE TABLE a (id INTEGER, n INTEGER);\nCREATE TRIGGER bump AFTER INSERT ON a\nBEGIN\n  UPDATE a SET n = 1 WHERE id = NEW.id;\nEND;",
 		"CREATE TABLE a (id INTEGER, note TEXT DEFAULT 'BEGIN;');",
+		"CREATE TABLE a (id INTEGER, n INTEGER);\nCREATE TEMP TRIGGER IF NOT EXISTS bump AFTER INSERT ON a\nBEGIN\n  UPDATE a SET n = 1 WHERE id = NEW.id;\nEND;",
 		"CREATE TABLE a (id INTEGER, note TEXT DEFAULT 'a;\nend of note');",
 		"CREATE TABLE a (id INTEGER);\n/* COMMIT;\n*/\nCREATE TABLE b (id INTEGER);",
 		"CREATE TABLE a (\n  id INTEGER,\n  \"commit\" TEXT\n);",

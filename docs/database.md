@@ -196,6 +196,11 @@ const (
 // and the body of a CREATE TRIGGER, whose BEGIN ... END is not a
 // transaction, stepped over (found by the verifier of that fix)
 func transactionStatement(sql string) string {
+	// sqlite reads a statement only up to a NUL: COMMIT\x00; ran as COMMIT
+	// while the word read here was not one
+	if end := strings.IndexByte(sql, 0); end >= 0 {
+		sql = sql[:end]
+	}
 	var statements []string
 	var current strings.Builder
 	for i := 0; i < len(sql); i++ {
@@ -255,7 +260,10 @@ func transactionStatement(sql string) string {
 			}
 			continue
 		}
-		if words[0] == "CREATE" && slices.Contains(words[:min(len(words), 4)], "TRIGGER") {
+		// by the grammar, CREATE [TEMP|TEMPORARY] TRIGGER: a column, table or
+		// index named trigger once stepped over every COMMIT after it (found
+		// by the verifier of this fix)
+		if isTrigger(words) {
 			inTrigger = true
 			continue
 		}
@@ -266,6 +274,16 @@ func transactionStatement(sql string) string {
 	}
 	return ""
 }
+
+func isTrigger(words []string) bool {
+	if len(words) < 2 || words[0] != "CREATE" {
+		return false
+	}
+	if words[1] == "TEMP" || words[1] == "TEMPORARY" {
+		words = words[1:]
+	}
+	return len(words) > 1 && words[1] == "TRIGGER"
+}
 ```
 
 What it refuses, and why:
@@ -274,7 +292,7 @@ What it refuses, and why:
 - **A recorded migration missing from the build.** That is an older build started against a database a newer one migrated - a rollback of the code without a rollback of the schema. It refuses rather than serve on a schema it does not know.
 - **A file with no place in the order.** `init.sql` or `10_x.sql` would apply in an order nobody chose.
 
-A migration that fails rolls back whole and is not recorded, so fixing the file and booting again retries it. That holds where DDL is transactional, as it is in SQLite and Postgres, and as long as the file holds no `BEGIN` or `COMMIT` of its own: the runner owns the transaction, and refuses a file holding a `BEGIN;`, `COMMIT` or `ROLLBACK` line by name - such a line once kept what came before it while the file stayed unrecorded. A trigger's `BEGIN ... END` is not one. MySQL commits each DDL statement on its own: there, keep one statement per migration, so a failure leaves nothing half-done.
+A migration that fails rolls back whole and is not recorded, so fixing the file and booting again retries it. That holds where DDL is transactional, as it is in SQLite and Postgres, and as long as the file holds no `BEGIN` or `COMMIT` of its own: the runner owns the transaction, and refuses, naming it, a file with a statement that begins or ends a transaction - `BEGIN`, `COMMIT`, `END` (SQLite's other spelling of `COMMIT`), `ROLLBACK`, `SAVEPOINT`, `RELEASE` - wherever it sits on a line: such a statement once kept what came before it while the file stayed unrecorded. A trigger's `BEGIN ... END` is not one, and neither is the word in a comment or in quoted text. MySQL commits each DDL statement on its own: there, keep one statement per migration, so a failure leaves nothing half-done.
 
 Three details are SQLite's, and the runner handles them:
 
