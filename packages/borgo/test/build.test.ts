@@ -517,6 +517,22 @@ describe("codeMask", () => {
     // and only the sign right after it: a keyword later still takes a regex
     const later = ["let x = 0; x++", "return /a`b/.test(s);", "const after = 1;"].join(String.fromCharCode(10));
     expect(codeMask(later)).toContain("const after = 1;");
+    // a comment between them is not a sign, and the ++ closing one
+    // interpolation does not reach the regex opening the next (found by the
+    // verifier of this fix)
+    const commented = [
+      "let x = a++ /* n */ / 2; const s = \"/\"; const t = `",
+      "multi-line help`;",
+      "const after = 1;",
+    ].join(String.fromCharCode(10));
+    expect(codeMask(commented)).toContain("const after = 1;");
+    expect(codeMask(commented)).not.toContain("multi-line help");
+    for (const first of ["a++", "a"]) {
+      const interpolated = ["const t = `${" + first + "}x${/q`z/.test(s)}`;", "const after = 1;"].join(String.fromCharCode(10));
+      // misread, the backtick in the regex opened a template that blanked
+      // the code after it
+      expect(`${first}: ${codeMask(interpolated).includes(".test(s)")}`).toBe(`${first}: true`);
+    }
   });
 });
 

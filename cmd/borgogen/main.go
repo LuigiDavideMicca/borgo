@@ -570,11 +570,21 @@ func matcherLiteral(pkg *packages.Package, v *types.Var) ([]string, bool) {
 			return true
 		})
 	}
+	// a file a build constraint keeps out of this load - linux only, a deploy
+	// tag - is not type-checked here, and may still write the Matcher where
+	// the app runs (found by the verifier of this fix)
+	for _, name := range pkg.IgnoredFiles {
+		if src, err := os.ReadFile(name); err != nil || matcherWord.Match(src) {
+			known = false
+		}
+	}
 	if !found || !known {
 		return nil, false
 	}
 	return values, true
 }
+
+var matcherWord = regexp.MustCompile(`\bMatcher\b`)
 
 func isMiddlewareSig(fn *types.Func) bool {
 	sig, ok := fn.Type().(*types.Signature)

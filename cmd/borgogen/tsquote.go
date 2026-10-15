@@ -93,7 +93,9 @@ func qualifyForModule(expr string, shadowed map[string]bool) string {
 			}
 			word := expr[i:j]
 			// a property key or a member of a qualified name is not a type
-			key := j < len(expr) && expr[j] == ':'
+			// (an optional one too: `Channel?:` was rewritten, found by the
+			// verifier of this fix)
+			key := strings.HasPrefix(expr[j:], ":") || strings.HasPrefix(expr[j:], "?:")
 			member := i > 0 && expr[i-1] == '.'
 			if shadowed[word] && !key && !member {
 				b.WriteString(moduleAliasPrefix + word)

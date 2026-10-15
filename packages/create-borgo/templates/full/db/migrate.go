@@ -19,11 +19,6 @@ import (
 // four digits wide: 10_x.sql would otherwise sort before 9_x.sql
 var migrationName = regexp.MustCompile(`^[0-9]{4}_[A-Za-z0-9_]+\.sql$`)
 
-// a statement that begins or ends a transaction, alone on its line. A
-// trigger's BEGIN ... END is not one: its BEGIN carries no semicolon, and its
-// END is left alone
-var transactionStatement = regexp.MustCompile(`(?im)^[[:blank:]]*(BEGIN([[:blank:]]+(DEFERRED|IMMEDIATE|EXCLUSIVE))?([[:blank:]]+TRANSACTION)?[[:blank:]]*;|(COMMIT|ROLLBACK)([[:blank:]]+TRANSACTION)?[[:blank:]]*;?)[[:blank:]]*$`)
-
 // Migrate applies every migration in fsys that the database has not seen,
 // in name order, each in a transaction with the row that records it. A
 // migration that ran is history: an applied file whose bytes changed refuses,
@@ -53,9 +48,11 @@ func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 			continue
 		}
 		// what an editor or a file manager leaves beside the files is not a
-		// migration that failed to be named: .DS_Store, .gitkeep. A hidden
-		// .sql is one, and is refused below
-		if strings.HasPrefix(f.Name(), ".") && !strings.HasSuffix(strings.ToLower(f.Name()), ".sql") {
+		// migration that failed to be named: .DS_Store, .gitkeep, and the ._
+		// twin macOS writes of every file on a shared or exFAT volume (found
+		// by the verifier of hunt 3's fixes). A hidden .sql is one, and is
+		// refused below
+		if strings.HasPrefix(f.Name(), "._") || (strings.HasPrefix(f.Name(), ".") && !strings.HasSuffix(strings.ToLower(f.Name()), ".sql")) {
 			continue
 		}
 		if !migrationName.MatchString(f.Name()) {
@@ -103,11 +100,7 @@ func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 			}
 			continue
 		}
-		// the runner owns the transaction: a COMMIT inside the file ended it
-		// half way, the statements after ran outside it, and a failure there
-		// left the first half applied and unrecorded - the next boot then
-		// failed on "table already exists" for good (found by hunt 3)
-		if line := transactionStatement.FindString(string(body)); line != "" {
+		if line := transactionStatement(string(body)); line != "" {
 			return fmt.Errorf("migrations: %s holds %q: the runner wraps every migration in a transaction of its own", name, strings.TrimSpace(line))
 		}
 		if err := apply(ctx, db, name, string(body), sum); err != nil {
@@ -163,4 +156,94 @@ func apply(ctx context.Context, db *sql.DB, name, body, sum string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// the bytes the statement reader below cares about
+const (
+	lineFeed    = 10
+	singleQuote = 39
+	doubleQuote = 34
+	backQuote   = 96
+)
+
+// transactionStatement returns the first statement of a migration that
+// begins or ends a transaction, or "". The runner owns the transaction: a
+// COMMIT in the file ended it half way, and a failure after it left the first
+// half applied and unrecorded - every later boot failed on "table already
+// exists" (found by hunt 3). A pattern over lines missed the spellings real
+// files have - CRLF line ends, a comment after the semicolon, two statements
+// on a line, END, which sqlite reads as COMMIT - so the file is read as
+// statements: comments dropped, quoted text kept whole, split at semicolons,
+// and the body of a CREATE TRIGGER, whose BEGIN ... END is not a
+// transaction, stepped over (found by the verifier of that fix)
+func transactionStatement(sql string) string {
+	var statements []string
+	var current strings.Builder
+	for i := 0; i < len(sql); i++ {
+		c := sql[i]
+		switch {
+		case c == '-' && i+1 < len(sql) && sql[i+1] == '-':
+			for i < len(sql) && sql[i] != lineFeed {
+				i++
+			}
+			current.WriteByte(' ')
+		case c == '/' && i+1 < len(sql) && sql[i+1] == '*':
+			end := strings.Index(sql[i+2:], "*/")
+			if end < 0 {
+				i = len(sql)
+			} else {
+				i += end + 3
+			}
+			current.WriteByte(' ')
+		case c == singleQuote || c == doubleQuote || c == backQuote || c == '[':
+			closing := c
+			if c == '[' {
+				closing = ']'
+			}
+			j := i + 1
+			for j < len(sql) {
+				if sql[j] == closing {
+					// a doubled quote is the quote itself
+					if closing != ']' && j+1 < len(sql) && sql[j+1] == closing {
+						j += 2
+						continue
+					}
+					break
+				}
+				j++
+			}
+			// quoted text is one word, whatever it holds
+			current.WriteString(" q ")
+			i = j
+		case c == ';':
+			statements = append(statements, current.String())
+			current.Reset()
+		default:
+			current.WriteByte(c)
+		}
+	}
+	statements = append(statements, current.String())
+	inTrigger := false
+	for _, statement := range statements {
+		words := strings.Fields(strings.ToUpper(statement))
+		if len(words) == 0 {
+			continue
+		}
+		if inTrigger {
+			// the trigger's own END closes its body
+			if len(words) == 1 && words[0] == "END" {
+				inTrigger = false
+			}
+			continue
+		}
+		if words[0] == "CREATE" && slices.Contains(words[:min(len(words), 4)], "TRIGGER") {
+			inTrigger = true
+			continue
+		}
+		switch words[0] {
+		case "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE":
+			return strings.Join(strings.Fields(statement), " ")
+		}
+	}
+	return ""
 }

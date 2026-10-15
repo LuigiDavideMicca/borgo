@@ -91,6 +91,7 @@ func TestTheMiddlewaresCoverIsWrittenForExport(t *testing.T) {
 		"mwcomputed":     `{"covers":"unknown"}`,
 		"mwreassigned":   `{"covers":"unknown"}`,
 		"mwindexed":      `{"covers":"unknown"}`,
+		"mwbuildtag":     `{"covers":"unknown"}`,
 	}
 	for dir, want := range cases {
 		if got := middlewareCover(t, dir); got != want {
@@ -121,5 +122,8 @@ func TestAnAppTypeNamedLikeBorgosKeepsItsName(t *testing.T) {
 	shadowed := map[string]bool{"Channel": true}
 	if got := qualifyForModule(`{ Channel: Channel; kind: "Channel" | Array<Channel> }`, shadowed); got != `{ Channel: __app_Channel; kind: "Channel" | Array<__app_Channel> }` {
 		t.Errorf("qualifyForModule: %s", got)
+	}
+	if got := qualifyForModule(`{ Channel?: Channel | null }`, shadowed); got != `{ Channel?: __app_Channel | null }` {
+		t.Errorf("qualifyForModule, an optional key: %s", got)
 	}
 }

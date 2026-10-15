@@ -1725,7 +1725,6 @@ export function codeMask(js: string): string {
     const c = js[i];
     // only the regex test below reads it, against the sign just before
     const incDec = afterIncDec;
-    if (c.trim() !== "") afterIncDec = false;
     if (c === "/" && js[i + 1] === "/") {
       let j = js.indexOf("\n", i + 2);
       if (j === -1) j = js.length;
@@ -1738,6 +1737,9 @@ export function codeMask(js: string): string {
       blank(i, j);
       return j;
     }
+    // a comment is not a sign: a++ /* x */ / 2 still divides (found by the
+    // verifier of this fix)
+    if (c.trim() !== "") afterIncDec = false;
     if (c === '"' || c === "'") {
       let j = i + 1;
       while (j < js.length && js[j] !== c && js[j] !== "\n") j += js[j] === "\\" ? 2 : 1;
@@ -1801,6 +1803,13 @@ export function codeMask(js: string): string {
       if (c === "$" && js[i + 1] === "{") {
         i += 2;
         let depth = 0;
+        // the body opens at a brace step never sees: the sign before it was
+        // the last one of the previous body, and ${a}x${/re/} or
+        // ${a++}x${/re/} read the regex as a division (found by the verifier
+        // of this fix)
+        lastSig = "{";
+        lastWord = "";
+        afterIncDec = false;
         while (i < js.length) {
           if (js[i] === "}" && depth === 0) {
             i++;

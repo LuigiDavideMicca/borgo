@@ -403,8 +403,10 @@ func Signup[U any, S SignupForm](a *Auth[U], register func(ctx context.Context, 
 			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "username and password required"})
 			return
 		}
-		// before the hash: a refused form must not cost a PBKDF2
-		if v, ok := any(form).(interface{ Validate() error }); ok {
+		// before the hash: a refused form must not cost a PBKDF2. Asked through
+		// a pointer, so a Validate on *Form counts too - through the value it
+		// was skipped without a word (found by the verifier of this step)
+		if v, ok := any(&form).(interface{ Validate() error }); ok {
 			if err := v.Validate(); err != nil {
 				writeRefusal(w, err, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
@@ -491,6 +493,10 @@ func Refuse(status int, body any) error {
 func writeRefusal(w http.ResponseWriter, err error, status int, body any) {
 	if refusal := (*Refusal)(nil); errors.As(err, &refusal) {
 		status, body = refusal.Status, refusal.Body
+	}
+	// a Refusal built by hand skips Refuse's check
+	if status < 400 || status > 599 {
+		status = http.StatusBadRequest
 	}
 	WriteJSON(w, status, body)
 }

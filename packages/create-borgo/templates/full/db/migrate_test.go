@@ -239,7 +239,7 @@ func TestMigrateRefusesAHiddenMigrationAndIgnoresTheClutter(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	err := Migrate(context.Background(), scratch(t), files(map[string]string{"0001_a.sql": `CREATE TABLE a (id INTEGER);`, ".DS_Store": "x", ".gitkeep": ""}))
+	err := Migrate(context.Background(), scratch(t), files(map[string]string{"0001_a.sql": `CREATE TABLE a (id INTEGER);`, ".DS_Store": "x", ".gitkeep": "", "._0001_a.sql": "mac resource fork"}))
 	if err != nil {
 		t.Errorf("clutter beside the migrations: %v", err)
 	}
@@ -255,6 +255,16 @@ func TestMigrateRefusesATransactionOfItsOwn(t *testing.T) {
 		"BEGIN TRANSACTION;\nCREATE TABLE a (id INTEGER);",
 		"begin;\nCREATE TABLE a (id INTEGER);",
 		"CREATE TABLE a (id INTEGER);\n  rollback",
+		"CREATE TABLE a (id INTEGER);\r\nCOMMIT;\r\nCREATE TABLE b (id INTEGER);",
+		"CREATE TABLE a (id INTEGER);\nCOMMIT; -- done\nCREATE TABLE b (id INTEGER);",
+		"CREATE TABLE a (id INTEGER); COMMIT; CREATE TABLE b (id INTEGER);",
+		"CREATE TABLE a (id INTEGER);\nCOMMIT /* x */;\nCREATE TABLE b (id INTEGER);",
+		"CREATE TABLE a (id INTEGER);\nEND;\nCREATE TABLE b (id INTEGER);",
+		"CREATE TABLE a (id INTEGER);\nEND TRANSACTION;",
+		"CREATE TABLE a (id INTEGER);\nCOMMIT;\f\nCREATE TABLE b (id INTEGER);",
+		"SAVEPOINT s;\nCREATE TABLE a (id INTEGER);",
+		"CREATE TABLE a (id INTEGER);\n-- the second half\nCOMMIT;",
+		"CREATE TABLE a (id INTEGER);\n/* the second half */ COMMIT;",
 	} {
 		conn := scratch(t)
 		err := Migrate(context.Background(), conn, files(map[string]string{"0001_a.sql": body}))
@@ -266,8 +276,17 @@ func TestMigrateRefusesATransactionOfItsOwn(t *testing.T) {
 			t.Errorf("%q left tables behind: %s", body, got)
 		}
 	}
-	trigger := "CREATE TABLE a (id INTEGER, n INTEGER);\nCREATE TRIGGER bump AFTER INSERT ON a\nBEGIN\n  UPDATE a SET n = 1 WHERE id = NEW.id;\nEND;"
-	if err := Migrate(context.Background(), scratch(t), files(map[string]string{"0001_a.sql": trigger})); err != nil {
-		t.Errorf("a trigger: %v", err)
+	// a trigger's BEGIN ... END, quoted text and comments are not transactions
+	for _, body := range []string{
+		"CREATE TABLE a (id INTEGER, n INTEGER);\nCREATE TRIGGER bump AFTER INSERT ON a\nBEGIN\n  UPDATE a SET n = 1 WHERE id = NEW.id;\nEND;",
+		"CREATE TABLE a (id INTEGER, note TEXT DEFAULT 'BEGIN;');",
+		"CREATE TABLE a (id INTEGER, note TEXT DEFAULT 'a;\nend of note');",
+		"CREATE TABLE a (id INTEGER);\n/* COMMIT;\n*/\nCREATE TABLE b (id INTEGER);",
+		"CREATE TABLE a (\n  id INTEGER,\n  \"commit\" TEXT\n);",
+		"CREATE TABLE a (id INTEGER, n INTEGER);\r\nCREATE TRIGGER bump AFTER INSERT ON a\r\nBEGIN\r\n  UPDATE a SET n = CASE WHEN n IS NULL THEN 1 ELSE n END WHERE id = NEW.id;\r\nEND;",
+	} {
+		if err := Migrate(context.Background(), scratch(t), files(map[string]string{"0001_a.sql": body})); err != nil {
+			t.Errorf("%q: %v", body, err)
+		}
 	}
 }

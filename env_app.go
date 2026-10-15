@@ -405,7 +405,10 @@ func decodesAsPunycode(s string) bool {
 	const base, tmin, tmax, skew, damp = 36, 1, 26, 38, 700
 	n, bias, out := 128, 72, 0
 	var runes []rune
-	if i := strings.LastIndexByte(s, '-'); i >= 0 {
+	// a delimiter first is a digit to the javascript decoder, and no digit:
+	// xn---abc passed here and was refused there (found by the verifier of
+	// this fix)
+	if i := strings.LastIndexByte(s, '-'); i > 0 {
 		for j := 0; j < i; j++ {
 			if s[j] >= 0x80 {
 				return false

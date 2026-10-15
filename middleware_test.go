@@ -70,10 +70,12 @@ func TestUseMiddlewareRefusesWhatWouldGuardNothing(t *testing.T) {
 		"/api/../x":    "not a clean path",
 		"/api//admin":  "not a clean path",
 		// ServeMux's spelling of a subtree, which guarded nothing
-		"/api/admin/": "ends in a slash",
-		"//":          "ends in a slash",
-		"/%61dmin":    "decoded path",
-		"/citt%C3%A0": "decoded path",
+		"/api/admin/": "write /api/admin for that path, or /api/admin/* for",
+		// the spellings offered are themselves accepted
+		"/api//admin/": "write /api/admin for that path, or /api/admin/* for",
+		"//":           "write / for that path, or /* for",
+		"/%61dmin":     "decoded path",
+		"/citt%C3%A0":  "decoded path",
 	} {
 		panicsWith(t, reason, func() { UseMiddleware(pass, []string{entry}) })
 	}

@@ -1733,6 +1733,12 @@ describe("refusals", () => {
       expect(out).toContain("standard library");
       expect(existsSync(join(cwd, name))).toBe(false);
     }
+    for (const name of ["all", "tool", "toolchain", "work"]) {
+      const { code, out } = run([name]);
+      expect(`${name}: ${code}`).toBe(`${name}: 1`);
+      expect(out).toContain("go command reserves");
+      expect(existsSync(join(cwd, name))).toBe(false);
+    }
     // a name that only starts like one is fine
     expect(run(["netflix-clone", "--yes", "--no-install"]).code).toBe(0);
   });

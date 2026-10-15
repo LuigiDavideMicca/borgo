@@ -90,7 +90,11 @@ func matcherRefusal(m string) string {
 		// covers compares the cleaned path, which never ends in a slash:
 		// /api/admin/ - ServeMux's spelling of a subtree - guarded nothing
 		// at all (found by the verifier of hunt 3's fixes)
-		return "ends in a slash, and a path is matched cleaned, without one: write " + strings.TrimRight(m, "/") + " for that path, or " + strings.TrimRight(m, "/") + "/* for it and everything below"
+		// the spellings offered are clean ones: trimmed, /api//admin/ offered
+		// /api//admin, refused in turn, and // offered "" (found by the
+		// verifier of this fix)
+		clean := path.Clean(m)
+		return "ends in a slash, and a path is matched cleaned, without one: write " + clean + " for that path, or " + strings.TrimSuffix(clean, "/") + "/* for it and everything below"
 	case path.Clean(strings.TrimSuffix(strings.TrimSuffix(m, "*"), "/")) != strings.TrimSuffix(strings.TrimSuffix(m, "*"), "/") && strings.TrimSuffix(strings.TrimSuffix(m, "*"), "/") != "":
 		return "is not a clean path: requests are matched after dot segments and doubled slashes are resolved, so this entry could never match"
 	}

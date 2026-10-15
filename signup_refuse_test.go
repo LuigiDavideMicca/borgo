@@ -75,3 +75,34 @@ func TestSignupAnswersTheAppsOwnRefusals(t *testing.T) {
 		t.Errorf("a good form: %d %s", w.Code, w.Body)
 	}
 }
+
+type pointerValidatedSignup struct {
+	Credentials
+	Email string `json:"email"`
+}
+
+func (f *pointerValidatedSignup) Validate() error {
+	if !strings.Contains(f.Email, "@") {
+		return &Refusal{Status: http.StatusOK, Body: map[string]string{"field": "email"}}
+	}
+	return nil
+}
+
+// a Validate on the pointer was skipped, and a Refusal built by hand with a
+// status that is no refusal went out as it was (found by the verifier of
+// this step)
+func TestSignupAsksAPointerValidate(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "a-test-secret-of-at-least-32-bytes-long")
+	hasher := &countingHasher{}
+	auth := &Auth[pointerValidatedSignup]{Hasher: hasher, Principal: func(u pointerValidatedSignup) any { return u.Username }}
+	h := Signup(auth, func(ctx context.Context, form pointerValidatedSignup, hash string) (pointerValidatedSignup, error) {
+		return form, nil
+	})
+	w := postJSON(h, `{"username":"ada","password":"pw123456","email":"nope"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"field":"email"`) {
+		t.Errorf("a pointer Validate's refusal: %d %s", w.Code, w.Body)
+	}
+	if n := hasher.hashes.Load(); n != 0 {
+		t.Errorf("a refused form was hashed %d times", n)
+	}
+}

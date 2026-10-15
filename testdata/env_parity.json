@@ -4807,6 +4807,12 @@
  },
  {
   "type": "url",
+  "raw": "http://xn---r8jz45g/",
+  "ok": false,
+  "error": "V: expected an absolute url, got \"http://xn---r8jz45g/\""
+ },
+ {
+  "type": "url",
   "raw": "http://xn--1ug/",
   "ok": false,
   "error": "V: expected an absolute url, got \"http://xn--1ug/\""

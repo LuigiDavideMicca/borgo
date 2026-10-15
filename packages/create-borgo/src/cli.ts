@@ -170,6 +170,13 @@ if (GO_STD.has(name)) {
   console.error(`invalid project name "${name}": it names the go module too, and ${name} is a package of go's standard library - pick another name`);
   process.exit(1);
 }
+// and the words the go command reads as package patterns or its own
+// subcommands' targets (found by the verifier of this fix)
+const GO_RESERVED = new Set(["all", "tool", "toolchain", "work"]);
+if (GO_RESERVED.has(name)) {
+  console.error(`invalid project name "${name}": it names the go module too, and the go command reserves "${name}" - pick another name`);
+  process.exit(1);
+}
 
 const isTemplate = (t: string): t is TemplateName => TEMPLATES.some((k) => k.name === t);
 const isLinter = (l: string): l is LinterName => LINTERS.some((k) => k.name === l);
