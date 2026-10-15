@@ -6,7 +6,7 @@
 // is optional and admits null whatever its Go type is.
 export interface AttachmentForm$Request {
   note?: string | null;
-  file?: Blob | null;
+  file?: globalThis.Blob | null;
 }
 
 export interface AttachmentView {

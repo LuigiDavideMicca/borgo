@@ -7,9 +7,9 @@
 export interface AttachmentForm$Request {
   note?: string | null;
   count?: number | null;
-  file?: Blob | null;
-  cover?: Blob | null;
-  extras?: Array<Blob> | null;
+  file?: globalThis.Blob | null;
+  cover?: globalThis.Blob | null;
+  extras?: Array<globalThis.Blob> | null;
 }
 
 export interface Attachment {

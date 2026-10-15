@@ -104,13 +104,22 @@ func TestTheMiddlewaresCoverIsWrittenForExport(t *testing.T) {
 }
 
 // borgo-framework's own declarations resolve first inside its declare module
-// block: an app type of that name took borgo's place (found by the verifier
-// of hunt 3)
-func TestBorgosOwnTypeNamesAreReserved(t *testing.T) {
-	reserved := reservedTSNames()
-	for _, name := range []string{"WsEvents", "ApiRoutes", "Channel", "SubscribeOptions", "TopicEvents", "IslandProps", "Blob"} {
-		if !reserved[name] {
-			t.Errorf("%s is not reserved", name)
-		}
+// block: an app type Channel became borgo's (found by the verifier of hunt
+// 3), and renaming it broke every import of it (found rebuilding piazza).
+// The app's type keeps its name; the block reaches it through an alias
+func TestAnAppTypeNamedLikeBorgosKeepsItsName(t *testing.T) {
+	wants(t, generateFresh(t, "shadowed"),
+		"export interface Channel {",
+		"export interface WsEvents {",
+		"type __app_Channel = Channel;",
+		"type __app_WsEvents = WsEvents;",
+		`"GET /api/channel": { response: __app_Channel };`,
+		`"GET /api/events": { response: __app_WsEvents };`,
+		`"live/channel": __app_Channel;`,
+	)
+	// a string literal type and a property key are not type references
+	shadowed := map[string]bool{"Channel": true}
+	if got := qualifyForModule(`{ Channel: Channel; kind: "Channel" | Array<Channel> }`, shadowed); got != `{ Channel: __app_Channel; kind: "Channel" | Array<__app_Channel> }` {
+		t.Errorf("qualifyForModule: %s", got)
 	}
 }

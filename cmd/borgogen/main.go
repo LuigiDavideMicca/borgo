@@ -216,9 +216,18 @@ func run(root string) (err error) {
 		out.WriteString(def)
 		out.WriteString("\n")
 	}
+	shadowed := shadowedByModule(gen.defs)
+	for _, name := range borgoModuleNames {
+		if shadowed[name] {
+			fmt.Fprintf(&out, "type %s%s = %s;\n", moduleAliasPrefix, name, name)
+		}
+	}
+	if len(shadowed) > 0 {
+		out.WriteString("\n")
+	}
 	out.WriteString("declare module \"borgo-framework\" {\n  interface ApiRoutes {\n")
 	for _, p := range patterns {
-		fmt.Fprintf(&out, "    %s: %s;\n", tsString(p), entries[p])
+		fmt.Fprintf(&out, "    %s: %s;\n", tsString(p), qualifyForModule(entries[p], shadowed))
 	}
 	out.WriteString("  }\n")
 	if len(wsKeys) > 0 {
@@ -227,10 +236,10 @@ func run(root string) (err error) {
 			if wsPatterns[k] {
 				// a template literal index signature: the key of every topic
 				// the pattern admits, matched by EventsFor in index.ts
-				fmt.Fprintf(&out, "    [k: `%s`]: %s;\n", eventKey(k), wsEntries[k])
+				fmt.Fprintf(&out, "    [k: `%s`]: %s;\n", eventKey(k), qualifyForModule(wsEntries[k], shadowed))
 				continue
 			}
-			fmt.Fprintf(&out, "    %s: %s;\n", tsString(k), wsEntries[k])
+			fmt.Fprintf(&out, "    %s: %s;\n", tsString(k), qualifyForModule(wsEntries[k], shadowed))
 		}
 		out.WriteString("  }\n")
 	}
@@ -2207,7 +2216,9 @@ func (g *tsGen) tsType(t types.Type, s site) tsRef {
 		// only: a File written into a response is the plain struct
 		// encoding/json makes of it (found by the verifier of the step)
 		if s.w == in && isBorgoFile(t) {
-			return tsRef{ts: "Blob"}
+			// the global one by name: an app type called Blob would otherwise
+			// take its place for every file field (found by hunt 3)
+			return tsRef{ts: "globalThis.Blob"}
 		}
 		// time.Time and json.Number cross the same way in both directions, so
 		// neither of these two needs to know which one it is on
@@ -2893,16 +2904,11 @@ func tsPropName(name string) string {
 // categories, TS1xxx at the parse and TS2427/TS2457 at the check. Array and
 // Record are the two generics this file writes: an interface under either
 // name shadows them in the module and every use becomes "type is not
-// generic", quietly, since apps typecheck with skipLibCheck. Blob is the
-// type a file field is written as: an app type of that name took its place,
-// a real File no longer fit and an object did (found by hunt 3).
+// generic", quietly, since apps typecheck with skipLibCheck. A file field is written globalThis.Blob, and the names borgo-framework
+// declares are reached through aliases (qualifyForModule): neither renames
+// an app's type.
 var tsReserved = []string{
-	"Array", "Record", "Blob",
-	// borgo-framework's own declarations: the generated file writes app types
-	// inside its declare module block, where these names resolve to borgo's -
-	// an app type WsEvents became borgo's (found by the verifier of hunt 3)
-	"ApiRoutes", "Channel", "EventPairs", "EventsFor", "Island", "IslandProps",
-	"PublishArgs", "SubscribeOptions", "TopicEventName", "TopicEvents", "WsEvents",
+	"Array", "Record",
 	"as", "await", "break", "case", "catch", "class", "const", "continue",
 	"debugger", "default", "delete", "do", "else", "enum", "export", "extends",
 	"false", "finally", "for", "function", "if", "implements", "import", "in",
