@@ -34,7 +34,7 @@ import (
 // root package entry would claim the tag packages/borgo already owns.
 // TestVersionMatchesManifest fails the build when this disagrees with
 // .release-please-manifest.json.
-const Version = "0.22.1"
+const Version = "0.30.0"
 
 var (
 	// init() registers on one goroutine, but an app may register lazily
