@@ -466,6 +466,7 @@ export const SHARED_RENDER_HEADER = "X-Borgo-Shared";
 // on every response in render mode: the go front reloads the page policy
 // table when the stamp changes, i.e. when this process was restarted
 export const BOOT_HEADER = "X-Borgo-Boot";
+export const UNMEASURED_HEADER = "X-Borgo-Unmeasured";
 export const ROUTES_PATH = "/__borgo/routes";
 export const INTERNAL_KEY_MIN_LEN = 32;
 // The render service's loopback port has no default. A fixed 3600 was where
@@ -763,9 +764,13 @@ export async function limitRequestBody(req: Request, limit: number): Promise<Req
 export function headResponse(method: string, res: Response): Response {
   if (method !== "HEAD" || !res.body) return res;
   const measured = res.headers.has("Content-Length");
+  const headers = new Headers(res.headers);
+  // bun 1.4.4 frames even the empty stream as Content-Length: 0, so the mark
+  // tells the go front, which answers the client, that no length was measured
+  if (!measured) headers.set(UNMEASURED_HEADER, "1");
   const headless = new Response(measured ? null : emptyStream(), {
     status: res.status,
-    headers: res.headers,
+    headers,
   });
   void res.body.cancel().catch(() => {});
   return headless;

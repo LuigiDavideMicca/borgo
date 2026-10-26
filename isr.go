@@ -46,6 +46,7 @@ const (
 	renderErroredHeader = "X-Borgo-Render-Errored"
 	sharedRenderHeader  = "X-Borgo-Shared"
 	bootHeader          = "X-Borgo-Boot"
+	unmeasuredHeader    = "X-Borgo-Unmeasured"
 	routesPath          = "/__borgo/routes"
 	// bounded: the key includes the query string, and an attacker who can
 	// vary a query must not grow the cache without limit. lru, because

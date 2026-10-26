@@ -549,6 +549,16 @@ func newFrontHandler(api http.Handler, opts frontOptions, renderer *url.URL, key
 				policies.sawBoot(res.Header.Get(bootHeader))
 			}
 			res.Header.Del(bootHeader)
+			// a head the render service could not measure: bun 1.4.4 frames
+			// it as Content-Length: 0, which tells a crawler the page is
+			// empty, where 1.4.0 left the length out (found releasing 0.30)
+			if res.Header.Get(unmeasuredHeader) != "" {
+				res.Header.Del(unmeasuredHeader)
+				if res.Request != nil && res.Request.Method == http.MethodHead {
+					res.Header.Del("Content-Length")
+					res.ContentLength = -1
+				}
+			}
 			if res.Request != nil && isBypass(res.Request) {
 				res.Header.Set(cacheStateHeader, "bypass")
 			}

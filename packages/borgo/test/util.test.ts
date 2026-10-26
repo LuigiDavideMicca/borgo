@@ -9,6 +9,7 @@ import {
   hasCookie,
   headHtml,
   headResponse,
+  UNMEASURED_HEADER,
   scriptJson,
   UNKNOWN_CHANGE,
   csrfEnabled,
@@ -400,9 +401,12 @@ describe("headResponse", () => {
     expect(head.bytes).toBe(0);
   });
 
-  test("an unmeasured length is omitted, never answered as zero", async () => {
-    // a null body would have bun frame the head as Content-Length: 0, and a
-    // client would read "this resource is empty" off a document that is not
+  test("an unmeasured length is marked for the front, never answered as zero by it", async () => {
+    // a client must not read "this resource is empty" off a document that is
+    // not. bun 1.4.0 left the length out; 1.4.4 frames the empty stream as
+    // Content-Length: 0 whatever it is given, so the render service marks the
+    // answer and the go front, which answers the client, drops the length -
+    // head_length_test.go holds that half
     for (const make of [
       () => stream("<html>a long document</html>"),
       () => Response.json({ status: "ok", uptime: 12.5 }),
@@ -411,11 +415,13 @@ describe("headResponse", () => {
       const get = await served("GET", make);
       const head = await served("HEAD", make);
       expect(head.bytes).toBe(0);
-      expect(head.length).not.toBe("0");
-      expect(head.length).toBeNull();
+      expect(head.headers.get(UNMEASURED_HEADER)).toBe("1");
+      expect(get.headers.get(UNMEASURED_HEADER)).toBeNull();
       expect(head.status).toBe(get.status);
       expect(Number(get.length ?? get.bytes)).toBeGreaterThan(0);
     }
+    const measured = await served("HEAD", () => new Response("0123456789", { headers: { "Content-Length": "10" } }));
+    expect(measured.headers.get(UNMEASURED_HEADER)).toBeNull();
     // six real servers: 18ms idle, but past bun's default 5s budget under load
     // (measured: 5/5 failures at 16 burners on 8 cores, all "timed out")
   }, 30_000);
