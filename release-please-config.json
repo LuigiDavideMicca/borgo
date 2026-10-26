@@ -5,13 +5,11 @@
     "packages/borgo": {
       "release-type": "node",
       "component": "borgo-framework",
-      "include-component-in-tag": false,
-      "release-as": "0.30.0"
+      "include-component-in-tag": false
     },
     "packages/create-borgo": {
       "release-type": "node",
-      "component": "create-borgo",
-      "release-as": "0.30.0"
+      "component": "create-borgo"
     }
   },
   "plugins": [
