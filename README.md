@@ -273,7 +273,7 @@ There is a benchmark harness in [bench/](bench/), and it is built backwards from
 - **Correctness before speed**: every response is checked against the contract — exact bodies, key order on the wire, sha256 for the asset — before any load is generated. A fast wrong answer is not a result. A worst run below 99% transport success, or above 0.1% non-2xx responses, fails the scenario.
 - **The machine testifies**: every result file since schema 2 records CPU idle before and after, free memory, versions, the commit, and whether the tree was dirty. A run on a busy machine opens with a contamination warning instead of hiding it.
 
-The committed runs in [bench/results/](bench/results/) are a **single-implementation proof run of borgo alone, labelled "not a comparison"**, and one full campaign whose own report opens with a warning that the machine was not idle - so neither is a clean comparison, and we would rather say so than let a table imply otherwise. The harness runs all eight that are implemented; the numbers worth citing are the ones you make:
+The committed runs in [bench/results/](bench/results/) are a **single-implementation proof run of borgo alone, labelled "not a comparison"**, and one full campaign whose own report opens with a warning that the machine was not idle - so neither is a clean comparison, and we would rather say so than let a table imply otherwise. Both were taken on 0.22; the campaign on 0.30's topology, with Go in front, comes in a later update. The harness runs all eight that are implemented; the numbers worth citing are the ones you make:
 
 ```bash
 bun bench/run.ts --list          # implementations and scenarios, run nothing
