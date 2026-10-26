@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.30.0](https://github.com/LuigiDavideMicca/borgo/compare/v0.22.1...v0.30.0) (2026-10-26)
+
+
+### Features
+
+* //borgo:export, the typed bridge from TypeScript to Go ([f59abcd](https://github.com/LuigiDavideMicca/borgo/commit/f59abcd513eaa38082294265133e23823ceaf03d))
+* borgo.With, borgo.Value and borgo.Forward, and ctx.locals ([f5aa31b](https://github.com/LuigiDavideMicca/borgo/commit/f5aa31b56bc7cb7c76d37133b21e790e660be165))
+* loaders and actions receive the session go verified ([cae05bb](https://github.com/LuigiDavideMicca/borgo/commit/cae05bbecd1eb4914141b03587c6a95c53a573a3))
+* middleware.ts guards all three doors of a page ([1ec1dd2](https://github.com/LuigiDavideMicca/borgo/commit/1ec1dd2384c0f8f9eca7ffcb60d32434e2a73a9d))
+
+
+### Bug Fixes
+
+* a .go save in borgo dev reloads the browser again ([6f779cb](https://github.com/LuigiDavideMicca/borgo/commit/6f779cb7b8f8de0efaf22458b971367c4ccea28f))
+* a file the front refused was served by the render service ([c6decdc](https://github.com/LuigiDavideMicca/borgo/commit/c6decdc1aa3a266d7d122061936caab4b4ee8b01))
+* a head request no longer calls a page empty ([4a6fda6](https://github.com/LuigiDavideMicca/borgo/commit/4a6fda6e67dab8934e4b038df0ff8c0b8c3092f8))
+* a lock's pid read after its holder died names someone else ([0674341](https://github.com/LuigiDavideMicca/borgo/commit/0674341e77748b8d3389cd208099a50fcd55c2c8))
+* a restart dev asked for is not a crash, and go gets only its half ([1f66b31](https://github.com/LuigiDavideMicca/borgo/commit/1f66b31a8907cdf4f288468684f8997e947a3287))
+* a stale build lock nothing can remove is given up on in time ([002fe78](https://github.com/LuigiDavideMicca/borgo/commit/002fe78313fcdee51d9eed1defca8ae913e23ae8))
+* an app type named like borgo's keeps its name ([46ea8a5](https://github.com/LuigiDavideMicca/borgo/commit/46ea8a5be4c672e4c50ce448903c12f0c84dd0c2))
+* back and forward restore the position the page had when it was left ([60ab44f](https://github.com/LuigiDavideMicca/borgo/commit/60ab44fb3142ff15c9a5ac505fe87d9e7dc4c0e1))
+* borgo dev's watcher honours the app's .gitignore, as it promised ([1f5c872](https://github.com/LuigiDavideMicca/borgo/commit/1f5c8720a66e4b77cfd52cad3e1a23e9b2fa6a2c))
+* borgo export publishes no page api/middleware.go guards, and any app's 404 ([6ee9a91](https://github.com/LuigiDavideMicca/borgo/commit/6ee9a91cc86e3b1de61e9de97aea642ee60b87d1))
+* borgo start lets requests in flight finish, and serves its fresh build ([cb32eaf](https://github.com/LuigiDavideMicca/borgo/commit/cb32eaf2e16036e646b2a10444a0aac8cae0aab1))
+* close the findings of the phase 7 verifier ([38ef156](https://github.com/LuigiDavideMicca/borgo/commit/38ef156dbd52b09e654fc99d3f6475b824bef2f6))
+* fast refresh reads a division after ++ as one, and the docs say 0.30 ([e186480](https://github.com/LuigiDavideMicca/borgo/commit/e186480a1587eac198654c6905ce04547cc2c4d2))
+* one asset build per directory at a time (F10) ([5514979](https://github.com/LuigiDavideMicca/borgo/commit/5514979c47bbfcb698c3f31155d54c39e70c32fb))
+* the findings of the phase verifier ([382bc6c](https://github.com/LuigiDavideMicca/borgo/commit/382bc6ceb75518e74340ade7ee6a31dbcb2c74f1))
+* the phase 2 verifier's findings, and the page that documents the phase ([105b8e7](https://github.com/LuigiDavideMicca/borgo/commit/105b8e7f2c21b1c51f3c0e6dff2f4c681a74774b))
+* the typed client follows no redirect and sends the path it was given ([72f5a4d](https://github.com/LuigiDavideMicca/borgo/commit/72f5a4d2197ebfd7aa47cf5a9a682acbce109a21))
+* two borgo apps on one machine no longer answer each other's pages 403 ([376cfa6](https://github.com/LuigiDavideMicca/borgo/commit/376cfa6d0a04ee0bf43938bb405a1868714f8189))
+* what the page cache keys on and what a shared render is told ([a6854c6](https://github.com/LuigiDavideMicca/borgo/commit/a6854c6b462e34664ddc93d2ae4d4095ad0beb74))
+* what the verifier of S11-S12 found ([24510ec](https://github.com/LuigiDavideMicca/borgo/commit/24510ec0993f819094f00bb11917369238692377))
+* what the verifier of S5-S8 found, the guard bypass first ([5d240b7](https://github.com/LuigiDavideMicca/borgo/commit/5d240b7727b14c529bd4eed3ccb97ae7d86b01c9))
+* what the verifier of S9-S10 and the guard fix found ([d198765](https://github.com/LuigiDavideMicca/borgo/commit/d19876581e0f2035377e178a5f4cd958a8ee632f))
+
 ## [0.22.1](https://github.com/LuigiDavideMicca/borgo/compare/v0.22.0...v0.22.1) (2026-09-11)
 
 

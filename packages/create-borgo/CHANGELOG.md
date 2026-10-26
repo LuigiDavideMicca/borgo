@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.30.0](https://github.com/LuigiDavideMicca/borgo/compare/create-borgo-v0.22.1...create-borgo-v0.30.0) (2026-10-26)
+
+
+### Bug Fixes
+
+* a table named trigger hid every COMMIT after it ([8c00851](https://github.com/LuigiDavideMicca/borgo/commit/8c00851e28121128c714c77968bcd0caebfe5813))
+* close the findings of the phase 7 verifier ([38ef156](https://github.com/LuigiDavideMicca/borgo/commit/38ef156dbd52b09e654fc99d3f6475b824bef2f6))
+* sessions and the go env say what is true, and take what Bun takes ([cc80491](https://github.com/LuigiDavideMicca/borgo/commit/cc804914c9c120502680133b7c1cc28e0d1881b2))
+* templates, the scaffolder and Signup do what an app asks of them ([ea316aa](https://github.com/LuigiDavideMicca/borgo/commit/ea316aa8844fc974faa45b22ea55795ca27c6c4f))
+* what the verifier of S11-S12 found ([24510ec](https://github.com/LuigiDavideMicca/borgo/commit/24510ec0993f819094f00bb11917369238692377))
+
 ## [0.22.1](https://github.com/LuigiDavideMicca/borgo/compare/create-borgo-v0.22.0...create-borgo-v0.22.1) (2026-09-11)
 
 
