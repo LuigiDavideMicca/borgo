@@ -591,7 +591,12 @@ describe("the systemd unit is hardened", () => {
     // /usr/local/bin/bun is not installed here, and a unit copied off a
     // windows filesystem arrives with its executable bit set
     const noise = /is not executable|marked executable|Proceeding anyway/;
-    const real = verify.text.split("\n").filter((l) => l.trim() && !noise.test(l));
+    // nor about the host's own units: ubuntu 26's systemd warns about
+    // CPUAccounting= in xfs_scrub and walinuxagent on every verify
+    const hostUnit = /^\/(usr\/lib|lib|etc|run)\/systemd\/\S+:\d+:/;
+    const real = verify.text
+      .split("\n")
+      .filter((l) => l.trim() && !noise.test(l) && !hostUnit.test(l));
     expect(real).toEqual([]);
 
     const security = await found.run(["security", "--offline=true"], path);
